@@ -21,6 +21,8 @@ pub enum HandError {
     NotFound(String),
     #[error("Hand already active: {0}")]
     AlreadyActive(String),
+    #[error("Hand already registered: {0}")]
+    AlreadyRegistered(String),
     #[error("Hand instance not found: {0}")]
     InstanceNotFound(Uuid),
     #[error("Activation failed: {0}")]
@@ -55,14 +57,14 @@ pub enum HandCategory {
 impl std::fmt::Display for HandCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Content => write!(f, "Content"),
-            Self::Security => write!(f, "Security"),
-            Self::Productivity => write!(f, "Productivity"),
-            Self::Development => write!(f, "Development"),
-            Self::Communication => write!(f, "Communication"),
-            Self::Data => write!(f, "Data"),
-            Self::Finance => write!(f, "Finance"),
-            Self::Other => write!(f, "Other"),
+            Self::Content => f.write_str("Content"),
+            Self::Security => f.write_str("Security"),
+            Self::Productivity => f.write_str("Productivity"),
+            Self::Development => f.write_str("Development"),
+            Self::Communication => f.write_str("Communication"),
+            Self::Data => f.write_str("Data"),
+            Self::Finance => f.write_str("Finance"),
+            Self::Other => f.write_str("Other"),
         }
     }
 }
@@ -84,27 +86,16 @@ pub enum RequirementType {
 /// Platform-specific install commands and guides for a requirement.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandInstallInfo {
-    #[serde(default)]
     pub macos: Option<String>,
-    #[serde(default)]
     pub windows: Option<String>,
-    #[serde(default)]
     pub linux_apt: Option<String>,
-    #[serde(default)]
     pub linux_dnf: Option<String>,
-    #[serde(default)]
     pub linux_pacman: Option<String>,
-    #[serde(default)]
     pub pip: Option<String>,
-    #[serde(default)]
     pub signup_url: Option<String>,
-    #[serde(default)]
     pub docs_url: Option<String>,
-    #[serde(default)]
     pub env_example: Option<String>,
-    #[serde(default)]
     pub manual_url: Option<String>,
-    #[serde(default)]
     pub estimated_time: Option<String>,
     #[serde(default)]
     pub steps: Vec<String>,
@@ -122,7 +113,6 @@ pub struct HandRequirement {
     /// The value to check (binary name, env var name, etc.).
     pub check_value: String,
     /// Human-readable description of why this is needed.
-    #[serde(default)]
     pub description: Option<String>,
     /// Whether this requirement is optional (non-critical).
     ///
@@ -132,8 +122,19 @@ pub struct HandRequirement {
     #[serde(default)]
     pub optional: bool,
     /// Platform-specific installation instructions.
-    #[serde(default)]
     pub install: Option<HandInstallInfo>,
+}
+
+/// Display format for a Hand dashboard metric.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricFormat {
+    #[default]
+    Number,
+    Duration,
+    Bytes,
+    Percentage,
+    Text,
 }
 
 /// A metric displayed on the Hand dashboard.
@@ -143,13 +144,9 @@ pub struct HandMetric {
     pub label: String,
     /// Memory key to read from agent's structured memory.
     pub memory_key: String,
-    /// Display format (e.g. "number", "duration", "bytes").
-    #[serde(default = "default_format")]
-    pub format: String,
-}
-
-fn default_format() -> String {
-    "number".to_string()
+    /// Display format (e.g. number, duration, bytes).
+    #[serde(default)]
+    pub format: MetricFormat,
 }
 
 // ─── Hand settings types ────────────────────────────────────────────────────
@@ -169,10 +166,8 @@ pub struct HandSettingOption {
     pub value: String,
     pub label: String,
     /// Env var to check for "Ready" badge (e.g. `GROQ_API_KEY`).
-    #[serde(default)]
     pub provider_env: Option<String>,
     /// Binary to check on PATH for "Ready" badge (e.g. `whisper`).
-    #[serde(default)]
     pub binary: Option<String>,
 }
 
@@ -190,7 +185,6 @@ pub struct HandSetting {
     pub options: Vec<HandSettingOption>,
     /// Env var name to expose when a text-type setting has a value
     /// (e.g. `ELEVENLABS_API_KEY` for an API key text field).
-    #[serde(default)]
     pub env_var: Option<String>,
 }
 
@@ -289,9 +283,7 @@ struct LegacyHandAgentConfig {
     provider: String,
     #[serde(default = "default_model")]
     model: String,
-    #[serde(default)]
     api_key_env: Option<String>,
-    #[serde(default)]
     base_url: Option<String>,
     #[serde(default = "default_max_tokens")]
     max_tokens: u32,
@@ -299,7 +291,6 @@ struct LegacyHandAgentConfig {
     temperature: f32,
     #[serde(default)]
     system_prompt: String,
-    #[serde(default)]
     max_iterations: Option<u32>,
 }
 
@@ -337,7 +328,6 @@ pub struct HandAgentManifest {
     pub coordinator: bool,
     /// Hint for other agents on when/how to invoke this agent.
     /// Injected into the coordinator's system prompt as a dispatch guide.
-    #[serde(default)]
     pub invoke_hint: Option<String>,
     /// Reference to an agent template from the agents/ registry.
     /// If set, the template's AgentManifest is loaded as a base,
@@ -548,9 +538,7 @@ fn default_temperature() -> f32 {
 /// If omitted, the original English label/description from `[[settings]]` is used.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandSettingI18n {
-    #[serde(default)]
     pub label: Option<String>,
-    #[serde(default)]
     pub description: Option<String>,
 }
 
@@ -558,10 +546,8 @@ pub struct HandSettingI18n {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandAgentI18n {
     /// Localized agent display name.
-    #[serde(default)]
     pub name: Option<String>,
     /// Localized agent description.
-    #[serde(default)]
     pub description: Option<String>,
 }
 
@@ -590,13 +576,10 @@ pub struct HandAgentI18n {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandI18n {
     /// Localized name.
-    #[serde(default)]
     pub name: Option<String>,
     /// Localized description.
-    #[serde(default)]
     pub description: Option<String>,
     /// Localized category display name.
-    #[serde(default)]
     pub category: Option<String>,
     /// Localized agent names/descriptions, keyed by role name.
     /// Optional — agents without translations fall back to English.
@@ -714,17 +697,14 @@ struct HandDefinitionRaw {
     #[serde(default)]
     settings: Vec<HandSetting>,
     /// Single-agent format: `[agent]`
-    #[serde(default)]
     agent: Option<toml::Value>,
     /// Multi-agent format: `[agents.role1]`, `[agents.role2]`, ...
     /// Deserialized as raw TOML values so we can apply legacy fallback per entry.
-    #[serde(default)]
     agents: Option<BTreeMap<String, toml::Value>>,
     #[serde(default)]
     dashboard: HandDashboard,
     #[serde(default)]
     routing: HandRouting,
-    #[serde(default)]
     metadata: Option<HandMetadata>,
     #[serde(default)]
     i18n: HashMap<String, HandI18n>,
@@ -806,6 +786,29 @@ impl<'de> Deserialize<'de> for HandDefinition {
     }
 }
 
+/// How often a Hand runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HandFrequency {
+    Continuous,
+    Periodic,
+    #[default]
+    #[serde(rename = "on-demand")]
+    OnDemand,
+    Daily,
+    Hourly,
+}
+
+/// Relative token consumption level of a Hand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenConsumption {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
 /// Parse a HAND.toml string into a `HandDefinition`, resolving `base` agent
 /// templates when `agents_dir` is provided.
 ///
@@ -824,12 +827,12 @@ pub(crate) fn parse_hand_definition(
 /// Token consumption and activation metadata for user awareness.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandMetadata {
-    /// How often the hand runs: continuous, periodic, on_demand
+    /// How often the hand runs.
     #[serde(default)]
-    pub frequency: String,
-    /// Relative token consumption: low, medium, high
+    pub frequency: HandFrequency,
+    /// Relative token consumption.
     #[serde(default)]
-    pub token_consumption: String,
+    pub token_consumption: TokenConsumption,
     /// Whether this hand is included in default activation
     #[serde(default)]
     pub default_active: bool,
@@ -864,10 +867,10 @@ pub enum HandStatus {
 impl std::fmt::Display for HandStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Active => write!(f, "Active"),
-            Self::Paused => write!(f, "Paused"),
+            Self::Active => f.write_str("Active"),
+            Self::Paused => f.write_str("Paused"),
             Self::Error(msg) => write!(f, "Error: {msg}"),
-            Self::Inactive => write!(f, "Inactive"),
+            Self::Inactive => f.write_str("Inactive"),
         }
     }
 }
@@ -887,7 +890,7 @@ pub struct HandInstance {
     pub agent_ids: BTreeMap<String, AgentId>,
     /// Role name of the coordinator agent that receives user messages.
     /// Persisted explicitly so runtime routes do not have to guess.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub coordinator_role: Option<String>,
     /// User-provided configuration overrides.
     pub config: HashMap<String, serde_json::Value>,
@@ -1483,6 +1486,183 @@ metrics = []
         assert_eq!(install.steps[0], "Go to example.com and sign up");
         assert!(install.macos.is_none());
         assert!(install.windows.is_none());
+    }
+
+    #[test]
+    fn hand_i18n_parsing() {
+        let toml_str = r#"
+id = "i18n-test"
+name = "Lead Generator"
+description = "Autonomous lead generation"
+category = "content"
+tools = []
+
+[[settings]]
+key = "target_industry"
+label = "Target Industry"
+description = "Industry to focus on"
+setting_type = "select"
+default = "tech"
+
+[[settings.options]]
+value = "tech"
+label = "Technology"
+
+[i18n.zh]
+name = "线索生成"
+description = "自主线索生成"
+
+[i18n.zh.agents.main]
+name = "主协调器"
+description = "协调各个子智能体完成任务"
+
+[i18n.zh.settings.target_industry]
+label = "目标行业"
+description = "聚焦的行业领域"
+
+[agent]
+name = "lead-agent"
+description = "Lead generation agent"
+system_prompt = "You generate leads."
+
+[dashboard]
+metrics = []
+"#;
+        let def: HandDefinition = toml::from_str(toml_str).unwrap();
+        assert!(def.i18n.contains_key("zh"));
+        assert_eq!(def.i18n["zh"].name, Some("线索生成".to_string()));
+        assert_eq!(def.i18n["zh"].description, Some("自主线索生成".to_string()));
+        assert_eq!(
+            def.i18n["zh"].agents["main"].name,
+            Some("主协调器".to_string())
+        );
+        assert_eq!(
+            def.i18n["zh"].settings["target_industry"].label,
+            Some("目标行业".to_string())
+        );
+    }
+
+    #[test]
+    fn hand_setting_i18n_defaults() {
+        let si = HandSettingI18n::default();
+        assert!(si.label.is_none());
+        assert!(si.description.is_none());
+
+        let ai = HandAgentI18n::default();
+        assert!(ai.name.is_none());
+        assert!(ai.description.is_none());
+
+        let hi = HandI18n::default();
+        assert!(hi.name.is_none());
+        assert!(hi.agents.is_empty());
+        assert!(hi.settings.is_empty());
+    }
+
+    #[test]
+    fn hand_instance_agent_id_backward_compat() {
+        let mut instance = HandInstance::new("clip", HashMap::new(), None);
+        // Brak agent_ids → agent_id() zwraca None
+        assert!(instance.agent_id().is_none());
+
+        let agent_id = AgentId::new();
+        instance.agent_ids.insert("main".to_string(), agent_id);
+        // Teraz agent_id() powinno zwrócić tego agenta
+        assert_eq!(instance.agent_id(), Some(agent_id));
+    }
+
+    #[test]
+    fn hand_metric_default_format() {
+        let toml_str = r#"
+id = "metric-test"
+name = "Metric Test"
+description = "Test"
+category = "data"
+tools = []
+
+[[dashboard.metrics]]
+label = "Items processed"
+memory_key = "items_count"
+
+[agent]
+name = "test-agent"
+description = "Test"
+system_prompt = "Test."
+"#;
+        let def: HandDefinition = toml::from_str(toml_str).unwrap();
+        assert_eq!(def.dashboard.metrics.len(), 1);
+        assert_eq!(def.dashboard.metrics[0].format, MetricFormat::Number);
+        assert_eq!(def.dashboard.metrics[0].label, "Items processed");
+        assert_eq!(def.dashboard.metrics[0].memory_key, "items_count");
+    }
+
+    #[test]
+    fn hand_metadata_parsing() {
+        let toml_str = r#"
+id = "meta-test"
+name = "Meta Test"
+description = "Test"
+category = "productivity"
+tools = []
+
+[metadata]
+frequency = "periodic"
+token_consumption = "medium"
+default_active = true
+activation_warning = "This hand uses paid API calls"
+
+[agent]
+name = "test-agent"
+description = "Test"
+system_prompt = "Test."
+
+[dashboard]
+metrics = []
+"#;
+        let def: HandDefinition = toml::from_str(toml_str).unwrap();
+        let meta = def.metadata.as_ref().expect("metadata should be present");
+        assert_eq!(meta.frequency, HandFrequency::Periodic);
+        assert_eq!(meta.token_consumption, TokenConsumption::Medium);
+        assert!(meta.default_active);
+        assert_eq!(meta.activation_warning, "This hand uses paid API calls");
+    }
+
+    #[test]
+    fn hand_routing_aliases() {
+        let toml_str = r#"
+id = "routing-test"
+name = "Routing Test"
+description = "Test"
+category = "content"
+tools = []
+
+[routing]
+aliases = ["video editor", "clip maker"]
+weak_aliases = ["cut video", "trim"]
+
+[agent]
+name = "test-agent"
+description = "Test"
+system_prompt = "Test."
+
+[dashboard]
+metrics = []
+"#;
+        let def: HandDefinition = toml::from_str(toml_str).unwrap();
+        assert_eq!(def.routing.aliases, vec!["video editor", "clip maker"]);
+        assert_eq!(def.routing.weak_aliases, vec!["cut video", "trim"]);
+    }
+
+    #[test]
+    fn activate_hand_request_deserialization() {
+        // With config
+        let req: ActivateHandRequest =
+            serde_json::from_str(r#"{"config": {"key": "value"}}"#).unwrap();
+        assert_eq!(req.config.len(), 1);
+        assert_eq!(req.config["key"], serde_json::json!("value"));
+
+        // Without config
+        let req: ActivateHandRequest = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(req.config.is_empty());
     }
 
     #[test]

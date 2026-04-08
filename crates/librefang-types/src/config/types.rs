@@ -2522,6 +2522,20 @@ pub struct ContextEngineHooks {
     /// Called when another plugin emits an event via the event bus.
     #[serde(default)]
     pub on_event: Option<String>,
+    /// Vault secret names that this plugin's hooks are allowed to access.
+    ///
+    /// Each entry is a key name in the LibreFang credential vault. The runtime
+    /// resolves the secret value at engine init time and injects it into every
+    /// hook subprocess as `LIBREFANG_SECRET_<NAME>` (uppercased). If a named
+    /// secret does not exist in the vault a warning is logged and the variable
+    /// is not injected.
+    ///
+    /// ```toml
+    /// [hooks]
+    /// allowed_secrets = ["GITHUB_TOKEN", "OPENAI_KEY"]
+    /// ```
+    #[serde(default)]
+    pub allowed_secrets: Vec<String>,
 }
 
 /// Circuit-breaker settings for a hook.
