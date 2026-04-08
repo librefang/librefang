@@ -1103,8 +1103,8 @@ mod tests {
 
         // Temporarily override HOME so home_dir() resolves to our temp parent.
         // We test the helper directly since home_dir() reads HOME/USERPROFILE.
-        let parent = tmp.parent().unwrap();
-        let dir_name = tmp.file_name().unwrap().to_str().unwrap();
+        let _parent = tmp.parent().unwrap();
+        let _dir_name = tmp.file_name().unwrap().to_str().unwrap();
 
         // Manually replicate the check logic against our temp path.
         let has_credentials = tmp.join(".credentials.json").exists()

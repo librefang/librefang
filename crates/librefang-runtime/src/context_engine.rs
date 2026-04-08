@@ -715,7 +715,7 @@ impl HookRateLimiter {
         while self
             .calls
             .front()
-            .map_or(false, |t| now.duration_since(*t) > window)
+            .is_some_and(|t| now.duration_since(*t) > window)
         {
             self.calls.pop_front();
         }
@@ -1449,11 +1449,9 @@ impl ScriptableContextEngine {
             &self.compact_script,
             &self.on_event_script,
         ];
-        for script_opt in hooks {
-            if let Some(ref script) = script_opt {
-                let resolved = Self::resolve_script_path(script);
-                self.process_pool.evict(&resolved).await;
-            }
+        for script in hooks.iter().filter_map(|opt| opt.as_deref()) {
+            let resolved = Self::resolve_script_path(script);
+            self.process_pool.evict(&resolved).await;
         }
     }
 
@@ -4252,12 +4250,14 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
             None,
             None,
             "",
+            "",
+            false,
         )
         .await
         .unwrap();
 
-        assert_eq!(output["type"], "ingest");
-        assert_eq!(output["message"], "hello");
+        assert_eq!(output.0["type"], "ingest");
+        assert_eq!(output.0["message"], "hello");
     }
 
     #[test]

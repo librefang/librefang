@@ -2894,7 +2894,7 @@ async fn fetch_checksum(
                     // checksums.txt format: "<sha256>  <filename>" per line
                     for line in text.lines() {
                         let parts: Vec<&str> = line.splitn(2, ' ').collect();
-                        if parts.len() >= 1 {
+                        if !parts.is_empty() {
                             let hash = parts[0].trim();
                             if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
                                 // If it's a checksums.txt, check the filename matches
@@ -3918,8 +3918,13 @@ after_turn = "hooks/after_turn.py"
                 ingest: Some("hooks/ingest.py".to_string()),
                 after_turn: Some("hooks/after_turn.py".to_string()), // missing
                 runtime: None,
+                ..Default::default()
             },
             requirements: None,
+            env: std::collections::HashMap::new(),
+            librefang_min_version: None,
+            integrity: std::collections::HashMap::new(),
+            plugin_depends: Vec::new(),
         };
 
         assert!(!check_hooks_exist(&plugin_dir, &manifest));
@@ -3938,8 +3943,13 @@ after_turn = "hooks/after_turn.py"
                 ingest: Some("../../etc/passwd".to_string()),
                 after_turn: None,
                 runtime: None,
+                ..Default::default()
             },
             requirements: None,
+            env: std::collections::HashMap::new(),
+            librefang_min_version: None,
+            integrity: std::collections::HashMap::new(),
+            plugin_depends: Vec::new(),
         };
         assert!(!check_hooks_exist(&plugin_dir, &manifest_escape));
     }
