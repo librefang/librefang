@@ -457,6 +457,18 @@ pub trait KernelHandle: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Run a workflow by ID or name. The `workflow_id` can be a UUID string or a
+    /// workflow name. The `input` is an arbitrary string (typically JSON-encoded
+    /// parameters) passed to the first step. Returns `(run_id, output)` on success.
+    async fn run_workflow(
+        &self,
+        workflow_id: &str,
+        input: &str,
+    ) -> Result<(String, String), String> {
+        let _ = (workflow_id, input);
+        Err("Workflow engine not available".to_string())
+    }
+
     /// Update a goal's status and/or progress. Returns the updated goal JSON.
     fn goal_update(
         &self,
