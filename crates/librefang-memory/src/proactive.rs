@@ -1781,19 +1781,16 @@ impl ProactiveMemoryStore {
     /// metadata map so that downstream stores can restrict results to that
     /// tenant.  When the scope is global the returned filter only contains
     /// the (optional) agent-id constraint.
-    fn scoped_filter(
-        &self,
-        agent_id: Option<AgentId>,
-        scope: MemoryScope<'_>,
-    ) -> MemoryFilter {
+    fn scoped_filter(&self, agent_id: Option<AgentId>, scope: MemoryScope<'_>) -> MemoryFilter {
         let mut filter = match agent_id {
             Some(aid) => MemoryFilter::agent(aid),
             None => MemoryFilter::default(),
         };
         if let Some(acct) = scope.account_id {
-            filter
-                .metadata
-                .insert("account_id".to_string(), serde_json::Value::String(acct.to_string()));
+            filter.metadata.insert(
+                "account_id".to_string(),
+                serde_json::Value::String(acct.to_string()),
+            );
         }
         filter
     }
@@ -1854,11 +1851,9 @@ impl ProactiveMemoryStore {
                 // Post-filter: if scope has an account_id, only keep items whose
                 // metadata contains a matching account_id.
                 match scope.account_id {
-                    Some(acct) => item
-                        .metadata
-                        .get("account_id")
-                        .and_then(|v| v.as_str())
-                        == Some(acct),
+                    Some(acct) => {
+                        item.metadata.get("account_id").and_then(|v| v.as_str()) == Some(acct)
+                    }
                     None => true,
                 }
             })
@@ -1898,10 +1893,7 @@ impl ProactiveMemoryStore {
             .into_iter()
             .filter(|frag| {
                 // Defense-in-depth: post-filter by account_id
-                frag.metadata
-                    .get("account_id")
-                    .and_then(|v| v.as_str())
-                    == Some(account_id)
+                frag.metadata.get("account_id").and_then(|v| v.as_str()) == Some(account_id)
             })
             .filter(|frag| {
                 if let Some(target_cat) = category {
@@ -1933,10 +1925,7 @@ impl ProactiveMemoryStore {
         // Post-filter by account_id when scoped
         if let Some(acct) = scope.account_id {
             items.retain(|item| {
-                item.metadata
-                    .get("account_id")
-                    .and_then(|v| v.as_str())
-                    == Some(acct)
+                item.metadata.get("account_id").and_then(|v| v.as_str()) == Some(acct)
             });
         }
 
@@ -1954,10 +1943,7 @@ impl ProactiveMemoryStore {
     /// `stats_all()`.  When scoped to an account, queries all memories
     /// belonging to that tenant (pre-filtered at the DB level) and computes
     /// aggregate counts.
-    pub async fn stats_scoped(
-        &self,
-        scope: MemoryScope<'_>,
-    ) -> LibreFangResult<MemoryStats> {
+    pub async fn stats_scoped(&self, scope: MemoryScope<'_>) -> LibreFangResult<MemoryStats> {
         if scope.is_global() {
             return self.stats_all().await;
         }
@@ -1966,7 +1952,9 @@ impl ProactiveMemoryStore {
 
         // Use SQL COUNT via json_extract — no row fetch, no cap.
         let user_count = self.semantic.count_by_account(acct, Some(scopes::USER))? as usize;
-        let session_count = self.semantic.count_by_account(acct, Some(scopes::SESSION))? as usize;
+        let session_count = self
+            .semantic
+            .count_by_account(acct, Some(scopes::SESSION))? as usize;
         let agent_count = self.semantic.count_by_account(acct, Some(scopes::AGENT))? as usize;
         let total_all = self.semantic.count_by_account(acct, None)? as usize;
         let total = std::cmp::max(total_all, user_count + session_count + agent_count);
@@ -2005,16 +1993,25 @@ impl ProactiveMemoryStore {
 
         // Use SQL COUNT via json_extract — no row fetch, no cap.
         let user_count =
-            self.semantic.count_by_agent_and_account(agent_id, acct, Some(scopes::USER))? as usize;
+            self.semantic
+                .count_by_agent_and_account(agent_id, acct, Some(scopes::USER))?
+                as usize;
         let session_count =
-            self.semantic.count_by_agent_and_account(agent_id, acct, Some(scopes::SESSION))? as usize;
+            self.semantic
+                .count_by_agent_and_account(agent_id, acct, Some(scopes::SESSION))?
+                as usize;
         let agent_scope_count =
-            self.semantic.count_by_agent_and_account(agent_id, acct, Some(scopes::AGENT))? as usize;
-        let total_all =
-            self.semantic.count_by_agent_and_account(agent_id, acct, None)? as usize;
+            self.semantic
+                .count_by_agent_and_account(agent_id, acct, Some(scopes::AGENT))?
+                as usize;
+        let total_all = self
+            .semantic
+            .count_by_agent_and_account(agent_id, acct, None)? as usize;
         let total = std::cmp::max(total_all, user_count + session_count + agent_scope_count);
 
-        let categories = self.semantic.count_by_category_and_account(acct, Some(agent_id))?;
+        let categories = self
+            .semantic
+            .count_by_category_and_account(acct, Some(agent_id))?;
 
         let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
         Ok(MemoryStats {
@@ -2152,10 +2149,7 @@ impl ProactiveMemoryStore {
 
         // Check ownership when scoped to a tenant
         if let Some(acct) = scope.account_id {
-            let frag_acct = frag
-                .metadata
-                .get("account_id")
-                .and_then(|v| v.as_str());
+            let frag_acct = frag.metadata.get("account_id").and_then(|v| v.as_str());
             if frag_acct != Some(acct) {
                 // Memory does not belong to this account — return NotFound
                 // so the handler can map it to 404.
@@ -2206,12 +2200,7 @@ impl ProactiveMemoryStore {
             // Only consider memories belonging to this account
             let scoped_group: Vec<&MemoryItem> = group
                 .iter()
-                .filter(|m| {
-                    m.metadata
-                        .get("account_id")
-                        .and_then(|v| v.as_str())
-                        == Some(acct)
-                })
+                .filter(|m| m.metadata.get("account_id").and_then(|v| v.as_str()) == Some(acct))
                 .collect();
 
             if scoped_group.len() < 2 {

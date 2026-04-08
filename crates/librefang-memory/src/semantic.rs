@@ -901,11 +901,7 @@ impl SemanticStore {
 
     /// Count non-deleted memories belonging to a specific account, optionally
     /// filtered by scope.  Uses `json_extract` for an index-friendly COUNT.
-    pub fn count_by_account(
-        &self,
-        account_id: &str,
-        scope: Option<&str>,
-    ) -> LibreFangResult<u64> {
+    pub fn count_by_account(&self, account_id: &str, scope: Option<&str>) -> LibreFangResult<u64> {
         let conn = self
             .conn
             .lock()

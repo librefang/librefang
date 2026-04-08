@@ -49,6 +49,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         )
 }
 
+use super::shared::require_admin;
 use super::skills::{remove_secret_env, write_secret_env};
 use super::AppState;
 use axum::extract::{Path, Query, State};
@@ -71,10 +72,13 @@ use crate::types::ApiErrorResponse;
     )
 )]
 pub async fn list_models(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let catalog = state
         .kernel
         .model_catalog_ref()
@@ -145,13 +149,17 @@ pub async fn list_models(
             "available": available_count,
         })),
     )
+        .into_response()
 }
 
 #[utoipa::path(get, path = "/api/models/aliases", tag = "models", responses((status = 200, description = "List model aliases", body = serde_json::Value)))]
 pub async fn list_aliases(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let aliases = state
         .kernel
         .model_catalog_ref()
@@ -176,6 +184,7 @@ pub async fn list_aliases(
             "total": entries.len(),
         })),
     )
+        .into_response()
 }
 
 /// POST /api/models/aliases — Create a new alias mapping.
@@ -183,10 +192,13 @@ pub async fn list_aliases(
 /// Body: `{ "alias": "my-alias", "model_id": "gpt-4o" }`
 #[utoipa::path(post, path = "/api/models/aliases", tag = "models", request_body = serde_json::Value, responses((status = 200, description = "Alias created", body = serde_json::Value)))]
 pub async fn create_alias(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let alias = body
         .get("alias")
         .and_then(|v| v.as_str())
@@ -199,10 +211,14 @@ pub async fn create_alias(
         .to_string();
 
     if alias.is_empty() {
-        return ApiErrorResponse::bad_request("Missing required field: alias").into_json_tuple();
+        return ApiErrorResponse::bad_request("Missing required field: alias")
+            .into_json_tuple()
+            .into_response();
     }
     if model_id.is_empty() {
-        return ApiErrorResponse::bad_request("Missing required field: model_id").into_json_tuple();
+        return ApiErrorResponse::bad_request("Missing required field: model_id")
+            .into_json_tuple()
+            .into_response();
     }
 
     let mut catalog = state
@@ -213,7 +229,8 @@ pub async fn create_alias(
 
     if !catalog.add_alias(&alias, &model_id) {
         return ApiErrorResponse::conflict(format!("Alias '{}' already exists", alias))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     (
@@ -224,15 +241,19 @@ pub async fn create_alias(
             "status": "created"
         })),
     )
+        .into_response()
 }
 
 /// DELETE /api/models/aliases/{alias} — Remove an alias mapping.
 #[utoipa::path(delete, path = "/api/models/aliases/{alias}", tag = "models", params(("alias" = String, Path, description = "Alias name")), responses((status = 200, description = "Alias deleted")))]
 pub async fn delete_alias(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(alias): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let mut catalog = state
         .kernel
         .model_catalog_ref()
@@ -241,21 +262,26 @@ pub async fn delete_alias(
 
     if !catalog.remove_alias(&alias) {
         return ApiErrorResponse::not_found(format!("Alias '{}' not found", alias))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     (
         StatusCode::OK,
         Json(serde_json::json!({"status": "removed"})),
     )
+        .into_response()
 }
 
 #[utoipa::path(get, path = "/api/models/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Model details", body = serde_json::Value)))]
 pub async fn get_model(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let catalog = state
         .kernel
         .model_catalog_ref()
@@ -288,6 +314,7 @@ pub async fn get_model(
         }
         None => ApiErrorResponse::not_found(format!("Model '{}' not found", id)).into_json_tuple(),
     }
+    .into_response()
 }
 
 /// Attach local-provider probe results to a JSON entry and optionally merge
@@ -333,9 +360,12 @@ fn attach_probe_result(
     )
 )]
 pub async fn list_providers(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
         let catalog = state
             .kernel
@@ -446,6 +476,7 @@ pub async fn list_providers(
             "total": total,
         })),
     )
+        .into_response()
 }
 
 /// GET /api/providers/{name} — Get details for a single provider.
@@ -460,10 +491,13 @@ pub async fn list_providers(
     )
 )]
 pub async fn get_provider(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let (provider, models) = {
         let catalog = state
             .kernel
@@ -494,7 +528,8 @@ pub async fn get_provider(
             }
             None => {
                 return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
-                    .into_json_tuple();
+                    .into_json_tuple()
+                    .into_response();
             }
         }
     };
@@ -535,7 +570,7 @@ pub async fn get_provider(
         entry["is_local"] = serde_json::json!(true);
     }
 
-    (StatusCode::OK, Json(entry))
+    (StatusCode::OK, Json(entry)).into_response()
 }
 
 /// POST /api/models/custom — Add a custom model to the catalog.
@@ -544,10 +579,13 @@ pub async fn get_provider(
 /// available in the catalog.
 #[utoipa::path(post, path = "/api/models/custom", tag = "models", request_body = serde_json::Value, responses((status = 200, description = "Custom model added", body = serde_json::Value)))]
 pub async fn add_custom_model(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let id = body
         .get("id")
         .and_then(|v| v.as_str())
@@ -569,7 +607,9 @@ pub async fn add_custom_model(
         .unwrap_or(8_192);
 
     if id.is_empty() {
-        return ApiErrorResponse::bad_request("Missing required field: id").into_json_tuple();
+        return ApiErrorResponse::bad_request("Missing required field: id")
+            .into_json_tuple()
+            .into_response();
     }
 
     let display = body
@@ -619,7 +659,8 @@ pub async fn add_custom_model(
             "Model '{}' already exists for provider '{}'",
             id, provider
         ))
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
 
     // Persist to disk. If save fails, roll back the in-memory add so the
@@ -630,7 +671,8 @@ pub async fn add_custom_model(
         tracing::warn!("Failed to persist custom models: {e}");
         catalog.remove_custom_model(&id);
         return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     (
@@ -641,15 +683,19 @@ pub async fn add_custom_model(
             "status": "added"
         })),
     )
+        .into_response()
 }
 
 /// DELETE /api/models/custom/{id} — Remove a custom model.
 #[utoipa::path(delete, path = "/api/models/custom/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Custom model removed")))]
 pub async fn remove_custom_model(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let mut catalog = state
         .kernel
         .model_catalog_ref()
@@ -662,7 +708,8 @@ pub async fn remove_custom_model(
     let snapshot = catalog.find_model(&model_id).cloned();
     if !catalog.remove_custom_model(&model_id) {
         return ApiErrorResponse::not_found(format!("Custom model '{}' not found", model_id))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     let custom_path = state.kernel.home_dir().join("custom_models.json");
@@ -672,28 +719,35 @@ pub async fn remove_custom_model(
             catalog.add_custom_model(entry);
         }
         return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     (
         StatusCode::OK,
         Json(serde_json::json!({"status": "removed"})),
     )
+        .into_response()
 }
 
 // ── A2A (Agent-to-Agent) Protocol Endpoints ─────────────────────────
 
 #[utoipa::path(post, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "API key set", body = serde_json::Value)))]
 pub async fn set_provider_key(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
-            return ApiErrorResponse::bad_request("Missing or empty 'key' field").into_json_tuple();
+            return ApiErrorResponse::bad_request("Missing or empty 'key' field")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -718,7 +772,8 @@ pub async fn set_provider_key(
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_var, &key) {
         return ApiErrorResponse::internal(format!("Failed to write secrets.env: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Set env var in current process so detect_auth picks it up
@@ -873,16 +928,19 @@ pub async fn set_provider_key(
         ));
     }
 
-    (StatusCode::OK, Json(resp))
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
 /// DELETE /api/providers/{name}/key — Remove an API key for a provider.
 #[utoipa::path(delete, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "API key deleted")))]
 pub async fn delete_provider_key(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let env_var = {
         let catalog = state
             .kernel
@@ -901,14 +959,16 @@ pub async fn delete_provider_key(
 
     if env_var.is_empty() {
         return ApiErrorResponse::bad_request("Provider does not require an API key")
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Remove from secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
         return ApiErrorResponse::internal(format!("Failed to update secrets.env: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Remove from process environment
@@ -926,15 +986,19 @@ pub async fn delete_provider_key(
         StatusCode::OK,
         Json(serde_json::json!({"status": "removed", "provider": name})),
     )
+        .into_response()
 }
 
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
 #[utoipa::path(post, path = "/api/providers/{name}/test", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "Provider test result", body = serde_json::Value)))]
 pub async fn test_provider(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let (env_var, base_url, key_required, auth_status) = {
         let catalog = state
             .kernel
@@ -950,7 +1014,8 @@ pub async fn test_provider(
             ),
             None => {
                 return ApiErrorResponse::not_found(format!("Unknown provider '{}'", name))
-                    .into_json_tuple();
+                    .into_json_tuple()
+                    .into_response();
             }
         }
     };
@@ -984,7 +1049,7 @@ pub async fn test_provider(
                     serde_json::json!({"status":"error","provider":name,"error":"CLI not found in PATH"}),
                 ),
             )
-        };
+        }.into_response();
     }
 
     // API provider with CLI fallback but no API key — test the CLI instead.
@@ -1023,12 +1088,14 @@ pub async fn test_provider(
                     serde_json::json!({"status":"error","provider":name,"error":format!("{cli_name} CLI not found in PATH")}),
                 ),
             )
-        };
+        }.into_response();
     }
 
     // API providers with no base_url configured cannot be tested.
     if base_url.is_empty() {
-        return ApiErrorResponse::bad_request("Provider base URL not configured").into_json_tuple();
+        return ApiErrorResponse::bad_request("Provider base URL not configured")
+            .into_json_tuple()
+            .into_response();
     }
 
     // Treat empty-string env vars the same as missing — an env var set to ""
@@ -1037,7 +1104,9 @@ pub async fn test_provider(
         .ok()
         .filter(|k| !k.trim().is_empty());
     if key_required && api_key.is_none() && !env_var.is_empty() {
-        return ApiErrorResponse::bad_request("Provider API key not configured").into_json_tuple();
+        return ApiErrorResponse::bad_request("Provider API key not configured")
+            .into_json_tuple()
+            .into_response();
     }
 
     let start = std::time::Instant::now();
@@ -1051,7 +1120,8 @@ pub async fn test_provider(
             return ApiErrorResponse::internal(format!(
                 "Failed to build HTTP client for provider test: {e}"
             ))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
         }
     };
 
@@ -1069,7 +1139,8 @@ pub async fn test_provider(
                 "latency_ms": 0,
                 "note": "AWS Bedrock uses IAM auth; key presence verified"
             })),
-        );
+        )
+            .into_response();
     }
 
     // ── Provider-specific test URL ──
@@ -1121,7 +1192,8 @@ pub async fn test_provider(
                     "provider": name,
                     "error": format!("Connection failed: {e}"),
                 })),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -1162,29 +1234,35 @@ pub async fn test_provider(
             })),
         )
     }
+    .into_response()
 }
 
 /// PUT /api/providers/{name}/url — Set a custom base URL for a provider.
 #[utoipa::path(put, path = "/api/providers/{name}/url", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "Provider URL set", body = serde_json::Value)))]
 pub async fn set_provider_url(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Accept any provider name — custom providers are supported via OpenAI-compatible format.
     let base_url = match body["base_url"].as_str() {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing or empty 'base_url' field")
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     // Validate URL scheme
     if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
         return ApiErrorResponse::bad_request("base_url must start with http:// or https://")
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Update catalog in memory
@@ -1200,7 +1278,9 @@ pub async fn set_provider_url(
     // Persist to config.toml [provider_urls] section
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_provider_url(&config_path, &name, &base_url) {
-        return ApiErrorResponse::internal(format!("Failed to save config: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to save config: {e}"))
+            .into_json_tuple()
+            .into_response();
     }
 
     // Probe reachability at the new URL
@@ -1227,7 +1307,7 @@ pub async fn set_provider_url(
         resp["discovered_model_info"] = serde_json::json!(probe.discovered_model_info);
     }
 
-    (StatusCode::OK, Json(resp))
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
 /// POST /api/providers/{name}/default — Set a provider as the default model provider.
@@ -1246,10 +1326,13 @@ pub async fn set_provider_url(
     )
 )]
 pub async fn set_default_provider(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Verify the provider exists in the catalog
     let (default_model, env_var) = {
         let catalog = state
@@ -1261,7 +1344,8 @@ pub async fn set_default_provider(
             Some(p) => p.clone(),
             None => {
                 return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
-                    .into_json_tuple();
+                    .into_json_tuple()
+                    .into_response();
             }
         };
         let model_id = catalog.default_model_for_provider(&name);
@@ -1275,7 +1359,8 @@ pub async fn set_default_provider(
                 "No models found for provider '{}'",
                 name
             ))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
         }
     };
 
@@ -1334,6 +1419,7 @@ pub async fn set_default_provider(
             "persisted": persisted,
         })),
     )
+        .into_response()
 }
 
 /// Safely persist the `[default_model]` section into config.toml using proper
@@ -1446,7 +1532,13 @@ static COPILOT_FLOWS: LazyLock<DashMap<String, CopilotFlowState>> = LazyLock::ne
 /// Initiates a GitHub device flow for Copilot authentication.
 /// Returns a user code and verification URI that the user visits in their browser.
 #[utoipa::path(post, path = "/api/providers/github-copilot/oauth/start", tag = "models", responses((status = 200, description = "OAuth flow started", body = serde_json::Value)))]
-pub async fn copilot_oauth_start(_account: AccountId) -> impl IntoResponse {
+pub async fn copilot_oauth_start(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Clean up expired flows first
     COPILOT_FLOWS.retain(|_, state| state.expires_at > Instant::now());
 
@@ -1479,6 +1571,7 @@ pub async fn copilot_oauth_start(_account: AccountId) -> impl IntoResponse {
             Json(serde_json::json!({ "error": e })),
         ),
     }
+    .into_response()
 }
 
 /// GET /api/providers/github-copilot/oauth/poll/{poll_id}
@@ -1488,10 +1581,13 @@ pub async fn copilot_oauth_start(_account: AccountId) -> impl IntoResponse {
 /// On `complete`, saves the token to secrets.env and sets GITHUB_TOKEN.
 #[utoipa::path(get, path = "/api/providers/github-copilot/oauth/poll/{poll_id}", tag = "models", params(("poll_id" = String, Path, description = "Poll ID")), responses((status = 200, description = "OAuth poll result", body = serde_json::Value)))]
 pub async fn copilot_oauth_poll(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(poll_id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let flow = match COPILOT_FLOWS.get(&poll_id) {
         Some(f) => f,
         None => {
@@ -1499,6 +1595,7 @@ pub async fn copilot_oauth_poll(
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"status": "not_found", "error": "Unknown poll_id"})),
             )
+                .into_response()
         }
     };
 
@@ -1508,7 +1605,8 @@ pub async fn copilot_oauth_poll(
         return (
             StatusCode::OK,
             Json(serde_json::json!({"status": "expired"})),
-        );
+        )
+            .into_response();
     }
 
     let device_code = flow.device_code.clone();
@@ -1528,7 +1626,7 @@ pub async fn copilot_oauth_poll(
                     Json(
                         serde_json::json!({"status": "error", "error": format!("Failed to save token: {e}")}),
                     ),
-                );
+                ).into_response();
             }
 
             // Set in current process
@@ -1578,7 +1676,7 @@ pub async fn copilot_oauth_poll(
             StatusCode::OK,
             Json(serde_json::json!({"status": "error", "error": e})),
         ),
-    }
+    }.into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1591,9 +1689,12 @@ pub async fn copilot_oauth_poll(
 /// After syncing, the kernel's in-memory catalog is refreshed.
 #[utoipa::path(post, path = "/api/catalog/update", tag = "models", responses((status = 200, description = "Catalog updated", body = serde_json::Value)))]
 pub async fn catalog_update(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let cfg = state.kernel.config_ref();
     let mirror = &cfg.registry.registry_mirror;
     match librefang_runtime::catalog_sync::sync_catalog_to(state.kernel.home_dir(), mirror).await {
@@ -1638,29 +1739,40 @@ pub async fn catalog_update(
         )
             .into_response(),
     }
+    .into_response()
 }
 
 /// GET /api/catalog/status — Check last catalog sync time.
 #[utoipa::path(get, path = "/api/catalog/status", tag = "models", responses((status = 200, description = "Catalog sync status", body = serde_json::Value)))]
 pub async fn catalog_status(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let last_sync = librefang_runtime::catalog_sync::last_sync_time_for(state.kernel.home_dir());
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))
+    .into_response()
 }
 
 /// GET /api/providers/ollama/detect — Probe localhost for Ollama availability
-pub async fn detect_ollama(_account: AccountId) -> impl IntoResponse {
+pub async fn detect_ollama(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
     {
         Ok(c) => c,
         Err(_) => {
-            return Json(serde_json::json!({ "available": false, "models": [] }));
+            return Json(serde_json::json!({ "available": false, "models": [] })).into_response();
         }
     };
 
@@ -1682,6 +1794,7 @@ pub async fn detect_ollama(_account: AccountId) -> impl IntoResponse {
         }
         _ => Json(serde_json::json!({ "available": false, "models": [] })),
     }
+    .into_response()
 }
 
 #[cfg(test)]

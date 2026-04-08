@@ -155,6 +155,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
 use super::channels::FieldType;
 use super::config::json_to_toml_value;
 use super::shared::check_account;
+use super::shared::require_admin;
 use super::AppState;
 use super::RequestLanguage;
 use crate::middleware::AccountId;
@@ -182,9 +183,12 @@ use std::time::Instant;
     )
 )]
 pub async fn list_skills(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let skills_dir = state.kernel.home_dir().join("skills");
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
     if let Err(e) = registry.load_all() {
@@ -226,7 +230,7 @@ pub async fn list_skills(
         })
         .collect();
 
-    Json(serde_json::json!({ "skills": skills, "total": skills.len() }))
+    Json(serde_json::json!({ "skills": skills, "total": skills.len() })).into_response()
 }
 
 /// POST /api/skills/install — Install a skill from FangHub (GitHub).
@@ -240,16 +244,20 @@ pub async fn list_skills(
     )
 )]
 pub async fn install_skill(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillInstallRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let home = state.kernel.home_dir();
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);
         if !hand_dir.exists() {
             return ApiErrorResponse::not_found(format!("Hand '{hand_id}' not found"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
         hand_dir.join("skills")
     } else {
@@ -257,7 +265,8 @@ pub async fn install_skill(
     };
     if let Err(e) = std::fs::create_dir_all(&skills_dir) {
         return ApiErrorResponse::internal(format!("Failed to create skills dir: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Install from local registry (~/.librefang/registry/skills/{name}/)
@@ -267,7 +276,8 @@ pub async fn install_skill(
             "Skill '{}' not found in local registry",
             req.name
         ))
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
 
     let dest = skills_dir.join(&req.name);
@@ -278,7 +288,8 @@ pub async fn install_skill(
                 "error": format!("Skill '{}' is already installed", req.name),
                 "status": "already_installed",
             })),
-        );
+        )
+            .into_response();
     }
 
     // Copy the skill directory from registry to skills
@@ -310,6 +321,7 @@ pub async fn install_skill(
             ApiErrorResponse::internal(format!("Install failed: {e}")).into_json_tuple()
         }
     }
+    .into_response()
 }
 
 /// POST /api/skills/uninstall — Uninstall a skill.
@@ -323,10 +335,13 @@ pub async fn install_skill(
     )
 )]
 pub async fn uninstall_skill(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillUninstallRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let skills_dir = state.kernel.home_dir().join("skills");
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
     if let Err(e) = registry.load_all() {
@@ -344,6 +359,7 @@ pub async fn uninstall_skill(
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
     }
+    .into_response()
 }
 
 /// POST /api/skills/reload — Rescan `~/.librefang/skills/` and refresh the
@@ -359,9 +375,12 @@ pub async fn uninstall_skill(
     )
 )]
 pub async fn reload_skills(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     state.kernel.reload_skills();
     let count = state
         .kernel
@@ -373,6 +392,7 @@ pub async fn reload_skills(
         StatusCode::OK,
         Json(serde_json::json!({"status": "reloaded", "count": count})),
     )
+        .into_response()
 }
 
 /// GET /api/skills/registry — List official skills from the local registry cache (~/.librefang/registry/skills).
@@ -385,13 +405,16 @@ pub async fn reload_skills(
     )
 )]
 pub async fn list_skill_registry(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let registry_skills_dir = state.kernel.home_dir().join("registry").join("skills");
 
     if !registry_skills_dir.exists() {
-        return Json(serde_json::json!({ "skills": [], "total": 0 }));
+        return Json(serde_json::json!({ "skills": [], "total": 0 })).into_response();
     }
 
     let mut skills: Vec<serde_json::Value> = Vec::new();
@@ -435,7 +458,7 @@ pub async fn list_skill_registry(
     }
 
     let total = skills.len();
-    Json(serde_json::json!({ "skills": skills, "total": total }))
+    Json(serde_json::json!({ "skills": skills, "total": total })).into_response()
 }
 
 /// GET /api/marketplace/search — Search the FangHub marketplace.
@@ -451,10 +474,13 @@ pub async fn list_skill_registry(
     )
 )]
 pub async fn marketplace_search(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let query = params.get("q").cloned().unwrap_or_default().to_lowercase();
     let registry_dir = state.kernel.home_dir().join("registry").join("skills");
 
@@ -490,7 +516,7 @@ pub async fn marketplace_search(
     }
 
     let total = results.len();
-    Json(serde_json::json!({"results": results, "total": total}))
+    Json(serde_json::json!({"results": results, "total": total})).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -514,16 +540,20 @@ pub async fn marketplace_search(
     )
 )]
 pub async fn clawhub_search(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let query = params.get("q").cloned().unwrap_or_default();
     if query.is_empty() {
         return (
             StatusCode::OK,
             Json(serde_json::json!({"items": [], "next_cursor": null})),
-        );
+        )
+            .into_response();
     }
 
     let limit: u32 = params
@@ -535,7 +565,7 @@ pub async fn clawhub_search(
     let cache_key = format!("search:{}:{}", query, limit);
     if let Some(entry) = state.clawhub_cache.get(&cache_key) {
         if entry.0.elapsed().as_secs() < 120 {
-            return (StatusCode::OK, Json(entry.1.clone()));
+            return (StatusCode::OK, Json(entry.1.clone())).into_response();
         }
     }
 
@@ -581,6 +611,7 @@ pub async fn clawhub_search(
             )
         }
     }
+    .into_response()
 }
 
 /// GET /api/clawhub/browse — Browse ClawHub skills by sort order.
@@ -601,10 +632,13 @@ pub async fn clawhub_search(
     )
 )]
 pub async fn clawhub_browse(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let sort = match params.get("sort").map(|s| s.as_str()) {
         Some("downloads") => librefang_skills::clawhub::ClawHubSort::Downloads,
         Some("stars") => librefang_skills::clawhub::ClawHubSort::Stars,
@@ -624,7 +658,7 @@ pub async fn clawhub_browse(
     let cache_key = format!("browse:{:?}:{}:{}", sort, limit, cursor.unwrap_or(""));
     if let Some(entry) = state.clawhub_cache.get(&cache_key) {
         if entry.0.elapsed().as_secs() < 120 {
-            return (StatusCode::OK, Json(entry.1.clone()));
+            return (StatusCode::OK, Json(entry.1.clone())).into_response();
         }
     }
 
@@ -661,6 +695,7 @@ pub async fn clawhub_browse(
             )
         }
     }
+    .into_response()
 }
 
 /// GET /api/clawhub/skill/{slug} — Get detailed info about a ClawHub skill.
@@ -676,10 +711,13 @@ pub async fn clawhub_browse(
     )
 )]
 pub async fn clawhub_skill_detail(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub");
     let client = librefang_skills::clawhub::ClawHubClient::new(cache_dir);
 
@@ -738,6 +776,7 @@ pub async fn clawhub_skill_detail(
             (status, Json(serde_json::json!({"error": format!("{e}")})))
         }
     }
+    .into_response()
 }
 
 /// GET /api/clawhub/skill/{slug}/code — Fetch the source code (SKILL.md) of a ClawHub skill.
@@ -753,10 +792,13 @@ pub async fn clawhub_skill_detail(
     )
 )]
 pub async fn clawhub_skill_code(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub");
     let client = librefang_skills::clawhub::ClawHubClient::new(cache_dir);
 
@@ -777,7 +819,8 @@ pub async fn clawhub_skill_code(
 
     if code.is_empty() {
         return ApiErrorResponse::not_found("No source code found for this skill")
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     (
@@ -788,6 +831,7 @@ pub async fn clawhub_skill_code(
             "code": code,
         })),
     )
+        .into_response()
 }
 
 /// POST /api/clawhub/install — Install a skill from ClawHub.
@@ -804,10 +848,13 @@ pub async fn clawhub_skill_code(
     )
 )]
 pub async fn clawhub_install(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let home = state.kernel.home_dir();
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);
@@ -815,7 +862,8 @@ pub async fn clawhub_install(
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": format!("Hand '{hand_id}' not found")})),
-            );
+            )
+                .into_response();
         }
         let dir = hand_dir.join("skills");
         let _ = std::fs::create_dir_all(&dir);
@@ -834,7 +882,8 @@ pub async fn clawhub_install(
                 "error": format!("Skill '{}' is already installed", req.slug),
                 "status": "already_installed",
             })),
-        );
+        )
+            .into_response();
     }
 
     match client.install(&req.slug, &skills_dir).await {
@@ -884,6 +933,7 @@ pub async fn clawhub_install(
             (status, Json(serde_json::json!({"error": msg})))
         }
     }
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -892,16 +942,20 @@ pub async fn clawhub_install(
 
 /// GET /api/skillhub/search — Search Skillhub skills.
 pub async fn skillhub_search(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let query = params.get("q").cloned().unwrap_or_default();
     if query.is_empty() {
         return (
             StatusCode::OK,
             Json(serde_json::json!({"items": [], "next_cursor": null})),
-        );
+        )
+            .into_response();
     }
 
     let limit: u32 = params
@@ -913,7 +967,7 @@ pub async fn skillhub_search(
     let cache_key = format!("sh_search:{}:{}", query, limit);
     if let Some(entry) = state.skillhub_cache.get(&cache_key) {
         if entry.0.elapsed().as_secs() < 120 {
-            return (StatusCode::OK, Json(entry.1.clone()));
+            return (StatusCode::OK, Json(entry.1.clone())).into_response();
         }
     }
 
@@ -959,14 +1013,18 @@ pub async fn skillhub_search(
             )
         }
     }
+    .into_response()
 }
 
 /// GET /api/skillhub/browse — Browse Skillhub skills from the static index.
 pub async fn skillhub_browse(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let sort = params.get("sort").map(|s| s.as_str()).unwrap_or("trending");
 
     let limit: u32 = params
@@ -978,7 +1036,7 @@ pub async fn skillhub_browse(
     let cache_key = format!("sh_browse:{}:{}", sort, limit);
     if let Some(entry) = state.skillhub_cache.get(&cache_key) {
         if entry.0.elapsed().as_secs() < 300 {
-            return (StatusCode::OK, Json(entry.1.clone()));
+            return (StatusCode::OK, Json(entry.1.clone())).into_response();
         }
     }
 
@@ -1019,14 +1077,18 @@ pub async fn skillhub_browse(
             )
         }
     }
+    .into_response()
 }
 
 /// GET /api/skillhub/skill/{slug} — Get detailed info about a Skillhub skill.
 pub async fn skillhub_skill_detail(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let cache_dir = state
         .kernel
         .config_ref()
@@ -1090,24 +1152,32 @@ pub async fn skillhub_skill_detail(
             };
             (status, Json(serde_json::json!({"error": format!("{e}")})))
         }
-    }
+    }.into_response()
 }
 
 /// GET /api/skillhub/skill/{slug}/code — Source code viewing is not available for Skillhub skills.
 pub async fn skillhub_skill_code(
-    _account: AccountId,
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
     Path(_slug): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     ApiErrorResponse::not_found("Source code viewing is not available for Skillhub skills")
         .into_json_tuple()
+        .into_response()
 }
 
 /// POST /api/skillhub/install — Install a skill from Skillhub.
 pub async fn skillhub_install(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let home = state.kernel.home_dir();
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);
@@ -1115,7 +1185,8 @@ pub async fn skillhub_install(
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": format!("Hand '{hand_id}' not found")})),
-            );
+            )
+                .into_response();
         }
         let dir = hand_dir.join("skills");
         let _ = std::fs::create_dir_all(&dir);
@@ -1139,7 +1210,8 @@ pub async fn skillhub_install(
                 "error": format!("Skill '{}' is already installed", req.slug),
                 "status": "already_installed",
             })),
-        );
+        )
+            .into_response();
     }
 
     match client.install(&req.slug, &skills_dir).await {
@@ -1189,6 +1261,7 @@ pub async fn skillhub_install(
             (status, Json(serde_json::json!({"error": msg})))
         }
     }
+    .into_response()
 }
 
 /// Check whether a SkillError represents a ClawHub rate-limit (429).
@@ -1240,7 +1313,7 @@ pub async fn list_hands(
     _account: AccountId,
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let lang = headers
         .get("accept-language")
         .and_then(|v| v.to_str().ok())
@@ -1305,7 +1378,7 @@ pub async fn list_hands(
         })
         .collect();
 
-    Json(serde_json::json!({ "hands": hands, "total": hands.len() }))
+    Json(serde_json::json!({ "hands": hands, "total": hands.len() })).into_response()
 }
 
 /// GET /api/hands/active — List active hand instances.
@@ -1320,7 +1393,7 @@ pub async fn list_hands(
 pub async fn list_active_hands(
     _account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let instances = state.kernel.hands().list_instances();
     let items: Vec<serde_json::Value> = instances
         .iter()
@@ -1337,7 +1410,7 @@ pub async fn list_active_hands(
         })
         .collect();
 
-    Json(serde_json::json!({ "instances": items, "total": items.len() }))
+    Json(serde_json::json!({ "instances": items, "total": items.len() })).into_response()
 }
 
 /// GET /api/hands/{hand_id} — Get a single hand definition with requirements check.
@@ -1357,7 +1430,7 @@ pub async fn get_hand(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
     headers: axum::http::HeaderMap,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     match state.kernel.hands().get_definition(&hand_id) {
         Some(def) => {
             let lang = headers
@@ -1479,7 +1552,7 @@ pub async fn get_hand(
             )
         }
         None => ApiErrorResponse::not_found(format!("Hand not found: {hand_id}")).into_json_tuple(),
-    }
+    }.into_response()
 }
 
 /// POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a hand.
@@ -1498,7 +1571,7 @@ pub async fn check_hand_deps(
     _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     match state.kernel.hands().get_definition(&hand_id) {
         Some(def) => {
             let reqs = state
@@ -1543,6 +1616,7 @@ pub async fn check_hand_deps(
         }
         None => ApiErrorResponse::not_found(format!("Hand not found: {hand_id}")).into_json_tuple(),
     }
+    .into_response()
 }
 
 /// POST /api/hands/{hand_id}/install-deps — Auto-install missing dependencies for a hand.
@@ -1561,12 +1635,13 @@ pub async fn install_hand_deps(
     _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let def = match state.kernel.hands().get_definition(&hand_id) {
         Some(d) => d.clone(),
         None => {
             return ApiErrorResponse::not_found(format!("Hand not found: {hand_id}"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -1789,6 +1864,7 @@ pub async fn install_hand_deps(
             }).collect::<Vec<_>>(),
         })),
     )
+        .into_response()
 }
 
 /// POST /api/hands/install — Install a hand from TOML content.
@@ -1805,12 +1881,14 @@ pub async fn install_hand(
     _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let toml_content = body["toml_content"].as_str().unwrap_or("");
     let skill_content = body["skill_content"].as_str().unwrap_or("");
 
     if toml_content.is_empty() {
-        return ApiErrorResponse::bad_request("Missing toml_content field").into_json_tuple();
+        return ApiErrorResponse::bad_request("Missing toml_content field")
+            .into_json_tuple()
+            .into_response();
     }
 
     match state.kernel.hands().install_from_content_persisted(
@@ -1832,6 +1910,7 @@ pub async fn install_hand(
         }
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
+    .into_response()
 }
 
 /// POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).
@@ -1852,7 +1931,7 @@ pub async fn activate_hand(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
     body: Option<Json<librefang_hands::ActivateHandRequest>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let config = body.map(|b| b.0.config).unwrap_or_default();
 
     match state.kernel.activate_hand(&hand_id, config) {
@@ -1892,7 +1971,7 @@ pub async fn activate_hand(
             )
         }
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
-    }
+    }.into_response()
 }
 
 /// POST /api/hands/instances/{id}/pause — Pause a hand instance.
@@ -1911,7 +1990,7 @@ pub async fn pause_hand(
     _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     match state.kernel.pause_hand(id) {
         Ok(()) => (
             StatusCode::OK,
@@ -1919,6 +1998,7 @@ pub async fn pause_hand(
         ),
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
+    .into_response()
 }
 
 /// POST /api/hands/instances/{id}/resume — Resume a paused hand instance.
@@ -1937,7 +2017,7 @@ pub async fn resume_hand(
     _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     match state.kernel.resume_hand(id) {
         Ok(()) => (
             StatusCode::OK,
@@ -1945,6 +2025,7 @@ pub async fn resume_hand(
         ),
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
+    .into_response()
 }
 
 /// DELETE /api/hands/instances/{id} — Deactivate a hand (kills agent).
@@ -1963,7 +2044,7 @@ pub async fn deactivate_hand(
     _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     match state.kernel.deactivate_hand(id) {
         Ok(()) => (
             StatusCode::OK,
@@ -1971,6 +2052,7 @@ pub async fn deactivate_hand(
         ),
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
+    .into_response()
 }
 
 /// POST /api/hands/{hand_id}/secret — Set an environment variable (secret) for a hand requirement.
@@ -1987,19 +2069,21 @@ pub async fn set_hand_secret(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let env_key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing 'key' field (env var name)")
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
     let value = match body["value"].as_str() {
         Some(v) if !v.trim().is_empty() => v.trim().to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing or empty 'value' field")
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -2021,14 +2105,16 @@ pub async fn set_hand_secret(
             "'{}' is not a requirement of hand '{}'",
             env_key, hand_id
         ))
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
 
     // Write to secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_key, &value) {
         return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Set in current process
@@ -2041,6 +2127,7 @@ pub async fn set_hand_secret(
         StatusCode::OK,
         Json(serde_json::json!({"ok": true, "key": env_key})),
     )
+        .into_response()
 }
 
 /// GET /api/hands/{hand_id}/settings — Get settings schema and current values for a hand.
@@ -2060,7 +2147,7 @@ pub async fn get_hand_settings(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     Path(hand_id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let lang = headers
         .get("accept-language")
         .and_then(|v| v.to_str().ok())
@@ -2074,7 +2161,8 @@ pub async fn get_hand_settings(
         Ok(s) => s,
         Err(_) => {
             return ApiErrorResponse::not_found(format!("Hand not found: {hand_id}"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -2096,6 +2184,7 @@ pub async fn get_hand_settings(
             "current_values": instance_config,
         })),
     )
+        .into_response()
 }
 
 /// PUT /api/hands/{hand_id}/settings — Update settings for a hand instance.
@@ -2116,7 +2205,7 @@ pub async fn update_hand_settings(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
     Json(config): Json<std::collections::HashMap<String, serde_json::Value>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Find active instance for this hand
     let instance_id = state
         .kernel
@@ -2147,6 +2236,7 @@ pub async fn update_hand_settings(
         ))
         .into_json_tuple(),
     }
+    .into_response()
 }
 
 /// POST /api/hands/reload — Reload hand definitions from disk.
@@ -2159,9 +2249,12 @@ pub async fn update_hand_settings(
     )
 )]
 pub async fn reload_hands(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let (added, updated) = state.kernel.reload_hands();
     let total = state.kernel.hands().list_definitions().len();
     (
@@ -2173,6 +2266,7 @@ pub async fn reload_hands(
             "total": total,
         })),
     )
+        .into_response()
 }
 
 /// GET /api/hands/instances/{id}/stats — Get dashboard stats for a hand instance.
@@ -2191,18 +2285,22 @@ pub async fn hand_stats(
     _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let instance = match state.kernel.hands().get_instance(id) {
         Some(i) => i,
         None => {
-            return ApiErrorResponse::not_found("Instance not found").into_json_tuple();
+            return ApiErrorResponse::not_found("Instance not found")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     let def = match state.kernel.hands().get_definition(&instance.hand_id) {
         Some(d) => d,
         None => {
-            return ApiErrorResponse::not_found("Hand definition not found").into_json_tuple();
+            return ApiErrorResponse::not_found("Hand definition not found")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -2216,7 +2314,8 @@ pub async fn hand_stats(
                     "hand_id": instance.hand_id,
                     "metrics": {},
                 })),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -2249,6 +2348,7 @@ pub async fn hand_stats(
             "metrics": metrics,
         })),
     )
+        .into_response()
 }
 
 /// GET /api/hands/instances/{id}/browser — Get live browser state for a hand instance.
@@ -2267,12 +2367,14 @@ pub async fn hand_instance_browser(
     _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // 1. Look up instance
     let instance = match state.kernel.hands().get_instance(id) {
         Some(i) => i,
         None => {
-            return ApiErrorResponse::not_found("Instance not found").into_json_tuple();
+            return ApiErrorResponse::not_found("Instance not found")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -2280,7 +2382,7 @@ pub async fn hand_instance_browser(
     let agent_id = match instance.agent_id() {
         Some(aid) => aid,
         None => {
-            return (StatusCode::OK, Json(serde_json::json!({"active": false})));
+            return (StatusCode::OK, Json(serde_json::json!({"active": false}))).into_response();
         }
     };
 
@@ -2288,7 +2390,7 @@ pub async fn hand_instance_browser(
 
     // 3. Check if a browser session exists (without creating one)
     if !state.kernel.browser().has_session(&agent_id_str) {
-        return (StatusCode::OK, Json(serde_json::json!({"active": false})));
+        return (StatusCode::OK, Json(serde_json::json!({"active": false}))).into_response();
     }
 
     // 4. Send ReadPage command to get page info
@@ -2355,6 +2457,7 @@ pub async fn hand_instance_browser(
             "screenshot_base64": screenshot_base64,
         })),
     )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -2396,10 +2499,10 @@ pub async fn hand_send_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
     Json(req): Json<MessageRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let (_instance, agent_id) = match resolve_hand_agent(&state, id) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
 
     // Reject oversized messages
@@ -2408,7 +2511,8 @@ pub async fn hand_send_message(
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
-        );
+        )
+            .into_response();
     }
 
     // Resolve file attachments
@@ -2475,6 +2579,7 @@ pub async fn hand_send_message(
             ApiErrorResponse::internal(format!("Message delivery failed: {e}")).into_json_tuple()
         }
     }
+    .into_response()
 }
 
 /// GET /api/hands/instances/:id/session — Get hand conversation history.
@@ -2747,9 +2852,12 @@ fn serialize_mcp_transport(
     )
 )]
 pub async fn list_mcp_servers(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Get configured servers from config
     let config_servers: Vec<serde_json::Value> = state
         .kernel
@@ -2797,6 +2905,7 @@ pub async fn list_mcp_servers(
         "total_configured": config_servers.len(),
         "total_connected": connected.len(),
     }))
+    .into_response()
 }
 
 /// GET /api/mcp/servers/{name} — Retrieve a single MCP server by name.
@@ -2816,10 +2925,13 @@ pub async fn list_mcp_servers(
     )
 )]
 pub async fn get_mcp_server(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Find the configured entry by name — use config_snapshot() because
     // the result is held across an .await below.
     let cfg = state.kernel.config_snapshot();
@@ -2829,7 +2941,8 @@ pub async fn get_mcp_server(
         Some(e) => e,
         None => {
             return ApiErrorResponse::not_found(format!("MCP server '{}' not found", name))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -2863,7 +2976,7 @@ pub async fn get_mcp_server(
         }
     }
 
-    (StatusCode::OK, Json(result))
+    (StatusCode::OK, Json(result)).into_response()
 }
 
 /// POST /api/mcp/servers — Add a new MCP server configuration.
@@ -2880,21 +2993,27 @@ pub async fn get_mcp_server(
     )
 )]
 pub async fn add_mcp_server(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Validate required fields
     let name = match body.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing or empty 'name' field")
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     if body.get("transport").is_none() {
-        return ApiErrorResponse::bad_request("Missing 'transport' field").into_json_tuple();
+        return ApiErrorResponse::bad_request("Missing 'transport' field")
+            .into_json_tuple()
+            .into_response();
     }
 
     // Validate by deserializing the body into McpServerConfigEntry
@@ -2902,7 +3021,8 @@ pub async fn add_mcp_server(
         Ok(e) => e,
         Err(e) => {
             return ApiErrorResponse::bad_request(format!("Invalid MCP server config: {e}"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -2915,14 +3035,16 @@ pub async fn add_mcp_server(
         .any(|s| s.name == name)
     {
         return ApiErrorResponse::conflict(format!("MCP server '{}' already exists", name))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Persist to config.toml
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
         return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Trigger config reload
@@ -2952,6 +3074,7 @@ pub async fn add_mcp_server(
             "reload": reload_status,
         })),
     )
+        .into_response()
 }
 
 /// PUT /api/mcp/servers/{name} — Update an existing MCP server configuration.
@@ -2972,12 +3095,15 @@ pub async fn add_mcp_server(
     )
 )]
 pub async fn update_mcp_server(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(mut body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Ensure the entry exists
     if !state
@@ -2990,7 +3116,8 @@ pub async fn update_mcp_server(
         return ApiErrorResponse::not_found(
             t.t_args("api-error-mcp-not-found", &[("name", &name)]),
         )
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
 
     // Force the name in body to match the path parameter
@@ -3000,7 +3127,8 @@ pub async fn update_mcp_server(
 
     if body.get("transport").is_none() {
         return ApiErrorResponse::bad_request(t.t("api-error-mcp-missing-transport"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Validate by deserializing
@@ -3010,7 +3138,8 @@ pub async fn update_mcp_server(
             return ApiErrorResponse::bad_request(
                 t.t_args("api-error-mcp-invalid-config", &[("error", &e.to_string())]),
             )
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
         }
     };
 
@@ -3021,7 +3150,8 @@ pub async fn update_mcp_server(
             "api-error-config-write-failed",
             &[("error", &e.to_string())],
         ))
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
     // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
     // be held across an async suspension point.
@@ -3053,6 +3183,7 @@ pub async fn update_mcp_server(
             "reload": reload_status,
         })),
     )
+        .into_response()
 }
 
 /// DELETE /api/mcp/servers/{name} — Remove an MCP server configuration.
@@ -3068,11 +3199,14 @@ pub async fn update_mcp_server(
     )
 )]
 pub async fn delete_mcp_server(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Ensure the entry exists
     if !state
@@ -3085,7 +3219,8 @@ pub async fn delete_mcp_server(
         return ApiErrorResponse::not_found(
             t.t_args("api-error-mcp-not-found", &[("name", &name)]),
         )
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
 
     let config_path = state.kernel.home_dir().join("config.toml");
@@ -3094,7 +3229,8 @@ pub async fn delete_mcp_server(
             "api-error-config-write-failed",
             &[("error", &e.to_string())],
         ))
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
     drop(t);
 
@@ -3124,6 +3260,7 @@ pub async fn delete_mcp_server(
             "reload": reload_status,
         })),
     )
+        .into_response()
 }
 
 /// Upsert an MCP server entry in config.toml's `[[mcp_servers]]` array.
@@ -3242,15 +3379,19 @@ fn validate_static_file_path(
     )
 )]
 pub async fn create_skill(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let name = match body["name"].as_str() {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing or empty 'name' field")
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -3259,7 +3400,8 @@ pub async fn create_skill(
         return ApiErrorResponse::bad_request(
             "Skill name must contain only letters, numbers, hyphens, and underscores",
         )
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
 
     let description = body["description"].as_str().unwrap_or("").to_string();
@@ -3271,19 +3413,22 @@ pub async fn create_skill(
         return ApiErrorResponse::bad_request(
             "Only prompt_only skills can be created from the web UI",
         )
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
 
     // Write skill.toml to ~/.librefang/skills/{name}/
     let skill_dir = state.kernel.home_dir().join("skills").join(&name);
     if skill_dir.exists() {
         return ApiErrorResponse::conflict(format!("Skill '{}' already exists", name))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     if let Err(e) = std::fs::create_dir_all(&skill_dir) {
         return ApiErrorResponse::internal(format!("Failed to create skill directory: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     let toml_content = format!(
@@ -3296,7 +3441,8 @@ pub async fn create_skill(
     let toml_path = skill_dir.join("skill.toml");
     if let Err(e) = std::fs::write(&toml_path, &toml_content) {
         return ApiErrorResponse::internal(format!("Failed to write skill.toml: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     (
@@ -3306,7 +3452,7 @@ pub async fn create_skill(
             "name": name,
             "note": "Restart the daemon to load the new skill, or it will be available on next boot."
         })),
-    )
+    ).into_response()
 }
 
 // ── Helper functions for secrets.env management ────────────────────────
@@ -3570,9 +3716,12 @@ fn integration_status_str(
     )
 )]
 pub async fn list_integrations(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let registry = state
         .kernel
         .extensions()
@@ -3602,6 +3751,7 @@ pub async fn list_integrations(
         "installed": entries,
         "count": entries.len(),
     }))
+    .into_response()
 }
 
 /// GET /api/integrations/:id — Get a single integration by ID.
@@ -3618,10 +3768,13 @@ pub async fn list_integrations(
     )
 )]
 pub async fn get_integration(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let registry = state
         .kernel
         .extensions()
@@ -3688,9 +3841,12 @@ pub async fn get_integration(
     )
 )]
 pub async fn list_available_integrations(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let registry = state
         .kernel
         .extensions()
@@ -3726,6 +3882,7 @@ pub async fn list_available_integrations(
         "integrations": templates,
         "count": templates.len(),
     }))
+    .into_response()
 }
 
 /// POST /api/integrations/add — Install an integration.
@@ -3739,14 +3896,19 @@ pub async fn list_available_integrations(
     )
 )]
 pub async fn add_integration(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let id = match req.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
-            return ApiErrorResponse::bad_request("Missing 'id' field").into_json_tuple();
+            return ApiErrorResponse::bad_request("Missing 'id' field")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -3784,7 +3946,7 @@ pub async fn add_integration(
     }; // write lock dropped here
 
     if let Some((status, error)) = install_err {
-        return (status, Json(serde_json::json!({"error": error})));
+        return (status, Json(serde_json::json!({"error": error}))).into_response();
     }
 
     state.kernel.extension_monitor().register(&id);
@@ -3801,6 +3963,7 @@ pub async fn add_integration(
             "message": format!("Integration '{}' installed", id),
         })),
     )
+        .into_response()
 }
 
 /// DELETE /api/integrations/:id — Remove an integration.
@@ -3816,10 +3979,13 @@ pub async fn add_integration(
     )
 )]
 pub async fn remove_integration(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Scope the write lock
     let uninstall_err = {
         let mut registry = state
@@ -3831,7 +3997,9 @@ pub async fn remove_integration(
     };
 
     if let Some(e) = uninstall_err {
-        return ApiErrorResponse::not_found(e.to_string()).into_json_tuple();
+        return ApiErrorResponse::not_found(e.to_string())
+            .into_json_tuple()
+            .into_response();
     }
 
     state.kernel.extension_monitor().unregister(&id);
@@ -3848,6 +4016,7 @@ pub async fn remove_integration(
             "status": "removed",
         })),
     )
+        .into_response()
 }
 
 /// POST /api/integrations/:id/reconnect — Reconnect an MCP server.
@@ -3863,10 +4032,13 @@ pub async fn remove_integration(
     )
 )]
 pub async fn reconnect_integration(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let is_installed = {
         let registry = state
             .kernel
@@ -3878,7 +4050,8 @@ pub async fn reconnect_integration(
 
     if !is_installed {
         return ApiErrorResponse::not_found(format!("Integration '{}' not installed", id))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     match state.kernel.reconnect_extension_mcp(&id).await {
@@ -3899,6 +4072,7 @@ pub async fn reconnect_integration(
             })),
         ),
     }
+    .into_response()
 }
 
 /// GET /api/integrations/health — Health status for all integrations.
@@ -3911,9 +4085,12 @@ pub async fn reconnect_integration(
     )
 )]
 pub async fn integrations_health(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let health_entries = state.kernel.extension_monitor().all_health();
     let entries: Vec<serde_json::Value> = health_entries
         .iter()
@@ -3936,6 +4113,7 @@ pub async fn integrations_health(
         "health": entries,
         "count": entries.len(),
     }))
+    .into_response()
 }
 
 /// POST /api/integrations/reload — Hot-reload integration configs and reconnect MCP.
@@ -3948,9 +4126,12 @@ pub async fn integrations_health(
     )
 )]
 pub async fn reload_integrations(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match state.kernel.reload_extension_mcps().await {
         Ok(connected) => (
             StatusCode::OK,
@@ -3961,6 +4142,7 @@ pub async fn reload_integrations(
         ),
         Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -3977,9 +4159,12 @@ pub async fn reload_integrations(
     )
 )]
 pub async fn list_extensions(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let registry = state
         .kernel
         .extensions()
@@ -4017,6 +4202,7 @@ pub async fn list_extensions(
         "extensions": extensions,
         "total": extensions.len(),
     }))
+    .into_response()
 }
 
 /// GET /api/extensions/:name — Get details for a single extension by name.
@@ -4032,10 +4218,13 @@ pub async fn list_extensions(
     )
 )]
 pub async fn get_extension(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let registry = state
         .kernel
         .extensions()
@@ -4046,7 +4235,8 @@ pub async fn get_extension(
         Some(t) => t.clone(),
         None => {
             return ApiErrorResponse::not_found(format!("Extension '{}' not found", name))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -4093,6 +4283,7 @@ pub async fn get_extension(
             })),
         })),
     )
+        .into_response()
 }
 
 /// POST /api/extensions/install — Install an extension by name.
@@ -4106,13 +4297,18 @@ pub async fn get_extension(
     )
 )]
 pub async fn install_extension(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExtensionInstallRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let name = req.name.trim().to_string();
     if name.is_empty() {
-        return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
+        return ApiErrorResponse::bad_request("Missing or empty 'name' field")
+            .into_json_tuple()
+            .into_response();
     }
 
     // Scope the write lock so it's dropped before any .await
@@ -4149,7 +4345,7 @@ pub async fn install_extension(
     }; // write lock dropped here
 
     if let Some((status, error)) = install_err {
-        return (status, Json(serde_json::json!({"error": error})));
+        return (status, Json(serde_json::json!({"error": error}))).into_response();
     }
 
     state.kernel.extension_monitor().register(&name);
@@ -4165,6 +4361,7 @@ pub async fn install_extension(
             "connected": connected > 0,
         })),
     )
+        .into_response()
 }
 
 /// POST /api/extensions/uninstall — Uninstall an extension by name.
@@ -4178,13 +4375,18 @@ pub async fn install_extension(
     )
 )]
 pub async fn uninstall_extension(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExtensionUninstallRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let name = req.name.trim().to_string();
     if name.is_empty() {
-        return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
+        return ApiErrorResponse::bad_request("Missing or empty 'name' field")
+            .into_json_tuple()
+            .into_response();
     }
 
     // Scope the write lock
@@ -4198,7 +4400,9 @@ pub async fn uninstall_extension(
     };
 
     if let Some(e) = uninstall_err {
-        return ApiErrorResponse::not_found(e.to_string()).into_json_tuple();
+        return ApiErrorResponse::not_found(e.to_string())
+            .into_json_tuple()
+            .into_response();
     }
 
     state.kernel.extension_monitor().unregister(&name);
@@ -4215,6 +4419,7 @@ pub async fn uninstall_extension(
             "name": name,
         })),
     )
+        .into_response()
 }
 
 /// Recursively copy a directory tree.
