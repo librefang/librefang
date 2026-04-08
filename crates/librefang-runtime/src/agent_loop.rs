@@ -201,7 +201,6 @@ fn strip_processed_image_data(messages: &mut [Message]) {
     }
 }
 
-
 fn accumulate_token_usage(total_usage: &mut TokenUsage, usage: &TokenUsage) {
     total_usage.input_tokens += usage.input_tokens;
     total_usage.output_tokens += usage.output_tokens;
