@@ -715,7 +715,7 @@ impl HookRateLimiter {
         while self
             .calls
             .front()
-            .map_or(false, |t| now.duration_since(*t) > window)
+            .is_some_and(|t| now.duration_since(*t) > window)
         {
             self.calls.pop_front();
         }
@@ -1449,11 +1449,9 @@ impl ScriptableContextEngine {
             &self.compact_script,
             &self.on_event_script,
         ];
-        for script_opt in hooks {
-            if let Some(ref script) = script_opt {
-                let resolved = Self::resolve_script_path(script);
-                self.process_pool.evict(&resolved).await;
-            }
+        for ref script in hooks.iter().copied().flatten() {
+            let resolved = Self::resolve_script_path(script);
+            self.process_pool.evict(&resolved).await;
         }
     }
 
@@ -4232,7 +4230,7 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
 
         let traces = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let hook_schemas = std::collections::HashMap::new();
-        let output = ScriptableContextEngine::run_hook(
+        let (output, _duration_ms) = ScriptableContextEngine::run_hook(
             "ingest",
             script_path.to_str().unwrap(),
             crate::plugin_runtime::PluginRuntime::Python,
@@ -4252,6 +4250,8 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
             None,
             None,
             "",
+            "",
+            false,
         )
         .await
         .unwrap();
