@@ -2387,11 +2387,20 @@ impl LibreFangKernel {
             let emb_arc: Option<
                 Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
             > = embedding_driver.as_ref().map(Arc::clone);
+            let vault_path = config.home_dir.join("vault.enc");
             let engine = librefang_runtime::context_engine::build_context_engine(
                 &config.context_engine,
                 context_engine_config.clone(),
                 memory.clone(),
                 emb_arc,
+                &|secret_name| {
+                    let mut vault =
+                        librefang_extensions::vault::CredentialVault::new(vault_path.clone());
+                    if vault.unlock().is_err() {
+                        return None;
+                    }
+                    vault.get(secret_name).map(|v| v.as_str().to_string())
+                },
             );
             Some(engine)
         };

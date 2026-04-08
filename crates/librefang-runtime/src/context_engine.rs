@@ -3954,6 +3954,35 @@ impl ContextEngine for StackedContextEngine {
     }
 }
 
+/// Resolve `allowed_secrets` from a hooks config into `LIBREFANG_SECRET_<NAME>`
+/// environment variable pairs, using the provided vault lookup function.
+///
+/// Secret names are uppercased when forming the env var name. Secrets that are
+/// not found in the vault are skipped with a `warn!` log — no error is raised.
+/// Secret values are never logged.
+fn resolve_vault_env_vars(
+    hooks: &librefang_types::config::ContextEngineHooks,
+    vault_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    let mut vault_env = Vec::with_capacity(hooks.allowed_secrets.len());
+    for secret_name in &hooks.allowed_secrets {
+        debug!(secret = secret_name.as_str(), "Resolving vault secret for hook");
+        match vault_lookup(secret_name) {
+            Some(value) => {
+                let env_key = format!("LIBREFANG_SECRET_{}", secret_name.to_uppercase());
+                vault_env.push((env_key, value));
+            }
+            None => {
+                warn!(
+                    secret = secret_name.as_str(),
+                    "Secret listed in allowed_secrets not found in vault — skipping"
+                );
+            }
+        }
+    }
+    vault_env
+}
+
 /// Build a context engine from config.
 ///
 /// Resolution order:
@@ -3961,11 +3990,16 @@ impl ContextEngine for StackedContextEngine {
 /// 2. If `plugin` is set, load plugin manifest and use its hooks
 /// 3. If manual `hooks` are set, use them directly
 /// 4. Otherwise, return a plain `DefaultContextEngine`
+///
+/// The `vault_lookup` callback is called for each secret name listed in
+/// `hooks.allowed_secrets`. Return `Some(value)` for known secrets, `None`
+/// for secrets that don't exist. Passing `&|_| None` disables vault injection.
 pub fn build_context_engine(
     toml_config: &librefang_types::config::ContextEngineTomlConfig,
     runtime_config: ContextEngineConfig,
     memory: Arc<MemorySubstrate>,
     embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
+    vault_lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Box<dyn ContextEngine> {
     // Warn if an unknown engine name is configured
     if toml_config.engine != "default" {
@@ -3999,7 +4033,10 @@ pub fn build_context_engine(
                             || hooks.prepare_subagent.is_some()
                             || hooks.merge_subagent.is_some()
                         {
-                            let env: Vec<(String, String)> = manifest.env.into_iter().collect();
+                            let mut env: Vec<(String, String)> =
+                                manifest.env.into_iter().collect();
+                            let vault_env = resolve_vault_env_vars(&hooks, vault_lookup);
+                            env.extend(vault_env);
                             engines.push(Box::new(
                                 ScriptableContextEngine::new(inner, &hooks)
                                     .with_plugin_name(plugin_name)
@@ -4042,7 +4079,9 @@ pub fn build_context_engine(
         match load_plugin(plugin_name) {
             Ok((manifest, hooks)) => {
                 if hooks.ingest.is_some() || hooks.after_turn.is_some() {
-                    let env: Vec<(String, String)> = manifest.env.into_iter().collect();
+                    let mut env: Vec<(String, String)> = manifest.env.into_iter().collect();
+                    let vault_env = resolve_vault_env_vars(&hooks, vault_lookup);
+                    env.extend(vault_env);
                     return Box::new(
                         ScriptableContextEngine::new(default, &hooks)
                             .with_plugin_name(plugin_name)
@@ -4068,7 +4107,12 @@ pub fn build_context_engine(
 
     // Manual hooks
     if toml_config.hooks.ingest.is_some() || toml_config.hooks.after_turn.is_some() {
-        Box::new(ScriptableContextEngine::new(default, &toml_config.hooks))
+        let vault_env = resolve_vault_env_vars(&toml_config.hooks, vault_lookup);
+        let mut engine = ScriptableContextEngine::new(default, &toml_config.hooks);
+        if !vault_env.is_empty() {
+            engine = engine.with_plugin_env(vault_env);
+        }
+        Box::new(engine)
     } else {
         Box::new(default)
     }
@@ -4332,7 +4376,8 @@ ingest = "hooks/ingest.py"
     fn test_build_context_engine_default() {
         let toml_config = librefang_types::config::ContextEngineTomlConfig::default();
         let runtime_config = ContextEngineConfig::default();
-        let engine = build_context_engine(&toml_config, runtime_config, make_memory(), None);
+        let engine =
+            build_context_engine(&toml_config, runtime_config, make_memory(), None, &|_| None);
         // Should not panic — returns DefaultContextEngine
         let _ = engine;
     }
@@ -4345,7 +4390,8 @@ ingest = "hooks/ingest.py"
         };
         let runtime_config = ContextEngineConfig::default();
         // Should fall back to default engine, not panic
-        let engine = build_context_engine(&toml_config, runtime_config, make_memory(), None);
+        let engine =
+            build_context_engine(&toml_config, runtime_config, make_memory(), None, &|_| None);
         let _ = engine;
     }
 }
