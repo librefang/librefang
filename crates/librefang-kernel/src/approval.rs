@@ -456,10 +456,14 @@ impl ApprovalManager {
         totp_verified: bool,
         user_id: Option<&str>,
     ) -> Result<(ApprovalResponse, Option<DeferredToolExecution>), String> {
+        // Read policy once and hold the snapshot for both the gate check and
+        // the grace-period recording below, avoiding a hot-reload race between
+        // two separate lock acquisitions.
+        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+
         // TOTP gate: only enforced on Approved decisions.
         // Peek at the pending request to get the tool_name for per-tool checks.
         if decision.is_approved() {
-            let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
             let tool_needs_totp = self
                 .pending
                 .get(&request_id)
@@ -473,12 +477,15 @@ impl ApprovalManager {
             }
         }
 
+        // Drop the read lock before the remove+send to minimise lock hold time.
+        drop(policy);
+        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+
         match self.pending.remove(&request_id) {
             Some((_, pending)) => {
-                // Record TOTP grace on successful approval with TOTP
+                // Record TOTP grace on successful approval with TOTP.
                 if decision.is_approved() && totp_verified {
                     if let Some(uid) = user_id {
-                        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
                         if policy.tool_requires_totp(&pending.request.tool_name) {
                             self.record_totp_grace(uid);
                         }

@@ -1160,8 +1160,12 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 msg.push_str(&format!("    {}\n", req.action_summary));
             }
         }
-        if self.kernel.approvals().requires_totp() {
-            msg.push_str("\nUse /approve <id> <totp-code> or /reject <id>");
+        let policy = self.kernel.approvals().policy();
+        let any_needs_totp = pending
+            .iter()
+            .any(|r| policy.tool_requires_totp(&r.tool_name));
+        if any_needs_totp {
+            msg.push_str("\nUse /approve <id> [<totp-code>] or /reject <id> (some tools require a TOTP code)");
         } else {
             msg.push_str("\nUse /approve <id> or /reject <id>");
         }
@@ -1190,8 +1194,15 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     librefang_types::approval::ApprovalDecision::Denied
                 };
 
-                // Pre-verify TOTP or recovery code if required
-                let totp_verified = if approve && self.kernel.approvals().requires_totp() {
+                // Pre-verify TOTP or recovery code if required.
+                // Use per-tool check so tools not in totp_tools are never gated
+                // or blocked by lockout — even when second_factor = totp globally.
+                let tool_requires_totp = self
+                    .kernel
+                    .approvals()
+                    .policy()
+                    .tool_requires_totp(&req.tool_name);
+                let totp_verified = if approve && tool_requires_totp {
                     if self.kernel.approvals().is_totp_locked_out(sender_id) {
                         return "Too many failed TOTP attempts. Try again later.".into();
                     }
