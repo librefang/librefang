@@ -1,0 +1,41 @@
+## Brainstorm Skill Example
+##
+## This skill uses pure prompt engineering — no code required.
+## It generates creative ideas on any topic with configurable quantity and style.
+##
+## To test: librefang skill test ./examples/brainstorm \
+##   --input '{"topic": "names for a Rust-based CLI tool", "count": "10"}'
+##
+## For the full reference, see: docs/skill-development.md
+
+[skill]
+name = "brainstorm"
+version = "0.1.0"
+description = "Generate creative ideas and possibilities on any topic."
+author = "your-name"
+tags = ["creativity", "ideation", "productivity"]
+
+[runtime]
+type = "promptonly"
+
+[input]
+topic = { type = "string", description = "The topic or question to brainstorm about", required = true }
+count = { type = "string", description = "Number of ideas to generate (default: 10)", required = false }
+style = { type = "string", description = "Idea style: practical, wild, or mixed (default: mixed)", required = false }
+
+[prompt]
+template = """
+Brainstorm ideas for the following topic.
+
+Topic: {{topic}}
+Number of ideas: {{#if count}}{{count}}{{else}}10{{/if}}
+Style: {{#if style}}{{style}}{{else}}mixed (blend of practical and creative){{/if}}
+
+Requirements:
+- Each idea should be distinct — avoid overlap or minor variations
+- Be specific enough to be actionable, not vague platitudes
+- For "wild" style: push past the obvious and include unexpected angles
+- For "practical" style: focus on realistic, immediately applicable ideas
+- For "mixed" style: include a range from conventional to unconventional
+- Number each idea and add a one-sentence explanation of its potential value
+"""

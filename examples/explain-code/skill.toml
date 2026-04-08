@@ -1,0 +1,46 @@
+## Explain Code Skill Example
+##
+## This skill uses pure prompt engineering — no code required.
+## It explains what a piece of code does in plain, accessible language.
+##
+## To test: librefang skill test ./examples/explain-code \
+##   --input '{"code": "fn fib(n: u64) -> u64 { if n <= 1 { n } else { fib(n-1) + fib(n-2) } }", "audience": "beginner"}'
+##
+## For the full reference, see: docs/skill-development.md
+
+[skill]
+name = "explain-code"
+version = "0.1.0"
+description = "Explain what a piece of code does in plain, accessible language."
+author = "your-name"
+tags = ["code", "education", "documentation", "development"]
+
+[runtime]
+type = "promptonly"
+
+[input]
+code = { type = "string", description = "The code snippet to explain", required = true }
+language = { type = "string", description = "The programming language (e.g. Rust, Python, JavaScript)", required = false }
+audience = { type = "string", description = "Target audience: beginner, intermediate, or expert (default: intermediate)", required = false }
+
+[prompt]
+template = """
+Explain what the following code does in plain language.
+
+{{#if language}}Language: {{language}}{{/if}}
+Audience: {{#if audience}}{{audience}}{{else}}intermediate developer{{/if}}
+
+Code:
+```
+{{code}}
+```
+
+Explanation guidelines:
+- Start with a one-sentence summary of what the code does overall
+- Walk through the logic step by step, in the order it executes
+- For "beginner" audience: avoid jargon, use analogies, define technical terms
+- For "intermediate" audience: assume general programming knowledge, focus on the approach
+- For "expert" audience: focus on design decisions, trade-offs, and non-obvious behaviour
+- Highlight any important edge cases, assumptions, or limitations
+- Do not rewrite or improve the code — only explain it
+"""

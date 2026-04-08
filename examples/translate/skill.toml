@@ -1,0 +1,38 @@
+## Translate Skill Example
+##
+## This skill uses pure prompt engineering — no code required.
+## It translates text between languages, auto-detecting the source language.
+##
+## To test: librefang skill test ./examples/translate \
+##   --input '{"text": "Hello, how are you?", "target_language": "Spanish"}'
+##
+## For the full reference, see: docs/skill-development.md
+
+[skill]
+name = "translate"
+version = "0.1.0"
+description = "Translate text between languages with automatic source language detection."
+author = "your-name"
+tags = ["text", "translation", "language"]
+
+[runtime]
+type = "promptonly"
+
+[input]
+text = { type = "string", description = "The text to translate", required = true }
+target_language = { type = "string", description = "The target language (e.g. Spanish, French, Japanese)", required = true }
+
+[prompt]
+template = """
+Translate the following text into {{target_language}}.
+
+Text:
+{{text}}
+
+Requirements:
+- Automatically detect the source language
+- Produce a natural, idiomatic translation (not word-for-word)
+- Preserve the original tone, style, and formatting
+- If the text is already in {{target_language}}, state that and return it unchanged
+- Output only the translated text, with no additional commentary
+"""

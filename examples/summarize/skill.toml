@@ -1,0 +1,40 @@
+## Summarize Skill Example
+##
+## This skill uses pure prompt engineering — no code required.
+## It summarizes text or documents into concise key points.
+##
+## To test: librefang skill test ./examples/summarize \
+##   --input '{"text": "Long article text here...", "max_points": "5"}'
+##
+## For the full reference, see: docs/skill-development.md
+
+[skill]
+name = "summarize"
+version = "0.1.0"
+description = "Summarize text or documents into concise key points."
+author = "your-name"
+tags = ["text", "productivity", "summarization"]
+
+[runtime]
+type = "promptonly"
+
+[input]
+text = { type = "string", description = "The text or document to summarize", required = true }
+max_points = { type = "string", description = "Maximum number of key points to extract (default: 5)", required = false }
+
+[prompt]
+template = """
+Summarize the following text into clear, concise key points.
+
+Text:
+{{text}}
+
+{{#if max_points}}Maximum key points: {{max_points}}{{else}}Maximum key points: 5{{/if}}
+
+Requirements:
+- Extract the most important information
+- Each point should be self-contained and actionable
+- Use plain, direct language
+- Order points by importance (most important first)
+- Format as a numbered list
+"""

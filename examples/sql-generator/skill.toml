@@ -1,0 +1,41 @@
+## SQL Generator Skill Example
+##
+## This skill uses pure prompt engineering — no code required.
+## It generates SQL queries from natural language descriptions.
+##
+## To test: librefang skill test ./examples/sql-generator \
+##   --input '{"description": "Find the top 5 customers by total order value in the last 30 days", "dialect": "PostgreSQL"}'
+##
+## For the full reference, see: docs/skill-development.md
+
+[skill]
+name = "sql-generator"
+version = "0.1.0"
+description = "Generate SQL queries from natural language descriptions."
+author = "your-name"
+tags = ["sql", "database", "development", "productivity"]
+
+[runtime]
+type = "promptonly"
+
+[input]
+description = { type = "string", description = "Natural language description of the query to generate", required = true }
+dialect = { type = "string", description = "SQL dialect: PostgreSQL, MySQL, SQLite, MSSQL, or standard SQL (default: standard SQL)", required = false }
+schema = { type = "string", description = "Optional table/schema context (e.g. 'users(id, name, email), orders(id, user_id, total, created_at)')", required = false }
+
+[prompt]
+template = """
+Generate a SQL query based on the following description.
+
+Description: {{description}}
+Dialect: {{#if dialect}}{{dialect}}{{else}}standard SQL{{/if}}
+{{#if schema}}Schema context: {{schema}}{{/if}}
+
+Requirements:
+- Output only the SQL query, ready to run
+- Use clear formatting with each clause on its own line
+- Use meaningful table and column aliases where helpful
+- Add brief inline comments (-- comment) for non-obvious logic
+- If the description is ambiguous, state the assumption made before the query
+- If the request cannot be expressed in SQL, explain why
+"""

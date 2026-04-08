@@ -1,0 +1,44 @@
+## Email Composer Skill Example
+##
+## This skill uses pure prompt engineering — no code required.
+## It composes professional emails from bullet-point notes.
+##
+## To test: librefang skill test ./examples/email-composer \
+##   --input '{"points": "- follow up on invoice\n- politely ask for ETA\n- offer to help", "recipient": "vendor", "tone": "professional"}'
+##
+## For the full reference, see: docs/skill-development.md
+
+[skill]
+name = "email-composer"
+version = "0.1.0"
+description = "Compose professional emails from bullet-point notes or rough ideas."
+author = "your-name"
+tags = ["email", "communication", "writing", "productivity"]
+
+[runtime]
+type = "promptonly"
+
+[input]
+points = { type = "string", description = "Bullet points or rough notes describing what the email should cover", required = true }
+recipient = { type = "string", description = "Who the email is addressed to (e.g. 'a client', 'my manager', 'the support team')", required = false }
+tone = { type = "string", description = "Desired tone: professional, friendly, formal, or assertive (default: professional)", required = false }
+
+[prompt]
+template = """
+Compose a professional email based on the notes below.
+
+Recipient: {{#if recipient}}{{recipient}}{{else}}the recipient{{/if}}
+Tone: {{#if tone}}{{tone}}{{else}}professional{{/if}}
+
+Notes / key points to cover:
+{{points}}
+
+Requirements:
+- Write a clear, informative subject line
+- Open with an appropriate greeting
+- Organize the content logically — one idea per paragraph
+- Keep it concise; omit filler phrases like "I hope this email finds you well"
+- Close with a clear call to action or next step if applicable
+- End with a professional sign-off
+- Output format: Subject line on the first line, blank line, then the email body
+"""

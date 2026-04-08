@@ -1,0 +1,49 @@
+## Code Review Skill Example
+##
+## This skill uses pure prompt engineering — no code required.
+## It reviews code for bugs, style issues, and potential improvements.
+##
+## To test: librefang skill test ./examples/code-review \
+##   --input '{"code": "def add(a,b):\n  return a+b", "language": "Python"}'
+##
+## For the full reference, see: docs/skill-development.md
+
+[skill]
+name = "code-review"
+version = "0.1.0"
+description = "Review code for bugs, style violations, and improvement opportunities."
+author = "your-name"
+tags = ["code", "review", "quality", "development"]
+
+[runtime]
+type = "promptonly"
+
+[input]
+code = { type = "string", description = "The code to review", required = true }
+language = { type = "string", description = "The programming language (e.g. Python, Rust, JavaScript)", required = false }
+
+[prompt]
+template = """
+Review the following code and provide actionable feedback.
+
+{{#if language}}Language: {{language}}{{/if}}
+
+Code:
+```
+{{code}}
+```
+
+Provide a structured review covering:
+
+1. **Bugs & Correctness** — logic errors, edge cases, potential runtime failures
+2. **Style & Readability** — naming conventions, formatting, clarity
+3. **Performance** — inefficiencies, unnecessary allocations, algorithmic concerns
+4. **Security** — input validation, injection risks, unsafe patterns
+5. **Improvements** — refactoring opportunities, better abstractions, idiomatic patterns
+
+For each issue, include:
+- Severity: Critical / Major / Minor / Suggestion
+- Location: line number or function name if identifiable
+- Explanation: what the problem is and why it matters
+- Fix: a concrete recommendation or corrected snippet
+"""

@@ -1,0 +1,44 @@
+## Changelog Writer Skill Example
+##
+## This skill uses pure prompt engineering — no code required.
+## It generates a changelog entry from git commit messages or a description of changes.
+##
+## To test: librefang skill test ./examples/changelog-writer \
+##   --input '{"changes": "feat: add dark mode\nfix: crash on empty input\nchore: bump deps", "version": "1.2.0"}'
+##
+## For the full reference, see: docs/skill-development.md
+
+[skill]
+name = "changelog-writer"
+version = "0.1.0"
+description = "Generate a changelog entry from git commit messages or a description of changes."
+author = "your-name"
+tags = ["changelog", "documentation", "git", "release"]
+
+[runtime]
+type = "promptonly"
+
+[input]
+changes = { type = "string", description = "Git commit messages or a plain description of what changed", required = true }
+version = { type = "string", description = "The release version (e.g. 1.2.0)", required = false }
+date = { type = "string", description = "Release date in YYYY-MM-DD format (defaults to today)", required = false }
+
+[prompt]
+template = """
+Write a changelog entry based on the following changes.
+
+Version: {{#if version}}{{version}}{{else}}[version]{{/if}}
+Date: {{#if date}}{{date}}{{else}}[today's date]{{/if}}
+
+Changes / commits:
+{{changes}}
+
+Requirements:
+- Follow the Keep a Changelog format (https://keepachangelog.com)
+- Group changes under the appropriate headings: Added, Changed, Deprecated, Removed, Fixed, Security
+- Omit headings that have no entries
+- Write each entry from the user's perspective — what they gain or what is fixed
+- Rewrite terse commit messages into clear, human-readable sentences
+- Remove internal/chore commits (dependency bumps, CI tweaks) unless they affect users
+- Output the entry in Markdown, starting with the version heading: ## [version] - date
+"""
