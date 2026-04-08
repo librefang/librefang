@@ -191,7 +191,7 @@ static EMAIL_DOMAIN_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(||
 /// Static regex for validating email local part.
 /// Compiled once at first use via LazyLock to avoid recompilation on every call.
 static EMAIL_LOCAL_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"^[a-zA-Z0-9._%+-]+$").expect("valid email local regex")
+    Regex::new(r"^[a-zA-Z0-9_%+-]+(\.[a-zA-Z0-9_%+-]+)*$").expect("valid email local regex")
 });
 
 /// Validate an email address with basic RFC 5322 compliance.

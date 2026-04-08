@@ -3735,6 +3735,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf36173d4167ed999940f804952e6b08197cae5ad5d572eb4db150ce8ad5d58f"
 
 [[package]]
+name = "landlock"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49fefd6652c57d68aaa32544a4c0e642929725bdc1fd929367cdeb673ab81088"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4160,15 +4171,18 @@ dependencies = [
  "chrono",
  "dashmap",
  "dirs 6.0.0",
+ "ed25519-dalek",
  "flate2",
  "futures",
  "hex",
  "hmac",
  "http",
+ "landlock",
  "librefang-channels",
  "librefang-memory",
  "librefang-skills",
  "librefang-types",
+ "once_cell",
  "rand 0.10.0",
  "regex-lite",
  "reqwest 0.13.2",
@@ -4176,6 +4190,7 @@ dependencies = [
  "rusqlite",
  "rustls",
  "rustls-native-certs",
+ "seccompiler",
  "serde",
  "serde_json",
  "sha2",
@@ -6876,6 +6891,15 @@ dependencies = [
  "pkcs8",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "seccompiler"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "345a3e4dddf721a478089d4697b83c6c0a8f5bf16086f6c13397e4534eb6e2e5"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

@@ -397,22 +397,29 @@ fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json
             if timeout_secs > 0 {
                 let timeout = Duration::from_secs(timeout_secs);
                 match child.wait_timeout(timeout).expect("wait_timeout failed") {
-                    Some(_status) => {
-                        // Process finished before timeout; capture output.
-                        match child.wait_with_output() {
-                            Ok(output) => {
-                                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                                json!({
-                                    "ok": {
-                                        "exit_code": output.status.code(),
-                                        "stdout": stdout,
-                                        "stderr": stderr,
-                                    }
-                                })
-                            }
-                            Err(e) => json!({"error": format!("shell_exec failed capture: {e}")}),
+                    Some(status) => {
+                        // Process finished before timeout. wait_timeout() already
+                        // reaped the child, so read pipes manually using the exit
+                        // status it returned (do NOT call wait_with_output again).
+                        use std::io::Read;
+
+                        let mut stdout = String::new();
+                        let mut stderr = String::new();
+
+                        if let Some(mut out) = child.stdout.take() {
+                            let _ = out.read_to_string(&mut stdout);
                         }
+                        if let Some(mut err) = child.stderr.take() {
+                            let _ = err.read_to_string(&mut stderr);
+                        }
+
+                        json!({
+                            "ok": {
+                                "exit_code": status.code(),
+                                "stdout": stdout,
+                                "stderr": stderr,
+                            }
+                        })
                     }
                     None => {
                         // Timeout occurred; kill the child process and collect partial state.

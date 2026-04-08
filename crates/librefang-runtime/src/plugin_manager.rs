@@ -19,9 +19,8 @@ use tracing::{debug, info, warn};
 /// This is an Ed25519 public key (32 bytes, base64url-encoded).
 /// Override via `LIBREFANG_REGISTRY_PUBKEY` env var for custom registries.
 /// Set to `LIBREFANG_REGISTRY_VERIFY=0` to skip verification entirely.
-const OFFICIAL_REGISTRY_PUBKEY_B64: &str =
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-    // ^ placeholder — real key would be the registry operator's public key
+const OFFICIAL_REGISTRY_PUBKEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+// ^ placeholder — real key would be the registry operator's public key
 
 /// Verify an Ed25519 signature over registry index JSON bytes.
 ///
@@ -59,8 +58,8 @@ fn verify_registry_index(
         .map_err(|_| "Public key must be exactly 32 bytes".to_string())?;
 
     let signature = Signature::from_bytes(&sig_arr);
-    let verifying_key = VerifyingKey::from_bytes(&key_arr)
-        .map_err(|e| format!("Invalid public key: {e}"))?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&key_arr).map_err(|e| format!("Invalid public key: {e}"))?;
 
     verifying_key
         .verify(index_bytes, &signature)
@@ -147,7 +146,13 @@ fn registry_cache_path(registry: &str) -> std::path::PathBuf {
     // Sanitise the URL into a safe filename (replace non-alphanumeric with '_').
     let safe_name: String = registry
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     cache_dir.join(format!("{safe_name}.json"))
 }
@@ -211,12 +216,8 @@ pub async fn fetch_verified_index(
         }
     }
 
-    let index_url = format!(
-        "https://raw.githubusercontent.com/{registry}/main/index.json"
-    );
-    let sig_url = format!(
-        "https://raw.githubusercontent.com/{registry}/main/index.json.sig"
-    );
+    let index_url = format!("https://raw.githubusercontent.com/{registry}/main/index.json");
+    let sig_url = format!("https://raw.githubusercontent.com/{registry}/main/index.json.sig");
 
     // Fetch index bytes.
     let index_resp = client
@@ -493,7 +494,9 @@ pub fn load_plugin_manifest(plugin_dir: &Path) -> Result<PluginManifest, String>
 /// `YYYY.M.D-betaN` versioning, so a real semver library is overkill.
 fn version_satisfies(running: &str, required: &str) -> bool {
     fn semver_parts(v: &str) -> Vec<u64> {
-        v.split('-').next().unwrap_or(v)
+        v.split('-')
+            .next()
+            .unwrap_or(v)
             .split('.')
             .filter_map(|p| p.parse().ok())
             .collect()
@@ -839,7 +842,9 @@ async fn install_from_registry(
     } else {
         let pubkey = std::env::var("LIBREFANG_REGISTRY_PUBKEY")
             .unwrap_or_else(|_| OFFICIAL_REGISTRY_PUBKEY_B64.to_string());
-        if let Err(e) = verify_archive_signature(&client, &listing_url, &archive_bytes, &pubkey).await {
+        if let Err(e) =
+            verify_archive_signature(&client, &listing_url, &archive_bytes, &pubkey).await
+        {
             let _ = std::fs::remove_dir_all(&target_dir);
             return Err(e);
         }
@@ -1041,12 +1046,12 @@ pub fn scaffold_plugin(
     } else {
         format!("runtime = \"{runtime_tag}\"\n")
     };
-    let requirements_line =
-        if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python) {
-            "requirements = \"requirements.txt\"\n".to_string()
-        } else {
-            String::new()
-        };
+    let requirements_line = if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python)
+    {
+        "requirements = \"requirements.txt\"\n".to_string()
+    } else {
+        String::new()
+    };
     let manifest_toml = format!(
         r#"name = "{name}"
 version = "0.1.0"
@@ -1280,6 +1285,15 @@ fn hook_templates(runtime: crate::plugin_runtime::PluginRuntime) -> HookFiles {
             bootstrap: ("bootstrap", STUB_LIFECYCLE_NATIVE),
             prepare_subagent: ("prepare_subagent", STUB_LIFECYCLE_NATIVE),
             merge_subagent: ("merge_subagent", STUB_LIFECYCLE_NATIVE),
+        },
+        R::Wasm => HookFiles {
+            ingest: ("ingest.wasm", NATIVE_INGEST),
+            after_turn: ("after_turn.wasm", NATIVE_AFTER_TURN),
+            assemble: ("assemble.wasm", STUB_ASSEMBLE_NATIVE),
+            compact: ("compact.wasm", STUB_COMPACT_NATIVE),
+            bootstrap: ("bootstrap.wasm", STUB_LIFECYCLE_NATIVE),
+            prepare_subagent: ("prepare_subagent.wasm", STUB_LIFECYCLE_NATIVE),
+            merge_subagent: ("merge_subagent.wasm", STUB_LIFECYCLE_NATIVE),
         },
     }
 }
@@ -2743,34 +2757,27 @@ async fn download_github_entry(
 /// Check that all declared hook scripts exist on disk and are within the plugin directory.
 /// Compute a hex-encoded SHA-256 digest of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-
     // NOTE: Rust's `DefaultHasher` is NOT cryptographic. We use a simple
     // hand-rolled SHA-256 here so we don't pull in a new crate. If the project
     // adds `sha2` in future, swap this implementation out.
     //
     // This is a pure-Rust SHA-256 implementation (RFC 6234).
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
 
     // Pre-processing: padding
@@ -2786,31 +2793,51 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     for block in msg.chunks(64) {
         let mut w = [0u32; 64];
         for i in 0..16 {
-            w[i] = u32::from_be_bytes([block[i*4], block[i*4+1], block[i*4+2], block[i*4+3]]);
+            w[i] = u32::from_be_bytes([
+                block[i * 4],
+                block[i * 4 + 1],
+                block[i * 4 + 2],
+                block[i * 4 + 3],
+            ]);
         }
         for i in 16..64 {
-            let s0 = w[i-15].rotate_right(7) ^ w[i-15].rotate_right(18) ^ (w[i-15] >> 3);
-            let s1 = w[i-2].rotate_right(17) ^ w[i-2].rotate_right(19) ^ (w[i-2] >> 10);
-            w[i] = w[i-16].wrapping_add(s0).wrapping_add(w[i-7]).wrapping_add(s1);
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
         }
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] =
             [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]];
         for i in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = s0.wrapping_add(maj);
-            hh = g; g = f; f = e;
+            hh = g;
+            g = f;
+            f = e;
             e = d.wrapping_add(temp1);
-            d = c; c = b; b = a;
+            d = c;
+            c = b;
+            b = a;
             a = temp1.wrapping_add(temp2);
         }
-        h[0] = h[0].wrapping_add(a); h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c); h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e); h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g); h[7] = h[7].wrapping_add(hh);
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
     }
 
     format!(
@@ -2850,13 +2877,13 @@ async fn fetch_checksum(
     plugin_name: &str,
 ) -> Option<String> {
     // Try {archive_url}.sha256 first, then checksums.txt in the same directory.
-    let candidates = [
-        format!("{archive_url}.sha256"),
-        {
-            let base = archive_url.rsplit_once('/').map(|(b, _)| b).unwrap_or(archive_url);
-            format!("{base}/checksums.txt")
-        },
-    ];
+    let candidates = [format!("{archive_url}.sha256"), {
+        let base = archive_url
+            .rsplit_once('/')
+            .map(|(b, _)| b)
+            .unwrap_or(archive_url);
+        format!("{base}/checksums.txt")
+    }];
 
     for url in &candidates {
         if let Ok(resp) = client.get(url).send().await {
@@ -2865,7 +2892,7 @@ async fn fetch_checksum(
                     // checksums.txt format: "<sha256>  <filename>" per line
                     for line in text.lines() {
                         let parts: Vec<&str> = line.splitn(2, ' ').collect();
-                        if parts.len() >= 1 {
+                        if !parts.is_empty() {
                             let hash = parts[0].trim();
                             if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
                                 // If it's a checksums.txt, check the filename matches
@@ -2895,8 +2922,7 @@ pub fn enable_plugin(name: &str) -> Result<(), String> {
     if !marker.exists() {
         return Err(format!("Plugin '{name}' is already enabled"));
     }
-    std::fs::remove_file(&marker)
-        .map_err(|e| format!("Failed to enable plugin '{name}': {e}"))?;
+    std::fs::remove_file(&marker).map_err(|e| format!("Failed to enable plugin '{name}': {e}"))?;
     info!(plugin = name, "Plugin enabled");
     Ok(())
 }
@@ -2915,8 +2941,7 @@ pub fn disable_plugin(name: &str) -> Result<(), String> {
     if marker.exists() {
         return Err(format!("Plugin '{name}' is already disabled"));
     }
-    std::fs::write(&marker, "")
-        .map_err(|e| format!("Failed to disable plugin '{name}': {e}"))?;
+    std::fs::write(&marker, "").map_err(|e| format!("Failed to disable plugin '{name}': {e}"))?;
     info!(plugin = name, "Plugin disabled");
     Ok(())
 }
@@ -2924,20 +2949,14 @@ pub fn disable_plugin(name: &str) -> Result<(), String> {
 /// Compare two plugin manifests and return a list of backward-incompatibility warnings.
 ///
 /// An empty return value means the upgrade is safe.
-fn check_manifest_compat(
-    old: &PluginManifest,
-    new: &PluginManifest,
-) -> Vec<ManifestCompatWarning> {
+fn check_manifest_compat(old: &PluginManifest, new: &PluginManifest) -> Vec<ManifestCompatWarning> {
     let mut warnings = Vec::new();
 
     // Name change
     if old.name != new.name {
         warnings.push(ManifestCompatWarning {
             kind: ManifestCompatKind::NameChanged,
-            message: format!(
-                "plugin name changed from '{}' to '{}'",
-                old.name, new.name
-            ),
+            message: format!("plugin name changed from '{}' to '{}'", old.name, new.name),
         });
     }
 
@@ -2954,13 +2973,41 @@ fn check_manifest_compat(
 
     // Removed hooks — check each of the 7 known hook script fields
     let hook_pairs = [
-        ("bootstrap",        old.hooks.bootstrap.as_ref(),        new.hooks.bootstrap.as_ref()),
-        ("ingest",           old.hooks.ingest.as_ref(),           new.hooks.ingest.as_ref()),
-        ("assemble",         old.hooks.assemble.as_ref(),         new.hooks.assemble.as_ref()),
-        ("compact",          old.hooks.compact.as_ref(),          new.hooks.compact.as_ref()),
-        ("after_turn",       old.hooks.after_turn.as_ref(),       new.hooks.after_turn.as_ref()),
-        ("prepare_subagent", old.hooks.prepare_subagent.as_ref(), new.hooks.prepare_subagent.as_ref()),
-        ("merge_subagent",   old.hooks.merge_subagent.as_ref(),   new.hooks.merge_subagent.as_ref()),
+        (
+            "bootstrap",
+            old.hooks.bootstrap.as_ref(),
+            new.hooks.bootstrap.as_ref(),
+        ),
+        (
+            "ingest",
+            old.hooks.ingest.as_ref(),
+            new.hooks.ingest.as_ref(),
+        ),
+        (
+            "assemble",
+            old.hooks.assemble.as_ref(),
+            new.hooks.assemble.as_ref(),
+        ),
+        (
+            "compact",
+            old.hooks.compact.as_ref(),
+            new.hooks.compact.as_ref(),
+        ),
+        (
+            "after_turn",
+            old.hooks.after_turn.as_ref(),
+            new.hooks.after_turn.as_ref(),
+        ),
+        (
+            "prepare_subagent",
+            old.hooks.prepare_subagent.as_ref(),
+            new.hooks.prepare_subagent.as_ref(),
+        ),
+        (
+            "merge_subagent",
+            old.hooks.merge_subagent.as_ref(),
+            new.hooks.merge_subagent.as_ref(),
+        ),
     ];
     for (hook_name, old_script, new_script) in &hook_pairs {
         if old_script.is_some() && new_script.is_none() {
@@ -3010,7 +3057,9 @@ pub async fn upgrade_plugin(name: &str, source: &PluginSource) -> Result<PluginI
     validate_plugin_name(name)?;
     let plugin_dir = plugins_dir().join(name);
     if !plugin_dir.exists() {
-        return Err(format!("Plugin '{name}' is not installed. Use install instead."));
+        return Err(format!(
+            "Plugin '{name}' is not installed. Use install instead."
+        ));
     }
 
     // Capture old manifest before removing so we can compare with the new one.
@@ -3085,9 +3134,8 @@ pub fn sign_plugin(name: &str) -> Result<std::collections::HashMap<String, Strin
     let mut hashes = std::collections::HashMap::new();
     for rel_path in &hook_paths {
         let abs_path = plugin_dir.join(rel_path);
-        let bytes = std::fs::read(&abs_path).map_err(|e| {
-            format!("Cannot read '{}' for signing: {e}", abs_path.display())
-        })?;
+        let bytes = std::fs::read(&abs_path)
+            .map_err(|e| format!("Cannot read '{}' for signing: {e}", abs_path.display()))?;
         hashes.insert(rel_path.clone(), sha256_hex(&bytes));
     }
 
@@ -3115,7 +3163,11 @@ pub fn sign_plugin(name: &str) -> Result<std::collections::HashMap<String, Strin
     std::fs::write(&manifest_path, &new_content)
         .map_err(|e| format!("Failed to write plugin.toml: {e}"))?;
 
-    info!(plugin = name, hooks = hook_paths.len(), "Plugin signed — integrity hashes written");
+    info!(
+        plugin = name,
+        hooks = hook_paths.len(),
+        "Plugin signed — integrity hashes written"
+    );
     Ok(hashes)
 }
 
@@ -3287,7 +3339,9 @@ pub fn resolve_install_order(
             return Ok(());
         }
         if in_stack.contains(name) {
-            return Err(format!("Circular dependency detected: '{name}' depends on itself"));
+            return Err(format!(
+                "Circular dependency detected: '{name}' depends on itself"
+            ));
         }
         in_stack.insert(name.to_string());
 
@@ -3299,8 +3353,8 @@ pub fn resolve_install_order(
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                   .filter_map(|v| v.as_str().map(String::from))
-                   .collect()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
             })
             .unwrap_or_default();
 
@@ -3315,7 +3369,13 @@ pub fn resolve_install_order(
         Ok(())
     }
 
-    dfs(root, registry_plugins, &mut order, &mut visited, &mut in_stack)?;
+    dfs(
+        root,
+        registry_plugins,
+        &mut order,
+        &mut visited,
+        &mut in_stack,
+    )?;
     Ok(order)
 }
 
@@ -3345,11 +3405,7 @@ fn strip_toml_section(src: &str, section_name: &str) -> String {
             continue;
         }
         // Any new bare [section] ends the skip (but not [[array]] tables)
-        if skip
-            && trimmed.starts_with('[')
-            && !trimmed.starts_with("[[")
-            && trimmed != header
-        {
+        if skip && trimmed.starts_with('[') && !trimmed.starts_with("[[") && trimmed != header {
             skip = false;
         }
         if !skip {
@@ -3422,19 +3478,35 @@ pub fn lint_plugin(name: &str) -> Result<PluginLintReport, String> {
             use std::os::unix::fs::PermissionsExt;
             if let Ok(meta) = std::fs::metadata(&abs) {
                 if meta.permissions().mode() & 0o111 == 0 {
-                    errors.push(format!("Hook '{rel}' is not executable (chmod +x required for native runtime)"));
+                    errors.push(format!(
+                        "Hook '{rel}' is not executable (chmod +x required for native runtime)"
+                    ));
                 }
             }
         }
     };
 
-    if let Some(ref p) = hooks.ingest { check_hook(p, &mut errors, &mut warnings); }
-    if let Some(ref p) = hooks.after_turn { check_hook(p, &mut errors, &mut warnings); }
-    if let Some(ref p) = hooks.assemble { check_hook(p, &mut errors, &mut warnings); }
-    if let Some(ref p) = hooks.compact { check_hook(p, &mut errors, &mut warnings); }
-    if let Some(ref p) = hooks.bootstrap { check_hook(p, &mut errors, &mut warnings); }
-    if let Some(ref p) = hooks.prepare_subagent { check_hook(p, &mut errors, &mut warnings); }
-    if let Some(ref p) = hooks.merge_subagent { check_hook(p, &mut errors, &mut warnings); }
+    if let Some(ref p) = hooks.ingest {
+        check_hook(p, &mut errors, &mut warnings);
+    }
+    if let Some(ref p) = hooks.after_turn {
+        check_hook(p, &mut errors, &mut warnings);
+    }
+    if let Some(ref p) = hooks.assemble {
+        check_hook(p, &mut errors, &mut warnings);
+    }
+    if let Some(ref p) = hooks.compact {
+        check_hook(p, &mut errors, &mut warnings);
+    }
+    if let Some(ref p) = hooks.bootstrap {
+        check_hook(p, &mut errors, &mut warnings);
+    }
+    if let Some(ref p) = hooks.prepare_subagent {
+        check_hook(p, &mut errors, &mut warnings);
+    }
+    if let Some(ref p) = hooks.merge_subagent {
+        check_hook(p, &mut errors, &mut warnings);
+    }
 
     // 3. Warn on missing optional but recommended fields
     if manifest.description.is_none() {
@@ -3474,8 +3546,7 @@ pub fn lint_plugin(name: &str) -> Result<PluginLintReport, String> {
     let manifest_path = plugin_dir.join("plugin.toml");
     if let Ok(raw) = std::fs::read_to_string(&manifest_path) {
         let needs = extract_needs(&raw);
-        const KNOWN_CAPABILITIES: &[&str] =
-            &["network", "filesystem", "env", "subprocess", "gpu"];
+        const KNOWN_CAPABILITIES: &[&str] = &["network", "filesystem", "env", "subprocess", "gpu"];
         for cap in &needs {
             if !KNOWN_CAPABILITIES.contains(&cap.as_str()) {
                 warnings.push(format!(
@@ -3594,11 +3665,14 @@ pub async fn install_plugin_deps(name: &str) -> Result<Vec<String>, String> {
 
     // Determine the install command based on runtime and package manifest presence.
     // Returns `(executable, args, package_manifest_filename)`.
-    let cmd_info: Option<(&'static str, Vec<&'static str>, &'static str)> = match runtime.as_str()
-    {
+    let cmd_info: Option<(&'static str, Vec<&'static str>, &'static str)> = match runtime.as_str() {
         "python" | "py" => {
             if plugin_dir.join("requirements.txt").exists() {
-                Some(("pip", vec!["install", "-r", "requirements.txt"], "requirements.txt"))
+                Some((
+                    "pip",
+                    vec!["install", "-r", "requirements.txt"],
+                    "requirements.txt",
+                ))
             } else {
                 None
             }
@@ -3714,7 +3788,10 @@ pub async fn install_plugin_with_deps(
     let mut newly_installed = Vec::new();
     for dep_name in &order {
         if installed_names.contains(dep_name) {
-            info!(plugin = dep_name.as_str(), "Dependency already installed, skipping");
+            info!(
+                plugin = dep_name.as_str(),
+                "Dependency already installed, skipping"
+            );
             continue;
         }
         let source = PluginSource::Registry {
@@ -3838,9 +3915,13 @@ after_turn = "hooks/after_turn.py"
             hooks: librefang_types::config::ContextEngineHooks {
                 ingest: Some("hooks/ingest.py".to_string()),
                 after_turn: Some("hooks/after_turn.py".to_string()), // missing
-                runtime: None,
+                ..Default::default()
             },
             requirements: None,
+            env: std::collections::HashMap::new(),
+            librefang_min_version: None,
+            integrity: std::collections::HashMap::new(),
+            plugin_depends: Vec::new(),
         };
 
         assert!(!check_hooks_exist(&plugin_dir, &manifest));
@@ -3857,10 +3938,13 @@ after_turn = "hooks/after_turn.py"
             author: None,
             hooks: librefang_types::config::ContextEngineHooks {
                 ingest: Some("../../etc/passwd".to_string()),
-                after_turn: None,
-                runtime: None,
+                ..Default::default()
             },
             requirements: None,
+            env: std::collections::HashMap::new(),
+            librefang_min_version: None,
+            integrity: std::collections::HashMap::new(),
+            plugin_depends: Vec::new(),
         };
         assert!(!check_hooks_exist(&plugin_dir, &manifest_escape));
     }

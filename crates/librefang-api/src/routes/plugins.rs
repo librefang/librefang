@@ -20,7 +20,9 @@ fn validate_registry_param(registry: &str) -> Result<(), String> {
     // Must be exactly `owner/repo` — one slash, no leading/trailing slash.
     let parts: Vec<&str> = registry.splitn(2, '/').collect();
     if parts.len() != 2 {
-        return Err(format!("Invalid registry '{registry}': expected 'owner/repo' format"));
+        return Err(format!(
+            "Invalid registry '{registry}': expected 'owner/repo' format"
+        ));
     }
     let is_safe_component = |s: &str| -> bool {
         !s.is_empty()
@@ -50,18 +52,12 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         .route("/plugins/scaffold", axum::routing::post(scaffold_plugin))
         .route("/plugins/doctor", axum::routing::get(plugin_doctor))
         .route("/plugins/{name}", axum::routing::get(get_plugin))
-        .route(
-            "/plugins/{name}/status",
-            axum::routing::get(plugin_status),
-        )
+        .route("/plugins/{name}/status", axum::routing::get(plugin_status))
         .route(
             "/plugins/{name}/install-deps",
             axum::routing::post(install_plugin_deps),
         )
-        .route(
-            "/plugins/{name}/reload",
-            axum::routing::post(reload_plugin),
-        )
+        .route("/plugins/{name}/reload", axum::routing::post(reload_plugin))
         .route(
             "/context-engine/metrics",
             axum::routing::get(context_engine_metrics),
@@ -74,10 +70,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/context-engine/traces/{trace_id}",
             axum::routing::get(get_trace_by_id),
         )
-        .route(
-            "/plugins/{name}/enable",
-            axum::routing::post(enable_plugin),
-        )
+        .route("/plugins/{name}/enable", axum::routing::post(enable_plugin))
         .route(
             "/plugins/{name}/disable",
             axum::routing::post(disable_plugin),
@@ -90,14 +83,8 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/plugins/{name}/test-hook",
             axum::routing::post(test_plugin_hook),
         )
-        .route(
-            "/plugins/{name}/lint",
-            axum::routing::get(lint_plugin),
-        )
-        .route(
-            "/plugins/{name}/sign",
-            axum::routing::post(sign_plugin),
-        )
+        .route("/plugins/{name}/lint", axum::routing::get(lint_plugin))
+        .route("/plugins/{name}/sign", axum::routing::post(sign_plugin))
         .route(
             "/context-engine/health",
             axum::routing::get(context_engine_health),
@@ -114,10 +101,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/plugins/batch",
             axum::routing::post(batch_plugin_operation),
         )
-        .route(
-            "/plugins/{name}/export",
-            axum::routing::get(export_plugin),
-        )
+        .route("/plugins/{name}/export", axum::routing::get(export_plugin))
         .route(
             "/plugins/{name}/update-check",
             axum::routing::get(plugin_update_check),
@@ -150,10 +134,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/plugins/{name}/advanced-config",
             axum::routing::get(plugin_advanced_config),
         )
-        .route(
-            "/plugins/{name}/env",
-            axum::routing::get(plugin_env),
-        )
+        .route("/plugins/{name}/env", axum::routing::get(plugin_env))
         .route(
             "/context-engine/config",
             axum::routing::get(context_engine_config),
@@ -170,14 +151,8 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/plugins/install-with-deps",
             axum::routing::post(install_plugin_with_deps_handler),
         )
-        .route(
-            "/plugins/prewarm",
-            axum::routing::post(prewarm_plugins),
-        )
-        .route(
-            "/plugins/{name}/health",
-            axum::routing::get(plugin_health),
-        )
+        .route("/plugins/prewarm", axum::routing::post(prewarm_plugins))
+        .route("/plugins/{name}/health", axum::routing::get(plugin_health))
 }
 
 /// Query parameters for `GET /api/plugins`.
@@ -198,9 +173,7 @@ pub struct ListPluginsQuery {
         (status = 200, description = "List installed plugins", body = serde_json::Value)
     )
 )]
-pub async fn list_plugins(
-    Query(query): Query<ListPluginsQuery>,
-) -> impl IntoResponse {
+pub async fn list_plugins(Query(query): Query<ListPluginsQuery>) -> impl IntoResponse {
     let mut plugins = librefang_runtime::plugin_manager::list_plugins();
 
     // Apply enabled filter
@@ -572,9 +545,10 @@ pub async fn plugin_status(
         .as_deref()
         .map(|p| p == name)
         .unwrap_or(false);
-    let stack_position: Option<usize> = ctx_cfg.plugin_stack.as_ref().and_then(|stack| {
-        stack.iter().position(|p| p == &name)
-    });
+    let stack_position: Option<usize> = ctx_cfg
+        .plugin_stack
+        .as_ref()
+        .and_then(|stack| stack.iter().position(|p| p == &name));
     let is_active = active_single || stack_position.is_some();
 
     Json(serde_json::json!({
@@ -608,8 +582,16 @@ pub async fn plugin_status(
     )
 )]
 pub async fn context_engine_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.kernel.context_engine_ref().and_then(|e| e.hook_metrics()) {
-        Some(metrics) => (StatusCode::OK, Json(serde_json::to_value(&metrics).unwrap_or_default())).into_response(),
+    match state
+        .kernel
+        .context_engine_ref()
+        .and_then(|e| e.hook_metrics())
+    {
+        Some(metrics) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(&metrics).unwrap_or_default()),
+        )
+            .into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
     }
 }
@@ -956,9 +938,8 @@ pub async fn test_plugin_hook(
         .into_response();
     }
 
-    let runtime = librefang_runtime::plugin_runtime::PluginRuntime::from_tag(
-        hooks.runtime.as_deref(),
-    );
+    let runtime =
+        librefang_runtime::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref());
     let timeout_secs = hooks.hook_timeout_secs.unwrap_or(30);
 
     // Build hook config and run
@@ -1073,7 +1054,11 @@ pub async fn lint_plugin(Path(name): Path<String>) -> impl IntoResponse {
             } else {
                 StatusCode::UNPROCESSABLE_ENTITY
             };
-            (status, Json(serde_json::to_value(&report).unwrap_or_default())).into_response()
+            (
+                status,
+                Json(serde_json::to_value(&report).unwrap_or_default()),
+            )
+                .into_response()
         }
         Err(e) => ApiErrorResponse::bad_request(e).into_response(),
     }
@@ -1236,7 +1221,11 @@ pub async fn context_engine_chain(State(state): State<Arc<AppState>>) -> impl In
 pub async fn context_engine_metrics_prometheus(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let Some(metrics) = state.kernel.context_engine_ref().and_then(|e| e.hook_metrics()) else {
+    let Some(metrics) = state
+        .kernel
+        .context_engine_ref()
+        .and_then(|e| e.hook_metrics())
+    else {
         return (StatusCode::NO_CONTENT, String::new()).into_response();
     };
 
@@ -1255,7 +1244,9 @@ pub async fn context_engine_metrics_prometheus(
     output.push_str("# TYPE librefang_hook_calls_total counter\n");
     output.push_str("# HELP librefang_hook_errors_total Total hook failures\n");
     output.push_str("# TYPE librefang_hook_errors_total counter\n");
-    output.push_str("# HELP librefang_hook_latency_ms_total Cumulative hook latency in milliseconds\n");
+    output.push_str(
+        "# HELP librefang_hook_latency_ms_total Cumulative hook latency in milliseconds\n",
+    );
     output.push_str("# TYPE librefang_hook_latency_ms_total counter\n");
 
     let hook_pairs = [
@@ -1313,7 +1304,10 @@ pub async fn context_engine_metrics_prometheus(
 
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         output,
     )
         .into_response()
@@ -1328,15 +1322,16 @@ pub async fn context_engine_metrics_prometheus(
 /// {"operation": "lint", "plugins": ["plugin-a", "plugin-b"]}
 /// {"operation": "sign", "plugins": ["plugin-a"]}
 /// ```
-pub async fn batch_plugin_operation(
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+pub async fn batch_plugin_operation(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let operation = match body.get("operation").and_then(|o| o.as_str()) {
         Some(op) => op.to_string(),
         None => return ApiErrorResponse::bad_request("Missing 'operation' field").into_response(),
     };
     let plugins: Vec<String> = match body.get("plugins").and_then(|p| p.as_array()) {
-        Some(arr) => arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
         None => return ApiErrorResponse::bad_request("Missing 'plugins' array").into_response(),
     };
 
@@ -1359,12 +1354,16 @@ pub async fn batch_plugin_operation(
             "sign" => librefang_runtime::plugin_manager::sign_plugin(name)
                 .map(|h| serde_json::json!({"ok": true, "hashes": h}))
                 .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
-            _ => serde_json::json!({"ok": false, "error": format!("Unknown operation '{operation}'")}),
+            _ => {
+                serde_json::json!({"ok": false, "error": format!("Unknown operation '{operation}'")})
+            }
         };
         results.push(serde_json::json!({"plugin": name, "result": result}));
     }
 
-    let all_ok = results.iter().all(|r| r["result"]["ok"].as_bool().unwrap_or(false));
+    let all_ok = results
+        .iter()
+        .all(|r| r["result"]["ok"].as_bool().unwrap_or(false));
     Json(serde_json::json!({
         "operation": operation,
         "results": results,
@@ -1399,7 +1398,8 @@ pub async fn export_plugin(Path(name): Path<String>) -> impl IntoResponse {
             let mut tar = tar::Builder::new(enc);
             tar.append_dir_all(&safe_prefix, &info.path)
                 .map_err(|e| format!("Failed to create tar: {e}"))?;
-            tar.finish().map_err(|e| format!("Failed to finalize tar: {e}"))?;
+            tar.finish()
+                .map_err(|e| format!("Failed to finalize tar: {e}"))?;
         }
         Ok(buf)
     })
@@ -1461,40 +1461,39 @@ pub async fn plugin_update_check(
         }
     };
 
-    let manifest_url = format!(
-        "https://raw.githubusercontent.com/{registry}/main/plugins/{name}/plugin.toml"
-    );
+    let manifest_url =
+        format!("https://raw.githubusercontent.com/{registry}/main/plugins/{name}/plugin.toml");
 
     match client.get(&manifest_url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.text().await {
-                Ok(text) => {
-                    let registry_version = toml::from_str::<toml::Value>(&text)
-                        .ok()
-                        .and_then(|v| v.get("version")?.as_str().map(str::to_string));
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(text) => {
+                let registry_version = toml::from_str::<toml::Value>(&text)
+                    .ok()
+                    .and_then(|v| v.get("version")?.as_str().map(str::to_string));
 
-                    let installed_version = &info.manifest.version;
-                    let update_available = registry_version
-                        .as_deref()
-                        .map(|rv| rv != installed_version)
-                        .unwrap_or(false);
+                let installed_version = &info.manifest.version;
+                let update_available = registry_version
+                    .as_deref()
+                    .map(|rv| rv != installed_version)
+                    .unwrap_or(false);
 
-                    Json(serde_json::json!({
-                        "plugin": name,
-                        "installed_version": installed_version,
-                        "registry_version": registry_version,
-                        "update_available": update_available,
-                        "registry": registry,
-                    }))
-                    .into_response()
-                }
-                Err(e) => (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({"error": format!("Failed to read registry response: {e}")})),
-                )
-                    .into_response(),
+                Json(serde_json::json!({
+                    "plugin": name,
+                    "installed_version": installed_version,
+                    "registry_version": registry_version,
+                    "update_available": update_available,
+                    "registry": registry,
+                }))
+                .into_response()
             }
-        }
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(
+                    serde_json::json!({"error": format!("Failed to read registry response: {e}")}),
+                ),
+            )
+                .into_response(),
+        },
         Ok(resp) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -1531,7 +1530,11 @@ pub async fn benchmark_plugin_hook(
         None => return ApiErrorResponse::bad_request("Missing 'hook' field").into_response(),
     };
     let input = body.get("input").cloned().unwrap_or(serde_json::json!({}));
-    let runs = body.get("runs").and_then(|r| r.as_u64()).unwrap_or(5).min(50) as usize;
+    let runs = body
+        .get("runs")
+        .and_then(|r| r.as_u64())
+        .unwrap_or(5)
+        .min(50) as usize;
 
     let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
         Ok(i) => i,
@@ -1545,16 +1548,26 @@ pub async fn benchmark_plugin_hook(
         "assemble" => hooks.assemble.as_deref(),
         "compact" => hooks.compact.as_deref(),
         "bootstrap" => hooks.bootstrap.as_deref(),
-        _ => return ApiErrorResponse::bad_request(format!("Unknown hook '{hook_name}'")).into_response(),
+        _ => {
+            return ApiErrorResponse::bad_request(format!("Unknown hook '{hook_name}'"))
+                .into_response()
+        }
     };
     let script_rel = match script_rel {
         Some(s) => s.to_string(),
-        None => return ApiErrorResponse::bad_request(format!("Hook '{hook_name}' not declared")).into_response(),
+        None => {
+            return ApiErrorResponse::bad_request(format!("Hook '{hook_name}' not declared"))
+                .into_response()
+        }
     };
 
     let script_abs = info.path.join(&script_rel);
-    let runtime = librefang_runtime::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref());
-    let plugin_env: Vec<(String, String)> = info.manifest.env.iter()
+    let runtime =
+        librefang_runtime::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref());
+    let plugin_env: Vec<(String, String)> = info
+        .manifest
+        .env
+        .iter()
         .map(|(k, v): (&String, &String)| (k.clone(), v.clone()))
         .collect();
     let config = librefang_runtime::plugin_runtime::HookConfig {
@@ -1648,7 +1661,9 @@ pub async fn reset_plugin_state(Path(name): Path<String>) -> impl IntoResponse {
 
     match std::fs::write(&state_path, "{}") {
         Ok(()) => Json(serde_json::json!({"reset": true, "plugin": name})).into_response(),
-        Err(e) => ApiErrorResponse::bad_request(format!("Failed to reset state: {e}")).into_response(),
+        Err(e) => {
+            ApiErrorResponse::bad_request(format!("Failed to reset state: {e}")).into_response()
+        }
     }
 }
 
@@ -1664,19 +1679,16 @@ pub async fn plugin_registry_search(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let query = params.get("q").cloned().unwrap_or_default();
-    let registry = params
-        .get("registry")
-        .cloned()
-        .unwrap_or_else(|| {
-            state
-                .kernel
-                .config_ref()
-                .context_engine
-                .plugin_registries
-                .first()
-                .map(|r| r.github_repo.clone())
-                .unwrap_or_else(|| "librefang/librefang-registry".to_string())
-        });
+    let registry = params.get("registry").cloned().unwrap_or_else(|| {
+        state
+            .kernel
+            .config_ref()
+            .context_engine
+            .plugin_registries
+            .first()
+            .map(|r| r.github_repo.clone())
+            .unwrap_or_else(|| "librefang/librefang-registry".to_string())
+    });
 
     if let Err(e) = validate_registry_param(&registry) {
         return (
@@ -1701,9 +1713,7 @@ pub async fn plugin_registry_search(
         }
     };
 
-    let index_url = format!(
-        "https://raw.githubusercontent.com/{registry}/main/index.json"
-    );
+    let index_url = format!("https://raw.githubusercontent.com/{registry}/main/index.json");
 
     if let Ok(resp) = client.get(&index_url).send().await {
         if resp.status().is_success() {
@@ -1742,9 +1752,7 @@ pub async fn plugin_registry_search(
     }
 
     // Fallback: GitHub Contents API for the `plugins/` directory listing.
-    let api_url = format!(
-        "https://api.github.com/repos/{registry}/contents/plugins"
-    );
+    let api_url = format!("https://api.github.com/repos/{registry}/contents/plugins");
     if let Ok(resp) = client
         .get(&api_url)
         .header("Accept", "application/vnd.github.v3+json")
@@ -1758,9 +1766,7 @@ pub async fn plugin_registry_search(
                     .as_array()
                     .unwrap_or(&empty)
                     .iter()
-                    .filter(|e| {
-                        e.get("type").and_then(|v| v.as_str()) == Some("dir")
-                    })
+                    .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("dir"))
                     .filter(|e| {
                         if query.is_empty() {
                             return true;
@@ -1887,27 +1893,72 @@ pub async fn context_engine_trace_history(
 pub async fn context_engine_metrics_summary(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let Some(metrics) = state.kernel.context_engine_ref().and_then(|e| e.hook_metrics()) else {
-        return (
-            StatusCode::NO_CONTENT,
-            Json(serde_json::json!({})),
-        )
-            .into_response();
+    let Some(metrics) = state
+        .kernel
+        .context_engine_ref()
+        .and_then(|e| e.hook_metrics())
+    else {
+        return (StatusCode::NO_CONTENT, Json(serde_json::json!({}))).into_response();
     };
 
     let hook_data = [
-        ("ingest",          metrics.ingest.calls,          metrics.ingest.successes,          metrics.ingest.failures,          metrics.ingest.total_ms),
-        ("after_turn",      metrics.after_turn.calls,      metrics.after_turn.successes,      metrics.after_turn.failures,      metrics.after_turn.total_ms),
-        ("bootstrap",       metrics.bootstrap.calls,       metrics.bootstrap.successes,       metrics.bootstrap.failures,       metrics.bootstrap.total_ms),
-        ("assemble",        metrics.assemble.calls,        metrics.assemble.successes,        metrics.assemble.failures,        metrics.assemble.total_ms),
-        ("compact",         metrics.compact.calls,         metrics.compact.successes,         metrics.compact.failures,         metrics.compact.total_ms),
-        ("prepare_subagent",metrics.prepare_subagent.calls,metrics.prepare_subagent.successes,metrics.prepare_subagent.failures,metrics.prepare_subagent.total_ms),
-        ("merge_subagent",  metrics.merge_subagent.calls,  metrics.merge_subagent.successes,  metrics.merge_subagent.failures,  metrics.merge_subagent.total_ms),
+        (
+            "ingest",
+            metrics.ingest.calls,
+            metrics.ingest.successes,
+            metrics.ingest.failures,
+            metrics.ingest.total_ms,
+        ),
+        (
+            "after_turn",
+            metrics.after_turn.calls,
+            metrics.after_turn.successes,
+            metrics.after_turn.failures,
+            metrics.after_turn.total_ms,
+        ),
+        (
+            "bootstrap",
+            metrics.bootstrap.calls,
+            metrics.bootstrap.successes,
+            metrics.bootstrap.failures,
+            metrics.bootstrap.total_ms,
+        ),
+        (
+            "assemble",
+            metrics.assemble.calls,
+            metrics.assemble.successes,
+            metrics.assemble.failures,
+            metrics.assemble.total_ms,
+        ),
+        (
+            "compact",
+            metrics.compact.calls,
+            metrics.compact.successes,
+            metrics.compact.failures,
+            metrics.compact.total_ms,
+        ),
+        (
+            "prepare_subagent",
+            metrics.prepare_subagent.calls,
+            metrics.prepare_subagent.successes,
+            metrics.prepare_subagent.failures,
+            metrics.prepare_subagent.total_ms,
+        ),
+        (
+            "merge_subagent",
+            metrics.merge_subagent.calls,
+            metrics.merge_subagent.successes,
+            metrics.merge_subagent.failures,
+            metrics.merge_subagent.total_ms,
+        ),
     ];
 
-    let total_calls: u64   = hook_data.iter().map(|&(_, calls, _, _, _)| calls).sum();
-    let total_failures: u64 = hook_data.iter().map(|&(_, _, _, failures, _)| failures).sum();
-    let total_ms: u64       = hook_data.iter().map(|&(_, _, _, _, ms)| ms).sum();
+    let total_calls: u64 = hook_data.iter().map(|&(_, calls, _, _, _)| calls).sum();
+    let total_failures: u64 = hook_data
+        .iter()
+        .map(|&(_, _, _, failures, _)| failures)
+        .sum();
+    let total_ms: u64 = hook_data.iter().map(|&(_, _, _, _, ms)| ms).sum();
 
     let hooks: serde_json::Map<String, serde_json::Value> = hook_data
         .iter()
@@ -1985,7 +2036,9 @@ pub async fn plugin_advanced_config(Path(name): Path<String>) -> impl IntoRespon
             )
                 .into_response()
         }
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+        Err(e) => ApiErrorResponse::not_found(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -2020,7 +2073,11 @@ pub async fn plugin_env(Path(name): Path<String>) -> impl IntoResponse {
                         || k.to_ascii_uppercase().contains("PASSWORD")
                         || k.to_ascii_uppercase().contains("TOKEN")
                     {
-                        if v.is_empty() { "".to_string() } else { "***".to_string() }
+                        if v.is_empty() {
+                            "".to_string()
+                        } else {
+                            "***".to_string()
+                        }
                     } else {
                         v.clone()
                     };
@@ -2058,7 +2115,9 @@ pub async fn plugin_env(Path(name): Path<String>) -> impl IntoResponse {
             )
                 .into_response()
         }
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+        Err(e) => ApiErrorResponse::not_found(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -2173,7 +2232,9 @@ pub async fn prewarm_plugin(Path(name): Path<String>) -> impl IntoResponse {
             )
                 .into_response()
         }
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+        Err(e) => ApiErrorResponse::not_found(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -2274,12 +2335,14 @@ pub async fn context_engine_sandbox_policy(
 pub async fn get_trace_by_id(Path(trace_id): Path<String>) -> impl IntoResponse {
     // Validate: trace_id must be exactly 16 hex chars.
     if trace_id.len() != 16 || !trace_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        return ApiErrorResponse::bad_request("trace_id must be 16 lowercase hex characters").into_response();
+        return ApiErrorResponse::bad_request("trace_id must be 16 lowercase hex characters")
+            .into_response();
     }
     match librefang_runtime::plugin_manager::open_trace_store() {
         Ok(store) => match store.query_by_trace_id(&trace_id) {
             Some(trace) => axum::Json(trace).into_response(),
-            None => ApiErrorResponse::not_found(format!("No trace found with id '{trace_id}'")).into_response(),
+            None => ApiErrorResponse::not_found(format!("No trace found with id '{trace_id}'"))
+                .into_response(),
         },
         Err(e) => ApiErrorResponse::internal(e).into_response(),
     }
@@ -2292,9 +2355,7 @@ pub async fn get_trace_by_id(Path(trace_id): Path<String>) -> impl IntoResponse 
 /// {"plugins": ["my_plugin", "another_plugin"]}
 /// ```
 /// Omit `plugins` (or pass an empty array) to pre-warm all installed plugins.
-pub async fn prewarm_plugins(
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+pub async fn prewarm_plugins(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     // Parse plugin list from request body; empty means "all installed plugins".
     let names: Vec<String> = body
         .get("plugins")
@@ -2373,7 +2434,11 @@ pub async fn plugin_health(
             .unwrap_or(false);
 
     let hook_stats: serde_json::Value = if is_active {
-        match state.kernel.context_engine_ref().and_then(|e| e.hook_metrics()) {
+        match state
+            .kernel
+            .context_engine_ref()
+            .and_then(|e| e.hook_metrics())
+        {
             Some(metrics) => {
                 let make_stat = |calls: u64, failures: u64, total_ms: u64| {
                     let error_rate_pct = if calls > 0 {
@@ -2455,7 +2520,10 @@ pub async fn install_plugin_with_deps_handler(
     if let Err(e) = librefang_runtime::plugin_manager::validate_plugin_name(&name) {
         return ApiErrorResponse::bad_request(e).into_response();
     }
-    let registry = body.get("registry").and_then(|v| v.as_str()).map(String::from);
+    let registry = body
+        .get("registry")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     match librefang_runtime::plugin_manager::install_plugin_with_deps(
         &name,
         registry.as_deref(),
