@@ -1078,7 +1078,7 @@ impl ScriptableContextEngine {
             // Using Arc clones keeps it cheap; the spawned task holds them for its lifetime.
             let plugin_name = self.plugin_name.clone();
             let on_event_script = self.on_event_script.clone().unwrap();
-            let runtime = self.runtime;
+            let runtime = self.runtime.clone();
             let hook_timeout_secs = self.hook_timeout_secs;
             let plugin_env = self.plugin_env.clone();
             let bootstrap_overrides = self.bootstrap_applied_overrides.clone();
@@ -1406,7 +1406,7 @@ impl ScriptableContextEngine {
         if !self.prewarm_subprocesses || !self.persistent_subprocess {
             return;
         }
-        let runtime = self.runtime;
+        let runtime = self.runtime.clone();
         let hooks: &[(&str, &Option<String>)] = &[
             ("ingest", &self.ingest_script),
             ("after_turn", &self.after_turn_script),
@@ -1641,7 +1641,7 @@ impl ScriptableContextEngine {
 
         let input = serde_json::json!({"event": event});
         let plugin_name = self.plugin_name.clone();
-        let runtime = self.runtime;
+        let runtime = self.runtime.clone();
         let timeout_secs = self.hook_timeout_secs;
         let plugin_env = {
             let guard = self
@@ -1781,7 +1781,7 @@ impl ScriptableContextEngine {
                 );
             }
             match crate::plugin_runtime::run_hook_json(
-                hook_name, &resolved, runtime, &input, &config,
+                hook_name, &resolved, runtime.clone(), &input, &config,
             )
             .await
             {
@@ -1985,7 +1985,7 @@ impl ScriptableContextEngine {
             let t = std::time::Instant::now();
             let call_result = self
                 .process_pool
-                .call(script_path, self.runtime, &input, &config)
+                .call(script_path, self.runtime.clone(), &input, &config)
                 .await;
             let elapsed_ms = t.elapsed().as_millis() as u64;
             match call_result {
@@ -2077,7 +2077,7 @@ impl ScriptableContextEngine {
             Self::run_hook(
                 hook_name,
                 script_path,
-                self.runtime,
+                self.runtime.clone(),
                 input,
                 timeout_secs,
                 &effective_env,
@@ -2362,6 +2362,7 @@ impl ContextEngine for ScriptableContextEngine {
                 })
             };
             if let Some(cached_output) = cached {
+                tracing::info!(hook = "ingest", agent_id = %agent_id, ttl_secs, "Ingest hook succeeded (cache hit)");
                 debug!("Ingest hook cache hit (ttl={}s)", ttl_secs);
                 let mut memories = default_result.recalled_memories;
                 if let Some(hook_memories) =
@@ -2407,7 +2408,7 @@ impl ContextEngine for ScriptableContextEngine {
             {
                 Ok((output, ms)) => {
                     Self::record_hook(&self.metrics, "ingest", ms, true);
-                    tracing::info!(hook = "ingest", agent_id = %agent_id, elapsed_ms = ms, "Ingest hook succeeded");
+                    tracing::info!(hook = "ingest", agent_id = %agent_id, elapsed_ms = ms, "Ingest hook succeeded (cache miss)");
                     // Store in cache
                     {
                         let mut guard = cache_arc.lock().unwrap();
@@ -2467,7 +2468,7 @@ impl ContextEngine for ScriptableContextEngine {
             Ok((output, ms)) => {
                 Self::record_hook(&self.metrics, "ingest", ms, true);
                 self.record_per_agent(&agent_id, ms, true);
-                tracing::info!(hook = "ingest", agent_id = %agent_id, elapsed_ms = ms, "Ingest hook succeeded");
+                tracing::info!(hook = "ingest", agent_id = %agent_id, elapsed_ms = ms, "Ingest hook succeeded (no cache)");
                 // Merge hook memories with default memories
                 let mut memories = default_result.recalled_memories;
                 if let Some(hook_memories) = output.get("memories").and_then(|m| m.as_array()) {
@@ -2959,7 +2960,7 @@ impl ContextEngine for ScriptableContextEngine {
         }
 
         let script = script.clone();
-        let runtime = self.runtime;
+        let runtime = self.runtime.clone();
         let timeout_secs = self.hook_timeout_secs;
         // Merge bootstrap env overrides into the env passed to the background task.
         let plugin_env = {
