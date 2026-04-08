@@ -558,7 +558,7 @@ pub async fn clawhub_search(
             let status = if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else {
-                StatusCode::OK
+                StatusCode::BAD_GATEWAY
             };
             (
                 status,
@@ -637,7 +637,7 @@ pub async fn clawhub_browse(
             let status = if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else {
-                StatusCode::OK
+                StatusCode::BAD_GATEWAY
             };
             (
                 status,
@@ -931,7 +931,7 @@ pub async fn skillhub_search(
             let status = if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else {
-                StatusCode::OK
+                StatusCode::BAD_GATEWAY
             };
             (
                 status,
@@ -993,7 +993,7 @@ pub async fn skillhub_browse(
             let msg = format!("{e}");
             tracing::warn!("Skillhub browse failed: {msg}");
             (
-                StatusCode::OK,
+                StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({"items": [], "error": msg})),
             )
         }
