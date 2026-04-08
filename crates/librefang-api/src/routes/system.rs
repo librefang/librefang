@@ -1416,9 +1416,23 @@ pub async fn approve_request(
         }
     };
 
-    // Verify TOTP code or recovery code if second factor is enabled
+    // Verify TOTP code or recovery code if this specific tool requires it.
+    // Use per-tool check so tools not in totp_tools skip TOTP (and lockout)
+    // even when second_factor = totp is enabled globally.
     let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
-    let totp_verified = if state.kernel.approvals().requires_totp() {
+    let tool_requires_totp = state
+        .kernel
+        .approvals()
+        .get_pending(uuid)
+        .map(|req| {
+            state
+                .kernel
+                .approvals()
+                .policy()
+                .tool_requires_totp(&req.tool_name)
+        })
+        .unwrap_or(false);
+    let totp_verified = if tool_requires_totp {
         if state.kernel.approvals().is_totp_locked_out("api_admin") {
             return ApiErrorResponse::bad_request(
                 "Too many failed TOTP attempts. Try again later.",
@@ -1647,19 +1661,26 @@ pub async fn batch_resolve(
         }
     };
 
-    // Batch approve is incompatible with TOTP enforcement — each approval must
-    // be individually verified with a TOTP code. Batch reject is allowed.
-    if matches!(
-        decision,
-        librefang_types::approval::ApprovalDecision::Approved
-    ) && state.kernel.approvals().requires_totp()
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "Batch approval is not available when TOTP is enforced. Approve items individually with TOTP verification."
-            })),
-        );
+    // Batch approve is incompatible with TOTP enforcement for tools that
+    // require a TOTP code. Check if any of the requested IDs need TOTP;
+    // if so, reject the batch so each can be approved individually.
+    // Batch reject is always allowed.
+    if matches!(decision, librefang_types::approval::ApprovalDecision::Approved) {
+        let policy = state.kernel.approvals().policy();
+        let any_needs_totp = body
+            .ids
+            .iter()
+            .filter_map(|id| uuid::Uuid::parse_str(id).ok())
+            .filter_map(|uid| state.kernel.approvals().get_pending(uid))
+            .any(|req| policy.tool_requires_totp(&req.tool_name));
+        if any_needs_totp {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "Batch approval is not available when TOTP is required for some tools. Approve those items individually with TOTP verification."
+                })),
+            );
+        }
     }
 
     // Parse UUIDs, returning error entries for invalid ones
