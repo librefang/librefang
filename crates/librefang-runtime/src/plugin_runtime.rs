@@ -1016,7 +1016,7 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
 pub async fn run_hook_json(
     hook_name: &str,
     script_path: &str,
-    runtime: PluginRuntime,
+    runtime: &PluginRuntime,
     input: &serde_json::Value,
     config: &HookConfig,
 ) -> Result<serde_json::Value, PluginRuntimeError> {
@@ -1039,7 +1039,7 @@ pub async fn run_hook_json(
 
     let input_line =
         serde_json::to_string(input).map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
-    let (base_launcher, base_args) = build_command(runtime, script_path)?;
+    let (base_launcher, base_args) = build_command(&runtime, script_path)?;
 
     // On Linux, attempt true network namespace isolation via `unshare --net`.
     // On other platforms, proxy-blocking env vars (set below) are the only mechanism.
@@ -1111,7 +1111,7 @@ pub async fn run_hook_json(
     // Runtime-specific passthrough (venv vars for Python, module cache
     // paths for Go/V, etc.). Table-driven so adding a new runtime is a
     // one-line append.
-    for var in runtime_passthrough_vars(runtime) {
+    for var in runtime_passthrough_vars(&runtime) {
         if let Ok(val) = std::env::var(var) {
             cmd.env(var, val);
         }
@@ -1493,7 +1493,7 @@ impl HookProcessPool {
     pub async fn call(
         &self,
         script_path: &str,
-        runtime: PluginRuntime,
+        runtime: &PluginRuntime,
         input: &serde_json::Value,
         config: &HookConfig,
     ) -> Result<serde_json::Value, PluginRuntimeError> {
@@ -1551,7 +1551,7 @@ impl HookProcessPool {
 
     async fn spawn(
         script_path: &str,
-        runtime: PluginRuntime,
+        runtime: &PluginRuntime,
         config: &HookConfig,
     ) -> Result<PersistentProcess, PluginRuntimeError> {
         validate_path_traversal(script_path)?;
@@ -1823,7 +1823,7 @@ impl HookProcessPool {
     pub async fn prewarm(
         &self,
         script_path: &str,
-        runtime: PluginRuntime,
+        runtime: &PluginRuntime,
         plugin_env: &[(String, String)],
     ) -> Result<(), PluginRuntimeError> {
         // Use the same key as `call()` so the pre-warmed slot is found on first use.
@@ -1983,20 +1983,20 @@ mod tests {
 
     #[test]
     fn build_command_shapes() {
-        let (l, a) = build_command(PluginRuntime::V, "hooks/ingest.v").unwrap();
+        let (l, a) = build_command(&PluginRuntime::V, "hooks/ingest.v").unwrap();
         assert_eq!(l, "v");
         assert!(a.contains(&"run".to_string()));
         assert!(a.contains(&"hooks/ingest.v".to_string()));
 
-        let (l, a) = build_command(PluginRuntime::Native, "hooks/ingest").unwrap();
+        let (l, a) = build_command(&PluginRuntime::Native, "hooks/ingest").unwrap();
         assert_eq!(l, "hooks/ingest");
         assert!(a.is_empty());
 
-        let (l, a) = build_command(PluginRuntime::Go, "hooks/ingest.go").unwrap();
+        let (l, a) = build_command(&PluginRuntime::Go, "hooks/ingest.go").unwrap();
         assert_eq!(l, "go");
         assert_eq!(a, vec!["run".to_string(), "hooks/ingest.go".to_string()]);
 
-        let (l, a) = build_command(PluginRuntime::Deno, "hooks/ingest.ts").unwrap();
+        let (l, a) = build_command(&PluginRuntime::Deno, "hooks/ingest.ts").unwrap();
         assert_eq!(l, "deno");
         assert!(a.contains(&"--allow-read".to_string()));
     }
@@ -2025,7 +2025,7 @@ mod tests {
         let out = run_hook_json(
             "ingest",
             hook.to_str().unwrap(),
-            PluginRuntime::Native,
+            &PluginRuntime::Native,
             &input,
             &HookConfig::default(),
         )
@@ -2072,7 +2072,7 @@ mod tests {
         let out = run_hook_json(
             "ingest",
             hook.to_str().unwrap(),
-            PluginRuntime::Python,
+            &PluginRuntime::Python,
             &input,
             &HookConfig::default(),
         )
@@ -2099,7 +2099,7 @@ mod tests {
         let err = run_hook_json(
             "ingest",
             hook.to_str().unwrap(),
-            PluginRuntime::Native,
+            &PluginRuntime::Native,
             &serde_json::json!({"type": "ingest"}),
             &config,
         )
@@ -2115,7 +2115,7 @@ mod tests {
         let err = run_hook_json(
             "test_hook",
             "hooks/does-not-exist.v",
-            PluginRuntime::V,
+            &PluginRuntime::V,
             &serde_json::json!({}),
             &HookConfig::default(),
         )

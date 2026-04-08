@@ -1125,11 +1125,12 @@ impl ScriptableContextEngine {
                             let schemas_c = hook_schemas.clone();
                             let state_c = shared_state_path.clone();
                             let store_c = trace_store.clone();
+                            let runtime_c = runtime.clone();
                             tokio::spawn(async move {
                                 let _ = ScriptableContextEngine::run_hook(
                                     "on_event",
                                     &script,
-                                    runtime,
+                                    runtime_c,
                                     input,
                                     hook_timeout_secs,
                                     &effective_env,
@@ -1406,7 +1407,6 @@ impl ScriptableContextEngine {
         if !self.prewarm_subprocesses || !self.persistent_subprocess {
             return;
         }
-        let runtime = self.runtime;
         let hooks: &[(&str, &Option<String>)] = &[
             ("ingest", &self.ingest_script),
             ("after_turn", &self.after_turn_script),
@@ -1421,7 +1421,7 @@ impl ScriptableContextEngine {
                 if std::path::Path::new(&resolved).exists() {
                     match self
                         .process_pool
-                        .prewarm(&resolved, runtime, &self.plugin_env)
+                        .prewarm(&resolved, &self.runtime, &self.plugin_env)
                         .await
                     {
                         Ok(()) => debug!(hook = name, "Pre-warmed hook subprocess"),
@@ -1641,7 +1641,7 @@ impl ScriptableContextEngine {
 
         let input = serde_json::json!({"event": event});
         let plugin_name = self.plugin_name.clone();
-        let runtime = self.runtime;
+        let runtime = self.runtime.clone();
         let timeout_secs = self.hook_timeout_secs;
         let plugin_env = {
             let guard = self
@@ -1781,7 +1781,7 @@ impl ScriptableContextEngine {
                 );
             }
             match crate::plugin_runtime::run_hook_json(
-                hook_name, &resolved, runtime, &input, &config,
+                hook_name, &resolved, &runtime, &input, &config,
             )
             .await
             {
@@ -1985,7 +1985,7 @@ impl ScriptableContextEngine {
             let t = std::time::Instant::now();
             let call_result = self
                 .process_pool
-                .call(script_path, self.runtime, &input, &config)
+                .call(script_path, &self.runtime, &input, &config)
                 .await;
             let elapsed_ms = t.elapsed().as_millis() as u64;
             match call_result {
@@ -2077,7 +2077,7 @@ impl ScriptableContextEngine {
             Self::run_hook(
                 hook_name,
                 script_path,
-                self.runtime,
+                self.runtime.clone(),
                 input,
                 timeout_secs,
                 &effective_env,
@@ -2957,7 +2957,7 @@ impl ContextEngine for ScriptableContextEngine {
         }
 
         let script = script.clone();
-        let runtime = self.runtime;
+        let runtime = self.runtime.clone();
         let timeout_secs = self.hook_timeout_secs;
         // Merge bootstrap env overrides into the env passed to the background task.
         let plugin_env = {
@@ -3035,7 +3035,7 @@ impl ContextEngine for ScriptableContextEngine {
                     };
                     let started_at = chrono::Utc::now().to_rfc3339();
                     let t = std::time::Instant::now();
-                    let call_result = process_pool.call(&script, runtime, &input, &config).await;
+                    let call_result = process_pool.call(&script, &runtime, &input, &config).await;
                     let elapsed_ms = t.elapsed().as_millis() as u64;
                     match call_result {
                         Ok(output) => {
