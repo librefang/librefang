@@ -1,7 +1,7 @@
 import { Link, Outlet } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge, LogOut, UserCircle, X, Sparkles } from "lucide-react";
+import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge, LogOut, UserCircle, X, Sparkles, Terminal } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
@@ -443,6 +443,7 @@ export function App() {
         { to: "/network", label: t("nav.network"), icon: Share2 },
         { to: "/a2a", label: t("nav.a2a"), icon: Globe },
         { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
+        { to: "/terminal", label: t("nav.terminal"), icon: Terminal },
       ],
     },
   ], [t]);

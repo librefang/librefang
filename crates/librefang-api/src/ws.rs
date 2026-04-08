@@ -80,13 +80,13 @@ impl VerboseLevel {
 // ---------------------------------------------------------------------------
 
 /// Global connection tracker (DashMap<IpAddr, AtomicUsize>).
-fn ws_tracker() -> &'static DashMap<IpAddr, AtomicUsize> {
+pub fn ws_tracker() -> &'static DashMap<IpAddr, AtomicUsize> {
     static TRACKER: std::sync::OnceLock<DashMap<IpAddr, AtomicUsize>> = std::sync::OnceLock::new();
     TRACKER.get_or_init(DashMap::new)
 }
 
 /// RAII guard that decrements the connection count on drop.
-struct WsConnectionGuard {
+pub struct WsConnectionGuard {
     ip: IpAddr,
 }
 
@@ -104,7 +104,7 @@ impl Drop for WsConnectionGuard {
 
 /// Try to acquire a WS connection slot for the given IP.
 /// Returns None if the IP has reached `max_ws_per_ip`.
-fn try_acquire_ws_slot(ip: IpAddr, max_ws_per_ip: usize) -> Option<WsConnectionGuard> {
+pub fn try_acquire_ws_slot(ip: IpAddr, max_ws_per_ip: usize) -> Option<WsConnectionGuard> {
     let entry = ws_tracker()
         .entry(ip)
         .or_insert_with(|| AtomicUsize::new(0));
@@ -1167,7 +1167,7 @@ async fn flush_text_buffer(
 }
 
 /// Helper to send a JSON value over WebSocket.
-async fn send_json(
+pub async fn send_json(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     value: &serde_json::Value,
 ) -> Result<(), axum::Error> {
