@@ -84,11 +84,14 @@ impl ProcessManager {
             ));
         }
 
-        let mut child = tokio::process::Command::new(command)
-            .args(args)
+        let mut cmd = tokio::process::Command::new(command);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to start process '{}': {}", command, e))?;
 

@@ -86,6 +86,8 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         }
         #[cfg(windows)]
         {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             std::process::Command::new("tasklist")
                 .args([
                     "/FI",
@@ -94,6 +96,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                     "CSV",
                     "/NH",
                 ])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output()
                 .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
