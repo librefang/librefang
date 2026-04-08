@@ -2325,6 +2325,8 @@ impl LibreFangKernel {
             stable_prefix_mode: config.stable_prefix_mode,
             max_recall_results: 5,
             compaction: Some(config.compaction.clone()),
+            output_schema_strict: false,
+            max_hook_calls_per_minute: 0,
         };
         let context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>> = {
             let emb_arc: Option<
@@ -2605,11 +2607,18 @@ impl LibreFangKernel {
                     // Inherit kernel exec_policy for agents that lack one.
                     // Promote to Full when shell_exec is declared in capabilities.
                     if restored_entry.manifest.exec_policy.is_none() {
-                        if restored_entry.manifest.capabilities.tools.iter().any(|t| t == "shell_exec" || t == "*") {
-                            restored_entry.manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
-                                mode: librefang_types::config::ExecSecurityMode::Full,
-                                ..cfg.exec_policy.clone()
-                            });
+                        if restored_entry
+                            .manifest
+                            .capabilities
+                            .tools
+                            .iter()
+                            .any(|t| t == "shell_exec" || t == "*")
+                        {
+                            restored_entry.manifest.exec_policy =
+                                Some(librefang_types::config::ExecPolicy {
+                                    mode: librefang_types::config::ExecSecurityMode::Full,
+                                    ..cfg.exec_policy.clone()
+                                });
                         } else {
                             restored_entry.manifest.exec_policy = Some(cfg.exec_policy.clone());
                         }
@@ -2837,7 +2846,12 @@ system_prompt = "You are a helpful assistant."
         let cfg = self.config.load();
         let mut manifest = manifest;
         if manifest.exec_policy.is_none() {
-            if manifest.capabilities.tools.iter().any(|t| t == "shell_exec" || t == "*") {
+            if manifest
+                .capabilities
+                .tools
+                .iter()
+                .any(|t| t == "shell_exec" || t == "*")
+            {
                 manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
                     mode: librefang_types::config::ExecSecurityMode::Full,
                     ..cfg.exec_policy.clone()
@@ -8899,7 +8913,11 @@ system_prompt = "You are a helpful assistant."
         };
         for skill_tool in skill_tools {
             // If agent declares specific tools, only include matching skill tools
-            if !tools_unrestricted && !declared_tools.iter().any(|d| glob_matches(d, &skill_tool.name)) {
+            if !tools_unrestricted
+                && !declared_tools
+                    .iter()
+                    .any(|d| glob_matches(d, &skill_tool.name))
+            {
                 continue;
             }
             all_tools.push(ToolDefinition {
@@ -12389,7 +12407,10 @@ mod tests {
         let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
 
         // Verify exec_policy was promoted to Full
-        let entry = kernel.registry.get(agent_id).expect("agent must be registered");
+        let entry = kernel
+            .registry
+            .get(agent_id)
+            .expect("agent must be registered");
         assert_eq!(
             entry.manifest.exec_policy.as_ref().map(|p| p.mode),
             Some(librefang_types::config::ExecSecurityMode::Full),

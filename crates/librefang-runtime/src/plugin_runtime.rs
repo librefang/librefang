@@ -46,10 +46,10 @@ fn classify_exit_status(status: &std::process::ExitStatus) -> String {
     use std::os::unix::process::ExitStatusExt;
     if let Some(signal) = status.signal() {
         return match signal {
-            9  => format!("OOM-killed or SIGKILL (signal {signal})"),
+            9 => format!("OOM-killed or SIGKILL (signal {signal})"),
             11 => format!("SIGSEGV — segfault (signal {signal})"),
             31 => format!("SIGSYS — disallowed syscall, seccomp triggered (signal {signal})"),
-            _  => format!("killed by signal {signal}"),
+            _ => format!("killed by signal {signal}"),
         };
     }
     // On Unix, exit code 128+N means "killed by signal N" when reported via wait().
@@ -58,7 +58,7 @@ fn classify_exit_status(status: &std::process::ExitStatus) -> String {
             137 => "OOM-killed or SIGKILL (exit 137)".to_string(),
             139 => "SIGSEGV — segfault (exit 139)".to_string(),
             159 => "SIGSYS — disallowed syscall, seccomp triggered (exit 159)".to_string(),
-            _   => format!("exit code {code}"),
+            _ => format!("exit code {code}"),
         };
     }
     "unknown exit status".to_string()
@@ -131,8 +131,8 @@ pub async fn lock_state_file(path: &std::path::Path) -> tokio::sync::OwnedMutexG
     let arc = {
         let mut map = STATE_FILE_LOCKS.lock().unwrap();
         map.entry(path.to_string_lossy().into_owned())
-           .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-           .clone()
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     };
     arc.lock_owned().await
 }
@@ -578,8 +578,7 @@ impl HookConfig {
         if attempt == 0 {
             return self.retry_delay_ms;
         }
-        let delay = self.retry_delay_ms as f64
-            * self.retry_backoff_multiplier.powi(attempt as i32);
+        let delay = self.retry_delay_ms as f64 * self.retry_backoff_multiplier.powi(attempt as i32);
         delay.min(self.max_retry_delay_ms as f64) as u64
     }
 }
@@ -708,11 +707,7 @@ fn try_wrap_with_unshare(launcher: &str, args: &[String]) -> (String, Vec<String
         .unwrap_or(false);
 
     if available {
-        let mut new_args = vec![
-            "--net".to_string(),
-            "--".to_string(),
-            launcher.to_string(),
-        ];
+        let mut new_args = vec!["--net".to_string(), "--".to_string(), launcher.to_string()];
         new_args.extend_from_slice(args);
         return ("unshare".to_string(), new_args);
     }
@@ -814,47 +809,131 @@ fn try_apply_landlock_readonly(_allow_write_dir: Option<&std::path::Path>) -> bo
 /// when compiled without the `seccomp-sandbox` feature.
 #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
 fn apply_seccomp_allowlist(allow_network: bool) -> bool {
-    use seccompiler::{
-        BpfProgram, SeccompAction, SeccompFilter, SeccompRule,
-        syscall_name_to_num,
-    };
+    use seccompiler::{syscall_name_to_num, BpfProgram, SeccompAction, SeccompFilter, SeccompRule};
 
     // Core syscalls every process needs.
     let allowed: Vec<&str> = vec![
         // Memory
-        "mmap", "mprotect", "munmap", "brk", "madvise", "mremap",
+        "mmap",
+        "mprotect",
+        "munmap",
+        "brk",
+        "madvise",
+        "mremap",
         // File I/O
-        "read", "write", "readv", "writev", "pread64", "pwrite64",
-        "open", "openat", "close", "fstat", "stat", "lstat",
-        "lseek", "dup", "dup2", "dup3", "pipe", "pipe2",
-        "fcntl", "ioctl", "fsync", "fdatasync",
-        "mkdir", "rmdir", "unlink", "rename", "symlink", "readlink",
-        "getcwd", "chdir",
+        "read",
+        "write",
+        "readv",
+        "writev",
+        "pread64",
+        "pwrite64",
+        "open",
+        "openat",
+        "close",
+        "fstat",
+        "stat",
+        "lstat",
+        "lseek",
+        "dup",
+        "dup2",
+        "dup3",
+        "pipe",
+        "pipe2",
+        "fcntl",
+        "ioctl",
+        "fsync",
+        "fdatasync",
+        "mkdir",
+        "rmdir",
+        "unlink",
+        "rename",
+        "symlink",
+        "readlink",
+        "getcwd",
+        "chdir",
         // Process
-        "exit", "exit_group", "getpid", "getppid", "gettid",
-        "set_tid_address", "futex", "nanosleep", "clock_gettime",
-        "clock_nanosleep", "getrlimit", "setrlimit", "prlimit64",
-        "uname", "sysinfo", "times",
+        "exit",
+        "exit_group",
+        "getpid",
+        "getppid",
+        "gettid",
+        "set_tid_address",
+        "futex",
+        "nanosleep",
+        "clock_gettime",
+        "clock_nanosleep",
+        "getrlimit",
+        "setrlimit",
+        "prlimit64",
+        "uname",
+        "sysinfo",
+        "times",
         // Signals
-        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sigaltstack",
-        "kill", "tgkill",
+        "rt_sigaction",
+        "rt_sigprocmask",
+        "rt_sigreturn",
+        "sigaltstack",
+        "kill",
+        "tgkill",
         // Threads
-        "clone", "clone3", "fork", "execve", "execveat", "wait4", "waitid",
+        "clone",
+        "clone3",
+        "fork",
+        "execve",
+        "execveat",
+        "wait4",
+        "waitid",
         // I/O multiplexing
-        "select", "pselect6", "poll", "ppoll", "epoll_create", "epoll_create1",
-        "epoll_ctl", "epoll_wait", "epoll_pwait",
+        "select",
+        "pselect6",
+        "poll",
+        "ppoll",
+        "epoll_create",
+        "epoll_create1",
+        "epoll_ctl",
+        "epoll_wait",
+        "epoll_pwait",
         // Sockets (needed even without network for Unix domain sockets / IPC)
-        "socket", "connect", "bind", "listen", "accept", "accept4",
-        "getsockopt", "setsockopt", "getsockname", "getpeername",
-        "sendto", "recvfrom", "sendmsg", "recvmsg", "shutdown",
+        "socket",
+        "connect",
+        "bind",
+        "listen",
+        "accept",
+        "accept4",
+        "getsockopt",
+        "setsockopt",
+        "getsockname",
+        "getpeername",
+        "sendto",
+        "recvfrom",
+        "sendmsg",
+        "recvmsg",
+        "shutdown",
         // Anonymous pipes / tmpfiles
-        "eventfd", "eventfd2", "timerfd_create", "timerfd_settime", "timerfd_gettime",
+        "eventfd",
+        "eventfd2",
+        "timerfd_create",
+        "timerfd_settime",
+        "timerfd_gettime",
         // Misc
-        "arch_prctl", "prctl", "getdents", "getdents64",
-        "access", "faccessat", "newfstatat",
-        "readdir", "getuid", "getgid", "geteuid", "getegid",
-        "getgroups", "setgroups",
-        "mlock", "munlock", "mlockall", "munlockall",
+        "arch_prctl",
+        "prctl",
+        "getdents",
+        "getdents64",
+        "access",
+        "faccessat",
+        "newfstatat",
+        "readdir",
+        "getuid",
+        "getgid",
+        "geteuid",
+        "getegid",
+        "getgroups",
+        "setgroups",
+        "mlock",
+        "munlock",
+        "mlockall",
+        "munlockall",
         "getrandom",
     ];
 
@@ -870,7 +949,9 @@ fn apply_seccomp_allowlist(allow_network: bool) -> bool {
         rules.into_iter().collect(),
         SeccompAction::KillProcess,
         SeccompAction::Allow,
-        std::env::consts::ARCH.try_into().unwrap_or(seccompiler::TargetArch::x86_64),
+        std::env::consts::ARCH
+            .try_into()
+            .unwrap_or(seccompiler::TargetArch::x86_64),
     ) {
         Ok(f) => f,
         Err(_) => return false,
@@ -1006,7 +1087,8 @@ pub async fn run_hook_json(
     // Plugin-declared env vars from [env] in plugin.toml.
     // Values of the form `${VAR_NAME}` are expanded from the daemon's env.
     for (key, val) in &config.plugin_env {
-        let expanded = if let Some(inner) = val.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        let expanded = if let Some(inner) = val.strip_prefix("${").and_then(|s| s.strip_suffix('}'))
+        {
             std::env::var(inner).unwrap_or_default()
         } else {
             val.clone()
@@ -1034,8 +1116,7 @@ pub async fn run_hook_json(
     let _hook_tmpdir: Option<std::path::PathBuf> = if !config.allow_filesystem {
         cmd.env("LIBREFANG_READONLY_FS", "1");
         cmd.env("HOME", "/dev/null");
-        let tmp = std::env::temp_dir()
-            .join(format!("librefang_hook_{}", uuid_v4_hex()));
+        let tmp = std::env::temp_dir().join(format!("librefang_hook_{}", uuid_v4_hex()));
         let _ = std::fs::create_dir_all(&tmp);
         cmd.env("TMPDIR", tmp.display().to_string());
         debug!(
@@ -1054,7 +1135,10 @@ pub async fn run_hook_json(
     // their own limits.
     if let Some(mb) = config.max_memory_mb {
         cmd.env("LIBREFANG_MAX_MEMORY_MB", mb.to_string());
-        debug!(max_memory_mb = mb, "Memory limit set (advisory via env var; hard limit requires libc dep)");
+        debug!(
+            max_memory_mb = mb,
+            "Memory limit set (advisory via env var; hard limit requires libc dep)"
+        );
     }
 
     // Shared state KV store: ensure the file exists and inject its path so hook
@@ -1066,7 +1150,10 @@ pub async fn run_hook_json(
             }
             let _ = std::fs::write(state_path, "{}");
         }
-        cmd.env("LIBREFANG_STATE_FILE", state_path.to_string_lossy().as_ref());
+        cmd.env(
+            "LIBREFANG_STATE_FILE",
+            state_path.to_string_lossy().as_ref(),
+        );
         debug!(state_file = %state_path.display(), "Shared state file injected");
     }
 
@@ -1200,7 +1287,7 @@ pub async fn run_hook_json(
         Ok::<(Vec<String>, String, std::process::ExitStatus), PluginRuntimeError>((
             stdout_lines,
             stderr_text,
-            status.into(),
+            status,
         ))
     })
     .await;
@@ -1224,8 +1311,7 @@ pub async fn run_hook_json(
                     return Err(PluginRuntimeError::InvalidOutput(format!(
                         "Hook output exceeds maximum size ({} bytes > {} bytes limit). \
                          Truncate your hook's JSON response.",
-                        total_output_bytes,
-                        MAX_OUTPUT_BYTES
+                        total_output_bytes, MAX_OUTPUT_BYTES
                     )));
                 }
                 parse_output(&stdout_lines)
@@ -1350,7 +1436,10 @@ struct PersistentProcess {
 #[derive(Default)]
 pub struct HookProcessPool {
     procs: std::sync::Mutex<
-        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>>,
+        std::collections::HashMap<
+            String,
+            std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>,
+        >,
     >,
 }
 
@@ -1562,7 +1651,10 @@ impl HookProcessPool {
     /// Returns the list of script-path keys for alive processes.
     pub async fn health_check(&self) -> Vec<String> {
         let mut alive = Vec::new();
-        let entries: Vec<(String, std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>)> = {
+        let entries: Vec<(
+            String,
+            std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>,
+        )> = {
             let procs = self.procs.lock().unwrap();
             procs.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
@@ -1643,7 +1735,10 @@ impl HookProcessPool {
         let new_proc = match Self::spawn(script_path, runtime, config).await {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(hook = hook_name, "swap_prewarm: failed to spawn new process: {e}");
+                tracing::warn!(
+                    hook = hook_name,
+                    "swap_prewarm: failed to spawn new process: {e}"
+                );
                 return 0;
             }
         };
@@ -1651,7 +1746,10 @@ impl HookProcessPool {
         // Step 2: verify the new process is alive — child.id() returns Some
         // only while the process is still running.
         if new_proc.child.id().is_none() {
-            tracing::warn!(hook = hook_name, "swap_prewarm: new process died immediately");
+            tracing::warn!(
+                hook = hook_name,
+                "swap_prewarm: new process died immediately"
+            );
             return 0;
         }
 
@@ -1672,7 +1770,11 @@ impl HookProcessPool {
             let _ = old_proc.child.kill().await;
         }
         *guard = Some(new_proc);
-        tracing::info!(hook = hook_name, script = script_path, "swap_prewarm: hot-reload complete, slot replaced");
+        tracing::info!(
+            hook = hook_name,
+            script = script_path,
+            "swap_prewarm: hot-reload complete, slot replaced"
+        );
         1
     }
 
