@@ -1764,7 +1764,7 @@ impl HookProcessPool {
         &self,
         hook_name: &str,
         script_path: &str,
-        runtime: PluginRuntime,
+        runtime: &PluginRuntime,
         config: &HookConfig,
     ) -> usize {
         // Step 1: spawn the new process outside any lock so in-flight calls
@@ -1936,6 +1936,37 @@ mod tests {
             PluginRuntime::from_tag(Some("brainfuck")),
             PluginRuntime::Python
         );
+    }
+
+    #[test]
+    fn from_tag_full_path_becomes_custom() {
+        assert_eq!(
+            PluginRuntime::from_tag(Some("/opt/homebrew/bin/python3")),
+            PluginRuntime::Custom("/opt/homebrew/bin/python3".to_string())
+        );
+        assert_eq!(
+            PluginRuntime::from_tag(Some("/usr/bin/ruby")),
+            PluginRuntime::Custom("/usr/bin/ruby".to_string())
+        );
+        // Windows-style backslash path
+        assert_eq!(
+            PluginRuntime::from_tag(Some("C:\\Python312\\python.exe")),
+            PluginRuntime::Custom("C:\\Python312\\python.exe".to_string())
+        );
+        // Path with whitespace trimmed but preserved otherwise
+        assert_eq!(
+            PluginRuntime::from_tag(Some("  /usr/local/bin/node  ")),
+            PluginRuntime::Custom("/usr/local/bin/node".to_string())
+        );
+    }
+
+    #[test]
+    fn build_command_custom_launcher() {
+        let (l, a) =
+            build_command(&PluginRuntime::Custom("/opt/homebrew/bin/python3".to_string()), "hooks/ingest.py")
+                .unwrap();
+        assert_eq!(l, "/opt/homebrew/bin/python3");
+        assert_eq!(a, vec!["hooks/ingest.py".to_string()]);
     }
 
     #[test]

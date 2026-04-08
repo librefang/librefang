@@ -964,7 +964,7 @@ pub async fn test_plugin_hook(
     match librefang_runtime::plugin_runtime::run_hook_json(
         &hook_name,
         &script_abs.to_string_lossy(),
-        runtime,
+        &runtime,
         &input,
         &config,
     )
@@ -1589,7 +1589,7 @@ pub async fn benchmark_plugin_hook(
         match librefang_runtime::plugin_runtime::run_hook_json(
             &hook_name,
             &script_abs.to_string_lossy(),
-            runtime,
+            &runtime,
             &input,
             &config,
         )

@@ -1078,7 +1078,7 @@ impl ScriptableContextEngine {
             // Using Arc clones keeps it cheap; the spawned task holds them for its lifetime.
             let plugin_name = self.plugin_name.clone();
             let on_event_script = self.on_event_script.clone().unwrap();
-            let runtime = self.runtime;
+            let runtime = self.runtime.clone();
             let hook_timeout_secs = self.hook_timeout_secs;
             let plugin_env = self.plugin_env.clone();
             let bootstrap_overrides = self.bootstrap_applied_overrides.clone();

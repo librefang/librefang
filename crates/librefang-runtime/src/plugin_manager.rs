@@ -609,7 +609,7 @@ pub fn run_doctor() -> DoctorReport {
 
     let runtimes: Vec<_> = PluginRuntime::all()
         .iter()
-        .map(|r| check_runtime_status(*r))
+        .map(|r| check_runtime_status(r.clone()))
         .collect();
 
     // Index by runtime tag so per-plugin entries can look up availability
@@ -624,10 +624,10 @@ pub fn run_doctor() -> DoctorReport {
         .map(|info| {
             let runtime_kind = PluginRuntime::from_tag(info.manifest.hooks.runtime.as_deref());
             let tag = runtime_kind.label();
-            let (available, hint) = availability.get(tag).copied().unwrap_or((false, ""));
+            let (available, hint) = availability.get(tag.as_str()).copied().unwrap_or((false, ""));
             PluginDoctorEntry {
                 name: info.manifest.name,
-                runtime: tag.to_string(),
+                runtime: tag.clone(),
                 runtime_available: available,
                 hooks_valid: info.hooks_valid,
                 install_hint: hint.to_string(),
@@ -1030,7 +1030,7 @@ pub fn scaffold_plugin(
 
     // Each runtime declares its own hook filenames + template body so the
     // manifest + files stay in sync.
-    let files = hook_templates(runtime_kind);
+    let files = hook_templates(runtime_kind.clone());
     let (ingest_file, ingest_body) = files.ingest;
     let (after_file, after_body) = files.after_turn;
     let (assemble_file, assemble_body) = files.assemble;
@@ -1296,6 +1296,17 @@ fn hook_templates(runtime: crate::plugin_runtime::PluginRuntime) -> HookFiles {
             bootstrap: ("bootstrap.wasm", STUB_LIFECYCLE_NATIVE),
             prepare_subagent: ("prepare_subagent.wasm", STUB_LIFECYCLE_NATIVE),
             merge_subagent: ("merge_subagent.wasm", STUB_LIFECYCLE_NATIVE),
+        },
+        // Custom launchers: fall back to the native (shell-wrapper) scaffold.
+        // Users can replace the stubs with scripts appropriate for their launcher.
+        R::Custom(_) => HookFiles {
+            ingest: ("ingest", NATIVE_INGEST),
+            after_turn: ("after_turn", NATIVE_AFTER_TURN),
+            assemble: ("assemble", STUB_ASSEMBLE_NATIVE),
+            compact: ("compact", STUB_COMPACT_NATIVE),
+            bootstrap: ("bootstrap", STUB_LIFECYCLE_NATIVE),
+            prepare_subagent: ("prepare_subagent", STUB_LIFECYCLE_NATIVE),
+            merge_subagent: ("merge_subagent", STUB_LIFECYCLE_NATIVE),
         },
     }
 }
