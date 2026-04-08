@@ -1781,7 +1781,11 @@ impl ScriptableContextEngine {
                 );
             }
             match crate::plugin_runtime::run_hook_json(
-                hook_name, &resolved, runtime.clone(), &input, &config,
+                hook_name,
+                &resolved,
+                runtime.clone(),
+                &input,
+                &config,
             )
             .await
             {

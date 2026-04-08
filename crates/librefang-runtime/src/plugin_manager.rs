@@ -609,7 +609,7 @@ pub fn run_doctor() -> DoctorReport {
 
     let runtimes: Vec<_> = PluginRuntime::all()
         .iter()
-        .map(|r| check_runtime_status(*r))
+        .map(|r| check_runtime_status(r.clone()))
         .collect();
 
     // Index by runtime tag so per-plugin entries can look up availability
@@ -624,7 +624,7 @@ pub fn run_doctor() -> DoctorReport {
         .map(|info| {
             let runtime_kind = PluginRuntime::from_tag(info.manifest.hooks.runtime.as_deref());
             let tag = runtime_kind.label();
-            let (available, hint) = availability.get(tag).copied().unwrap_or((false, ""));
+            let (available, hint) = availability.get(tag.as_ref()).copied().unwrap_or((false, ""));
             PluginDoctorEntry {
                 name: info.manifest.name,
                 runtime: tag.to_string(),
@@ -1296,6 +1296,17 @@ fn hook_templates(runtime: crate::plugin_runtime::PluginRuntime) -> HookFiles {
             bootstrap: ("bootstrap.wasm", STUB_LIFECYCLE_NATIVE),
             prepare_subagent: ("prepare_subagent.wasm", STUB_LIFECYCLE_NATIVE),
             merge_subagent: ("merge_subagent.wasm", STUB_LIFECYCLE_NATIVE),
+        },
+        // Custom launchers: fall back to the native (shell-wrapper) templates.
+        // Users will replace these with scripts suitable for their launcher.
+        R::Custom(_) => HookFiles {
+            ingest: ("ingest", NATIVE_INGEST),
+            after_turn: ("after_turn", NATIVE_AFTER_TURN),
+            assemble: ("assemble", STUB_ASSEMBLE_NATIVE),
+            compact: ("compact", STUB_COMPACT_NATIVE),
+            bootstrap: ("bootstrap", STUB_LIFECYCLE_NATIVE),
+            prepare_subagent: ("prepare_subagent", STUB_LIFECYCLE_NATIVE),
+            merge_subagent: ("merge_subagent", STUB_LIFECYCLE_NATIVE),
         },
     }
 }
