@@ -33,7 +33,7 @@ use librefang_runtime::sandbox::{SandboxConfig, WasmSandbox};
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::*;
 use librefang_types::capability::{glob_matches, Capability};
-use librefang_types::config::{AuthProfile, KernelConfig};
+use librefang_types::config::{AuthProfile, AutoRouteStrategy, KernelConfig};
 use librefang_types::error::LibreFangError;
 use librefang_types::event::*;
 use librefang_types::memory::Memory;
@@ -387,6 +387,9 @@ pub struct LibreFangKernel {
     /// Sticky assistant routing per conversation (assistant + sender/thread).
     /// Preserves follow-up context for brief messages after a route to a specialist/hand.
     assistant_routes: dashmap::DashMap<String, (AssistantRouteTarget, std::time::Instant)>,
+    /// Consecutive-mismatch counters for `StickyHeuristic` auto-routing.
+    /// Maps the same cache key as `assistant_routes` to a mismatch count.
+    route_divergence: dashmap::DashMap<String, u32>,
     /// Per-agent decision traces from the most recent message exchange.
     /// Stored for retrieval via `/api/agents/{id}/traces`.
     pub(crate) decision_traces:
@@ -2453,6 +2456,7 @@ impl LibreFangKernel {
             injection_senders: dashmap::DashMap::new(),
             injection_receivers: dashmap::DashMap::new(),
             assistant_routes: dashmap::DashMap::new(),
+            route_divergence: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
             command_queue,
             context_engine,
@@ -4502,12 +4506,117 @@ system_prompt = "You are a helpful assistant."
         }
         drop(entry);
 
-        // Skip auto-routing for channel messages. When a channel has
-        // `default_agent = "assistant"`, the user explicitly chose the
-        // assistant — keyword/semantic routing must not override that.
-        // Users can still switch agents via `/agent <name>`.
-        if sender_context.is_some() {
-            return Ok(agent_id);
+        // Per-channel auto-routing strategy gate.
+        //
+        // When `auto_route` is `Off` (the default for all channels), channel messages
+        // bypass classification entirely — preserving legacy behaviour.
+        // Other strategies allow opt-in routing with different cache semantics.
+        if let Some(ctx) = sender_context {
+            let cache_key = format!(
+                "{}:{}:{}:{}",
+                agent_id,
+                ctx.channel,
+                ctx.account_id.as_deref().unwrap_or(""),
+                ctx.user_id,
+            );
+            let ttl = std::time::Duration::from_secs(ctx.auto_route_ttl_minutes as u64 * 60);
+
+            match ctx.auto_route {
+                AutoRouteStrategy::Off => return Ok(agent_id),
+
+                AutoRouteStrategy::ExplicitOnly => {
+                    if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                        let target = entry.value().0.clone();
+                        drop(entry);
+                        match self.resolve_assistant_route_target(&target) {
+                            Ok(routed_id) => return Ok(routed_id),
+                            Err(_) => {
+                                self.assistant_routes.remove(&cache_key);
+                            }
+                        }
+                    }
+                    // No cached entry — fall through to LLM classification once,
+                    // then store the result.
+                }
+
+                AutoRouteStrategy::StickyTtl => {
+                    if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                        if entry.value().1.elapsed() < ttl {
+                            let target = entry.value().0.clone();
+                            drop(entry);
+                            match self.resolve_assistant_route_target(&target) {
+                                Ok(routed_id) => return Ok(routed_id),
+                                Err(_) => {
+                                    self.assistant_routes.remove(&cache_key);
+                                }
+                            }
+                        }
+                    }
+                    // Cache miss or TTL expired — fall through to re-classify.
+                }
+
+                AutoRouteStrategy::StickyHeuristic => {
+                    let heuristic_target = self.route_assistant_by_metadata(message);
+                    if let Some(h_target) = heuristic_target {
+                        if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                            let cached = entry.value().0.clone();
+                            drop(entry);
+
+                            if h_target == cached {
+                                // Heuristic agrees with cache — reset divergence counter.
+                                self.route_divergence.remove(&cache_key);
+                                match self.resolve_assistant_route_target(&cached) {
+                                    Ok(routed_id) => return Ok(routed_id),
+                                    Err(_) => {
+                                        self.assistant_routes.remove(&cache_key);
+                                    }
+                                }
+                            } else {
+                                // Disagreement — increment divergence counter.
+                                let count = {
+                                    let mut div_entry = self
+                                        .route_divergence
+                                        .entry(cache_key.clone())
+                                        .or_insert(0);
+                                    *div_entry += 1;
+                                    *div_entry
+                                };
+                                if count < ctx.auto_route_divergence_count {
+                                    // Not enough divergence yet — stay on cached route.
+                                    if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                                        let target = entry.value().0.clone();
+                                        drop(entry);
+                                        match self.resolve_assistant_route_target(&target) {
+                                            Ok(routed_id) => return Ok(routed_id),
+                                            Err(_) => {
+                                                self.assistant_routes.remove(&cache_key);
+                                            }
+                                        }
+                                    }
+                                }
+                                // Enough divergence — fall through to LLM re-classification.
+                                self.route_divergence.remove(&cache_key);
+                            }
+                        }
+                        // No cached entry — fall through to LLM classification.
+                    } else {
+                        // Heuristic returned nothing — reuse cache within TTL if available.
+                        if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                            if entry.value().1.elapsed() < ttl {
+                                let target = entry.value().0.clone();
+                                drop(entry);
+                                match self.resolve_assistant_route_target(&target) {
+                                    Ok(routed_id) => return Ok(routed_id),
+                                    Err(_) => {
+                                        self.assistant_routes.remove(&cache_key);
+                                    }
+                                }
+                            }
+                        }
+                        // Cache miss or expired — fall through to LLM classification.
+                    }
+                }
+            }
         }
 
         let route_key = Self::assistant_route_key(agent_id, sender_context);
@@ -8023,6 +8132,7 @@ system_prompt = "You are a helpful assistant."
                                     was_mentioned: false,
                                     thread_id: None,
                                     account_id: None,
+                                    ..Default::default()
                                 };
                                 match tokio::time::timeout(
                                     timeout,
@@ -12766,6 +12876,7 @@ mod tests {
             was_mentioned: false,
             thread_id: Some("thread-9".to_string()),
             account_id: None,
+            ..Default::default()
         };
 
         let with_sender = LibreFangKernel::assistant_route_key(agent_id, Some(&sender));

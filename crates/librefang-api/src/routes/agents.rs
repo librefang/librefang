@@ -1256,6 +1256,7 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
         was_mentioned: req.was_mentioned,
         thread_id: None,
         account_id: None,
+        ..Default::default()
     })
 }
 

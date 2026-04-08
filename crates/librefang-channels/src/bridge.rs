@@ -14,7 +14,7 @@ use crate::types::{
 use async_trait::async_trait;
 use futures::StreamExt;
 use librefang_types::agent::AgentId;
-use librefang_types::config::{ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
+use librefang_types::config::{AutoRouteStrategy, ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
 use librefang_types::message::ContentBlock;
 use regex::RegexSet;
 use std::collections::HashMap;
@@ -724,6 +724,7 @@ fn flush_debounced(
                 ct_str,
                 thread_id,
                 output_format,
+                overrides.as_deref(),
                 journal.as_ref(),
             )
             .await;
@@ -1366,7 +1367,24 @@ fn should_process_group_message(
 }
 
 /// Build a `SenderContext` from an incoming `ChannelMessage`.
-fn build_sender_context(message: &ChannelMessage) -> SenderContext {
+///
+/// Per-channel auto-routing fields are populated from `overrides` when provided,
+/// and default to `AutoRouteStrategy::Off` / zeros otherwise.
+fn build_sender_context(
+    message: &ChannelMessage,
+    overrides: Option<&ChannelOverrides>,
+) -> SenderContext {
+    let (auto_route, auto_route_ttl_minutes, auto_route_confidence_threshold, auto_route_sticky_bonus, auto_route_divergence_count) =
+        match overrides {
+            Some(ov) => (
+                ov.auto_route.clone(),
+                ov.auto_route_ttl_minutes,
+                ov.auto_route_confidence_threshold,
+                ov.auto_route_sticky_bonus,
+                ov.auto_route_divergence_count,
+            ),
+            None => (AutoRouteStrategy::Off, 0, 0, 0, 0),
+        };
     SenderContext {
         channel: channel_type_str(&message.channel).to_string(),
         user_id: sender_user_id(message).to_string(),
@@ -1383,6 +1401,11 @@ fn build_sender_context(message: &ChannelMessage) -> SenderContext {
             .get("account_id")
             .and_then(|v| v.as_str())
             .map(String::from),
+        auto_route,
+        auto_route_ttl_minutes,
+        auto_route_confidence_threshold,
+        auto_route_sticky_bonus,
+        auto_route_divergence_count,
     }
 }
 
@@ -1813,6 +1836,7 @@ async fn dispatch_message(
                 ct_str,
                 thread_id,
                 output_format,
+                overrides.as_deref(),
                 journal,
             )
             .await;
@@ -2113,7 +2137,7 @@ async fn dispatch_message(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
     // Build sender context to propagate identity to the agent
-    let sender_ctx = build_sender_context(message);
+    let sender_ctx = build_sender_context(message, overrides.as_deref());
 
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
@@ -2558,6 +2582,7 @@ async fn dispatch_with_blocks(
     ct_str: &str,
     thread_id: Option<&str>,
     output_format: OutputFormat,
+    overrides: Option<&ChannelOverrides>,
     journal: Option<&crate::message_journal::MessageJournal>,
 ) {
     let agent_id = match resolve_or_fallback(message, handle, router).await {
@@ -2623,7 +2648,7 @@ async fn dispatch_with_blocks(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
     // Build sender context to propagate identity to the agent
-    let sender_ctx = build_sender_context(message);
+    let sender_ctx = build_sender_context(message, overrides);
 
     match handle
         .send_message_with_blocks_and_sender(agent_id, blocks.clone(), &sender_ctx)

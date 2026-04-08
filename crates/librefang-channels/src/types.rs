@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use librefang_types::agent::AgentId;
+use librefang_types::config::AutoRouteStrategy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -193,6 +194,21 @@ pub struct SenderContext {
     /// Account ID for multi-bot deployments on the same channel.
     #[serde(default)]
     pub account_id: Option<String>,
+    /// Auto-routing strategy configured for this channel.
+    #[serde(default)]
+    pub auto_route: AutoRouteStrategy,
+    /// TTL in minutes for the `sticky_ttl` auto-routing strategy.
+    #[serde(default)]
+    pub auto_route_ttl_minutes: u32,
+    /// Minimum heuristic confidence threshold for `sticky_heuristic` strategy.
+    #[serde(default)]
+    pub auto_route_confidence_threshold: u32,
+    /// Sticky bonus score for `sticky_heuristic` strategy.
+    #[serde(default)]
+    pub auto_route_sticky_bonus: u32,
+    /// Divergence count threshold for `sticky_heuristic` strategy.
+    #[serde(default)]
+    pub auto_route_divergence_count: u32,
 }
 
 /// Agent lifecycle phase for UX indicators.
