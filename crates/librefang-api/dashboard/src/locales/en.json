@@ -126,6 +126,7 @@
     "alert": "System Alert",
     "active_agents": "Active Agents",
     "active": "active",
+    "total": "total",
     "active_count": "{{count}} active",
     "workflows": "Workflows",
     "design_with_canvas": "Design with visual canvas",

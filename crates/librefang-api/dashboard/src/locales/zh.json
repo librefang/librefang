@@ -126,6 +126,7 @@
     "alert": "系统告警",
     "active_agents": "活跃智能体",
     "active": "活跃",
+    "total": "总计",
     "active_count": "{{count}} 活跃",
     "workflows": "工作流",
     "design_with_canvas": "使用可视化画布设计",

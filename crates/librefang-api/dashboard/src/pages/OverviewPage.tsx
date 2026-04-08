@@ -80,8 +80,8 @@ export function OverviewPage() {
   const statsCards = [
     {
       title: t("overview.active_agents"),
-      value: agentsTotal,
-      subValue: `${agentsActive} ${t("overview.active")}`,
+      value: agentsActive,
+      subValue: `${agentsTotal} ${t("overview.total")}`,
       icon: Users,
       color: "brand",
       link: "/agents",
