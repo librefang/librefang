@@ -451,6 +451,16 @@ pub struct ModelConfig {
     pub api_key_env: Option<String>,
     /// Optional base URL override for the provider.
     pub base_url: Option<String>,
+    /// Provider-specific extension parameters that are flattened directly
+    /// into the API request body.
+    ///
+    /// For example, Qwen 3.6's `enable_memory` parameter for agent memory
+    /// support. When serialized, these keys are merged into the top-level
+    /// API request body via `#[serde(flatten)]`. If a key conflicts with a
+    /// standard field (e.g. `temperature`), the `extra_params` value takes
+    /// precedence because it is serialized last.
+    #[serde(default, flatten)]
+    pub extra_params: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl Default for ModelConfig {
@@ -463,12 +473,14 @@ impl Default for ModelConfig {
             system_prompt: "You are a helpful AI agent.".to_string(),
             api_key_env: None,
             base_url: None,
+            extra_params: std::collections::HashMap::new(),
         }
     }
 }
 
 /// A fallback model entry in a chain.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FallbackModel {
     pub provider: String,
     pub model: String,
@@ -476,6 +488,10 @@ pub struct FallbackModel {
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Provider-specific extension parameters that are flattened directly
+    /// into the API request body.
+    #[serde(default, flatten)]
+    pub extra_params: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Tool configuration within an agent manifest.
@@ -1190,6 +1206,7 @@ mod tests {
             model: "llama-3.3-70b".to_string(),
             api_key_env: Some("GROQ_API_KEY".to_string()),
             base_url: None,
+            extra_params: std::collections::HashMap::new(),
         };
         let json = serde_json::to_string(&fb).unwrap();
         let back: FallbackModel = serde_json::from_str(&json).unwrap();
@@ -1207,6 +1224,7 @@ mod tests {
                 model: "llama-3.3-70b".to_string(),
                 api_key_env: None,
                 base_url: None,
+                extra_params: std::collections::HashMap::new(),
             }],
             ..Default::default()
         };
@@ -1620,6 +1638,46 @@ model = "llama-3.3-70b-versatile"
         let resolved = manifest.thinking.clone().unwrap_or(global);
         assert_eq!(resolved.budget_tokens, 5_000);
         assert!(resolved.stream_thinking);
+    }
+
+    #[test]
+    fn test_model_config_extra_params_roundtrip() {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("enable_memory".to_string(), serde_json::json!(true));
+        extra.insert("memory_max_window".to_string(), serde_json::json!(50));
+
+        let config = ModelConfig {
+            provider: "qwen".to_string(),
+            model: "qwen3.6".to_string(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            system_prompt: "test".to_string(),
+            api_key_env: None,
+            base_url: None,
+            extra_params: extra,
+        };
+
+        // Serialize to TOML
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("enable_memory = true"));
+        assert!(toml_str.contains("memory_max_window = 50"));
+
+        // Deserialize back
+        let parsed: ModelConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            parsed.extra_params.get("enable_memory").unwrap(),
+            &serde_json::json!(true)
+        );
+        assert_eq!(
+            parsed.extra_params.get("memory_max_window").unwrap(),
+            &serde_json::json!(50)
+        );
+    }
+
+    #[test]
+    fn test_model_config_extra_params_empty_by_default() {
+        let config = ModelConfig::default();
+        assert!(config.extra_params.is_empty());
     }
 
     #[test]

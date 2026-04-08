@@ -4630,6 +4630,7 @@ mod tests {
             api_key_env: "OPENAI_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
         };
         let override_dm = librefang_types::config::DefaultModelConfig {
             provider: "deepseek".to_string(),
@@ -4637,6 +4638,7 @@ mod tests {
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
         };
 
         let effective = effective_default_model(&base, Some(&override_dm));
@@ -4654,6 +4656,7 @@ mod tests {
             api_key_env: "OPENAI_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
         };
 
         let effective = effective_default_model(&base, None);

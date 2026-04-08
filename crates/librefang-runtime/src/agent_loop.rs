@@ -2085,8 +2085,47 @@ pub async fn run_agent_loop(
             apply_context_guard(&mut messages, &context_budget, available_tools);
         }
 
-        let request =
-            build_completion_request(manifest, &system_prompt, &messages, available_tools);
+        // Strip provider prefix: "openrouter/google/gemini-2.5-flash" → "google/gemini-2.5-flash"
+        let api_model = strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
+
+        let prompt_caching = manifest
+            .metadata
+            .get("prompt_caching")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let timeout_override = manifest
+            .metadata
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                if available_tools
+                    .iter()
+                    .any(|t| t.name.starts_with("browser_") || t.name.starts_with("playwright_"))
+                {
+                    Some(600)
+                } else {
+                    None
+                }
+            });
+
+        let request = CompletionRequest {
+            model: api_model,
+            messages: messages.clone(),
+            tools: available_tools.to_vec(),
+            max_tokens: manifest.model.max_tokens,
+            temperature: manifest.model.temperature,
+            system: Some(system_prompt.clone()),
+            thinking: manifest.thinking.clone(),
+            prompt_caching,
+            response_format: manifest.response_format.clone(),
+            timeout_secs: timeout_override,
+            extra_body: if manifest.model.extra_params.is_empty() {
+                None
+            } else {
+                Some(manifest.model.extra_params.clone())
+            },
+        };
 
         // Notify phase: Thinking
         if let Some(cb) = on_phase {
@@ -2933,8 +2972,50 @@ pub async fn run_agent_loop_streaming(
             }
         }
 
-        let request =
-            build_completion_request(manifest, &system_prompt, &messages, available_tools);
+        // Strip provider prefix: "openrouter/google/gemini-2.5-flash" → "google/gemini-2.5-flash"
+        let api_model = strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
+
+        let prompt_caching = manifest
+            .metadata
+            .get("prompt_caching")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        // Per-request timeout: manifest metadata takes priority, then browser
+        // heuristic, then driver default (None = use driver's configured value).
+        let timeout_override = manifest
+            .metadata
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                // Auto-extend for agents with browser tools
+                if available_tools
+                    .iter()
+                    .any(|t| t.name.starts_with("browser_") || t.name.starts_with("playwright_"))
+                {
+                    Some(600) // 10 minutes for browser tasks
+                } else {
+                    None
+                }
+            });
+
+        let request = CompletionRequest {
+            model: api_model,
+            messages: messages.clone(),
+            tools: available_tools.to_vec(),
+            max_tokens: manifest.model.max_tokens,
+            temperature: manifest.model.temperature,
+            system: Some(system_prompt.clone()),
+            thinking: manifest.thinking.clone(),
+            prompt_caching,
+            response_format: manifest.response_format.clone(),
+            timeout_secs: timeout_override,
+            extra_body: if manifest.model.extra_params.is_empty() {
+                None
+            } else {
+                Some(manifest.model.extra_params.clone())
+            },
+        };
 
         // Notify phase: on first iteration emit Streaming; on subsequent
         // iterations (after tool execution) emit Thinking so the UI shows

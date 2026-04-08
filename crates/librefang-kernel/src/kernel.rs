@@ -2742,6 +2742,15 @@ impl LibreFangKernel {
                                     .base_url
                                     .clone_from(&dm.base_url);
                             }
+                            // Merge extra_params from default_model
+                            for (key, value) in &dm.extra_params {
+                                restored_entry
+                                    .manifest
+                                    .model
+                                    .extra_params
+                                    .entry(key.clone())
+                                    .or_insert(value.clone());
+                            }
                         }
                     }
 
@@ -4414,6 +4423,7 @@ system_prompt = "You are a helpful assistant."
             prompt_caching: false,
             response_format: None,
             timeout_secs: None,
+            extra_body: None,
         };
 
         let result = match tokio::time::timeout(
@@ -4946,6 +4956,7 @@ system_prompt = "You are a helpful assistant."
                 prompt_caching: false,
                 response_format: None,
                 timeout_secs: None,
+                extra_body: None,
             };
             let (complexity, routed_model) = router.select_model(&probe);
             // Check if the routed model's provider has a valid API key.
@@ -6508,6 +6519,15 @@ system_prompt = "You are a helpful assistant."
             }
             if manifest.model.model == "default" {
                 manifest.model.model = cfg.default_model.model.clone();
+            }
+
+            // Merge extra_params from default_model (agent-level keys take precedence)
+            for (key, value) in &cfg.default_model.extra_params {
+                manifest
+                    .model
+                    .extra_params
+                    .entry(key.clone())
+                    .or_insert(value.clone());
             }
 
             // Hand-level tool inheritance: hand controls WHICH tools are available,
@@ -8566,6 +8586,7 @@ system_prompt = "You are a helpful assistant."
                         Some(gfb.api_key_env.clone())
                     },
                     base_url: gfb.base_url.clone(),
+                    extra_params: std::collections::HashMap::new(),
                 });
             }
         }
@@ -9948,6 +9969,14 @@ impl LibreFangKernel {
                         }
                         if dm.base_url.is_some() && e.manifest.model.base_url.is_none() {
                             e.manifest.model.base_url.clone_from(&dm.base_url);
+                        }
+                        // Merge extra_params from default_model (agent-level keys take precedence)
+                        for (key, value) in &dm.extra_params {
+                            e.manifest
+                                .model
+                                .extra_params
+                                .entry(key.clone())
+                                .or_insert(value.clone());
                         }
                         let _ = self.memory.save_agent(&e);
                     }
@@ -12426,6 +12455,7 @@ mod tests {
                         system_prompt: String::new(),
                         api_key_env: None,
                         base_url: None,
+                        extra_params: std::collections::HashMap::new(),
                     },
                     ..Default::default()
                 },
