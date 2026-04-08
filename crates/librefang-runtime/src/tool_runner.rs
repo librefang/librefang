@@ -1627,7 +1627,9 @@ async fn tool_file_list(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
 ) -> Result<String, String> {
-    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    let raw_path = input["path"].as_str().ok_or(
+        "Missing 'path' parameter — retry with {\"path\": \".\"} to list the workspace root",
+    )?;
     let resolved = resolve_file_path(raw_path, workspace_root)?;
     let mut entries = tokio::fs::read_dir(&resolved)
         .await

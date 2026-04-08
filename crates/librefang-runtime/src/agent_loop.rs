@@ -96,6 +96,20 @@ fn is_soft_error_content(content: &str) -> bool {
     content.contains(ERR_PATH_TRAVERSAL)
         || content.contains(ERR_SANDBOX_ESCAPE)
         || content.contains("arguments were truncated")
+        || is_parameter_error_content(content)
+}
+
+/// Detect tool errors that are caused by the LLM sending wrong/missing parameters.
+/// These are soft errors because the LLM can self-correct by retrying with different
+/// input — they should NOT count toward the consecutive-failure abort threshold.
+fn is_parameter_error_content(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("missing '") || // "Missing 'path' parameter"
+    lower.contains("missing parameter") ||
+    lower.contains("required parameter") ||
+    lower.contains("invalid parameter") ||
+    lower.contains("parameter is required") ||
+    lower.contains("argument is required")
 }
 
 /// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
@@ -294,14 +308,39 @@ fn append_tool_result_guidance_blocks(tool_result_blocks: &mut Vec<ContentBlock>
         .filter(|b| matches!(b, ContentBlock::ToolResult { is_error: true, .. }))
         .count();
     let non_denial_errors = error_count.saturating_sub(denial_count);
-    if non_denial_errors > 0 {
+    // Separate parameter errors (LLM can self-correct by retrying with valid args)
+    // from execution errors (network/IO/permission failures the LLM cannot fix).
+    let param_error_count = tool_result_blocks
+        .iter()
+        .filter(|b| match b {
+            ContentBlock::ToolResult {
+                is_error: true,
+                content,
+                ..
+            } => is_parameter_error_content(content),
+            _ => false,
+        })
+        .count();
+    let non_param_errors = non_denial_errors.saturating_sub(param_error_count);
+    if param_error_count > 0 {
+        tool_result_blocks.push(ContentBlock::Text {
+            text: format!(
+                "[System: {} tool call(s) failed due to missing or invalid parameters. \
+                 Read the error message, correct your tool call arguments, and retry \
+                 immediately. Do NOT ask the user for help — fix the parameters yourself.]",
+                param_error_count
+            ),
+            provider_metadata: None,
+        });
+    }
+    if non_param_errors > 0 {
         tool_result_blocks.push(ContentBlock::Text {
             text: format!(
                 "[System: {} tool(s) returned errors. Report the error honestly \
                  to the user. Do NOT fabricate results or pretend the tool succeeded. \
                  If a search or fetch failed, tell the user it failed and suggest \
                  alternatives instead of making up data.]",
-                non_denial_errors
+                non_param_errors
             ),
             provider_metadata: None,
         });
