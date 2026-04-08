@@ -326,9 +326,19 @@ install() {
     echo "  and configuration."
     echo ""
 
-    # Auto-initialize (sync registry, generate config)
-    echo "  Initializing LibreFang..."
-    "$INSTALL_DIR/librefang" init 2>/dev/null || true
+    # Auto-initialize (sync registry, generate config).
+    # When piped through `curl | sh`, stdin is not a TTY so librefang init
+    # cannot prompt for provider keys and silently falls back to defaults.
+    # Only run init interactively when stdin is a real terminal.
+    if [ -t 0 ]; then
+        echo "  Running setup wizard..."
+        "$INSTALL_DIR/librefang" init || true
+    else
+        echo "  Skipping interactive setup (running via pipe)."
+        echo "  Run the setup wizard manually to configure providers and API keys:"
+        echo "    librefang init"
+        echo ""
+    fi
 
     AUTO_START="${LIBREFANG_AUTO_START:-1}"
     if is_enabled "$AUTO_START"; then
