@@ -295,48 +295,34 @@ install() {
         echo "  LibreFang binary installed to $INSTALL_DIR/librefang"
     fi
 
-    echo ""
-    echo "  Get started now:"
-    echo "    $INSTALL_DIR/librefang init"
-    if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
-        echo ""
-        echo "  To use 'librefang' in this shell, run:"
-        case "$USER_SHELL" in
-            */fish|fish)
-                echo "    fish_add_path \"$INSTALL_DIR\""
-                ;;
-            *)
-                echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
-                ;;
-        esac
-        if [ -n "$SHELL_RC" ]; then
-            echo "  New shells will pick it up from $SHELL_RC."
-        fi
-        echo ""
-        echo "  After refreshing PATH, you can also run:"
-        echo "    librefang init"
-    else
-        echo ""
-        echo "  Or run:"
-        echo "    librefang init"
-    fi
-
-    echo ""
-    echo "  The setup wizard will guide you through provider selection"
-    echo "  and configuration."
-    echo ""
-
     # Auto-initialize (sync registry, generate config).
     # When piped through `curl | sh`, stdin is not a TTY so librefang init
     # cannot prompt for provider keys and silently falls back to defaults.
     # Only run init interactively when stdin is a real terminal.
     if [ -t 0 ]; then
+        echo ""
+        echo "  The setup wizard will guide you through provider selection"
+        echo "  and configuration."
+        echo ""
         echo "  Running setup wizard..."
         "$INSTALL_DIR/librefang" init || true
     else
-        echo "  Skipping interactive setup (running via pipe)."
-        echo "  Run the setup wizard manually to configure providers and API keys:"
+        echo ""
+        echo "  Next step — run the setup wizard to configure providers and API keys:"
         echo "    librefang init"
+        if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
+            echo ""
+            echo "  (First refresh your PATH:"
+            case "$USER_SHELL" in
+                */fish|fish)
+                    echo "    fish_add_path \"$INSTALL_DIR\""
+                    ;;
+                *)
+                    echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
+                    ;;
+            esac
+            echo "  )"
+        fi
         echo ""
     fi
 
