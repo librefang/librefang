@@ -244,6 +244,30 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Return all session IDs belonging to an agent.
+    pub fn get_agent_session_ids(&self, agent_id: AgentId) -> LibreFangResult<Vec<SessionId>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM sessions WHERE agent_id = ?1")
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
+                let id_str: String = row.get(0)?;
+                Ok(id_str)
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut ids = Vec::new();
+        for id_str in rows.flatten() {
+            if let Ok(uuid) = uuid::Uuid::parse_str(&id_str) {
+                ids.push(SessionId(uuid));
+            }
+        }
+        Ok(ids)
+    }
+
     /// Delete all sessions belonging to an agent and their FTS5 index entries.
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
         let conn = self

@@ -3644,12 +3644,19 @@ system_prompt = "You are a helpful assistant."
         }
 
         // LLM agent: true streaming via agent loop
+        // Derive session ID: use channel-specific session when SenderContext
+        // provides a non-empty channel, otherwise fall back to agent's default.
+        let effective_session_id = match sender_context {
+            Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
+            _ => entry.session_id,
+        };
+
         let mut session = self
             .memory
-            .get_session(entry.session_id)
+            .get_session(effective_session_id)
             .map_err(KernelError::LibreFang)?
             .unwrap_or_else(|| librefang_memory::session::Session {
-                id: entry.session_id,
+                id: effective_session_id,
                 agent_id,
                 messages: Vec::new(),
                 context_window_tokens: 0,
@@ -4631,12 +4638,19 @@ system_prompt = "You are a helpful assistant."
             .check_quota(agent_id, &entry.manifest.resources)
             .map_err(KernelError::LibreFang)?;
 
+        // Derive session ID: use channel-specific session when SenderContext
+        // provides a non-empty channel, otherwise fall back to agent's default.
+        let effective_session_id = match sender_context {
+            Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
+            _ => entry.session_id,
+        };
+
         let mut session = self
             .memory
-            .get_session(entry.session_id)
+            .get_session(effective_session_id)
             .map_err(KernelError::LibreFang)?
             .unwrap_or_else(|| librefang_memory::session::Session {
-                id: entry.session_id,
+                id: effective_session_id,
                 agent_id,
                 messages: Vec::new(),
                 context_window_tokens: 0,
@@ -5168,15 +5182,20 @@ system_prompt = "You are a helpful assistant."
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        // Auto-save session context to workspace memory before clearing
-        if let Ok(Some(old_session)) = self.memory.get_session(entry.session_id) {
-            if old_session.messages.len() >= 2 {
-                self.save_session_summary(agent_id, &entry, &old_session);
+        // Auto-save session summaries for ALL sessions (default + per-channel)
+        // before clearing, so no channel's conversation history is silently lost.
+        if let Ok(session_ids) = self.memory.get_agent_session_ids(agent_id) {
+            for sid in session_ids {
+                if let Ok(Some(old_session)) = self.memory.get_session(sid) {
+                    if old_session.messages.len() >= 2 {
+                        self.save_session_summary(agent_id, &entry, &old_session);
+                    }
+                }
             }
         }
 
-        // Delete the old session
-        let _ = self.memory.delete_session(entry.session_id);
+        // Delete ALL sessions for this agent (default + per-channel)
+        let _ = self.memory.delete_agent_sessions(agent_id);
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -5202,12 +5221,12 @@ system_prompt = "You are a helpful assistant."
     /// More aggressive than `reset_session` (which auto-saves a summary) but less
     /// destructive than `clear_agent_history` (which wipes ALL sessions).
     pub fn reboot_session(&self, agent_id: AgentId) -> KernelResult<()> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let _entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        // Delete the old session WITHOUT saving a summary
-        let _ = self.memory.delete_session(entry.session_id);
+        // Delete ALL sessions for this agent (default + per-channel)
+        let _ = self.memory.delete_agent_sessions(agent_id);
 
         // Create a fresh session
         let new_session = self
@@ -7816,9 +7835,26 @@ system_prompt = "You are a helpful assistant."
                                 let kh: std::sync::Arc<
                                     dyn librefang_runtime::kernel_handle::KernelHandle,
                                 > = kernel.clone();
+                                // Cron jobs use a synthetic SenderContext so they
+                                // get their own isolated session (channel="cron").
+                                let cron_sender = SenderContext {
+                                    channel: "cron".to_string(),
+                                    user_id: String::new(),
+                                    display_name: "cron".to_string(),
+                                    is_group: false,
+                                    was_mentioned: false,
+                                    thread_id: None,
+                                    account_id: None,
+                                };
                                 match tokio::time::timeout(
                                     timeout,
-                                    kernel.send_message_with_handle(agent_id, message, Some(kh)),
+                                    kernel.send_message_full(
+                                        agent_id,
+                                        message,
+                                        Some(kh),
+                                        None,
+                                        Some(&cron_sender),
+                                    ),
                                 )
                                 .await
                                 {
