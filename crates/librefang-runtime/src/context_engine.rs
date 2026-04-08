@@ -3430,6 +3430,7 @@ pub fn load_plugin(
             .as_ref()
             .map(|p| resolve_and_sandbox(p))
             .transpose()?,
+        allowed_secrets: manifest.hooks.allowed_secrets.clone(),
     };
 
     debug!(
@@ -3970,7 +3971,10 @@ fn resolve_vault_env_vars(
 ) -> Vec<(String, String)> {
     let mut vault_env = Vec::with_capacity(hooks.allowed_secrets.len());
     for secret_name in &hooks.allowed_secrets {
-        debug!(secret = secret_name.as_str(), "Resolving vault secret for hook");
+        debug!(
+            secret = secret_name.as_str(),
+            "Resolving vault secret for hook"
+        );
         match vault_lookup(secret_name) {
             Some(value) => {
                 let env_key = format!("LIBREFANG_SECRET_{}", secret_name.to_uppercase());
