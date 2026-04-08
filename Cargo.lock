@@ -4032,12 +4032,14 @@ name = "librefang-desktop"
 version = "2026.4.7-beta16"
 dependencies = [
  "axum",
+ "clap",
  "dirs 6.0.0",
  "librefang-api",
  "librefang-extensions",
  "librefang-kernel",
  "librefang-types",
  "open",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tauri",
