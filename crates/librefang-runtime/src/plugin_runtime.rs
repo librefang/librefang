@@ -138,7 +138,7 @@ pub async fn lock_state_file(path: &std::path::Path) -> tokio::sync::OwnedMutexG
 }
 
 /// Which launcher runs a hook script.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginRuntime {
     /// `python3 script.py` — the original (and default) runtime.
     Python,
@@ -166,6 +166,12 @@ pub enum PluginRuntime {
     /// Execute the hook as a WebAssembly module via wasmtime + WASI.
     /// The `.wasm` file path is used directly — no interpreter needed.
     Wasm,
+    /// A full path (or any string containing `/` or `\`) used verbatim as the
+    /// launcher binary.  The script path is passed as the sole argument.
+    ///
+    /// Example: `runtime = "/opt/homebrew/bin/python3"` in `plugin.toml`
+    /// produces the command `/opt/homebrew/bin/python3 <script>`.
+    Custom(String),
 }
 
 impl PluginRuntime {
@@ -186,30 +192,42 @@ impl PluginRuntime {
             Some("lua") => Self::Lua,
             Some("wasm") | Some("webassembly") => Self::Wasm,
             Some(other) => {
+                // If the tag looks like a file system path (contains '/' or '\'),
+                // treat it as a custom launcher binary rather than silently
+                // falling back to Python.  This is the common case for users
+                // who set `runtime = "/opt/homebrew/bin/python3"` (or any other
+                // full path) in their plugin.toml.
+                if other.contains('/') || other.contains('\\') {
+                    // Use the *original* (un-lowercased) tag so the path survives.
+                    let original = tag.map(str::trim).unwrap_or("").to_string();
+                    return Self::Custom(original);
+                }
                 warn!(
                     "Unknown plugin runtime '{other}', falling back to 'python'. \
-                     Valid values: python, native, v, node, deno, go, ruby, bash, bun, php, lua, wasm."
+                     Valid values: python, native, v, node, deno, go, ruby, bash, bun, php, lua, wasm. \
+                     To use a custom launcher binary, provide its full path (e.g. /usr/bin/python3)."
                 );
                 Self::Python
             }
         }
     }
 
-    /// Human-readable label for error messages.
-    pub fn label(&self) -> &'static str {
+    /// Human-readable label for error messages and config serialisation.
+    pub fn label(&self) -> String {
         match self {
-            Self::Python => "python",
-            Self::Native => "native",
-            Self::V => "v",
-            Self::Node => "node",
-            Self::Deno => "deno",
-            Self::Go => "go",
-            Self::Ruby => "ruby",
-            Self::Bash => "bash",
-            Self::Bun => "bun",
-            Self::Php => "php",
-            Self::Lua => "lua",
-            Self::Wasm => "wasm",
+            Self::Python => "python".to_string(),
+            Self::Native => "native".to_string(),
+            Self::V => "v".to_string(),
+            Self::Node => "node".to_string(),
+            Self::Deno => "deno".to_string(),
+            Self::Go => "go".to_string(),
+            Self::Ruby => "ruby".to_string(),
+            Self::Bash => "bash".to_string(),
+            Self::Bun => "bun".to_string(),
+            Self::Php => "php".to_string(),
+            Self::Lua => "lua".to_string(),
+            Self::Wasm => "wasm".to_string(),
+            Self::Custom(path) => path.clone(),
         }
     }
 
@@ -243,13 +261,16 @@ impl PluginRuntime {
             Self::Php => "php",
             Self::Lua => "lua",
             Self::Wasm => "wasm",
+            // Custom launchers don't impose a specific extension.
+            Self::Custom(_) => "",
         }
     }
 
     /// Arguments to pass when probing the launcher for its version.
     /// Most runtimes use `--version`; a few have their own conventions
     /// (Go uses `go version`, Lua uses `lua -v`).
-    /// `Wasm` has no launcher, so this is never called in practice.
+    /// `Wasm` and `Custom` have no fixed launcher, so this is never called
+    /// in practice for those variants.
     pub fn version_args(&self) -> &'static [&'static str] {
         match self {
             Self::Go => &["version"],
@@ -258,8 +279,9 @@ impl PluginRuntime {
         }
     }
 
-    /// Canonical launcher binary to probe on PATH. `Native` and `Wasm` have no
-    /// launcher (the script *is* the binary / module), so they return `None`.
+    /// Canonical launcher binary to probe on PATH. `Native`, `Wasm`, and
+    /// `Custom` return `None` — either the script is the binary, the hook
+    /// runs inline, or the caller must probe the custom path directly.
     pub fn launcher_binary(&self) -> Option<&'static str> {
         match self {
             // Python has a fallback chain (python3 → python → py). The doctor
@@ -277,6 +299,8 @@ impl PluginRuntime {
             Self::Lua => Some("lua"),
             // Wasm runs inline via wasmtime — no external launcher binary.
             Self::Wasm => None,
+            // Custom launcher: the path is user-supplied, not a fixed binary name.
+            Self::Custom(_) => None,
         }
     }
 
@@ -295,10 +319,14 @@ impl PluginRuntime {
             Self::Php => "Install PHP from https://www.php.net/downloads.php or your OS package manager",
             Self::Lua => "Install Lua from https://www.lua.org/download.html or your OS package manager",
             Self::Wasm => "Wasm hooks run inline via the built-in wasmtime engine — no external launcher needed",
+            Self::Custom(_) => "Custom runtime: verify that the binary path is correct and the binary is executable",
         }
     }
 
-    /// All runtime variants, in a stable order (useful for diagnostics).
+    /// All named runtime variants, in a stable order (useful for diagnostics).
+    ///
+    /// `Custom` is intentionally excluded because it carries a user-supplied
+    /// path and has no fixed canonical form.
     pub fn all() -> &'static [Self] {
         &[
             Self::Python,
@@ -342,7 +370,7 @@ pub struct RuntimeStatus {
 /// Cheap enough (<100ms per launcher on a warm cache) that the doctor
 /// endpoint probes every runtime on every call without caching.
 pub fn check_runtime_status(runtime: PluginRuntime) -> RuntimeStatus {
-    let tag = runtime.label().to_string();
+    let tag = runtime.label();
     let hint = runtime.install_hint().to_string();
 
     // Native has no launcher — report as available unconditionally.
@@ -360,7 +388,7 @@ pub fn check_runtime_status(runtime: PluginRuntime) -> RuntimeStatus {
     // `find_python_interpreter`'s discovery path.
     // Wasm has no launcher so it should have been caught by the early-return above,
     // but handle it defensively here too.
-    let candidates: &[&str] = match runtime {
+    let candidates: &[&str] = match &runtime {
         PluginRuntime::Python => &["python3", "python", "py"],
         _ => std::slice::from_ref(&primary),
     };
@@ -598,7 +626,7 @@ fn validate_path_traversal(path: &str) -> Result<(), PluginRuntimeError> {
 /// Returns `(launcher, args)`. `launcher` is the program we `exec`;
 /// `args` are its arguments (the first arg is typically the script path).
 fn build_command(
-    runtime: PluginRuntime,
+    runtime: &PluginRuntime,
     script_path: &str,
 ) -> Result<(String, Vec<String>), PluginRuntimeError> {
     match runtime {
@@ -651,6 +679,12 @@ fn build_command(
              dispatched via run_wasm_hook before reaching build_command"
                 .to_string(),
         )),
+        // Custom launcher: use the full path verbatim, pass the script as the
+        // sole argument.  This is the fix for hooks whose `runtime` is set to
+        // a full binary path such as `/opt/homebrew/bin/python3`.
+        PluginRuntime::Custom(launcher) => {
+            Ok((launcher.clone(), vec![script_path.to_string()]))
+        }
     }
 }
 
@@ -659,7 +693,7 @@ fn build_command(
 /// These land on top of the baseline (PATH, HOME, LIBREFANG_*) that every
 /// runtime gets. They're passthrough only — we never synthesize values,
 /// just forward whatever the user had.
-fn runtime_passthrough_vars(runtime: PluginRuntime) -> &'static [&'static str] {
+fn runtime_passthrough_vars(runtime: &PluginRuntime) -> &'static [&'static str] {
     match runtime {
         // Python: venv activation + module search path.
         PluginRuntime::Python => &["PYTHONPATH", "VIRTUAL_ENV", "PYTHONIOENCODING"],
@@ -686,6 +720,9 @@ fn runtime_passthrough_vars(runtime: PluginRuntime) -> &'static [&'static str] {
         PluginRuntime::Native => &[],
         // Wasm runs inline — no subprocess, no passthrough vars needed.
         PluginRuntime::Wasm => &[],
+        // Custom launchers get nothing runtime-specific by default — users
+        // can add any required env vars via `config.allowed_env_vars`.
+        PluginRuntime::Custom(_) => &[],
     }
 }
 
