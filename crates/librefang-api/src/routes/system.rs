@@ -1469,7 +1469,9 @@ pub async fn approve_request(
                         }
                     };
                     match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-                        &secret, code, &totp_issuer,
+                        &secret,
+                        code,
+                        &totp_issuer,
                     ) {
                         Ok(true) => true,
                         Ok(false) => {
@@ -1893,7 +1895,9 @@ pub async fn totp_confirm(
     };
 
     match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-        &secret, &body.code, &totp_issuer,
+        &secret,
+        &body.code,
+        &totp_issuer,
     ) {
         Ok(true) => {
             if let Err(e) = state.kernel.vault_set("totp_confirmed", "true") {
@@ -1986,7 +1990,9 @@ pub async fn totp_revoke(
         match state.kernel.vault_get("totp_secret") {
             Some(secret) => {
                 librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-                    &secret, &body.code, &totp_issuer,
+                    &secret,
+                    &body.code,
+                    &totp_issuer,
                 )
                 .unwrap_or(false)
             }

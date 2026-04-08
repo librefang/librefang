@@ -107,10 +107,13 @@ impl ApprovalManager {
     fn load_totp_lockout(
         conn: &Arc<StdMutex<Connection>>,
     ) -> HashMap<String, (u32, Option<Instant>)> {
-        let Ok(guard) = conn.lock() else { return HashMap::new() };
-        let Ok(mut stmt) = guard.prepare(
-            "SELECT sender_id, failures, locked_at FROM totp_lockout",
-        ) else { return HashMap::new() };
+        let Ok(guard) = conn.lock() else {
+            return HashMap::new();
+        };
+        let Ok(mut stmt) = guard.prepare("SELECT sender_id, failures, locked_at FROM totp_lockout")
+        else {
+            return HashMap::new();
+        };
 
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -127,7 +130,9 @@ impl ApprovalManager {
             })
             .ok();
 
-        let Some(rows) = rows else { return HashMap::new() };
+        let Some(rows) = rows else {
+            return HashMap::new();
+        };
         let mut map = HashMap::new();
         for row in rows.filter_map(|r| r.ok()) {
             let (sender_id, failures, locked_at_unix) = row;
