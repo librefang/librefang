@@ -367,6 +367,13 @@ pub struct PluginInfo {
     pub enabled: bool,
     /// Declared capabilities from the `needs` array in plugin.toml.
     pub needs: Vec<String>,
+    /// Config schema declared in `[config]` of plugin.toml.
+    ///
+    /// Each entry maps a field name to its type, default value, and description.
+    /// Hook subprocesses receive the resolved config (defaults + user overrides) as
+    /// JSON via the `LIBREFANG_PLUGIN_CONFIG` environment variable.
+    #[serde(default)]
+    pub config_schema: std::collections::HashMap<String, librefang_types::config::PluginConfigField>,
 }
 
 /// Result of a plugin lint check.
@@ -544,6 +551,8 @@ pub fn get_plugin_info(plugin_name: &str) -> Result<PluginInfo, String> {
             .unwrap_or_default()
     };
 
+    let config_schema = manifest.config.clone();
+
     Ok(PluginInfo {
         manifest,
         path: plugin_dir,
@@ -551,6 +560,7 @@ pub fn get_plugin_info(plugin_name: &str) -> Result<PluginInfo, String> {
         size_bytes,
         enabled,
         needs,
+        config_schema,
     })
 }
 
