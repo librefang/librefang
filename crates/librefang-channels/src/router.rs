@@ -226,6 +226,14 @@ impl AgentRouter {
         if let Some(agent) = self.user_defaults.get(platform_user_id) {
             return Some(*agent);
         }
+        // Account-specific channel default takes priority over the generic channel default.
+        // Keys are stored as "Telegram:account_id" when account_id is known.
+        if let Some(account_id) = ctx.account_id.as_deref() {
+            let account_key = format!("{}:{}", channel_key, account_id);
+            if let Some(agent) = self.channel_defaults.get(&account_key) {
+                return Some(*agent);
+            }
+        }
         if let Some(agent) = self.channel_defaults.get(&channel_key) {
             return Some(*agent);
         }
@@ -624,6 +632,56 @@ mod tests {
         // WhatsApp has no channel default — falls to system default
         let resolved = router.resolve(&ChannelType::WhatsApp, "user1", None);
         assert_eq!(resolved, Some(system_default));
+    }
+
+    /// Regression test for #2140: multi-bot Telegram routing must use account_id,
+    /// not first-match on allowed_users.
+    #[test]
+    fn test_multi_bot_account_id_routing() {
+        let router = AgentRouter::new();
+        let samapoedu_agent = AgentId::new();
+        let admin_agent = AgentId::new();
+
+        // Register two Telegram bots, each with their own account-qualified key.
+        router.set_channel_default_with_name(
+            "Telegram:samapoedu-bot".to_string(),
+            samapoedu_agent,
+            "nika".to_string(),
+        );
+        router.set_channel_default_with_name(
+            "Telegram:admin-bot".to_string(),
+            admin_agent,
+            "nick-assistant".to_string(),
+        );
+
+        // User in both bots' allowed_users — routing must be by account_id, not first-match.
+        let ctx_admin = BindingContext {
+            channel: Cow::Borrowed("telegram"),
+            account_id: Some(Cow::Borrowed("admin-bot")),
+            peer_id: Cow::Borrowed("23244855"),
+            ..Default::default()
+        };
+        let resolved = router.resolve_with_context(
+            &ChannelType::Telegram,
+            "23244855",
+            None,
+            &ctx_admin,
+        );
+        assert_eq!(resolved, Some(admin_agent), "admin-bot should route to nick-assistant");
+
+        let ctx_samapoedu = BindingContext {
+            channel: Cow::Borrowed("telegram"),
+            account_id: Some(Cow::Borrowed("samapoedu-bot")),
+            peer_id: Cow::Borrowed("23244855"),
+            ..Default::default()
+        };
+        let resolved = router.resolve_with_context(
+            &ChannelType::Telegram,
+            "23244855",
+            None,
+            &ctx_samapoedu,
+        );
+        assert_eq!(resolved, Some(samapoedu_agent), "samapoedu-bot should route to nika");
     }
 
     #[test]
