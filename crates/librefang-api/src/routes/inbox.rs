@@ -1,5 +1,6 @@
 //! Inbox status endpoint.
 
+use super::shared::require_admin;
 use super::AppState;
 use crate::middleware::AccountId;
 use axum::extract::State;
@@ -22,10 +23,13 @@ pub fn router() -> axum::Router<Arc<AppState>> {
     )
 )]
 pub async fn inbox_status(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let cfg = state.kernel.config_ref();
     let status = librefang_kernel::inbox::inbox_status(&cfg.inbox, state.kernel.home_dir());
-    Json(serde_json::json!(status))
+    Json(serde_json::json!(status)).into_response()
 }

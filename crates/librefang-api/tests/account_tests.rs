@@ -75,6 +75,42 @@ async fn start_mt_router() -> MtHarness {
     }
 }
 
+/// Boot a full router with multi-tenant mode enabled and an admin account configured.
+async fn start_mt_router_with_admin(admin_id: &str) -> MtHarness {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        multi_tenant: true,
+        admin_accounts: vec![admin_id.to_string()],
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
+
+    MtHarness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
 /// Boot a full router with multi-tenant mode disabled (single-tenant/legacy).
 async fn start_st_router() -> MtHarness {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
@@ -868,10 +904,7 @@ async fn test_memory_update_cross_tenant_denied() {
     );
     // Verify none of the results contain the hijacked content
     for item in items {
-        let content = item
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let content = item.get("content").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
             !content.contains("hijacked"),
             "Memory content must not be modified by cross-tenant update, got: {content}"
@@ -1044,7 +1077,9 @@ async fn test_memory_agent_endpoints_require_ownership() {
     let resp_search = h
         .send(
             Request::builder()
-                .uri(format!("/api/memory/agents/{agent_id}/search?q=test&limit=5"))
+                .uri(format!(
+                    "/api/memory/agents/{agent_id}/search?q=test&limit=5"
+                ))
                 .header("x-account-id", "tenant-b")
                 .body(Body::empty())
                 .unwrap(),
@@ -1173,5 +1208,258 @@ async fn test_memory_config_accessible() {
     assert!(
         json.get("proactive_memory").is_some(),
         "Config response should contain proactive_memory section, got: {json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// System endpoints: admin-only (require_admin blocks scoped tenants)
+// ---------------------------------------------------------------------------
+
+/// Assert that a system endpoint returns 403 for a scoped tenant.
+async fn assert_system_admin_only(h: &MtHarness, method: &str, uri: &str) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-account-id", "tenant-blocked")
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.send(req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "{method} {uri} must return 403 for scoped tenant, got: {}",
+        resp.status()
+    );
+}
+
+/// Assert that a system endpoint does NOT return 403 in single-tenant mode.
+async fn assert_system_admin_allowed(h: &MtHarness, method: &str, uri: &str) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.send(req).await;
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "{method} {uri} must NOT return 403 in single-tenant mode, got: {}",
+        resp.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_sessions_admin_only() {
+    let h = start_mt_router().await;
+    assert_system_admin_only(&h, "GET", "/api/sessions").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_audit_admin_only() {
+    let h = start_mt_router().await;
+    assert_system_admin_only(&h, "GET", "/api/audit/recent").await;
+    assert_system_admin_only(&h, "GET", "/api/audit/verify").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_tools_admin_only() {
+    let h = start_mt_router().await;
+    assert_system_admin_only(&h, "GET", "/api/tools").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_backup_admin_only() {
+    let h = start_mt_router().await;
+    assert_system_admin_only(&h, "POST", "/api/backup").await;
+    assert_system_admin_only(&h, "GET", "/api/backups").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_webhooks_admin_only() {
+    let h = start_mt_router().await;
+    assert_system_admin_only(&h, "GET", "/api/webhooks/events").await;
+    assert_system_admin_only(&h, "GET", "/api/webhooks").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_pairing_admin_only() {
+    let h = start_mt_router().await;
+    assert_system_admin_only(&h, "GET", "/api/pairing/devices").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_queue_admin_only() {
+    let h = start_mt_router().await;
+    assert_system_admin_only(&h, "GET", "/api/queue/status").await;
+    assert_system_admin_only(&h, "GET", "/api/tasks/status").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_registry_admin_only() {
+    let h = start_mt_router().await;
+    assert_system_admin_only(&h, "GET", "/api/registry/schema").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_bindings_admin_only() {
+    let h = start_mt_router().await;
+    assert_system_admin_only(&h, "GET", "/api/bindings").await;
+    // POST with valid AgentBinding JSON
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/bindings")
+        .header("x-account-id", "tenant-blocked")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({"agent": "test-agent", "match_rule": {}}))
+                .unwrap(),
+        ))
+        .unwrap();
+    let resp = h.send(req).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_kv_admin_only() {
+    let h = start_mt_router().await;
+    assert_system_admin_only(
+        &h,
+        "GET",
+        "/api/memory/agents/00000000-0000-0000-0000-000000000000/kv",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_approvals_admin_only() {
+    let h = start_mt_router().await;
+    assert_system_admin_only(&h, "GET", "/api/approvals").await;
+    assert_system_admin_only(&h, "GET", "/api/approvals/some-id").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_admin_passes_in_single_tenant() {
+    let h = start_st_router().await;
+    assert_system_admin_allowed(&h, "GET", "/api/sessions").await;
+    assert_system_admin_allowed(&h, "GET", "/api/audit/recent").await;
+    assert_system_admin_allowed(&h, "GET", "/api/tools").await;
+    assert_system_admin_allowed(&h, "GET", "/api/backups").await;
+    assert_system_admin_allowed(&h, "GET", "/api/queue/status").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_tier4_public_accessible_by_tenant() {
+    let h = start_mt_router().await;
+    for uri in &[
+        "/api/profiles",
+        "/api/templates",
+        "/api/commands",
+        "/api/versions",
+    ] {
+        let req = Request::builder()
+            .uri(*uri)
+            .header("x-account-id", "tenant-public")
+            .body(Body::empty())
+            .unwrap();
+        let resp = h.send(req).await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "GET {uri} is Tier 4 Public and must NOT return 403 for tenants, got: {}",
+            resp.status()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Admin accounts: configured admin can access admin-guarded endpoints
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_admin_account_passes_require_admin_in_multitenant() {
+    let h = start_mt_router_with_admin("admin-tenant").await;
+
+    // Admin account should NOT get 403 on admin-guarded endpoints
+    for uri in &[
+        "/api/sessions",
+        "/api/audit/recent",
+        "/api/tools",
+        "/api/backups",
+        "/api/queue/status",
+    ] {
+        let req = Request::builder()
+            .uri(*uri)
+            .header("x-account-id", "admin-tenant")
+            .body(Body::empty())
+            .unwrap();
+        let resp = h.send(req).await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "GET {uri} must NOT return 403 for configured admin account, got: {}",
+            resp.status()
+        );
+    }
+
+    // Non-admin tenant should STILL get 403
+    for uri in &["/api/sessions", "/api/tools"] {
+        let req = Request::builder()
+            .uri(*uri)
+            .header("x-account-id", "regular-tenant")
+            .body(Body::empty())
+            .unwrap();
+        let resp = h.send(req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "GET {uri} must return 403 for non-admin tenant"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event webhooks: admin can manage in multi-tenant mode
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_event_webhooks_admin_can_manage() {
+    let h = start_mt_router_with_admin("admin-tenant").await;
+
+    // Admin can list event webhooks
+    let req = Request::builder()
+        .uri("/api/webhooks/events")
+        .header("x-account-id", "admin-tenant")
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.send(req).await;
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "GET /api/webhooks/events must NOT return 403 for admin, got: {}",
+        resp.status()
+    );
+
+    // Admin can create event webhook
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/webhooks/events")
+        .header("x-account-id", "admin-tenant")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "url": "https://example.com/hook",
+                "events": ["agent.spawned"]
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let resp = h.send(req).await;
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "POST /api/webhooks/events must NOT return 403 for admin, got: {}",
+        resp.status()
     );
 }

@@ -21,9 +21,9 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/shutdown", axum::routing::post(shutdown))
         .route("/init", axum::routing::post(quick_init))
 }
+use super::shared::require_admin;
 use crate::middleware::AccountId;
 use crate::types::*;
-use super::shared::require_admin;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -160,8 +160,11 @@ pub async fn status(account: AccountId, State(state): State<Arc<AppState>>) -> i
         (status = 200, description = "Quick init result", body = serde_json::Value)
     )
 )]
-pub async fn quick_init(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+pub async fn quick_init(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     let home = state.kernel.home_dir();
@@ -171,7 +174,8 @@ pub async fn quick_init(account: AccountId, State(state): State<Arc<AppState>>) 
         return Json(serde_json::json!({
             "status": "already_initialized",
             "message": "config.toml already exists"
-        })).into_response();
+        }))
+        .into_response();
     }
 
     // Ensure directories exist
@@ -211,7 +215,8 @@ api_key_env = "{api_key_env}"
         return Json(serde_json::json!({
             "status": "error",
             "message": format!("Failed to write config: {e}")
-        })).into_response();
+        }))
+        .into_response();
     }
 
     // Reload config so kernel picks up new settings
@@ -221,7 +226,8 @@ api_key_env = "{api_key_env}"
         "status": "initialized",
         "provider": provider,
         "model": model,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 /// POST /api/shutdown — Graceful shutdown.
@@ -234,7 +240,7 @@ api_key_env = "{api_key_env}"
     )
 )]
 pub async fn shutdown(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     tracing::info!("Shutdown requested via API");
@@ -417,8 +423,11 @@ pub async fn health_detail(
 // returns global counters/gauges across all tenants. Filtering Prometheus
 // text-format output by account_id requires label injection and per-tenant
 // aggregation, which is too complex for a quick fix. Tracked for Phase 2.
-pub async fn prometheus_metrics(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+pub async fn prometheus_metrics(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     let mut out = String::with_capacity(4096);
@@ -537,7 +546,8 @@ pub async fn prometheus_metrics(account: AccountId, State(state): State<Arc<AppS
             "text/plain; version=0.0.4; charset=utf-8",
         )],
         out,
-    ).into_response()
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -553,8 +563,11 @@ pub async fn prometheus_metrics(account: AccountId, State(state): State<Arc<AppS
         (status = 200, description = "Get kernel configuration (secrets redacted)", body = serde_json::Value)
     )
 )]
-pub async fn get_config(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+pub async fn get_config(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     // Return a redacted view of the kernel config
@@ -1184,8 +1197,11 @@ pub async fn get_config(account: AccountId, State(state): State<Arc<AppState>>) 
         (status = 200, description = "Security feature status", body = serde_json::Value)
     )
 )]
-pub async fn security_status(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+pub async fn security_status(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     let scfg = state.kernel.config_ref();
@@ -1256,7 +1272,8 @@ pub async fn security_status(account: AccountId, State(state): State<Arc<AppStat
         },
         "secret_zeroization": true,
         "total_features": 15
-    })).into_response()
+    }))
+    .into_response()
 }
 
 #[utoipa::path(
@@ -1267,8 +1284,11 @@ pub async fn security_status(account: AccountId, State(state): State<Arc<AppStat
         (status = 200, description = "Detect migratable framework installation", body = serde_json::Value)
     )
 )]
-pub async fn migrate_detect(account: AccountId) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+pub async fn migrate_detect(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     // Check OpenClaw first
@@ -1321,8 +1341,12 @@ pub async fn migrate_detect(account: AccountId) -> impl IntoResponse {
         (status = 200, description = "Scan directory for migratable workspace", body = serde_json::Value)
     )
 )]
-pub async fn migrate_scan(account: AccountId, Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+pub async fn migrate_scan(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MigrateScanRequest>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     let path = std::path::PathBuf::from(&req.path);
@@ -1347,7 +1371,7 @@ pub async fn run_migrate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MigrateRequest>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     let source = match req.source.as_str() {
@@ -1447,8 +1471,11 @@ pub async fn run_migrate(
         (status = 200, description = "Reload configuration from disk", body = serde_json::Value)
     )
 )]
-pub async fn config_reload(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+pub async fn config_reload(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     // SECURITY: Record config reload in audit trail
@@ -1520,7 +1547,10 @@ pub async fn config_reload(account: AccountId, State(state): State<Arc<AppState>
         (status = 200, description = "Get config structure schema", body = serde_json::Value)
     )
 )]
-pub async fn config_schema(_account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn config_schema(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     // Build provider/model options from model catalog for dropdowns
     let catalog = state
         .kernel
@@ -1713,7 +1743,7 @@ pub async fn config_set(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     let path = match body.get("path").and_then(|v| v.as_str()) {

@@ -82,7 +82,7 @@ pub async fn list_peers(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // Peer registry is network-level, not tenant-scoped. Admin-only.
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     // Peers are tracked in the wire module's PeerRegistry.
@@ -129,7 +129,7 @@ pub async fn get_peer(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     let registry = match state.peer_registry {
@@ -154,7 +154,8 @@ pub async fn get_peer(
                 "connected_at": p.connected_at.to_rfc3339(),
                 "protocol_version": p.protocol_version,
             })),
-        ).into_response(),
+        )
+            .into_response(),
         None => ApiErrorResponse::not_found("Peer not found").into_response(),
     }
 }
@@ -172,7 +173,7 @@ pub async fn network_status(
     account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     let cfg = state.kernel.config_ref();
@@ -198,7 +199,8 @@ pub async fn network_status(
         "listen_address": listen_address,
         "connected_peers": connected_peers,
         "total_peers": total_peers,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 #[utoipa::path(
@@ -415,7 +417,7 @@ pub async fn a2a_get_task(
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
     // A2A task store has no tenant scoping yet. Admin-only until task ownership is added.
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     match state.kernel.a2a_tasks().get(&task_id) {
@@ -446,7 +448,7 @@ pub async fn a2a_cancel_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     if state.kernel.a2a_tasks().cancel(&task_id) {
@@ -480,7 +482,7 @@ pub async fn a2a_list_external_agents(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // External agent discovery is system-level. Admin-only.
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     let agents = state
@@ -683,7 +685,7 @@ pub async fn a2a_get_external_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     let agents = state
@@ -737,7 +739,7 @@ pub async fn a2a_discover_external(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     let url = match body["url"].as_str() {
@@ -805,7 +807,7 @@ pub async fn a2a_send_external(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     let url = match body["url"].as_str() {
@@ -862,7 +864,7 @@ pub async fn a2a_external_task_status(
     Path(task_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     let url = match params.get("url") {
@@ -918,7 +920,7 @@ pub async fn mcp_http(
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // MCP tool visibility needs tenant scoping. Admin-only until MCP session has account context.
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     // Gather all available tools (builtin + skills + MCP)
@@ -956,7 +958,8 @@ pub async fn mcp_http(
                 "jsonrpc": "2.0",
                 "id": request.get("id").cloned(),
                 "error": {"code": -32602, "message": format!("Unknown tool: {tool_name}")}
-            })).into_response();
+            }))
+            .into_response();
         }
 
         // Snapshot skill registry before async call (RwLockReadGuard is !Send)
@@ -1013,7 +1016,8 @@ pub async fn mcp_http(
                 "content": [{"type": "text", "text": result.content}],
                 "isError": result.is_error,
             }
-        })).into_response();
+        }))
+        .into_response();
     }
 
     // For non-tools/call methods (initialize, tools/list, etc.), delegate to the handler
@@ -1485,7 +1489,7 @@ pub async fn comms_task(
     Json(req): Json<librefang_types::comms::CommsTaskRequest>,
 ) -> impl IntoResponse {
     // Task queue posting needs tenant-scoped isolation. Admin-only until task store has account_id.
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json);
     }
     if req.title.is_empty() {

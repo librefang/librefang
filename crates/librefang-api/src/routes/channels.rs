@@ -33,6 +33,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         )
 }
 
+use super::shared::require_admin;
 use super::skills::{
     remove_channel_config, remove_secret_env, upsert_channel_config, validate_env_var,
     write_secret_env,
@@ -1153,8 +1154,11 @@ fn channel_config_values(
 )]
 pub async fn list_channels(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
-) -> impl IntoResponse {
+    account: AccountId,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Read the live channels config (updated on every hot-reload) instead of the
     // stale boot-time kernel.config, so newly configured channels show correctly.
     let live_channels = state.channels_config.read().await;
@@ -1213,6 +1217,7 @@ pub async fn list_channels(
         "total": channels.len(),
         "configured_count": configured_count,
     }))
+    .into_response()
 }
 
 /// GET /api/channels/{name} — Return a single channel's config, status, and field metadata.
@@ -1230,14 +1235,18 @@ pub async fn list_channels(
 )]
 pub async fn get_channel(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
             return ApiErrorResponse::not_found(format!("Unknown channel: {name}"))
                 .into_json_tuple()
+                .into_response()
         }
     };
 
@@ -1282,7 +1291,7 @@ pub async fn get_channel(
         detail["webhook_endpoint"] = serde_json::Value::String(endpoint);
     }
 
-    (StatusCode::OK, Json(detail))
+    (StatusCode::OK, Json(detail)).into_response()
 }
 
 #[utoipa::path(
@@ -1302,18 +1311,29 @@ pub async fn get_channel(
 /// POST /api/channels/{name}/configure — Save channel secrets + config fields.
 pub async fn configure_channel(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
-        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::not_found("Unknown channel")
+                .into_json_tuple()
+                .into_response()
+        }
     };
 
     let fields = match body.get("fields").and_then(|v| v.as_object()) {
         Some(f) => f,
-        None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::bad_request("Missing 'fields' object")
+                .into_json_tuple()
+                .into_response()
+        }
     };
 
     let home = librefang_kernel::config::librefang_home();
@@ -1333,12 +1353,15 @@ pub async fn configure_channel(
         if let Some(env_var) = field_def.env_var {
             // Validate env var name and value before writing
             if let Err(msg) = validate_env_var(env_var, value) {
-                return ApiErrorResponse::bad_request(msg).into_json_tuple();
+                return ApiErrorResponse::bad_request(msg)
+                    .into_json_tuple()
+                    .into_response();
             }
             // Secret field — write to secrets.env and set in process
             if let Err(e) = write_secret_env(&secrets_path, env_var, value) {
                 return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
-                    .into_json_tuple();
+                    .into_json_tuple()
+                    .into_response();
             }
             // SAFETY: We are the only writer; this is a single-threaded config operation
             unsafe {
@@ -1362,7 +1385,8 @@ pub async fn configure_channel(
     // Write config.toml section
     if let Err(e) = upsert_channel_config(&config_path, &name, &config_fields) {
         return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Hot-reload: activate the channel immediately
@@ -1383,6 +1407,7 @@ pub async fn configure_channel(
                     }
                 })),
             )
+                .into_response()
         }
         Err(e) => {
             tracing::warn!(error = %e, "Channel hot-reload failed after configure");
@@ -1394,7 +1419,7 @@ pub async fn configure_channel(
                     "activated": false,
                     "note": format!("Configured, but hot-reload failed: {e}. Restart daemon to activate.")
                 })),
-            )
+            ).into_response()
         }
     }
 }
@@ -1414,12 +1439,19 @@ pub async fn configure_channel(
 /// DELETE /api/channels/{name}/configure — Remove channel secrets + config section.
 pub async fn remove_channel(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
-        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::not_found("Unknown channel")
+                .into_json_tuple()
+                .into_response()
+        }
     };
 
     let home = librefang_kernel::config::librefang_home();
@@ -1442,7 +1474,8 @@ pub async fn remove_channel(
     // Remove config section
     if let Err(e) = remove_channel_config(&config_path, &name) {
         return ApiErrorResponse::internal(format!("Failed to remove config: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Hot-reload: deactivate the channel immediately
@@ -1455,7 +1488,8 @@ pub async fn remove_channel(
                 "remaining_channels": started,
                 "note": format!("{} deactivated.", name)
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "Channel hot-reload failed after remove");
             (
@@ -1465,7 +1499,7 @@ pub async fn remove_channel(
                     "channel": name,
                     "note": format!("Removed, but hot-reload failed: {e}. Restart daemon to fully deactivate.")
                 })),
-            )
+            ).into_response()
         }
     }
 }
@@ -1488,10 +1522,14 @@ pub async fn remove_channel(
 /// (for Telegram). When provided, sends a real test message to verify the bot can
 /// post to that channel.
 pub async fn test_channel(
-    _account: AccountId,
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     raw_body: axum::body::Bytes,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
@@ -1499,6 +1537,7 @@ pub async fn test_channel(
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"status": "error", "message": "Unknown channel"})),
             )
+                .into_response()
         }
     };
 
@@ -1521,7 +1560,8 @@ pub async fn test_channel(
                 "status": "error",
                 "message": format!("Missing required env vars: {}", missing.join(", "))
             })),
-        );
+        )
+            .into_response();
     }
 
     // If a target channel/chat ID is provided, send a real test message
@@ -1545,7 +1585,7 @@ pub async fn test_channel(
                         "status": "ok",
                         "message": format!("Test message sent to {} channel {}.", meta.display_name, target_id)
                     })),
-                );
+                ).into_response();
             }
             Err(e) => {
                 return (
@@ -1554,7 +1594,8 @@ pub async fn test_channel(
                         "status": "error",
                         "message": format!("Credentials valid but failed to send test message: {e}")
                     })),
-                );
+                )
+                    .into_response();
             }
         }
     }
@@ -1565,7 +1606,7 @@ pub async fn test_channel(
             "status": "ok",
             "message": format!("All required credentials for {} are set. Provide channel_id or chat_id to send a test message.", meta.display_name)
         })),
-    )
+    ).into_response()
 }
 
 /// Send a real test message to a specific channel/chat on the given platform.
@@ -1641,8 +1682,11 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
 /// POST /api/channels/reload — Manually trigger a channel hot-reload from disk config.
 pub async fn reload_channels(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
-) -> impl IntoResponse {
+    account: AccountId,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match crate::channel_bridge::reload_channels_from_disk(&state).await {
         Ok(started) => (
             StatusCode::OK,
@@ -1650,14 +1694,16 @@ pub async fn reload_channels(
                 "status": "ok",
                 "started": started,
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "status": "error",
                 "error": e,
             })),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -1677,7 +1723,13 @@ pub async fn reload_channels(
 /// If a WhatsApp Web gateway is available (e.g. a Baileys-based bridge process),
 /// this proxies the request and returns a base64 QR code data URL. If no gateway
 /// is running, it returns instructions to set one up.
-pub async fn whatsapp_qr_start(_account: AccountId) -> impl IntoResponse {
+pub async fn whatsapp_qr_start(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Check for WhatsApp Web gateway URL in config or env
     let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
 
@@ -1686,7 +1738,7 @@ pub async fn whatsapp_qr_start(_account: AccountId) -> impl IntoResponse {
             "available": false,
             "message": "WhatsApp Web gateway not running. Start the gateway or use Business API mode.",
             "help": "The WhatsApp Web gateway auto-starts with the daemon when configured. Ensure Node.js >= 18 is installed and WhatsApp is configured in config.toml. Set WHATSAPP_WEB_GATEWAY_URL to use an external gateway."
-        }));
+        })).into_response();
     }
 
     // Try to reach the gateway and start a QR session.
@@ -1717,12 +1769,14 @@ pub async fn whatsapp_qr_start(_account: AccountId) -> impl IntoResponse {
                 "message": msg,
                 "connected": connected,
             }))
+            .into_response()
         }
         Err(e) => Json(serde_json::json!({
             "available": false,
             "message": format!("Could not reach WhatsApp Web gateway: {e}"),
             "help": "Make sure the gateway is running at the configured URL"
-        })),
+        }))
+        .into_response(),
     }
 }
 #[utoipa::path(
@@ -1741,16 +1795,21 @@ pub async fn whatsapp_qr_start(_account: AccountId) -> impl IntoResponse {
 /// After calling `/qr/start`, the frontend polls this to check if the user
 /// has scanned the QR code and the WhatsApp Web session is connected.
 pub async fn whatsapp_qr_status(
-    _account: AccountId,
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
 
     if gateway_url.is_empty() {
         return Json(serde_json::json!({
             "connected": false,
             "message": "Gateway not available"
-        }));
+        }))
+        .into_response();
     }
 
     let session_id = params.get("session_id").cloned().unwrap_or_default();
@@ -1779,8 +1838,10 @@ pub async fn whatsapp_qr_status(
                 "message": msg,
                 "expired": expired,
             }))
+            .into_response()
         }
-        Err(_) => Json(serde_json::json!({ "connected": false, "message": "Gateway unreachable" })),
+        Err(_) => Json(serde_json::json!({ "connected": false, "message": "Gateway unreachable" }))
+            .into_response(),
     }
 }
 
@@ -1892,7 +1953,13 @@ const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
     )
 )]
 /// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
-pub async fn wechat_qr_start(_account: AccountId) -> impl IntoResponse {
+pub async fn wechat_qr_start(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -1902,7 +1969,8 @@ pub async fn wechat_qr_start(_account: AccountId) -> impl IntoResponse {
             return Json(serde_json::json!({
                 "available": false,
                 "message": format!("HTTP client error: {e}")
-            }));
+            }))
+            .into_response();
         }
     };
 
@@ -1916,7 +1984,8 @@ pub async fn wechat_qr_start(_account: AccountId) -> impl IntoResponse {
                     return Json(serde_json::json!({
                         "available": false,
                         "message": "iLink returned empty qrcode"
-                    }));
+                    }))
+                    .into_response();
                 }
                 Json(serde_json::json!({
                     "available": true,
@@ -1924,11 +1993,13 @@ pub async fn wechat_qr_start(_account: AccountId) -> impl IntoResponse {
                     "qr_url": qrcode_url,
                     "message": "Scan this QR code with your WeChat app to log in",
                 }))
+                .into_response()
             }
             Err(e) => Json(serde_json::json!({
                 "available": false,
                 "message": format!("Failed to parse iLink response: {e}")
-            })),
+            }))
+            .into_response(),
         },
         Ok(resp) => {
             let status = resp.status();
@@ -1937,11 +2008,13 @@ pub async fn wechat_qr_start(_account: AccountId) -> impl IntoResponse {
                 "available": false,
                 "message": format!("iLink QR request failed ({status}): {body}")
             }))
+            .into_response()
         }
         Err(e) => Json(serde_json::json!({
             "available": false,
             "message": format!("Could not reach iLink API: {e}")
-        })),
+        }))
+        .into_response(),
     }
 }
 
@@ -1958,16 +2031,21 @@ pub async fn wechat_qr_start(_account: AccountId) -> impl IntoResponse {
 )]
 /// GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.
 pub async fn wechat_qr_status(
-    _account: AccountId,
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let qr_code = params.get("qr_code").cloned().unwrap_or_default();
     if qr_code.is_empty() {
         return Json(serde_json::json!({
             "connected": false,
             "expired": false,
             "message": "Missing qr_code parameter"
-        }));
+        }))
+        .into_response();
     }
 
     // iLink uses long-polling: the request hangs until the user scans or it
@@ -1983,7 +2061,8 @@ pub async fn wechat_qr_status(
                 "connected": false,
                 "expired": false,
                 "message": "HTTP client error"
-            }));
+            }))
+            .into_response();
         }
     };
 
@@ -2003,31 +2082,36 @@ pub async fn wechat_qr_status(
                             "message": "WeChat login successful",
                             "bot_token": bot_token,
                         }))
+                        .into_response()
                     }
                     "expired" => Json(serde_json::json!({
                         "connected": false,
                         "expired": true,
                         "message": "QR code expired — click Start to get a new one"
-                    })),
+                    }))
+                    .into_response(),
                     _ => Json(serde_json::json!({
                         "connected": false,
                         "expired": false,
                         "message": "Waiting for scan..."
-                    })),
+                    }))
+                    .into_response(),
                 }
             }
             Err(_) => Json(serde_json::json!({
                 "connected": false,
                 "expired": false,
                 "message": "Failed to parse status response"
-            })),
+            }))
+            .into_response(),
         },
         // Timeout is normal for long-poll — treat as "still waiting"
         _ => Json(serde_json::json!({
             "connected": false,
             "expired": false,
             "message": "Waiting for scan..."
-        })),
+        }))
+        .into_response(),
     }
 }
 
@@ -2048,9 +2132,12 @@ pub async fn wechat_qr_status(
 )]
 pub async fn list_channel_registry(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
-) -> impl IntoResponse {
+    account: AccountId,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let channels_dir = state.kernel.home_dir().join("channels");
     let metadata = librefang_runtime::channel_registry::load_channel_metadata(&channels_dir);
-    Json(serde_json::to_value(&metadata).unwrap_or_default())
+    Json(serde_json::to_value(&metadata).unwrap_or_default()).into_response()
 }

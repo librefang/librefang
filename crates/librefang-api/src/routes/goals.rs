@@ -26,6 +26,7 @@ use librefang_types::agent::AgentId;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use super::shared::require_admin;
 use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
@@ -45,9 +46,12 @@ fn goals_shared_agent_id() -> AgentId {
 
 /// GET /api/goals — List all goals.
 pub async fn list_goals(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let agent_id = goals_shared_agent_id();
     match state
         .kernel
@@ -56,22 +60,26 @@ pub async fn list_goals(
     {
         Ok(Some(serde_json::Value::Array(arr))) => {
             let total = arr.len();
-            Json(serde_json::json!({"goals": arr, "total": total}))
+            Json(serde_json::json!({"goals": arr, "total": total})).into_response()
         }
-        Ok(_) => Json(serde_json::json!({"goals": [], "total": 0})),
+        Ok(_) => Json(serde_json::json!({"goals": [], "total": 0})).into_response(),
         Err(e) => {
             tracing::warn!("Failed to load goals: {e}");
             Json(serde_json::json!({"goals": [], "total": 0, "error": format!("{e}")}))
+                .into_response()
         }
     }
 }
 
 /// GET /api/goals/{id} — Get a specific goal by ID.
 pub async fn get_goal(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let agent_id = goals_shared_agent_id();
     match state
         .kernel
@@ -80,25 +88,34 @@ pub async fn get_goal(
     {
         Ok(Some(serde_json::Value::Array(arr))) => {
             if let Some(goal) = arr.iter().find(|g| g["id"].as_str() == Some(&id)) {
-                (StatusCode::OK, Json(goal.clone()))
+                (StatusCode::OK, Json(goal.clone())).into_response()
             } else {
-                ApiErrorResponse::not_found(format!("Goal '{}' not found", id)).into_json_tuple()
+                ApiErrorResponse::not_found(format!("Goal '{}' not found", id))
+                    .into_json_tuple()
+                    .into_response()
             }
         }
-        Ok(_) => ApiErrorResponse::not_found(format!("Goal '{}' not found", id)).into_json_tuple(),
+        Ok(_) => ApiErrorResponse::not_found(format!("Goal '{}' not found", id))
+            .into_json_tuple()
+            .into_response(),
         Err(e) => {
             tracing::warn!("Failed to load goals: {e}");
-            ApiErrorResponse::internal(format!("Failed to load goals: {e}")).into_json_tuple()
+            ApiErrorResponse::internal(format!("Failed to load goals: {e}"))
+                .into_json_tuple()
+                .into_response()
         }
     }
 }
 
 /// GET /api/goals/{id}/children — Get all direct children of a goal.
 pub async fn get_goal_children(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let agent_id = goals_shared_agent_id();
     match state
         .kernel
@@ -111,38 +128,46 @@ pub async fn get_goal_children(
                 .filter(|g| g["parent_id"].as_str() == Some(&id))
                 .collect();
             let total = children.len();
-            Json(serde_json::json!({"children": children, "total": total}))
+            Json(serde_json::json!({"children": children, "total": total})).into_response()
         }
-        Ok(_) => Json(serde_json::json!({"children": [], "total": 0})),
+        Ok(_) => Json(serde_json::json!({"children": [], "total": 0})).into_response(),
         Err(e) => {
             tracing::warn!("Failed to load goals: {e}");
             Json(serde_json::json!({"children": [], "total": 0, "error": format!("{e}")}))
+                .into_response()
         }
     }
 }
 
 /// POST /api/goals — Create a new goal.
 pub async fn create_goal(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let title = match req["title"].as_str() {
         Some(t) if !t.is_empty() => t.to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing or empty 'title' field")
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     if title.chars().count() > 256 {
-        return ApiErrorResponse::bad_request("Title too long (max 256 chars)").into_json_tuple();
+        return ApiErrorResponse::bad_request("Title too long (max 256 chars)")
+            .into_json_tuple()
+            .into_response();
     }
 
     let description = req["description"].as_str().unwrap_or("").to_string();
     if description.chars().count() > 4096 {
         return ApiErrorResponse::bad_request("Description too long (max 4096 chars)")
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     let parent_id = req["parent_id"].as_str().map(|s| s.to_string());
@@ -152,12 +177,15 @@ pub async fn create_goal(
         return ApiErrorResponse::bad_request(
             "Invalid status. Must be: pending, in_progress, completed, or cancelled",
         )
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
 
     let progress = req["progress"].as_u64().unwrap_or(0);
     if progress > 100 {
-        return ApiErrorResponse::bad_request("Progress must be 0-100").into_json_tuple();
+        return ApiErrorResponse::bad_request("Progress must be 0-100")
+            .into_json_tuple()
+            .into_response();
     }
 
     let agent_id_str = req["agent_id"].as_str().map(|s| s.to_string());
@@ -197,7 +225,8 @@ pub async fn create_goal(
         let parent_exists = goals.iter().any(|g| g["id"].as_str() == Some(pid.as_str()));
         if !parent_exists {
             return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     }
 
@@ -208,19 +237,24 @@ pub async fn create_goal(
         serde_json::Value::Array(goals),
     ) {
         tracing::warn!("Failed to save goal: {e}");
-        return ApiErrorResponse::internal(format!("Failed to save goal: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to save goal: {e}"))
+            .into_json_tuple()
+            .into_response();
     }
 
-    (StatusCode::CREATED, Json(entry))
+    (StatusCode::CREATED, Json(entry)).into_response()
 }
 
 /// PUT /api/goals/{id} — Update a goal.
 pub async fn update_goal_by_id(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let shared_id = goals_shared_agent_id();
     let mut goals: Vec<serde_json::Value> = match state
         .kernel
@@ -235,30 +269,38 @@ pub async fn update_goal_by_id(
 
     if let Some(title) = req.get("title").and_then(|v| v.as_str()) {
         if title.is_empty() {
-            return ApiErrorResponse::bad_request("Title must not be empty").into_json_tuple();
+            return ApiErrorResponse::bad_request("Title must not be empty")
+                .into_json_tuple()
+                .into_response();
         }
         if title.chars().count() > 256 {
             return ApiErrorResponse::bad_request("Title too long (max 256 chars)")
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     }
 
     if let Some(description) = req.get("description").and_then(|v| v.as_str()) {
         if description.chars().count() > 4096 {
             return ApiErrorResponse::bad_request("Description too long (max 4096 chars)")
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     }
 
     if let Some(status) = req.get("status").and_then(|v| v.as_str()) {
         if !["pending", "in_progress", "completed", "cancelled"].contains(&status) {
-            return ApiErrorResponse::bad_request("Invalid status").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid status")
+                .into_json_tuple()
+                .into_response();
         }
     }
 
     if let Some(progress) = req.get("progress").and_then(|v| v.as_u64()) {
         if progress > 100 {
-            return ApiErrorResponse::bad_request("Progress must be 0-100").into_json_tuple();
+            return ApiErrorResponse::bad_request("Progress must be 0-100")
+                .into_json_tuple()
+                .into_response();
         }
     }
 
@@ -268,12 +310,14 @@ pub async fn update_goal_by_id(
             if let Some(pid) = parent_id.as_str() {
                 if pid == id {
                     return ApiErrorResponse::bad_request("A goal cannot be its own parent")
-                        .into_json_tuple();
+                        .into_json_tuple()
+                        .into_response();
                 }
                 // Verify the target parent exists
                 if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
                     return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
-                        .into_json_tuple();
+                        .into_json_tuple()
+                        .into_response();
                 }
                 // Detect indirect cycles: walk ancestor chain from `pid` upward.
                 // Use a seen set to guard against infinite loops on corrupted data.
@@ -296,7 +340,8 @@ pub async fn update_goal_by_id(
                             return ApiErrorResponse::bad_request(
                                 "Circular parent reference detected",
                             )
-                            .into_json_tuple();
+                            .into_json_tuple()
+                            .into_response();
                         }
                         Some(ap) => ancestor = Some(ap),
                         None => break,
@@ -344,7 +389,9 @@ pub async fn update_goal_by_id(
     }
 
     if !found {
-        return ApiErrorResponse::not_found("Goal not found").into_json_tuple();
+        return ApiErrorResponse::not_found("Goal not found")
+            .into_json_tuple()
+            .into_response();
     }
 
     if let Err(e) = state.kernel.memory_substrate().structured_set(
@@ -352,21 +399,27 @@ pub async fn update_goal_by_id(
         GOALS_KEY,
         serde_json::Value::Array(goals),
     ) {
-        return ApiErrorResponse::internal(format!("Failed to update goal: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to update goal: {e}"))
+            .into_json_tuple()
+            .into_response();
     }
 
     (
         StatusCode::OK,
         Json(serde_json::json!({"status": "updated", "goal_id": id})),
     )
+        .into_response()
 }
 
 /// DELETE /api/goals/{id} — Delete a goal and all its descendants.
 pub async fn delete_goal(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let shared_id = goals_shared_agent_id();
     let mut goals: Vec<serde_json::Value> = match state
         .kernel
@@ -403,7 +456,9 @@ pub async fn delete_goal(
     });
 
     if goals.len() == before {
-        return ApiErrorResponse::not_found("Goal not found").into_json_tuple();
+        return ApiErrorResponse::not_found("Goal not found")
+            .into_json_tuple()
+            .into_response();
     }
 
     let removed = before - goals.len();
@@ -413,13 +468,16 @@ pub async fn delete_goal(
         GOALS_KEY,
         serde_json::Value::Array(goals),
     ) {
-        return ApiErrorResponse::internal(format!("Failed to delete goal: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to delete goal: {e}"))
+            .into_json_tuple()
+            .into_response();
     }
 
     (
         StatusCode::OK,
         Json(serde_json::json!({"status": "removed", "goal_id": id, "removed_count": removed})),
     )
+        .into_response()
 }
 
 /// GET /api/goals/templates — List built-in goal templates.
@@ -431,7 +489,13 @@ pub async fn delete_goal(
         (status = 200, description = "Goal templates", body = serde_json::Value)
     )
 )]
-pub async fn list_goal_templates(_account: AccountId) -> impl IntoResponse {
+pub async fn list_goal_templates(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let templates = serde_json::json!([
         {
             "id": "product_launch",
@@ -511,5 +575,5 @@ pub async fn list_goal_templates(_account: AccountId) -> impl IntoResponse {
         }
     ]);
 
-    Json(serde_json::json!({ "templates": templates }))
+    Json(serde_json::json!({ "templates": templates })).into_response()
 }

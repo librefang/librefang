@@ -1995,6 +1995,17 @@ pub struct KernelConfig {
     /// Generate with: `openssl rand -hex 32`
     #[serde(default)]
     pub account_sig_secret: Option<String>,
+    /// Account IDs that are granted admin privileges in multi-tenant mode.
+    ///
+    /// When `require_admin()` is called, requests from these accounts are
+    /// allowed through (in addition to `AccountId(None)` in single-tenant
+    /// mode). Without this, admin-guarded endpoints are unreachable when
+    /// `multi_tenant = true` since `require_account_id` middleware rejects
+    /// requests without `X-Account-Id`.
+    ///
+    /// Example: `["admin-account-001", "ops-team"]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admin_accounts: Vec<String>,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2951,6 +2962,7 @@ impl Default for KernelConfig {
             hmac_max_age_secs: default_hmac_max_age_secs(),
             multi_tenant: false,
             account_sig_secret: None,
+            admin_accounts: Vec::new(),
         }
     }
 }

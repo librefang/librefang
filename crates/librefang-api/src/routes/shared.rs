@@ -34,21 +34,30 @@ pub fn check_account(
     Ok(())
 }
 
-/// Reject scoped tenants from admin-only endpoints.
+/// Reject non-admin callers from admin-only endpoints.
 ///
-/// Returns 403 Forbidden when `AccountId(Some(_))` — these endpoints are
-/// restricted to admin/system callers (desktop mode or no X-Account-Id header).
-/// Single-tenant mode (`AccountId(None)`) passes through unchanged.
+/// Passes through when:
+/// - `AccountId(None)` — single-tenant / desktop mode (no X-Account-Id header)
+/// - `AccountId(Some(id))` where `id` is in `admin_accounts` — elevated tenant
+///
+/// Returns 403 Forbidden for all other scoped tenants.
+///
+/// `admin_accounts` comes from `KernelConfig::admin_accounts`. In multi-tenant
+/// mode, `require_account_id` middleware forces all requests to carry an
+/// `X-Account-Id`, so without this list admin-guarded endpoints would be
+/// unreachable.
 pub fn require_admin(
     account: &AccountId,
+    admin_accounts: &[String],
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    if account.0.is_some() {
-        return Err((
+    match &account.0 {
+        None => Ok(()),                                    // single-tenant / desktop mode
+        Some(id) if admin_accounts.contains(id) => Ok(()), // elevated admin tenant
+        Some(_) => Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "This endpoint requires admin access"})),
-        ));
+        )),
     }
-    Ok(())
 }
 
 /// Finalize a newly spawned agent by attaching the account ID.

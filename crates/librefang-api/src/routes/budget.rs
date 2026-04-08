@@ -150,7 +150,7 @@ pub async fn usage_by_model(
 ) -> impl IntoResponse {
     // Model-grouped usage cannot be scoped per-tenant without kernel changes.
     // Admin-only until UsageStore supports per-agent model aggregation.
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     match state.kernel.memory_substrate().usage().query_by_model() {
@@ -170,7 +170,8 @@ pub async fn usage_by_model(
             Json(serde_json::json!({"models": list}))
         }
         Err(_) => Json(serde_json::json!({"models": []})),
-    }.into_response()
+    }
+    .into_response()
 }
 
 /// GET /api/usage/by-model/performance — Get model performance metrics including latency statistics.
@@ -184,7 +185,7 @@ pub async fn usage_by_model_performance(
     State(state): State<Arc<AppState>>,
     account: AccountId,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     match state
@@ -214,7 +215,8 @@ pub async fn usage_by_model_performance(
             Json(serde_json::json!({"models": list}))
         }
         Err(_) => Json(serde_json::json!({"models": []})),
-    }.into_response()
+    }
+    .into_response()
 }
 
 /// GET /api/usage/daily — Get daily usage breakdown for the last 7 days.
@@ -228,7 +230,7 @@ pub async fn usage_daily(
     State(state): State<Arc<AppState>>,
     account: AccountId,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     let days = state
@@ -262,7 +264,8 @@ pub async fn usage_daily(
         "days": days_list,
         "today_cost_usd": today_cost.unwrap_or(0.0),
         "first_event_date": first_event.unwrap_or(None),
-    })).into_response()
+    }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +286,7 @@ pub async fn budget_status(
     account: AccountId,
 ) -> impl IntoResponse {
     // Global budget status is admin-only. Per-tenant budgets require ADR-MT-004.
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     let status = state
@@ -306,7 +309,7 @@ pub async fn update_budget(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Global budget mutation is admin-only.
-    if let Err((code, json)) = require_admin(&account) {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
     // Apply updates — accept both config field names (max_hourly_usd) and
