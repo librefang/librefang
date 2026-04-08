@@ -11,9 +11,7 @@ use librefang_types::capability::{capability_matches, Capability};
 use serde_json::json;
 use std::net::ToSocketAddrs;
 use std::path::{Component, Path};
-use std::time::Duration;
 use tracing::debug;
-use wait_timeout::ChildExt;
 
 /// Dispatch a host call to the appropriate handler.
 ///
@@ -382,91 +380,28 @@ fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
 
-    // Optional timeout (in seconds). If > 0, enforce timeout and kill on timeout.
-    let timeout_secs: u64 = params.get("timeout").and_then(|t| t.as_u64()).unwrap_or(0);
-
     // Command::new does NOT use a shell — safe from shell injection.
     // Each argument is passed directly to the process.
-    match std::process::Command::new(command)
-        .args(&args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    let mut cmd = std::process::Command::new(command);
+    cmd.args(&args);
+    #[cfg(windows)]
     {
-        Ok(mut child) => {
-            if timeout_secs > 0 {
-                let timeout = Duration::from_secs(timeout_secs);
-                match child.wait_timeout(timeout).expect("wait_timeout failed") {
-                    Some(status) => {
-                        // Process finished before timeout. wait_timeout() already
-                        // reaped the child, so read pipes manually using the exit
-                        // status it returned (do NOT call wait_with_output again).
-                        use std::io::Read;
-
-                        let mut stdout = String::new();
-                        let mut stderr = String::new();
-
-                        if let Some(mut out) = child.stdout.take() {
-                            let _ = out.read_to_string(&mut stdout);
-                        }
-                        if let Some(mut err) = child.stderr.take() {
-                            let _ = err.read_to_string(&mut stderr);
-                        }
-
-                        json!({
-                            "ok": {
-                                "exit_code": status.code(),
-                                "stdout": stdout,
-                                "stderr": stderr,
-                            }
-                        })
-                    }
-                    None => {
-                        // Timeout occurred; kill the child process and collect partial state.
-                        use std::io::Read;
-
-                        let mut stdout = String::new();
-                        let mut stderr = String::new();
-
-                        if let Some(mut out) = child.stdout.take() {
-                            let _ = out.read_to_string(&mut stdout);
-                        }
-                        if let Some(mut err) = child.stderr.take() {
-                            let _ = err.read_to_string(&mut stderr);
-                        }
-
-                        let _ = child.kill();
-                        let _ = child.wait();
-
-                        json!({
-                            "ok": {
-                                "exit_code": Option::<i32>::None,
-                                "stdout": stdout,
-                                "stderr": stderr,
-                                "timed_out": true,
-                            }
-                        })
-                    }
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    match cmd.output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            json!({
+                "ok": {
+                    "exit_code": output.status.code(),
+                    "stdout": stdout,
+                    "stderr": stderr,
                 }
-            } else {
-                // No timeout: wait for completion and capture output
-                match child.wait_with_output() {
-                    Ok(output) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                        json!({
-                            "ok": {
-                                "exit_code": output.status.code(),
-                                "stdout": stdout,
-                                "stderr": stderr,
-                            }
-                        })
-                    }
-                    Err(e) => json!({"error": format!("shell_exec failed: {e}")}),
-                }
-            }
+            })
         }
-        Err(e) => json!({"error": format!("shell_exec failed to spawn: {e}")}),
+        Err(e) => json!({"error": format!("shell_exec failed: {e}")}),
     }
 }
 
@@ -651,43 +586,6 @@ mod tests {
         let result = host_shell_exec(&state, &json!({"command": "ls"}));
         let err = result["error"].as_str().unwrap();
         assert!(err.contains("denied"));
-    }
-
-    #[tokio::test]
-    async fn test_shell_exec_timeout_kills_zombie() {
-        // Grant permission for the command 'sleep'
-        let state = test_state(vec![Capability::ShellExec("sleep".to_string())]);
-        // Execute a long sleep with a short timeout to force termination
-        let result = host_shell_exec(
-            &state,
-            &json!({"command": "sleep", "args": ["60"], "timeout": 1}),
-        );
-
-        // Expect a timeout indication in the result
-        let ok = result.get("ok").expect("Expected 'ok' field");
-        // It should contain a timed_out flag set to true
-        let timed_out = ok
-            .get("timed_out")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        assert!(
-            timed_out,
-            "Expected timeout path to be taken, got: {result}"
-        );
-
-        // The result should have exit_code: null (process was killed)
-        assert!(
-            ok.get("exit_code").is_some(),
-            "Expected exit_code field in timeout result, got: {result}"
-        );
-        assert!(
-            ok.get("exit_code").unwrap().is_null(),
-            "Expected exit_code to be null for killed process, got: {result}"
-        );
-
-        // stdout and stderr fields should exist (may be empty for sleep)
-        assert!(ok.get("stdout").is_some(), "Expected stdout field");
-        assert!(ok.get("stderr").is_some(), "Expected stderr field");
     }
 
     #[tokio::test]

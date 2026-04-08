@@ -266,7 +266,8 @@ export function ApprovalsPage() {
   const totpEnforced = totpQuery.data?.enforced ?? false;
 
   const approveMutation = useMutation({
-    mutationFn: ({ id, totpCode }: { id: string; totpCode?: string }) => approveApproval(id, totpCode),
+    mutationFn: ({ id, totpCode }: { id: string; totpCode?: string }) =>
+      approveApproval(id, totpCode),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["approvals"] }),
   });
   const rejectMutation = useMutation({
@@ -278,6 +279,7 @@ export function ApprovalsPage() {
   const pendingApprovals = approvals.filter((a) => !a.status || a.status === "pending");
 
   async function handleDecision(id: string, decision: "approve" | "reject") {
+    // If TOTP is enforced and user is approving, prompt for code
     if (decision === "approve" && totpEnforced) {
       setTotpPromptId(id);
       setTotpInput("");
@@ -286,7 +288,9 @@ export function ApprovalsPage() {
     await executeDecision(id, decision);
   }
 
-  const isValidTotpOrRecovery = (v: string) => /^\d{6}$/.test(v) || /^\d{4}-\d{4}$/.test(v);
+  // Accept 6-digit TOTP codes or xxxx-xxxx recovery codes
+  const isValidTotpOrRecovery = (v: string) =>
+    /^\d{6}$/.test(v) || /^\d{4}-\d{4}$/.test(v);
 
   async function handleTotpSubmit() {
     if (!totpPromptId || !isValidTotpOrRecovery(totpInput)) return;
@@ -305,7 +309,6 @@ export function ApprovalsPage() {
         await rejectMutation.mutateAsync(id);
         addToast(t("approvals.rejectedToast"), "success");
       }
-      // Remove from selection after resolution
       setSelected((prev) => {
         const next = new Set(prev);
         next.delete(id);
@@ -491,6 +494,38 @@ export function ApprovalsPage() {
                         </div>
                       )}
                     </div>
+                    {/* TOTP prompt */}
+                    {totpPromptId === a.id && isPending && (
+                      <div className="mt-3 flex items-center gap-2">
+                        <input
+                          type="text"
+                          maxLength={9}
+                          value={totpInput}
+                          onChange={(e) => setTotpInput(e.target.value.replace(/[^0-9-]/g, "").slice(0, 9))}
+                          placeholder="000000 / 0000-0000"
+                          className="w-40 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                          autoFocus
+                          onKeyDown={(e) => e.key === "Enter" && handleTotpSubmit()}
+                        />
+                        <Button
+                          variant="success"
+                          size="sm"
+                          onClick={handleTotpSubmit}
+                          disabled={!isValidTotpOrRecovery(totpInput) || pendingId === a.id}
+                          isLoading={pendingId === a.id}
+                        >
+                          {t("approvals.approve")}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => { setTotpPromptId(null); setTotpInput(""); }}
+                        >
+                          {t("common.cancel", "Cancel")}
+                        </Button>
+                        <span className="text-xs text-text-dim">TOTP</span>
+                      </div>
+                    )}
                     {/* Modify form */}
                     {totpPromptId === a.id && isPending && (
                       <div className="mt-3 flex items-center gap-2">

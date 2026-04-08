@@ -1287,6 +1287,8 @@ fn hook_templates(runtime: crate::plugin_runtime::PluginRuntime) -> HookFiles {
             merge_subagent: ("merge_subagent", STUB_LIFECYCLE_NATIVE),
         },
         R::Wasm => HookFiles {
+            // Wasm hooks run inline via wasmtime — no template files needed.
+            // Scaffold stubs so the directory structure is consistent.
             ingest: ("ingest.wasm", NATIVE_INGEST),
             after_turn: ("after_turn.wasm", NATIVE_AFTER_TURN),
             assemble: ("assemble.wasm", STUB_ASSEMBLE_NATIVE),
@@ -3910,18 +3912,12 @@ after_turn = "hooks/after_turn.py"
         let manifest = PluginManifest {
             name: "test".to_string(),
             version: "0.1.0".to_string(),
-            description: None,
-            author: None,
             hooks: librefang_types::config::ContextEngineHooks {
                 ingest: Some("hooks/ingest.py".to_string()),
                 after_turn: Some("hooks/after_turn.py".to_string()), // missing
                 ..Default::default()
             },
-            requirements: None,
-            env: std::collections::HashMap::new(),
-            librefang_min_version: None,
-            integrity: std::collections::HashMap::new(),
-            plugin_depends: Vec::new(),
+            ..Default::default()
         };
 
         assert!(!check_hooks_exist(&plugin_dir, &manifest));
@@ -3934,17 +3930,11 @@ after_turn = "hooks/after_turn.py"
         let manifest_escape = PluginManifest {
             name: "test".to_string(),
             version: "0.1.0".to_string(),
-            description: None,
-            author: None,
             hooks: librefang_types::config::ContextEngineHooks {
                 ingest: Some("../../etc/passwd".to_string()),
                 ..Default::default()
             },
-            requirements: None,
-            env: std::collections::HashMap::new(),
-            librefang_min_version: None,
-            integrity: std::collections::HashMap::new(),
-            plugin_depends: Vec::new(),
+            ..Default::default()
         };
         assert!(!check_hooks_exist(&plugin_dir, &manifest_escape));
     }

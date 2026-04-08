@@ -1355,7 +1355,10 @@ pub async fn batch_plugin_operation(Json(body): Json<serde_json::Value>) -> impl
                 .map(|h| serde_json::json!({"ok": true, "hashes": h}))
                 .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
             _ => {
-                serde_json::json!({"ok": false, "error": format!("Unknown operation '{operation}'")})
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!("Unknown operation '{operation}'"),
+                })
             }
         };
         results.push(serde_json::json!({"plugin": name, "result": result}));
@@ -1488,9 +1491,9 @@ pub async fn plugin_update_check(
             }
             Err(e) => (
                 StatusCode::BAD_GATEWAY,
-                Json(
-                    serde_json::json!({"error": format!("Failed to read registry response: {e}")}),
-                ),
+                Json(serde_json::json!({
+                    "error": format!("Failed to read registry response: {e}"),
+                })),
             )
                 .into_response(),
         },
@@ -1714,7 +1717,6 @@ pub async fn plugin_registry_search(
     };
 
     let index_url = format!("https://raw.githubusercontent.com/{registry}/main/index.json");
-
     if let Ok(resp) = client.get(&index_url).send().await {
         if resp.status().is_success() {
             if let Ok(index) = resp.json::<serde_json::Value>().await {
@@ -2290,8 +2292,8 @@ pub async fn context_engine_sandbox_policy(
 
     let policies: Vec<serde_json::Value> = active
         .iter()
-        .map(|plugin_name| {
-            match librefang_runtime::plugin_manager::get_plugin_info(plugin_name) {
+        .map(
+            |plugin_name| match librefang_runtime::plugin_manager::get_plugin_info(plugin_name) {
                 Ok(info) => {
                     let hooks = &info.manifest.hooks;
                     serde_json::json!({
@@ -2303,18 +2305,21 @@ pub async fn context_engine_sandbox_policy(
                         "persistent_subprocess": hooks.persistent_subprocess,
                         "prewarm_subprocesses": hooks.prewarm_subprocesses,
                         "after_turn_queue_depth": hooks.after_turn_queue_depth,
-                        "circuit_breaker": hooks.circuit_breaker.as_ref().map(|cb| serde_json::json!({
-                            "max_failures": cb.max_failures,
-                            "reset_secs": cb.reset_secs,
-                        })),
+                        "circuit_breaker": hooks
+                            .circuit_breaker
+                            .as_ref()
+                            .map(|cb| serde_json::json!({
+                                "max_failures": cb.max_failures,
+                                "reset_secs": cb.reset_secs,
+                            })),
                     })
                 }
                 Err(e) => serde_json::json!({
                     "name": plugin_name,
                     "error": e,
                 }),
-            }
-        })
+            },
+        )
         .collect();
 
     Json(serde_json::json!({
@@ -2455,13 +2460,41 @@ pub async fn plugin_health(
                     })
                 };
                 serde_json::json!({
-                    "ingest":           make_stat(metrics.ingest.calls,           metrics.ingest.failures,           metrics.ingest.total_ms),
-                    "after_turn":       make_stat(metrics.after_turn.calls,       metrics.after_turn.failures,       metrics.after_turn.total_ms),
-                    "bootstrap":        make_stat(metrics.bootstrap.calls,        metrics.bootstrap.failures,        metrics.bootstrap.total_ms),
-                    "assemble":         make_stat(metrics.assemble.calls,         metrics.assemble.failures,         metrics.assemble.total_ms),
-                    "compact":          make_stat(metrics.compact.calls,          metrics.compact.failures,          metrics.compact.total_ms),
-                    "prepare_subagent": make_stat(metrics.prepare_subagent.calls, metrics.prepare_subagent.failures, metrics.prepare_subagent.total_ms),
-                    "merge_subagent":   make_stat(metrics.merge_subagent.calls,   metrics.merge_subagent.failures,   metrics.merge_subagent.total_ms),
+                    "ingest": make_stat(
+                        metrics.ingest.calls,
+                        metrics.ingest.failures,
+                        metrics.ingest.total_ms,
+                    ),
+                    "after_turn": make_stat(
+                        metrics.after_turn.calls,
+                        metrics.after_turn.failures,
+                        metrics.after_turn.total_ms,
+                    ),
+                    "bootstrap": make_stat(
+                        metrics.bootstrap.calls,
+                        metrics.bootstrap.failures,
+                        metrics.bootstrap.total_ms,
+                    ),
+                    "assemble": make_stat(
+                        metrics.assemble.calls,
+                        metrics.assemble.failures,
+                        metrics.assemble.total_ms,
+                    ),
+                    "compact": make_stat(
+                        metrics.compact.calls,
+                        metrics.compact.failures,
+                        metrics.compact.total_ms,
+                    ),
+                    "prepare_subagent": make_stat(
+                        metrics.prepare_subagent.calls,
+                        metrics.prepare_subagent.failures,
+                        metrics.prepare_subagent.total_ms,
+                    ),
+                    "merge_subagent": make_stat(
+                        metrics.merge_subagent.calls,
+                        metrics.merge_subagent.failures,
+                        metrics.merge_subagent.total_ms,
+                    ),
                 })
             }
             None => serde_json::json!({}),
@@ -2524,18 +2557,18 @@ pub async fn install_plugin_with_deps_handler(
         .get("registry")
         .and_then(|v| v.as_str())
         .map(String::from);
-    match librefang_runtime::plugin_manager::install_plugin_with_deps(
-        &name,
-        registry.as_deref(),
-    )
-    .await
+    match librefang_runtime::plugin_manager::install_plugin_with_deps(&name, registry.as_deref())
+        .await
     {
         Ok(installed) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "installed": installed,
                 "count": installed.len(),
-                "message": format!("Installed {} plugin(s) including dependencies", installed.len()),
+                "message": format!(
+                    "Installed {} plugin(s) including dependencies",
+                    installed.len()
+                ),
             })),
         )
             .into_response(),

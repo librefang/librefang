@@ -2178,10 +2178,10 @@ function CanvasPageInner() {
           title={t("nav.scheduler")}
           subtitle={workflowName}
           initialCron="0 9 * * *"
-          onSave={async (cron) => {
+          onSave={async (cron, tz) => {
             if (!selectedWorkflow?.id) return;
             try {
-              await createSchedule({ name: `${workflowName || "workflow"} schedule`, cron, workflow_id: selectedWorkflow.id, enabled: true });
+              await createSchedule({ name: `${workflowName || "workflow"} schedule`, cron, tz, workflow_id: selectedWorkflow.id, enabled: true });
               setShowScheduleModal(false);
               showToast(t("canvas.scheduled", { defaultValue: "Schedule created" }));
             } catch (e: any) { showError(e?.message || String(e)); }

@@ -283,6 +283,7 @@ export interface ScheduleItem {
   id: string;
   name?: string;
   cron?: string;
+  tz?: string | null;
   description?: string;
   message?: string;
   enabled?: boolean;
@@ -1489,6 +1490,7 @@ export async function approveApproval(id: string, totpCode?: string): Promise<Ap
   return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/approve`, body);
 }
 
+// ── TOTP second-factor management ──
 export interface TotpSetupResponse {
   otpauth_uri: string;
   secret: string;

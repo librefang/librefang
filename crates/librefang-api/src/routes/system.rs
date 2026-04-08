@@ -200,7 +200,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::approval::ApprovalManager;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::AgentId;
@@ -208,6 +207,12 @@ use librefang_types::agent::AgentManifest;
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// TOTP helpers
+// ---------------------------------------------------------------------------
+
+use librefang_kernel::approval::ApprovalManager;
 
 // ---------------------------------------------------------------------------
 // Profile + Mode endpoints
@@ -1429,20 +1434,21 @@ pub async fn create_approval(
     )
 }
 
+/// POST /api/approvals/{id}/approve — Approve a pending request.
+///
+/// When TOTP is enabled, the request body must include a `totp_code` field.
 #[derive(serde::Deserialize, Default)]
 pub struct ApproveRequestBody {
     #[serde(default)]
-    #[allow(dead_code)]
     totp_code: Option<String>,
 }
 
-/// POST /api/approvals/{id}/approve — Approve a pending request.
 #[utoipa::path(post, path = "/api/approvals/{id}/approve", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = serde_json::Value, responses((status = 200, description = "Request approved", body = serde_json::Value)))]
 pub async fn approve_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(_body): Json<ApproveRequestBody>,
+    Json(body): Json<ApproveRequestBody>,
 ) -> axum::response::Response {
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
@@ -1454,12 +1460,106 @@ pub async fn approve_request(
         }
     };
 
+    // Verify TOTP code or recovery code if this specific tool requires it.
+    // Use per-tool check so tools not in totp_tools skip TOTP (and lockout)
+    // even when second_factor = totp is enabled globally.
+    let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
+    let tool_requires_totp = state
+        .kernel
+        .approvals()
+        .get_pending(uuid)
+        .map(|req| {
+            state
+                .kernel
+                .approvals()
+                .policy()
+                .tool_requires_totp(&req.tool_name)
+        })
+        .unwrap_or(false);
+    let totp_verified = if tool_requires_totp {
+        if state.kernel.approvals().is_totp_locked_out("api_admin") {
+            return ApiErrorResponse::bad_request(
+                "Too many failed TOTP attempts. Try again later.",
+            )
+            .into_json_tuple()
+            .into_response();
+        }
+        match body.totp_code.as_deref() {
+            Some(code) => {
+                if ApprovalManager::is_recovery_code_format(code) {
+                    match state.kernel.vault_get("totp_recovery_codes") {
+                        Some(stored) => {
+                            match librefang_kernel::approval::ApprovalManager::verify_recovery_code(
+                                &stored, code,
+                            ) {
+                                Ok((true, updated)) => {
+                                    let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                                    true
+                                }
+                                Ok((false, _)) => {
+                                    state.kernel.approvals().record_totp_failure("api_admin");
+                                    return ApiErrorResponse::bad_request("Invalid recovery code")
+                                        .into_json_tuple()
+                                        .into_response();
+                                }
+                                Err(e) => {
+                                    return ApiErrorResponse::bad_request(e)
+                                        .into_json_tuple()
+                                        .into_response();
+                                }
+                            }
+                        }
+                        None => {
+                            return ApiErrorResponse::bad_request("No recovery codes configured")
+                                .into_json_tuple()
+                                .into_response();
+                        }
+                    }
+                } else {
+                    let secret = match state.kernel.vault_get("totp_secret") {
+                        Some(s) => s,
+                        None => {
+                            return ApiErrorResponse::bad_request(
+                                "TOTP not configured. Run POST /api/approvals/totp/setup first.",
+                            )
+                            .into_json_tuple()
+                            .into_response();
+                        }
+                    };
+                    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                        &secret,
+                        code,
+                        &totp_issuer,
+                    ) {
+                        Ok(true) => true,
+                        Ok(false) => {
+                            state.kernel.approvals().record_totp_failure("api_admin");
+                            return ApiErrorResponse::bad_request("Invalid TOTP code")
+                                .into_json_tuple()
+                                .into_response();
+                        }
+                        Err(e) => {
+                            return ApiErrorResponse::bad_request(e)
+                                .into_json_tuple()
+                                .into_response();
+                        }
+                    }
+                }
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+
     match state
         .kernel
         .resolve_tool_approval(
             uuid,
             librefang_types::approval::ApprovalDecision::Approved,
             Some("api".to_string()),
+            totp_verified,
+            Some("api_admin"),
         )
         .await
     {
@@ -1470,7 +1570,7 @@ pub async fn approve_request(
             ),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple().into_response(),
     }
 }
 
@@ -1497,6 +1597,8 @@ pub async fn reject_request(
             uuid,
             librefang_types::approval::ApprovalDecision::Denied,
             Some("api".to_string()),
+            false,
+            None,
         )
         .await
     {
@@ -1551,6 +1653,8 @@ pub async fn modify_request(
             uuid,
             librefang_types::approval::ApprovalDecision::ModifyAndRetry { feedback },
             Some("api".to_string()),
+            false,
+            None,
         )
         .await
     {
@@ -1601,6 +1705,31 @@ pub async fn batch_resolve(
         }
     };
 
+    // Batch approve is incompatible with TOTP enforcement for tools that
+    // require a TOTP code. Check if any of the requested IDs need TOTP;
+    // if so, reject the batch so each can be approved individually.
+    // Batch reject is always allowed.
+    if matches!(
+        decision,
+        librefang_types::approval::ApprovalDecision::Approved
+    ) {
+        let policy = state.kernel.approvals().policy();
+        let any_needs_totp = body
+            .ids
+            .iter()
+            .filter_map(|id| uuid::Uuid::parse_str(id).ok())
+            .filter_map(|uid| state.kernel.approvals().get_pending(uid))
+            .any(|req| policy.tool_requires_totp(&req.tool_name));
+        if any_needs_totp {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "Batch approval is not available when TOTP is required for some tools. Approve those items individually with TOTP verification."
+                })),
+            );
+        }
+    }
+
     // Parse UUIDs, returning error entries for invalid ones
     let mut result_json: Vec<serde_json::Value> = Vec::with_capacity(body.ids.len());
     let mut valid_uuids = Vec::new();
@@ -1619,7 +1748,7 @@ pub async fn batch_resolve(
         let id = uuid.to_string();
         match state
             .kernel
-            .resolve_tool_approval(uuid, decision.clone(), Some("api".to_string()))
+            .resolve_tool_approval(uuid, decision.clone(), Some("api".to_string()), false, None)
             .await
         {
             Ok((resp, _)) => result_json.push(serde_json::json!({
@@ -1683,26 +1812,117 @@ pub async fn approval_count(State(state): State<Arc<AppState>>) -> impl IntoResp
     Json(serde_json::json!({"pending": pending}))
 }
 
+// ---------------------------------------------------------------------------
+// TOTP setup endpoints
+// ---------------------------------------------------------------------------
+
+/// POST /api/approvals/totp/setup — Generate a new TOTP secret and return a provisioning URI.
+///
+/// The secret is stored in the vault but not yet active. The user must call
+/// `/api/approvals/totp/confirm` with a valid code to activate TOTP.
+///
+/// If TOTP is already confirmed, the request body must include a valid
+/// `current_code` (TOTP or recovery code) to authorize the reset.
 #[derive(serde::Deserialize, Default)]
 pub struct TotpSetupBody {
+    /// Required when resetting an already-confirmed TOTP enrollment.
     #[serde(default)]
-    #[allow(dead_code)]
     current_code: Option<String>,
 }
 
 pub async fn totp_setup(
     State(state): State<Arc<AppState>>,
-    Json(_body): Json<TotpSetupBody>,
+    Json(body): Json<TotpSetupBody>,
 ) -> impl IntoResponse {
     let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
+    // If TOTP is already confirmed, require verification of the old code
+    let already_confirmed = state.kernel.vault_get("totp_confirmed").as_deref() == Some("true");
+
+    if already_confirmed {
+        if state.kernel.approvals().is_totp_locked_out("api_admin") {
+            return ApiErrorResponse::bad_request(
+                "Too many failed TOTP attempts. Try again later.",
+            )
+            .into_json_tuple();
+        }
+        match body.current_code.as_deref() {
+            None => {
+                return ApiErrorResponse::bad_request(
+                    "TOTP is already enrolled. Provide current_code (TOTP or recovery code) to reset.",
+                )
+                .into_json_tuple();
+            }
+            Some(code) => {
+                let verified = if ApprovalManager::is_recovery_code_format(code) {
+                    // Recovery code
+                    match state.kernel.vault_get("totp_recovery_codes") {
+                        Some(stored) => {
+                            match librefang_kernel::approval::ApprovalManager::verify_recovery_code(
+                                &stored, code,
+                            ) {
+                                Ok((true, updated)) => {
+                                    let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                        None => false,
+                    }
+                } else {
+                    // TOTP code
+                    match state.kernel.vault_get("totp_secret") {
+                        Some(secret) => {
+                            librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                                &secret,
+                                code,
+                                &totp_issuer,
+                            )
+                            .unwrap_or(false)
+                        }
+                        None => false,
+                    }
+                };
+                if !verified {
+                    state.kernel.approvals().record_totp_failure("api_admin");
+                    return ApiErrorResponse::bad_request(
+                        "Invalid current_code. Provide a valid TOTP or recovery code to reset.",
+                    )
+                    .into_json_tuple();
+                }
+            }
+        }
+    }
 
     let (secret_base32, otpauth_uri, qr_base64) =
-        match ApprovalManager::generate_totp_secret(&totp_issuer, "admin") {
+        match librefang_kernel::approval::ApprovalManager::generate_totp_secret(
+            &totp_issuer,
+            "admin",
+        ) {
             Ok(v) => v,
-            Err(e) => return ApiErrorResponse::internal(e).into_json_tuple(),
+            Err(e) => {
+                return ApiErrorResponse::internal(e).into_json_tuple();
+            }
         };
     let qr_data_uri = format!("data:image/png;base64,{qr_base64}");
-    let recovery_codes = ApprovalManager::generate_recovery_codes();
+
+    // Generate recovery codes
+    let recovery_codes = librefang_kernel::approval::ApprovalManager::generate_recovery_codes();
+    let recovery_json = serde_json::to_string(&recovery_codes).unwrap_or_default();
+
+    // Store secret and recovery codes in vault (not yet active — totp_confirmed = false)
+    if let Err(e) = state.kernel.vault_set("totp_secret", &secret_base32) {
+        return ApiErrorResponse::internal(e).into_json_tuple();
+    }
+    if let Err(e) = state.kernel.vault_set("totp_confirmed", "false") {
+        return ApiErrorResponse::internal(e).into_json_tuple();
+    }
+    if let Err(e) = state
+        .kernel
+        .vault_set("totp_recovery_codes", &recovery_json)
+    {
+        return ApiErrorResponse::internal(e).into_json_tuple();
+    }
 
     (
         StatusCode::OK,
@@ -1711,49 +1931,164 @@ pub async fn totp_setup(
             "secret": secret_base32,
             "qr_code": qr_data_uri,
             "recovery_codes": recovery_codes,
-            "message": "Scan the QR code or enter the secret in your authenticator app, then confirm with a valid code."
+            "message": "Scan the QR code or enter the secret in your authenticator app, then call POST /api/approvals/totp/confirm with a valid code. Save your recovery codes in a safe place."
         })),
     )
 }
 
+/// POST /api/approvals/totp/confirm — Confirm TOTP enrollment by verifying a code.
 #[derive(serde::Deserialize)]
 pub struct TotpConfirmBody {
-    #[allow(dead_code)]
     code: String,
 }
 
 pub async fn totp_confirm(
-    State(_state): State<Arc<AppState>>,
-    Json(_body): Json<TotpConfirmBody>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TotpConfirmBody>,
 ) -> impl IntoResponse {
-    ApiErrorResponse::bad_request("TOTP enrollment storage is not available on this branch yet.")
-        .into_json_tuple()
+    let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
+    if state.kernel.approvals().is_totp_locked_out("api_admin") {
+        return ApiErrorResponse::bad_request("Too many failed TOTP attempts. Try again later.")
+            .into_json_tuple();
+    }
+
+    let secret = match state.kernel.vault_get("totp_secret") {
+        Some(s) => s,
+        None => {
+            return ApiErrorResponse::bad_request(
+                "No TOTP secret found. Run POST /api/approvals/totp/setup first.",
+            )
+            .into_json_tuple();
+        }
+    };
+
+    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+        &secret,
+        &body.code,
+        &totp_issuer,
+    ) {
+        Ok(true) => {
+            if let Err(e) = state.kernel.vault_set("totp_confirmed", "true") {
+                return ApiErrorResponse::internal(e).into_json_tuple();
+            }
+            (
+                StatusCode::OK,
+                Json(
+                    serde_json::json!({"status": "confirmed", "message": "TOTP is now active. Set second_factor = \"totp\" in your config to enforce it."}),
+                ),
+            )
+        }
+        Ok(false) => {
+            state.kernel.approvals().record_totp_failure("api_admin");
+            ApiErrorResponse::bad_request(
+                "Invalid TOTP code. Check your authenticator app and try again.",
+            )
+            .into_json_tuple()
+        }
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+    }
 }
 
+/// GET /api/approvals/totp/status — Check TOTP enrollment status.
 pub async fn totp_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let has_secret = state
+        .kernel
+        .vault_get("totp_secret")
+        .is_some_and(|s| !s.is_empty());
+    let confirmed = state.kernel.vault_get("totp_confirmed").as_deref() == Some("true");
     let policy = state.kernel.approvals().policy();
     let enforced = policy.second_factor == librefang_types::approval::SecondFactor::Totp;
 
+    let remaining_recovery = state
+        .kernel
+        .vault_get("totp_recovery_codes")
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .map(|v| v.len())
+        .unwrap_or(0);
+
     Json(serde_json::json!({
-        "enrolled": false,
-        "confirmed": false,
+        "enrolled": has_secret,
+        "confirmed": confirmed,
         "enforced": enforced,
-        "remaining_recovery_codes": 0,
+        "remaining_recovery_codes": remaining_recovery,
     }))
 }
 
+/// POST /api/approvals/totp/revoke — Revoke TOTP enrollment.
+///
+/// Requires a valid TOTP or recovery code to authorize revocation.
 #[derive(serde::Deserialize)]
 pub struct TotpRevokeBody {
-    #[allow(dead_code)]
     code: String,
 }
 
 pub async fn totp_revoke(
-    State(_state): State<Arc<AppState>>,
-    Json(_body): Json<TotpRevokeBody>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TotpRevokeBody>,
 ) -> impl IntoResponse {
-    ApiErrorResponse::bad_request("TOTP enrollment storage is not available on this branch yet.")
-        .into_json_tuple()
+    let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
+    if state.kernel.approvals().is_totp_locked_out("api_admin") {
+        return ApiErrorResponse::bad_request("Too many failed TOTP attempts. Try again later.")
+            .into_json_tuple();
+    }
+
+    let confirmed = state.kernel.vault_get("totp_confirmed").as_deref() == Some("true");
+
+    if !confirmed {
+        return ApiErrorResponse::bad_request("TOTP is not enrolled.").into_json_tuple();
+    }
+
+    // Verify the provided code (recovery codes are consumed on use)
+    let verified = if ApprovalManager::is_recovery_code_format(&body.code) {
+        match state.kernel.vault_get("totp_recovery_codes") {
+            Some(stored) => {
+                match librefang_kernel::approval::ApprovalManager::verify_recovery_code(
+                    &stored, &body.code,
+                ) {
+                    Ok((true, updated)) => {
+                        let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            None => false,
+        }
+    } else {
+        match state.kernel.vault_get("totp_secret") {
+            Some(secret) => {
+                librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                    &secret,
+                    &body.code,
+                    &totp_issuer,
+                )
+                .unwrap_or(false)
+            }
+            None => false,
+        }
+    };
+
+    if !verified {
+        state.kernel.approvals().record_totp_failure("api_admin");
+        return ApiErrorResponse::bad_request(
+            "Invalid code. Provide a valid TOTP or recovery code.",
+        )
+        .into_json_tuple();
+    }
+
+    // Remove TOTP data from vault
+    // vault_set to empty/false markers (vault doesn't expose remove via kernel helper)
+    let _ = state.kernel.vault_set("totp_confirmed", "false");
+    let _ = state.kernel.vault_set("totp_secret", "");
+    let _ = state.kernel.vault_set("totp_recovery_codes", "[]");
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "revoked",
+            "message": "TOTP has been revoked. Set second_factor = \"none\" in config to disable enforcement."
+        })),
+    )
 }
 
 // ---------------------------------------------------------------------------

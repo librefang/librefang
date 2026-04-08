@@ -99,15 +99,19 @@ pub fn find_python_interpreter() -> String {
     // Try python3, then python, then the Windows Python Launcher (`py`).
     // Kept aligned with `plugin_runtime::check_runtime_status` so the
     // doctor's availability report matches what hooks actually resolve to.
-    for cmd in &["python3", "python", "py"] {
-        if std::process::Command::new(cmd)
+    for name in &["python3", "python", "py"] {
+        let mut probe = std::process::Command::new(name);
+        probe
             .arg("--version")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
+            .stderr(Stdio::null());
+        #[cfg(windows)]
         {
-            return cmd.to_string();
+            use std::os::windows::process::CommandExt;
+            probe.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        if probe.status().is_ok() {
+            return name.to_string();
         }
     }
     "python3".to_string() // default, will fail with helpful message

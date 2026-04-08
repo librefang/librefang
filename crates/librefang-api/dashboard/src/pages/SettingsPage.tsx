@@ -149,21 +149,30 @@ export function SettingsPage() {
         </div>
       </div>
 
+      {/* TOTP Second Factor */}
       <TotpSection />
 
+      {/* Config Backup */}
       <ConfigBackupSection />
     </div>
   );
 }
 
+/* ------------------------------------------------------------------ */
+/*  TOTP Management Section                                            */
+/* ------------------------------------------------------------------ */
+
 function TotpSection() {
   const { t } = useTranslation();
-  const [setupData, setSetupData] = useState<{ secret: string; qr_code: string | null; recovery_codes: string[] } | null>(null);
+  const [setupData, setSetupData] = useState<{ otpauth_uri: string; secret: string; qr_code: string | null; recovery_codes: string[] } | null>(null);
   const [confirmCode, setConfirmCode] = useState("");
+  const [resetCode, setResetCode] = useState("");
   const [revokeCode, setRevokeCode] = useState("");
+  const [showResetPrompt, setShowResetPrompt] = useState(false);
+  const [showRevokePrompt, setShowRevokePrompt] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
 
   const statusQuery = useQuery({
     queryKey: ["totp", "status"],
@@ -171,12 +180,16 @@ function TotpSection() {
     staleTime: 30_000,
   });
 
-  async function handleSetup() {
+  const status = statusQuery.data;
+
+  async function handleSetup(currentCode?: string) {
     setLoading(true);
     setError(null);
     try {
-      const data = await totpSetup();
-      setSetupData({ secret: data.secret, qr_code: data.qr_code, recovery_codes: data.recovery_codes });
+      const data = await totpSetup(currentCode);
+      setSetupData({ otpauth_uri: data.otpauth_uri, secret: data.secret, qr_code: data.qr_code, recovery_codes: data.recovery_codes });
+      setShowResetPrompt(false);
+      setResetCode("");
     } catch (e: any) {
       setError(e.message || "Setup failed");
     } finally {
@@ -184,28 +197,24 @@ function TotpSection() {
     }
   }
 
-  async function handleConfirm() {
-    setLoading(true);
-    setError(null);
-    try {
-      await totpConfirm(confirmCode);
-      setSuccess("TOTP confirmed.");
-      setSetupData(null);
-      setConfirmCode("");
-      statusQuery.refetch();
-    } catch (e: any) {
-      setError(e.message || "Confirm failed");
-    } finally {
-      setLoading(false);
+  function initiateSetup() {
+    if (status?.confirmed) {
+      setShowResetPrompt(true);
+      setShowRevokePrompt(false);
+      setError(null);
+    } else {
+      handleSetup();
     }
   }
 
   async function handleRevoke() {
+    if (!revokeCode) return;
     setLoading(true);
     setError(null);
     try {
       await totpRevoke(revokeCode);
-      setSuccess("TOTP revoked.");
+      setSuccess("TOTP revoked. Set second_factor = \"none\" in config.");
+      setShowRevokePrompt(false);
       setRevokeCode("");
       statusQuery.refetch();
     } catch (e: any) {
@@ -215,7 +224,22 @@ function TotpSection() {
     }
   }
 
-  const status = statusQuery.data;
+  async function handleConfirm() {
+    if (confirmCode.length !== 6) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await totpConfirm(confirmCode);
+      setSuccess("TOTP confirmed. Set second_factor = \"totp\" in config to enforce.");
+      setSetupData(null);
+      setConfirmCode("");
+      statusQuery.refetch();
+    } catch (e: any) {
+      setError(e.message || "Invalid code");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
     <div className="rounded-2xl border border-border-subtle bg-surface">
@@ -233,60 +257,171 @@ function TotpSection() {
         >
           <div className="flex items-center gap-2">
             {status?.confirmed ? (
-              <Badge variant="success"><CheckCircle className="w-3 h-3 mr-1" />{t("settings.totp_enrolled", "Enrolled")}</Badge>
+              <Badge variant="success">
+                <CheckCircle className="w-3 h-3 mr-1" />
+                {t("settings.totp_enrolled", "Enrolled")}
+              </Badge>
             ) : (
-              <Badge variant="default"><XCircle className="w-3 h-3 mr-1" />{t("settings.totp_not_enrolled", "Not enrolled")}</Badge>
+              <Badge variant="default">
+                <XCircle className="w-3 h-3 mr-1" />
+                {t("settings.totp_not_enrolled", "Not enrolled")}
+              </Badge>
             )}
-            {status?.enforced && <Badge variant="info">{t("settings.totp_enforced", "Enforced")}</Badge>}
+            {status?.enforced && (
+              <Badge variant="info">{t("settings.totp_enforced", "Enforced")}</Badge>
+            )}
           </div>
         </SettingRow>
-        <div className="py-4 flex flex-col gap-3">
-          {!setupData ? (
-            <div className="flex gap-2 flex-wrap">
-              <Button variant="secondary" size="sm" onClick={handleSetup} isLoading={loading}>
-                {t("settings.totp_setup", "Set up TOTP")}
+
+        {/* Recovery codes warning */}
+        {status?.confirmed && status.remaining_recovery_codes <= 2 && (
+          <div className="px-1 py-2 text-sm text-warning flex items-center gap-2">
+            <Shield className="w-4 h-4 shrink-0" />
+            {status.remaining_recovery_codes === 0
+              ? t("settings.totp_no_recovery", "No recovery codes remaining. Reset TOTP to generate new ones.")
+              : t("settings.totp_low_recovery", {
+                  defaultValue: "Only {{count}} recovery code(s) remaining.",
+                  count: status.remaining_recovery_codes,
+                })}
+          </div>
+        )}
+
+        {/* Setup flow */}
+        <div className="py-4">
+          {showResetPrompt && !setupData ? (
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={resetCode}
+                onChange={(e) => setResetCode(e.target.value)}
+                placeholder={t("settings.totp_reset_placeholder", "Current TOTP or recovery code")}
+                className="w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                onKeyDown={(e) => e.key === "Enter" && resetCode && handleSetup(resetCode)}
+              />
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => handleSetup(resetCode)}
+                disabled={!resetCode || loading}
+                isLoading={loading}
+              >
+                {t("settings.totp_verify_reset", "Verify & Reset")}
               </Button>
+              <Button variant="ghost" size="sm" onClick={() => { setShowResetPrompt(false); setResetCode(""); }}>
+                {t("common.cancel", "Cancel")}
+              </Button>
+            </div>
+          ) : showRevokePrompt && !setupData ? (
+            <div className="flex items-center gap-2">
               <input
                 type="text"
                 value={revokeCode}
                 onChange={(e) => setRevokeCode(e.target.value)}
                 placeholder={t("settings.totp_revoke_placeholder", "TOTP or recovery code")}
-                className="w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono"
+                className="w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                onKeyDown={(e) => e.key === "Enter" && revokeCode && handleRevoke()}
               />
-              <Button variant="danger" size="sm" onClick={handleRevoke} disabled={!revokeCode || loading}>
-                {t("settings.totp_revoke", "Revoke TOTP")}
+              <Button variant="danger" size="sm" onClick={handleRevoke} disabled={!revokeCode || loading} isLoading={loading}>
+                {t("settings.totp_confirm_revoke", "Confirm Revoke")}
               </Button>
+              <Button variant="ghost" size="sm" onClick={() => { setShowRevokePrompt(false); setRevokeCode(""); }}>
+                {t("common.cancel", "Cancel")}
+              </Button>
+            </div>
+          ) : !setupData ? (
+            <div className="flex gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={initiateSetup}
+                isLoading={loading}
+              >
+                {status?.confirmed
+                  ? t("settings.totp_reset", "Reset TOTP")
+                  : t("settings.totp_setup", "Set up TOTP")}
+              </Button>
+              {status?.confirmed && (
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => { setShowRevokePrompt(true); setShowResetPrompt(false); setError(null); }}
+                >
+                  {t("settings.totp_revoke", "Revoke TOTP")}
+                </Button>
+              )}
             </div>
           ) : (
             <div className="flex flex-col gap-3">
-              {setupData.qr_code && <img src={setupData.qr_code} alt="TOTP QR Code" className="w-48 h-48 rounded-xl border border-border-subtle bg-white p-3" />}
-              <code className="block text-sm font-mono bg-main border border-border-subtle rounded-lg px-3 py-2 break-all select-all">{setupData.secret}</code>
-              <div className="grid grid-cols-2 gap-1 bg-main border border-border-subtle rounded-lg p-3">
-                {setupData.recovery_codes.map((code, i) => <code key={i} className="text-sm font-mono text-center select-all">{code}</code>)}
-              </div>
+              <p className="text-sm text-text-dim">
+                {t("settings.totp_scan", "Scan the QR code or enter the secret in your authenticator app:")}
+              </p>
+              {setupData.qr_code && (
+                <div className="flex justify-center p-4 bg-white rounded-xl border border-border-subtle">
+                  <img src={setupData.qr_code} alt="TOTP QR Code" className="w-48 h-48" />
+                </div>
+              )}
+              <code className="block text-sm font-mono bg-main border border-border-subtle rounded-lg px-3 py-2 break-all select-all">
+                {setupData.secret}
+              </code>
+              {setupData.recovery_codes.length > 0 && (
+                <div className="mt-2">
+                  <p className="text-xs font-bold text-text-dim mb-1">
+                    {t("settings.totp_recovery_title", "Recovery Codes (save these somewhere safe):")}
+                  </p>
+                  <div className="grid grid-cols-2 gap-1 bg-main border border-border-subtle rounded-lg p-3">
+                    {setupData.recovery_codes.map((code, i) => (
+                      <code key={i} className="text-sm font-mono text-center select-all">{code}</code>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 <input
                   type="text"
                   inputMode="numeric"
                   maxLength={6}
+                  pattern="[0-9]*"
                   value={confirmCode}
                   onChange={(e) => setConfirmCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
                   placeholder="000000"
-                  className="w-28 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center"
+                  className="w-28 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                  onKeyDown={(e) => e.key === "Enter" && handleConfirm()}
                 />
-                <Button variant="primary" size="sm" onClick={handleConfirm} disabled={confirmCode.length !== 6 || loading}>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={handleConfirm}
+                  disabled={confirmCode.length !== 6 || loading}
+                  isLoading={loading}
+                >
                   {t("settings.totp_confirm", "Confirm")}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => { setSetupData(null); setConfirmCode(""); setError(null); }}
+                >
+                  {t("common.cancel", "Cancel")}
                 </Button>
               </div>
             </div>
           )}
-          {error && <p className="text-sm text-danger">{error}</p>}
-          {success && <p className="text-sm text-success">{success}</p>}
+
+          {error && (
+            <p className="mt-2 text-sm text-danger">{error}</p>
+          )}
+          {success && (
+            <p className="mt-2 text-sm text-success">{success}</p>
+          )}
         </div>
       </div>
     </div>
   );
 }
+
+/* ------------------------------------------------------------------ */
+/*  Config Backup Section                                              */
+/* ------------------------------------------------------------------ */
 
 function ConfigBackupSection() {
   const { t } = useTranslation();
@@ -303,7 +438,10 @@ function ConfigBackupSection() {
           icon={Download}
           iconColor="text-blue-500"
           label={t("settings.export_config_title", "Export Config")}
-          description={t("settings.export_config_desc", "Download a backup of your current config.toml settings file")}
+          description={t(
+            "settings.export_config_desc",
+            "Download a backup of your current config.toml settings file"
+          )}
         >
           <a href="/api/config/export" download="librefang-config.toml">
             <Button variant="secondary" size="sm">

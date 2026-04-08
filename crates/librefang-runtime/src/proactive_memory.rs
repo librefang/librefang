@@ -254,6 +254,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             prompt_caching: false,
             response_format: None,
             timeout_secs: None,
+            extra_body: None,
         };
 
         let response = self
@@ -307,6 +308,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             prompt_caching: false,
             response_format: None,
             timeout_secs: None,
+            extra_body: None,
         };
 
         match self.driver.complete(request).await {

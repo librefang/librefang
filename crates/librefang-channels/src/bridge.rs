@@ -14,7 +14,9 @@ use crate::types::{
 use async_trait::async_trait;
 use futures::StreamExt;
 use librefang_types::agent::AgentId;
-use librefang_types::config::{ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
+use librefang_types::config::{
+    AutoRouteStrategy, ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat,
+};
 use librefang_types::message::ContentBlock;
 use regex::RegexSet;
 use std::collections::HashMap;
@@ -253,7 +255,17 @@ pub trait ChannelBridgeHandle: Send + Sync {
     }
 
     /// Approve or reject a pending approval by UUID prefix.
-    async fn resolve_approval_text(&self, _id_prefix: &str, _approve: bool) -> String {
+    ///
+    /// When `totp_code` is provided, it is used for TOTP second-factor
+    /// verification on approve actions. `sender_id` identifies the user for
+    /// per-user TOTP failure tracking.
+    async fn resolve_approval_text(
+        &self,
+        _id_prefix: &str,
+        _approve: bool,
+        _totp_code: Option<&str>,
+        _sender_id: &str,
+    ) -> String {
         "Approvals not available.".to_string()
     }
 
@@ -714,6 +726,7 @@ fn flush_debounced(
                 ct_str,
                 thread_id,
                 output_format,
+                overrides.as_ref(),
                 journal.as_ref(),
             )
             .await;
@@ -1356,7 +1369,29 @@ fn should_process_group_message(
 }
 
 /// Build a `SenderContext` from an incoming `ChannelMessage`.
-fn build_sender_context(message: &ChannelMessage) -> SenderContext {
+///
+/// Per-channel auto-routing fields are populated from `overrides` when provided,
+/// and default to `AutoRouteStrategy::Off` / zeros otherwise.
+fn build_sender_context(
+    message: &ChannelMessage,
+    overrides: Option<&ChannelOverrides>,
+) -> SenderContext {
+    let (
+        auto_route,
+        auto_route_ttl_minutes,
+        auto_route_confidence_threshold,
+        auto_route_sticky_bonus,
+        auto_route_divergence_count,
+    ) = match overrides {
+        Some(ov) => (
+            ov.auto_route.clone(),
+            ov.auto_route_ttl_minutes,
+            ov.auto_route_confidence_threshold,
+            ov.auto_route_sticky_bonus,
+            ov.auto_route_divergence_count,
+        ),
+        None => (AutoRouteStrategy::Off, 0, 0, 0, 0),
+    };
     SenderContext {
         channel: channel_type_str(&message.channel).to_string(),
         user_id: sender_user_id(message).to_string(),
@@ -1373,6 +1408,11 @@ fn build_sender_context(message: &ChannelMessage) -> SenderContext {
             .get("account_id")
             .and_then(|v| v.as_str())
             .map(String::from),
+        auto_route,
+        auto_route_ttl_minutes,
+        auto_route_confidence_threshold,
+        auto_route_sticky_bonus,
+        auto_route_divergence_count,
     }
 }
 
@@ -1803,6 +1843,7 @@ async fn dispatch_message(
                 ct_str,
                 thread_id,
                 output_format,
+                overrides.as_ref(),
                 journal,
             )
             .await;
@@ -2103,7 +2144,7 @@ async fn dispatch_message(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
     // Build sender context to propagate identity to the agent
-    let sender_ctx = build_sender_context(message);
+    let sender_ctx = build_sender_context(message, overrides.as_ref());
 
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
@@ -2427,7 +2468,45 @@ async fn download_image_to_blocks(
         }];
     }
 
-    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    // Downscale large images so batches of many photos fit within the LLM
+    // context window.  Max dimension 1024px keeps enough detail for analysis
+    // while reducing a 3 MB photo to ~80-150 KB of JPEG.
+    const MAX_DIMENSION: u32 = 1024;
+    const DOWNSCALE_THRESHOLD: usize = 200 * 1024; // only resize if > 200 KB
+    let final_bytes: Vec<u8>;
+    let final_media_type: String;
+    if bytes.len() > DOWNSCALE_THRESHOLD {
+        match image::load_from_memory(&bytes) {
+            Ok(img) => {
+                let resized = img.resize(
+                    MAX_DIMENSION,
+                    MAX_DIMENSION,
+                    image::imageops::FilterType::Triangle,
+                );
+                let mut buf = std::io::Cursor::new(Vec::new());
+                if resized.write_to(&mut buf, image::ImageFormat::Jpeg).is_ok() {
+                    final_bytes = buf.into_inner();
+                    final_media_type = "image/jpeg".to_string();
+                    tracing::debug!(
+                        original_kb = bytes.len() / 1024,
+                        resized_kb = final_bytes.len() / 1024,
+                        "Downscaled image for LLM context budget"
+                    );
+                } else {
+                    final_bytes = bytes.to_vec();
+                    final_media_type = media_type;
+                }
+            }
+            Err(_) => {
+                // Can't decode (e.g. exotic format) — send as-is
+                final_bytes = bytes.to_vec();
+                final_media_type = media_type;
+            }
+        }
+    } else {
+        final_bytes = bytes.to_vec();
+        final_media_type = media_type;
+    }
 
     let mut blocks = Vec::new();
 
@@ -2441,7 +2520,59 @@ async fn download_image_to_blocks(
         }
     }
 
-    blocks.push(ContentBlock::Image { media_type, data });
+    // Save image to disk instead of base64-encoding into the session.
+    // A 3 MB photo becomes ~100 KB on disk with only a short path in the session.
+    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+
+    let ext = match final_media_type.as_str() {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "jpg",
+    };
+
+    // Ensure upload directory exists (BRDG-04)
+    if let Err(e) = tokio::fs::create_dir_all(&upload_dir).await {
+        warn!("Failed to create upload dir {}: {e}", upload_dir.display());
+        // Fallback to base64 inline encoding
+        let data = base64::engine::general_purpose::STANDARD.encode(&final_bytes);
+        blocks.push(ContentBlock::Image {
+            media_type: final_media_type,
+            data,
+        });
+        return blocks;
+    }
+
+    let filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+    let file_path = upload_dir.join(&filename);
+
+    // Save image to disk (BRDG-01)
+    match tokio::fs::write(&file_path, &final_bytes).await {
+        Ok(()) => {
+            tracing::debug!(
+                path = %file_path.display(),
+                size_kb = final_bytes.len() / 1024,
+                "Saved channel image to disk"
+            );
+            // Return ImageFile with absolute path (BRDG-02)
+            blocks.push(ContentBlock::ImageFile {
+                media_type: final_media_type,
+                path: file_path.to_string_lossy().into_owned(),
+            });
+        }
+        Err(e) => {
+            warn!(
+                "Failed to write image to {}: {e} — falling back to base64",
+                file_path.display()
+            );
+            let data = base64::engine::general_purpose::STANDARD.encode(&final_bytes);
+            blocks.push(ContentBlock::Image {
+                media_type: final_media_type,
+                data,
+            });
+        }
+    }
 
     blocks
 }
@@ -2458,6 +2589,7 @@ async fn dispatch_with_blocks(
     ct_str: &str,
     thread_id: Option<&str>,
     output_format: OutputFormat,
+    overrides: Option<&ChannelOverrides>,
     journal: Option<&crate::message_journal::MessageJournal>,
 ) {
     let agent_id = match resolve_or_fallback(message, handle, router).await {
@@ -2523,7 +2655,7 @@ async fn dispatch_with_blocks(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
     // Build sender context to propagate identity to the agent
-    let sender_ctx = build_sender_context(message);
+    let sender_ctx = build_sender_context(message, overrides);
 
     match handle
         .send_message_with_blocks_and_sender(agent_id, blocks.clone(), &sender_ctx)
@@ -2877,16 +3009,21 @@ async fn handle_command(
         "approvals" => handle.list_approvals_text().await,
         "approve" => {
             if args.is_empty() {
-                "Usage: /approve <id-prefix>".to_string()
+                "Usage: /approve <id-prefix> [totp-code]".to_string()
             } else {
-                handle.resolve_approval_text(&args[0], true).await
+                let totp_code = args.get(1).map(|s| s.as_str());
+                handle
+                    .resolve_approval_text(&args[0], true, totp_code, &sender.platform_id)
+                    .await
             }
         }
         "reject" => {
             if args.is_empty() {
                 "Usage: /reject <id-prefix>".to_string()
             } else {
-                handle.resolve_approval_text(&args[0], false).await
+                handle
+                    .resolve_approval_text(&args[0], false, None, &sender.platform_id)
+                    .await
             }
         }
 

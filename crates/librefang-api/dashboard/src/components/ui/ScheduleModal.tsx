@@ -13,6 +13,7 @@ interface ScheduleModalProps {
   onClose: () => void;
 }
 
+/** Common IANA timezones for the picker. */
 const COMMON_TIMEZONES = [
   "UTC",
   "America/New_York",
@@ -259,6 +260,7 @@ export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave,
           })()}
         </div>
 
+        {/* Timezone picker */}
         <div className="mx-5 mt-1 mb-2 flex items-center gap-2">
           <label className="text-[10px] font-bold text-text-dim/50 uppercase shrink-0">{t("scheduler.timezone", { defaultValue: "Timezone" })}</label>
           <select value={timezone} onChange={e => setTimezone(e.target.value)}

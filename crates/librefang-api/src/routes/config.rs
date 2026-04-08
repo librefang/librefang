@@ -87,6 +87,8 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         }
         #[cfg(windows)]
         {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             std::process::Command::new("tasklist")
                 .args([
                     "/FI",
@@ -95,6 +97,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                     "CSV",
                     "/NH",
                 ])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output()
                 .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -1121,66 +1124,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Json(serde_json::Value::Object(out))
 }
 
-/// GET /api/config/export — Download config.toml as a file attachment.
-#[utoipa::path(
-    get,
-    path = "/api/config/export",
-    tag = "system",
-    responses(
-        (status = 200, description = "config.toml file download", content_type = "application/toml")
-    )
-)]
-pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    use axum::body::Body;
-
-    let config_path = state.kernel.home_dir().join("config.toml");
-
-    let toml_content = if config_path.exists() {
-        match std::fs::read_to_string(&config_path) {
-            Ok(content) => content,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    [(axum::http::header::CONTENT_TYPE, "application/json")],
-                    Body::from(
-                        serde_json::json!({"status": "error", "error": format!("failed to read config: {e}")})
-                            .to_string(),
-                    ),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        match toml::to_string_pretty(&**state.kernel.config_ref()) {
-            Ok(s) => s,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    [(axum::http::header::CONTENT_TYPE, "application/json")],
-                    Body::from(
-                        serde_json::json!({"status": "error", "error": format!("failed to serialize config: {e}")})
-                            .to_string(),
-                    ),
-                )
-                    .into_response();
-            }
-        }
-    };
-
-    (
-        StatusCode::OK,
-        [
-            (axum::http::header::CONTENT_TYPE, "application/toml"),
-            (
-                axum::http::header::CONTENT_DISPOSITION,
-                "attachment; filename=\"librefang-config.toml\"",
-            ),
-        ],
-        Body::from(toml_content),
-    )
-        .into_response()
-}
-
 // ---------------------------------------------------------------------------
 // Migration endpoint
 // ---------------------------------------------------------------------------
@@ -1503,6 +1446,74 @@ pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoRespo
             Json(serde_json::json!({"status": "error", "error": e})),
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Config Export endpoint
+// ---------------------------------------------------------------------------
+
+/// GET /api/config/export — Download config.toml as a file attachment.
+///
+/// Reads the raw config.toml from disk. If the file does not exist, falls back
+/// to serializing the in-memory config so a download is always available.
+#[utoipa::path(
+    get,
+    path = "/api/config/export",
+    tag = "system",
+    responses(
+        (status = 200, description = "config.toml file download", content_type = "application/toml")
+    )
+)]
+pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use axum::body::Body;
+
+    let config_path = state.kernel.home_dir().join("config.toml");
+
+    let toml_content = if config_path.exists() {
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => content,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    Body::from(
+                        serde_json::json!({"status": "error", "error": format!("failed to read config: {e}")})
+                            .to_string(),
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        // Fall back to serializing in-memory config
+        match toml::to_string_pretty(&**state.kernel.config_ref()) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    Body::from(
+                        serde_json::json!({"status": "error", "error": format!("failed to serialize config: {e}")})
+                            .to_string(),
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/toml"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"librefang-config.toml\"",
+            ),
+        ],
+        Body::from(toml_content),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

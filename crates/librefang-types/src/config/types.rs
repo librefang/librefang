@@ -50,6 +50,26 @@ pub enum OutputFormat {
     PlainText,
 }
 
+/// Auto-routing strategy for a channel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoRouteStrategy {
+    /// Disable auto-routing entirely (default). Channel messages always go to
+    /// the configured agent without keyword/semantic classification.
+    #[default]
+    Off,
+    /// Only route if the cache already has an entry; never trigger LLM
+    /// classification on the first message.
+    ExplicitOnly,
+    /// Use the cached route for up to `auto_route_ttl_minutes`; re-classify
+    /// via LLM once the TTL expires.
+    StickyTtl,
+    /// Use a cheap metadata heuristic to decide whether the cached route is
+    /// still valid; fall back to full LLM classification after
+    /// `auto_route_divergence_count` consecutive mismatches.
+    StickyHeuristic,
+}
+
 /// Per-channel behavior overrides.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -122,6 +142,24 @@ pub struct ChannelOverrides {
     /// the agent.
     #[serde(default)]
     pub blocked_commands: Vec<String>,
+    /// Auto-routing strategy for this channel. Defaults to `off` (no routing).
+    #[serde(default)]
+    pub auto_route: AutoRouteStrategy,
+    /// How long (in minutes) a cached route stays valid for `sticky_ttl` strategy.
+    #[serde(default = "default_auto_route_ttl")]
+    pub auto_route_ttl_minutes: u32,
+    /// Minimum heuristic confidence score (0–10) before a route is cached for
+    /// `sticky_heuristic` strategy.
+    #[serde(default = "default_auto_route_confidence")]
+    pub auto_route_confidence_threshold: u32,
+    /// Extra score added to the cached route in `sticky_heuristic` to prefer
+    /// stability over churn.
+    #[serde(default = "default_auto_route_bonus")]
+    pub auto_route_sticky_bonus: u32,
+    /// How many consecutive heuristic mismatches trigger a full LLM
+    /// re-classification in `sticky_heuristic` mode.
+    #[serde(default = "default_auto_route_divergence")]
+    pub auto_route_divergence_count: u32,
 }
 
 impl Default for ChannelOverrides {
@@ -145,6 +183,11 @@ impl Default for ChannelOverrides {
             disable_commands: false,
             allowed_commands: Vec::new(),
             blocked_commands: Vec::new(),
+            auto_route: AutoRouteStrategy::Off,
+            auto_route_ttl_minutes: default_auto_route_ttl(),
+            auto_route_confidence_threshold: default_auto_route_confidence(),
+            auto_route_sticky_bonus: default_auto_route_bonus(),
+            auto_route_divergence_count: default_auto_route_divergence(),
         }
     }
 }
@@ -155,6 +198,22 @@ fn default_message_debounce_max_ms() -> u64 {
 
 fn default_message_debounce_max_buffer() -> usize {
     64
+}
+
+fn default_auto_route_ttl() -> u32 {
+    30
+}
+
+fn default_auto_route_confidence() -> u32 {
+    6
+}
+
+fn default_auto_route_bonus() -> u32 {
+    4
+}
+
+fn default_auto_route_divergence() -> u32 {
+    2
 }
 
 /// Controls what usage info appears in response footers.
@@ -2532,7 +2591,7 @@ pub enum HookFailurePolicy {
 /// ingest = "hooks/ingest.py"      # relative to plugin dir
 /// after_turn = "hooks/after_turn.py"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginManifest {
     /// Plugin name (must match directory name).
     pub name: String,
@@ -3439,6 +3498,10 @@ pub struct DefaultModelConfig {
     /// many seconds of silence on stdout, not wall-clock time.
     #[serde(default = "default_message_timeout_secs")]
     pub message_timeout_secs: u64,
+    /// Provider-specific extension parameters that are flattened directly
+    /// into the API request body.
+    #[serde(default, flatten)]
+    pub extra_params: HashMap<String, serde_json::Value>,
 }
 
 fn default_message_timeout_secs() -> u64 {
@@ -3453,6 +3516,7 @@ impl Default for DefaultModelConfig {
             api_key_env: String::new(),
             base_url: None,
             message_timeout_secs: default_message_timeout_secs(),
+            extra_params: HashMap::new(),
         }
     }
 }

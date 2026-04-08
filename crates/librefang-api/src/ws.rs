@@ -560,6 +560,7 @@ async fn handle_text_message(
                 was_mentioned: false,
                 thread_id: None,
                 account_id: None,
+                ..Default::default()
             };
             match state
                 .kernel

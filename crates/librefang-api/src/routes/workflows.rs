@@ -1287,6 +1287,7 @@ pub async fn create_schedule(
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
+    // Validate timezone string if provided
     if let Some(ref tz_str) = tz {
         if tz_str != "UTC" && tz_str.parse::<chrono_tz::Tz>().is_err() {
             return ApiErrorResponse::bad_request(format!(
@@ -1368,12 +1369,16 @@ pub async fn update_schedule(
     if let Some(name) = req.get("name") {
         updates.insert("name".to_string(), name.clone());
     }
+    // Read tz from the request (if provided).  When the caller sends
+    // a new `cron` expression we must carry over the timezone — otherwise
+    // replacing the entire schedule object would reset tz to null.
     let req_tz = req
         .get("tz")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
+    // Validate timezone string if provided
     if let Some(ref tz_str) = req_tz {
         if tz_str != "UTC" && tz_str.parse::<chrono_tz::Tz>().is_err() {
             return ApiErrorResponse::bad_request(format!(
@@ -1388,6 +1393,7 @@ pub async fn update_schedule(
         if cron_parts.len() != 5 {
             return ApiErrorResponse::bad_request("Invalid cron expression").into_json_tuple();
         }
+        // If tz not in this request, preserve the existing tz from the job.
         let tz = req_tz.clone().or_else(|| {
             state.kernel.cron().get_meta(job_id).and_then(|meta| {
                 if let librefang_types::scheduler::CronSchedule::Cron { tz, .. } =
@@ -1404,6 +1410,7 @@ pub async fn update_schedule(
             serde_json::json!({"kind": "cron", "expr": cron, "tz": tz}),
         );
     } else if req_tz.is_some() {
+        // Caller wants to change only the timezone — read current cron expr.
         if let Some(meta) = state.kernel.cron().get_meta(job_id) {
             if let librefang_types::scheduler::CronSchedule::Cron { expr, .. } = &meta.job.schedule
             {

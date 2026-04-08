@@ -122,6 +122,7 @@ impl PiiFilter {
                     .account_id
                     .as_ref()
                     .map(|_| REDACTED_PLACEHOLDER.to_string()),
+                ..Default::default()
             },
             PrivacyMode::Pseudonymize => {
                 let pseudo_name = self.get_or_create_pseudonym(&sender.display_name, "user");
@@ -137,6 +138,7 @@ impl PiiFilter {
                         .account_id
                         .as_ref()
                         .map(|id| self.get_or_create_pseudonym(id, "account")),
+                    ..Default::default()
                 }
             }
         }
@@ -354,6 +356,7 @@ mod tests {
             was_mentioned: false,
             thread_id: None,
             account_id: Some("acct-1".to_string()),
+            ..Default::default()
         };
         let result = filter.filter_sender_context(&sender, &PrivacyMode::Redact);
         assert_eq!(result.user_id, REDACTED_PLACEHOLDER);
@@ -375,6 +378,7 @@ mod tests {
             was_mentioned: false,
             thread_id: Some("thread-1".to_string()),
             account_id: None,
+            ..Default::default()
         };
         let result = filter.filter_sender_context(&sender, &PrivacyMode::Pseudonymize);
         assert_ne!(result.user_id, "uid-999");
@@ -396,6 +400,7 @@ mod tests {
             was_mentioned: false,
             thread_id: None,
             account_id: None,
+            ..Default::default()
         };
         let result = filter.filter_sender_context(&sender, &PrivacyMode::Off);
         assert_eq!(result.user_id, "U123");

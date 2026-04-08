@@ -612,10 +612,11 @@ export function WorkflowsPage() {
           title={t("nav.scheduler")}
           subtitle={workflows.find(w => w.id === scheduleWorkflowId)?.name}
           initialCron={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.cron || "0 9 * * *"}
-          onSave={async (cron) => {
+          initialTz={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.tz}
+          onSave={async (cron, tz) => {
             const wf = workflows.find(w => w.id === scheduleWorkflowId);
             try {
-              await createSchedule({ name: `${wf?.name || "workflow"} schedule`, cron, workflow_id: scheduleWorkflowId, enabled: true });
+              await createSchedule({ name: `${wf?.name || "workflow"} schedule`, cron, tz, workflow_id: scheduleWorkflowId, enabled: true });
               setScheduleWorkflowId(null);
               await queryClient.invalidateQueries({ queryKey: ["workflows"] });
             } catch { /* ignore */ }

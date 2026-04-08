@@ -152,20 +152,21 @@ impl ChannelAdapter for SidecarAdapter {
             "Starting sidecar channel adapter"
         );
 
-        let mut child = Command::new(&self.command)
-            .args(&self.args)
+        let mut cmd = Command::new(&self.command);
+        cmd.args(&self.args)
             .envs(&self.env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                format!(
-                    "Failed to spawn sidecar '{}' ({}): {e}",
-                    self.name, self.command
-                )
-            })?;
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let mut child = cmd.spawn().map_err(|e| {
+            format!(
+                "Failed to spawn sidecar '{}' ({}): {e}",
+                self.name, self.command
+            )
+        })?;
 
         // Take ownership of stdin
         let child_stdin = child
