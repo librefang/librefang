@@ -1665,7 +1665,10 @@ pub async fn batch_resolve(
     // require a TOTP code. Check if any of the requested IDs need TOTP;
     // if so, reject the batch so each can be approved individually.
     // Batch reject is always allowed.
-    if matches!(decision, librefang_types::approval::ApprovalDecision::Approved) {
+    if matches!(
+        decision,
+        librefang_types::approval::ApprovalDecision::Approved
+    ) {
         let policy = state.kernel.approvals().policy();
         let any_needs_totp = body
             .ids

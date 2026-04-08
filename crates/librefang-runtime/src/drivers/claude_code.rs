@@ -1144,9 +1144,6 @@ mod tests {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output();
-        assert!(
-            output.is_err(),
-            "spawning a nonexistent binary should fail"
-        );
+        assert!(output.is_err(), "spawning a nonexistent binary should fail");
     }
 }

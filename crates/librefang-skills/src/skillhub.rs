@@ -496,6 +496,9 @@ mod tests {
         assert_eq!(percent_encode("hello world"), "hello+world");
         assert_eq!(percent_encode("rust"), "rust");
         assert_eq!(percent_encode("a&b=c"), "a%26b%3Dc");
-        assert_eq!(percent_encode("hello-world_2.0~test"), "hello-world_2.0~test");
+        assert_eq!(
+            percent_encode("hello-world_2.0~test"),
+            "hello-world_2.0~test"
+        );
     }
 }
