@@ -84,15 +84,28 @@ impl<'a> TelegramApiCtx<'a> {
     /// Resolve a Telegram file_id to a download URL via the Bot API.
     async fn get_file_url(&self, file_id: &str) -> Option<String> {
         let url = format!("{}/bot{}/getFile", self.api_base_url, self.token);
-        let resp = self
+        let resp = match self
             .client
             .post(&url)
             .json(&serde_json::json!({"file_id": file_id}))
             .send()
             .await
-            .ok()?;
-        let body: serde_json::Value = resp.json().await.ok()?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("Telegram getFile request failed for {file_id}: {e}");
+                return None;
+            }
+        };
+        let body: serde_json::Value = match resp.json().await {
+            Ok(b) => b,
+            Err(e) => {
+                debug!("Telegram getFile parse failed for {file_id}: {e}");
+                return None;
+            }
+        };
         if body["ok"].as_bool() != Some(true) {
+            debug!("Telegram getFile returned ok=false for {file_id}: {body}");
             return None;
         }
         let file_path = body["result"]["file_path"].as_str()?;
@@ -320,7 +333,9 @@ impl TelegramAdapter {
                 let resp2 = self.client.post(&url).json(&body).send().await?;
                 if !resp2.status().is_success() {
                     let body_text2 = resp2.text().await.unwrap_or_default();
-                    warn!("Telegram {endpoint} failed after retry: {body_text2}");
+                    return Err(
+                        format!("Telegram {endpoint} failed after retry: {body_text2}").into(),
+                    );
                 }
                 return Ok(());
             }
@@ -423,7 +438,10 @@ impl TelegramAdapter {
                 let resp2 = self.client.post(&url).multipart(retry_form).send().await?;
                 if !resp2.status().is_success() {
                     let body_text2 = resp2.text().await.unwrap_or_default();
-                    warn!("Telegram sendDocument upload failed after retry: {body_text2}");
+                    return Err(format!(
+                        "Telegram sendDocument upload failed after retry: {body_text2}"
+                    )
+                    .into());
                 }
                 return Ok(());
             }
@@ -1218,7 +1236,7 @@ fn ends_with_ascii_ci(haystack: &str, suffix: &str) -> bool {
     if haystack.len() < suffix.len() {
         return false;
     }
-    haystack[haystack.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+    haystack.as_bytes()[haystack.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
 }
 
 /// Detect image MIME type from a Telegram file path or download URL.
