@@ -25,7 +25,7 @@ import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pa
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
 
-const REFRESH_MS = 30000;
+const REFRESH_MS = 5000;
 
 export function AgentsPage() {
   const { t } = useTranslation();
@@ -255,11 +255,11 @@ export function AgentsPage() {
         </div>
         <div className="pt-4 border-t border-border-subtle/30 flex gap-2">
           {isSuspended ? (
-            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); await resumeAgent(agent.id); agentsQuery.refetch(); }}>
+            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); await resumeAgent(agent.id); agentsQuery.refetch(); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); }}>
               <Play className="h-3.5 w-3.5 mr-1" /> {t("agents.resume")}
             </Button>
           ) : (
-            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); await suspendAgent(agent.id); agentsQuery.refetch(); }}>
+            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); await suspendAgent(agent.id); agentsQuery.refetch(); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); }}>
               <Pause className="h-3.5 w-3.5 mr-1" /> {t("agents.suspend")}
             </Button>
           )}
@@ -629,12 +629,12 @@ export function AgentsPage() {
                 {/* Management actions */}
                 <div className="grid grid-cols-4 gap-2">
                   {isDetailSuspended ? (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await resumeAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await resumeAgent(detailAgent.id); agentsQuery.refetch(); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
                       <Play className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.resume")}</span>
                     </Button>
                   ) : (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await suspendAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await suspendAgent(detailAgent.id); agentsQuery.refetch(); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
                       <Pause className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.suspend")}</span>
                     </Button>
