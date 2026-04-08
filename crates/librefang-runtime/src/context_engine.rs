@@ -4041,8 +4041,7 @@ pub fn build_context_engine(
                             || hooks.prepare_subagent.is_some()
                             || hooks.merge_subagent.is_some()
                         {
-                            let mut env: Vec<(String, String)> =
-                                manifest.env.into_iter().collect();
+                            let mut env: Vec<(String, String)> = manifest.env.into_iter().collect();
                             let vault_env = resolve_vault_env_vars(&hooks, vault_lookup);
                             env.extend(vault_env);
                             engines.push(Box::new(
