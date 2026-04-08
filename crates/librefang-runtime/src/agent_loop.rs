@@ -949,7 +949,13 @@ pub async fn run_agent_loop(
         // Context assembly — use context engine if available, else inline logic
         if let Some(engine) = context_engine {
             let result = engine
-                .assemble(session.agent_id, &mut messages, &system_prompt, available_tools, ctx_window)
+                .assemble(
+                    session.agent_id,
+                    &mut messages,
+                    &system_prompt,
+                    available_tools,
+                    ctx_window,
+                )
                 .await?;
             if result.recovery == RecoveryStage::FinalError {
                 warn!("Context overflow unrecoverable — suggest /reset or /compact");
@@ -2521,7 +2527,13 @@ pub async fn run_agent_loop_streaming(
         // Context assembly — use context engine if available, else inline logic
         let recovery = if let Some(engine) = context_engine {
             let result = engine
-                .assemble(session.agent_id, &mut messages, &system_prompt, available_tools, ctx_window)
+                .assemble(
+                    session.agent_id,
+                    &mut messages,
+                    &system_prompt,
+                    available_tools,
+                    ctx_window,
+                )
                 .await?;
             result.recovery
         } else {

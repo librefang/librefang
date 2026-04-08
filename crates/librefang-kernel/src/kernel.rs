@@ -1234,6 +1234,40 @@ impl LibreFangKernel {
         &self.approval_manager
     }
 
+    /// Read a secret from the encrypted vault.
+    ///
+    /// Opens and unlocks the vault on each call (stateless). Returns `None` if
+    /// the vault does not exist, cannot be unlocked, or the key is missing.
+    pub fn vault_get(&self, key: &str) -> Option<String> {
+        let vault_path = self.home_dir_boot.join("vault.enc");
+        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if vault.unlock().is_err() {
+            return None;
+        }
+        vault.get(key).map(|s| s.to_string())
+    }
+
+    /// Write a secret to the encrypted vault.
+    ///
+    /// Opens and unlocks the vault on each call (stateless). Creates the vault
+    /// if it does not exist.
+    pub fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
+        let vault_path = self.home_dir_boot.join("vault.enc");
+        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if !vault.exists() {
+            vault
+                .init()
+                .map_err(|e| format!("Vault init failed: {e}"))?;
+        } else {
+            vault
+                .unlock()
+                .map_err(|e| format!("Vault unlock failed: {e}"))?;
+        }
+        vault
+            .set(key.to_string(), zeroize::Zeroizing::new(value.to_string()))
+            .map_err(|e| format!("Vault write failed: {e}"))
+    }
+
     /// Workflow engine.
     #[inline]
     pub fn workflow_engine(&self) -> &WorkflowEngine {
@@ -1638,6 +1672,24 @@ impl LibreFangKernel {
         let warnings = config.validate();
         for w in &warnings {
             warn!("Config: {}", w);
+        }
+
+        // Check TOTP configuration consistency
+        if config.approval.second_factor == librefang_types::approval::SecondFactor::Totp {
+            let vault_path = config.home_dir.join("vault.enc");
+            let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+            let totp_ready = vault.unlock().is_ok()
+                && vault
+                    .get("totp_confirmed")
+                    .map(|v| v.as_str() == "true")
+                    .unwrap_or(false);
+            if !totp_ready {
+                warn!(
+                    "Config: second_factor = \"totp\" but TOTP is not enrolled/confirmed in vault. \
+                     Approvals will require TOTP but no secret is configured. \
+                     Run POST /api/approvals/totp/setup to enroll."
+                );
+            }
         }
 
         // Initialise global HTTP proxy settings so all outbound reqwest
@@ -2325,6 +2377,8 @@ impl LibreFangKernel {
             stable_prefix_mode: config.stable_prefix_mode,
             max_recall_results: 5,
             compaction: Some(config.compaction.clone()),
+            output_schema_strict: false,
+            max_hook_calls_per_minute: 0,
         };
         let context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>> = {
             let emb_arc: Option<
@@ -2605,11 +2659,18 @@ impl LibreFangKernel {
                     // Inherit kernel exec_policy for agents that lack one.
                     // Promote to Full when shell_exec is declared in capabilities.
                     if restored_entry.manifest.exec_policy.is_none() {
-                        if restored_entry.manifest.capabilities.tools.iter().any(|t| t == "shell_exec" || t == "*") {
-                            restored_entry.manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
-                                mode: librefang_types::config::ExecSecurityMode::Full,
-                                ..cfg.exec_policy.clone()
-                            });
+                        if restored_entry
+                            .manifest
+                            .capabilities
+                            .tools
+                            .iter()
+                            .any(|t| t == "shell_exec" || t == "*")
+                        {
+                            restored_entry.manifest.exec_policy =
+                                Some(librefang_types::config::ExecPolicy {
+                                    mode: librefang_types::config::ExecSecurityMode::Full,
+                                    ..cfg.exec_policy.clone()
+                                });
                         } else {
                             restored_entry.manifest.exec_policy = Some(cfg.exec_policy.clone());
                         }
@@ -2846,7 +2907,12 @@ system_prompt = "You are a helpful assistant."
         let cfg = self.config.load();
         let mut manifest = manifest;
         if manifest.exec_policy.is_none() {
-            if manifest.capabilities.tools.iter().any(|t| t == "shell_exec" || t == "*") {
+            if manifest
+                .capabilities
+                .tools
+                .iter()
+                .any(|t| t == "shell_exec" || t == "*")
+            {
                 manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
                     mode: librefang_types::config::ExecSecurityMode::Full,
                     ..cfg.exec_policy.clone()
@@ -8989,7 +9055,11 @@ system_prompt = "You are a helpful assistant."
         };
         for skill_tool in skill_tools {
             // If agent declares specific tools, only include matching skill tools
-            if !tools_unrestricted && !declared_tools.iter().any(|d| glob_matches(d, &skill_tool.name)) {
+            if !tools_unrestricted
+                && !declared_tools
+                    .iter()
+                    .any(|d| glob_matches(d, &skill_tool.name))
+            {
                 continue;
             }
             all_tools.push(ToolDefinition {
@@ -9858,6 +9928,9 @@ impl LibreFangKernel {
     }
 
     /// Push an interactive approval notification with Approve/Reject buttons.
+    ///
+    /// When TOTP is enabled, the message includes instructions for providing
+    /// the TOTP code and the Approve button is removed (code must be typed).
     async fn push_approval_interactive(
         &self,
         target: &librefang_types::approval::NotificationTarget,
@@ -9865,9 +9938,24 @@ impl LibreFangKernel {
         request_id: &str,
     ) {
         let short_id = &request_id[..std::cmp::min(8, request_id.len())];
-        let interactive = librefang_channels::types::InteractiveMessage {
-            text: message.to_string(),
-            buttons: vec![vec![
+        let totp_enabled = self.approval_manager.requires_totp();
+
+        let display_message = if totp_enabled {
+            format!("{message}\n\nTOTP required. Reply: /approve {short_id} <6-digit-code>")
+        } else {
+            message.to_string()
+        };
+
+        // When TOTP is enabled, only show Reject button (approve needs typed code).
+        let buttons = if totp_enabled {
+            vec![vec![librefang_channels::types::InteractiveButton {
+                label: "Reject".to_string(),
+                action: format!("/reject {short_id}"),
+                style: Some("danger".to_string()),
+                url: None,
+            }]]
+        } else {
+            vec![vec![
                 librefang_channels::types::InteractiveButton {
                     label: "Approve".to_string(),
                     action: format!("/approve {short_id}"),
@@ -9880,7 +9968,12 @@ impl LibreFangKernel {
                     style: Some("danger".to_string()),
                     url: None,
                 },
-            ]],
+            ]]
+        };
+
+        let interactive = librefang_channels::types::InteractiveMessage {
+            text: display_message.clone(),
+            buttons,
         };
 
         if let Some(adapter) = self.channel_adapters.get(&target.channel_type) {
@@ -9896,11 +9989,11 @@ impl LibreFangKernel {
                     "Failed to send interactive approval notification, falling back to text"
                 );
                 // Fallback to plain text
-                self.push_to_target(target, message).await;
+                self.push_to_target(target, &display_message).await;
             }
         } else {
             // No adapter found — fall back to send_channel_message
-            self.push_to_target(target, message).await;
+            self.push_to_target(target, &display_message).await;
         }
     }
 
@@ -10681,6 +10774,8 @@ impl KernelHandle for LibreFangKernel {
         request_id: uuid::Uuid,
         decision: librefang_types::approval::ApprovalDecision,
         decided_by: Option<String>,
+        totp_verified: bool,
+        user_id: Option<&str>,
     ) -> Result<
         (
             librefang_types::approval::ApprovalResponse,
@@ -10688,9 +10783,13 @@ impl KernelHandle for LibreFangKernel {
         ),
         String,
     > {
-        let (response, deferred) = self
-            .approval_manager
-            .resolve(request_id, decision, decided_by)?;
+        let (response, deferred) = self.approval_manager.resolve(
+            request_id,
+            decision,
+            decided_by,
+            totp_verified,
+            user_id,
+        )?;
 
         // Deferred approval execution resumes in the background so API callers do
         // not block on slow tools.
@@ -12488,7 +12587,10 @@ mod tests {
         let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
 
         // Verify exec_policy was promoted to Full
-        let entry = kernel.registry.get(agent_id).expect("agent must be registered");
+        let entry = kernel
+            .registry
+            .get(agent_id)
+            .expect("agent must be registered");
         assert_eq!(
             entry.manifest.exec_policy.as_ref().map(|p| p.mode),
             Some(librefang_types::config::ExecSecurityMode::Full),

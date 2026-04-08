@@ -751,9 +751,47 @@ Token 内省端点。验证并返回 OAuth 访问令牌的元数据。
 
 批准待处理的请求。等待中的 Agent 将继续执行该操作。
 
+当启用 TOTP 二次验证（配置中 `second_factor = "totp"`）时，需要在请求体中包含 TOTP 验证码：
+
+```json
+{ "totp_code": "123456" }
+```
+
+未提供有效 TOTP 码将返回 `400 Bad Request`。
+
 ### POST /api/approvals/&lbrace;id&rbrace;/reject
 
 拒绝待处理的请求。等待中的 Agent 将收到拒绝通知并中止该操作。
+
+### POST /api/approvals/totp/setup
+
+生成新的 TOTP 密钥用于二次验证注册。返回 base32 密钥和 `otpauth://` URI，可用于验证器应用。密钥存储在加密保管库中，但在确认前不会激活。
+
+### POST /api/approvals/totp/confirm
+
+通过验证验证器应用生成的 6 位验证码来确认 TOTP 注册。
+
+```json
+{ "code": "123456" }
+```
+
+### GET /api/approvals/totp/status
+
+查询 TOTP 注册状态。返回：
+
+```json
+{ "enrolled": true, "confirmed": true, "enforced": false, "remaining_recovery_codes": 7 }
+```
+
+### DELETE /api/approvals/totp
+
+撤销 TOTP 注册。需要提供有效的 TOTP 或恢复码进行验证。
+
+```json
+{ "code": "123456" }
+```
+
+验证码无效或 TOTP 未注册时返回 `400`。
 
 ---
 

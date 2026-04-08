@@ -1478,8 +1478,49 @@ export async function listApprovals(): Promise<ApprovalItem[]> {
   return data.approvals ?? [];
 }
 
-export async function approveApproval(id: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/approve`, {});
+export async function approveApproval(id: string, totpCode?: string): Promise<ApiActionResponse> {
+  const body = totpCode ? { totp_code: totpCode } : {};
+  return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/approve`, body);
+}
+
+// ── TOTP second-factor management ──
+
+export interface TotpSetupResponse {
+  otpauth_uri: string;
+  secret: string;
+  qr_code: string | null;
+  recovery_codes: string[];
+  message: string;
+}
+
+export interface TotpStatusResponse {
+  enrolled: boolean;
+  confirmed: boolean;
+  enforced: boolean;
+  remaining_recovery_codes: number;
+}
+
+export async function totpSetup(currentCode?: string): Promise<TotpSetupResponse> {
+  const body = currentCode ? { current_code: currentCode } : {};
+  return post<TotpSetupResponse>("/api/approvals/totp/setup", body);
+}
+
+export async function totpConfirm(code: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/approvals/totp/confirm", { code });
+}
+
+export async function totpStatus(): Promise<TotpStatusResponse> {
+  return get<TotpStatusResponse>("/api/approvals/totp/status");
+}
+
+export async function totpRevoke(code: string): Promise<ApiActionResponse> {
+  const response = await fetch("/api/approvals/totp/revoke", {
+    method: "POST",
+    headers: buildHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ code }),
+  });
+  if (!response.ok) throw await parseError(response);
+  return response.json();
 }
 
 export async function rejectApproval(id: string): Promise<ApiActionResponse> {

@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 17;
+const SCHEMA_VERSION: u32 = 18;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -77,6 +77,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 17 {
         migrate_v17(conn)?;
+    }
+
+    if current_version < 18 {
+        migrate_v18(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -591,11 +595,28 @@ fn migrate_v17(conn: &Connection) -> Result<(), rusqlite::Error> {
             decided_by TEXT,
             decided_at TEXT NOT NULL,
             requested_at TEXT NOT NULL,
-            feedback TEXT
+            feedback TEXT,
+            second_factor_used INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_approval_audit_agent ON approval_audit(agent_id);
         CREATE INDEX IF NOT EXISTS idx_approval_audit_decided ON approval_audit(decided_at);
         ",
+    )?;
+    // Migration: add second_factor_used column (ignore error if already exists)
+    let _ = conn.execute(
+        "ALTER TABLE approval_audit ADD COLUMN second_factor_used INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    Ok(())
+}
+
+fn migrate_v18(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS totp_lockout (
+            sender_id  TEXT    PRIMARY KEY,
+            failures   INTEGER NOT NULL DEFAULT 0,
+            locked_at  INTEGER             -- Unix timestamp (seconds) when lockout started, NULL if below threshold
+        );",
     )
 }
 

@@ -105,6 +105,11 @@ taskkill //PID <pid> //F
 | `/api/a2a/discover` | POST | Discover A2A agent at URL |
 | `/api/a2a/send` | POST | Send task to external A2A agent |
 | `/api/a2a/tasks/{id}/status` | GET | Check external A2A task status |
+| `/api/approvals/{id}/approve` | POST | Approve (body: `{totp_code?}`) |
+| `/api/approvals/totp/setup` | POST | Generate TOTP secret + URI |
+| `/api/approvals/totp/confirm` | POST | Confirm TOTP enrollment |
+| `/api/approvals/totp/status` | GET | Check TOTP enrollment status |
+| `/api/approvals/totp` | DELETE | Revoke TOTP enrollment |
 
 ## Architecture Notes
 - **Don't touch `librefang-cli`** — user is actively building the interactive CLI

@@ -424,8 +424,12 @@ The `Retry-After` header indicates the window duration in seconds.
 | GET | `/api/approvals` | List approval requests |
 | POST | `/api/approvals` | Create approval request |
 | GET | `/api/approvals/{id}` | Get approval request |
-| POST | `/api/approvals/{id}/approve` | Approve request |
+| POST | `/api/approvals/{id}/approve` | Approve request (body: `{totp_code?}`) |
 | POST | `/api/approvals/{id}/reject` | Reject request |
+| POST | `/api/approvals/totp/setup` | Generate TOTP secret for enrollment |
+| POST | `/api/approvals/totp/confirm` | Confirm TOTP enrollment with code |
+| GET | `/api/approvals/totp/status` | Check TOTP enrollment status |
+| DELETE | `/api/approvals/totp` | Revoke TOTP enrollment |
 | **Bindings & Commands** | | |
 | GET | `/api/bindings` | List UI bindings |
 | POST | `/api/bindings` | Add binding |

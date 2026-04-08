@@ -253,7 +253,17 @@ pub trait ChannelBridgeHandle: Send + Sync {
     }
 
     /// Approve or reject a pending approval by UUID prefix.
-    async fn resolve_approval_text(&self, _id_prefix: &str, _approve: bool) -> String {
+    ///
+    /// When `totp_code` is provided, it is used for TOTP second-factor
+    /// verification on approve actions. `sender_id` identifies the user for
+    /// per-user TOTP failure tracking.
+    async fn resolve_approval_text(
+        &self,
+        _id_prefix: &str,
+        _approve: bool,
+        _totp_code: Option<&str>,
+        _sender_id: &str,
+    ) -> String {
         "Approvals not available.".to_string()
     }
 
@@ -2967,16 +2977,21 @@ async fn handle_command(
         "approvals" => handle.list_approvals_text().await,
         "approve" => {
             if args.is_empty() {
-                "Usage: /approve <id-prefix>".to_string()
+                "Usage: /approve <id-prefix> [totp-code]".to_string()
             } else {
-                handle.resolve_approval_text(&args[0], true).await
+                let totp_code = args.get(1).map(|s| s.as_str());
+                handle
+                    .resolve_approval_text(&args[0], true, totp_code, &sender.platform_id)
+                    .await
             }
         }
         "reject" => {
             if args.is_empty() {
                 "Usage: /reject <id-prefix>".to_string()
             } else {
-                handle.resolve_approval_text(&args[0], false).await
+                handle
+                    .resolve_approval_text(&args[0], false, None, &sender.platform_id)
+                    .await
             }
         }
 
