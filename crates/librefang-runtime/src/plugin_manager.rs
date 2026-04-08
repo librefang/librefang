@@ -1286,6 +1286,17 @@ fn hook_templates(runtime: crate::plugin_runtime::PluginRuntime) -> HookFiles {
             prepare_subagent: ("prepare_subagent", STUB_LIFECYCLE_NATIVE),
             merge_subagent: ("merge_subagent", STUB_LIFECYCLE_NATIVE),
         },
+        R::Wasm => HookFiles {
+            // Wasm hooks run inline via wasmtime — no template files needed.
+            // Scaffold stubs so the directory structure is consistent.
+            ingest: ("ingest.wasm", NATIVE_INGEST),
+            after_turn: ("after_turn.wasm", NATIVE_AFTER_TURN),
+            assemble: ("assemble.wasm", STUB_ASSEMBLE_NATIVE),
+            compact: ("compact.wasm", STUB_COMPACT_NATIVE),
+            bootstrap: ("bootstrap.wasm", STUB_LIFECYCLE_NATIVE),
+            prepare_subagent: ("prepare_subagent.wasm", STUB_LIFECYCLE_NATIVE),
+            merge_subagent: ("merge_subagent.wasm", STUB_LIFECYCLE_NATIVE),
+        },
     }
 }
 

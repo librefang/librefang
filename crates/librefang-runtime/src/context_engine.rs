@@ -1902,7 +1902,7 @@ impl ScriptableContextEngine {
             // rate limit for all other agents sharing the same plugin.
             let rl_key = format!(
                 "{}:{}",
-                agent_id.map(|id| id.0.as_str()).unwrap_or(""),
+                agent_id.map(|id| id.0.to_string()).unwrap_or_default(),
                 hook_name
             );
             let limiter = limiters.entry(rl_key).or_default();
