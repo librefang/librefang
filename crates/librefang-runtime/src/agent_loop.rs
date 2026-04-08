@@ -242,6 +242,7 @@ fn build_completion_request(
             .unwrap_or(true),
         response_format: manifest.response_format.clone(),
         timeout_secs: completion_timeout_override(manifest, available_tools),
+        extra_body: None,
     }
 }
 
