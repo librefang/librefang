@@ -4739,7 +4739,19 @@ pub async fn serve_upload(account: AccountId, Path(file_id): Path<String>) -> im
             m.content_type.clone()
         }
         None => {
-            // Infer content type from file magic bytes
+            // No registry entry — scoped tenants cannot access unregistered files
+            // because there is no ownership metadata to verify against.
+            if account.0.is_some() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/json".to_string(),
+                    )],
+                    b"{\"error\":\"File not found\"}".to_vec(),
+                );
+            }
+            // System/admin fallback: infer content type from disk
             if !file_path.exists() {
                 return (
                     StatusCode::NOT_FOUND,
