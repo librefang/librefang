@@ -201,50 +201,6 @@ fn strip_processed_image_data(messages: &mut [Message]) {
     }
 }
 
-fn completion_timeout_override(
-    manifest: &AgentManifest,
-    available_tools: &[ToolDefinition],
-) -> Option<u64> {
-    manifest
-        .metadata
-        .get("timeout_secs")
-        .and_then(|v| v.as_u64())
-        .or_else(|| {
-            if available_tools
-                .iter()
-                .any(|t| t.name.starts_with("browser_") || t.name.starts_with("playwright_"))
-            {
-                Some(600)
-            } else {
-                None
-            }
-        })
-}
-
-fn build_completion_request(
-    manifest: &AgentManifest,
-    system_prompt: &str,
-    messages: &[Message],
-    available_tools: &[ToolDefinition],
-) -> CompletionRequest {
-    CompletionRequest {
-        model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
-        messages: messages.to_vec(),
-        tools: available_tools.to_vec(),
-        max_tokens: manifest.model.max_tokens,
-        temperature: manifest.model.temperature,
-        system: Some(system_prompt.to_string()),
-        thinking: manifest.thinking.clone(),
-        prompt_caching: manifest
-            .metadata
-            .get("prompt_caching")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        response_format: manifest.response_format.clone(),
-        timeout_secs: completion_timeout_override(manifest, available_tools),
-        extra_body: None,
-    }
-}
 
 fn accumulate_token_usage(total_usage: &mut TokenUsage, usage: &TokenUsage) {
     total_usage.input_tokens += usage.input_tokens;
