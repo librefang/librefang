@@ -23,6 +23,7 @@ MAX_MEMORY_CHARS = int(os.environ.get("MEMPALACE_MAX_CHARS", "300"))
 # Results with distance above this threshold are too dissimilar to be useful.
 # Set MEMPALACE_MAX_DISTANCE=0 to disable filtering.
 MAX_DISTANCE = float(os.environ.get("MEMPALACE_MAX_DISTANCE", "1.2"))
+N_RESULTS = int(os.environ.get("MEMPALACE_N_RESULTS", "5"))
 
 
 def emit(obj):
@@ -57,7 +58,7 @@ def main():
     try:
         from mempalace.searcher import search_memories
 
-        results = search_memories(message, PALACE_PATH, n_results=5)
+        results = search_memories(message, PALACE_PATH, n_results=N_RESULTS)
 
         memories = []
         for r in results.get("results", []):
