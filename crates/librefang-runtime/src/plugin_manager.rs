@@ -624,7 +624,10 @@ pub fn run_doctor() -> DoctorReport {
         .map(|info| {
             let runtime_kind = PluginRuntime::from_tag(info.manifest.hooks.runtime.as_deref());
             let tag = runtime_kind.label();
-            let (available, hint) = availability.get(tag.as_ref()).copied().unwrap_or((false, ""));
+            let (available, hint) = availability
+                .get(tag.as_ref())
+                .copied()
+                .unwrap_or((false, ""));
             PluginDoctorEntry {
                 name: info.manifest.name,
                 runtime: tag.to_string(),
@@ -1157,7 +1160,7 @@ after_turn = "hooks/{after_file}"
 
     info!(
         plugin = name,
-        runtime = runtime_tag,
+        runtime = runtime_tag.as_ref(),
         "Scaffolded new plugin"
     );
     Ok(plugin_dir)
