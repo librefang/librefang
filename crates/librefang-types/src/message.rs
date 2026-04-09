@@ -43,7 +43,7 @@ pub enum MessageContent {
 }
 
 /// A content block within a message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     /// A text block.
@@ -64,6 +64,14 @@ pub enum ContentBlock {
         media_type: String,
         /// Base64-encoded image data.
         data: String,
+    },
+    /// An image stored as a file on disk, referenced by absolute path.
+    #[serde(rename = "image_file")]
+    ImageFile {
+        /// MIME type (e.g. "image/jpeg", "image/png").
+        media_type: String,
+        /// Absolute path to the image file on disk.
+        path: String,
     },
     /// A tool use request from the assistant.
     #[serde(rename = "tool_use")]
@@ -164,6 +172,7 @@ impl MessageContent {
                     ContentBlock::Thinking { thinking, .. } => thinking.len(),
                     ContentBlock::ToolUse { .. }
                     | ContentBlock::Image { .. }
+                    | ContentBlock::ImageFile { .. }
                     | ContentBlock::Unknown => 0,
                 })
                 .sum(),
@@ -189,9 +198,12 @@ impl MessageContent {
     pub fn has_images(&self) -> bool {
         match self {
             MessageContent::Text(_) => false,
-            MessageContent::Blocks(blocks) => blocks
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Image { .. })),
+            MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
+                matches!(
+                    b,
+                    ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
+                )
+            }),
         }
     }
 
@@ -209,8 +221,13 @@ impl MessageContent {
             MessageContent::Blocks(blocks) => {
                 let mut stripped = false;
                 for block in blocks.iter_mut() {
-                    if let ContentBlock::Image { media_type, .. } = block {
-                        let placeholder = format!("[Image ({media_type}) previously processed]");
+                    let media = match block {
+                        ContentBlock::Image { media_type, .. }
+                        | ContentBlock::ImageFile { media_type, .. } => Some(media_type.clone()),
+                        _ => None,
+                    };
+                    if let Some(mt) = media {
+                        let placeholder = format!("[Image ({mt}) previously processed]");
                         *block = ContentBlock::Text {
                             text: placeholder,
                             provider_metadata: None,
@@ -497,6 +514,80 @@ mod tests {
         assert!(text.contains("[Image (image/jpeg) previously processed]"));
         // Original text should still be present
         assert!(text.contains("What is this?"));
+    }
+
+    #[test]
+    fn test_image_file_serde_roundtrip() {
+        let block = ContentBlock::ImageFile {
+            media_type: "image/jpeg".to_string(),
+            path: "/tmp/test.jpg".to_string(),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let deserialized: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(block, deserialized);
+    }
+
+    #[test]
+    fn test_image_file_serde_tag() {
+        let block = ContentBlock::ImageFile {
+            media_type: "image/jpeg".to_string(),
+            path: "/tmp/test.jpg".to_string(),
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "image_file");
+        assert_eq!(json["media_type"], "image/jpeg");
+        assert_eq!(json["path"], "/tmp/test.jpg");
+    }
+
+    #[test]
+    fn test_image_retrocompat() {
+        let json = serde_json::json!({
+            "type": "image",
+            "media_type": "image/png",
+            "data": "abc123"
+        });
+        let block: ContentBlock = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(block, ContentBlock::Image { ref media_type, ref data }
+            if media_type == "image/png" && data == "abc123")
+        );
+    }
+
+    #[test]
+    fn test_image_file_text_length() {
+        let content = MessageContent::Blocks(vec![ContentBlock::ImageFile {
+            media_type: "image/jpeg".to_string(),
+            path: "/tmp/test.jpg".to_string(),
+        }]);
+        assert_eq!(content.text_length(), 0);
+    }
+
+    #[test]
+    fn test_image_file_has_images() {
+        let content = MessageContent::Blocks(vec![ContentBlock::ImageFile {
+            media_type: "image/jpeg".to_string(),
+            path: "/tmp/test.jpg".to_string(),
+        }]);
+        assert!(content.has_images());
+    }
+
+    #[test]
+    fn test_image_file_strip_images() {
+        let mut content = MessageContent::Blocks(vec![ContentBlock::ImageFile {
+            media_type: "image/jpeg".to_string(),
+            path: "/tmp/x.jpg".to_string(),
+        }]);
+        assert!(content.strip_images());
+        assert!(!content.has_images());
+        let text = content.text_content();
+        assert!(text.contains("[Image (image/jpeg) previously processed]"));
+    }
+
+    #[test]
+    fn test_unknown_variant_still_works() {
+        let json = serde_json::json!({"type": "some_future_type"});
+        let block: ContentBlock = serde_json::from_value(json).unwrap();
+        assert!(matches!(block, ContentBlock::Unknown));
     }
 
     #[test]

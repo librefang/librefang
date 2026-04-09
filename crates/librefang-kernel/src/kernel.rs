@@ -33,7 +33,7 @@ use librefang_runtime::sandbox::{SandboxConfig, WasmSandbox};
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::*;
 use librefang_types::capability::{glob_matches, Capability};
-use librefang_types::config::{AuthProfile, KernelConfig};
+use librefang_types::config::{AuthProfile, AutoRouteStrategy, KernelConfig};
 use librefang_types::error::LibreFangError;
 use librefang_types::event::*;
 use librefang_types::memory::Memory;
@@ -387,6 +387,9 @@ pub struct LibreFangKernel {
     /// Sticky assistant routing per conversation (assistant + sender/thread).
     /// Preserves follow-up context for brief messages after a route to a specialist/hand.
     assistant_routes: dashmap::DashMap<String, (AssistantRouteTarget, std::time::Instant)>,
+    /// Consecutive-mismatch counters for `StickyHeuristic` auto-routing.
+    /// Maps the same cache key as `assistant_routes` to a mismatch count.
+    route_divergence: dashmap::DashMap<String, u32>,
     /// Per-agent decision traces from the most recent message exchange.
     /// Stored for retrieval via `/api/agents/{id}/traces`.
     pub(crate) decision_traces:
@@ -1234,6 +1237,40 @@ impl LibreFangKernel {
         &self.approval_manager
     }
 
+    /// Read a secret from the encrypted vault.
+    ///
+    /// Opens and unlocks the vault on each call (stateless). Returns `None` if
+    /// the vault does not exist, cannot be unlocked, or the key is missing.
+    pub fn vault_get(&self, key: &str) -> Option<String> {
+        let vault_path = self.home_dir_boot.join("vault.enc");
+        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if vault.unlock().is_err() {
+            return None;
+        }
+        vault.get(key).map(|s| s.to_string())
+    }
+
+    /// Write a secret to the encrypted vault.
+    ///
+    /// Opens and unlocks the vault on each call (stateless). Creates the vault
+    /// if it does not exist.
+    pub fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
+        let vault_path = self.home_dir_boot.join("vault.enc");
+        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if !vault.exists() {
+            vault
+                .init()
+                .map_err(|e| format!("Vault init failed: {e}"))?;
+        } else {
+            vault
+                .unlock()
+                .map_err(|e| format!("Vault unlock failed: {e}"))?;
+        }
+        vault
+            .set(key.to_string(), zeroize::Zeroizing::new(value.to_string()))
+            .map_err(|e| format!("Vault write failed: {e}"))
+    }
+
     /// Workflow engine.
     #[inline]
     pub fn workflow_engine(&self) -> &WorkflowEngine {
@@ -1638,6 +1675,24 @@ impl LibreFangKernel {
         let warnings = config.validate();
         for w in &warnings {
             warn!("Config: {}", w);
+        }
+
+        // Check TOTP configuration consistency
+        if config.approval.second_factor == librefang_types::approval::SecondFactor::Totp {
+            let vault_path = config.home_dir.join("vault.enc");
+            let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+            let totp_ready = vault.unlock().is_ok()
+                && vault
+                    .get("totp_confirmed")
+                    .map(|v| v.as_str() == "true")
+                    .unwrap_or(false);
+            if !totp_ready {
+                warn!(
+                    "Config: second_factor = \"totp\" but TOTP is not enrolled/confirmed in vault. \
+                     Approvals will require TOTP but no secret is configured. \
+                     Run POST /api/approvals/totp/setup to enroll."
+                );
+            }
         }
 
         // Initialise global HTTP proxy settings so all outbound reqwest
@@ -2325,16 +2380,27 @@ impl LibreFangKernel {
             stable_prefix_mode: config.stable_prefix_mode,
             max_recall_results: 5,
             compaction: Some(config.compaction.clone()),
+            output_schema_strict: false,
+            max_hook_calls_per_minute: 0,
         };
         let context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>> = {
             let emb_arc: Option<
                 Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
             > = embedding_driver.as_ref().map(Arc::clone);
+            let vault_path = config.home_dir.join("vault.enc");
             let engine = librefang_runtime::context_engine::build_context_engine(
                 &config.context_engine,
                 context_engine_config.clone(),
                 memory.clone(),
                 emb_arc,
+                &|secret_name| {
+                    let mut vault =
+                        librefang_extensions::vault::CredentialVault::new(vault_path.clone());
+                    if vault.unlock().is_err() {
+                        return None;
+                    }
+                    vault.get(secret_name).map(|v| v.as_str().to_string())
+                },
             );
             Some(engine)
         };
@@ -2399,6 +2465,7 @@ impl LibreFangKernel {
             injection_senders: dashmap::DashMap::new(),
             injection_receivers: dashmap::DashMap::new(),
             assistant_routes: dashmap::DashMap::new(),
+            route_divergence: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
             command_queue,
             context_engine,
@@ -2506,10 +2573,16 @@ impl LibreFangKernel {
                     if toml_path.exists() {
                         match std::fs::read_to_string(&toml_path) {
                             Ok(toml_str) => {
-                                match toml::from_str::<librefang_types::agent::AgentManifest>(
-                                    &toml_str,
-                                ) {
-                                    Ok(mut disk_manifest) => {
+                                // Try parsing as AgentManifest first; fall back to
+                                // extracting from a hand.toml (HandDefinition format).
+                                let parsed =
+                                    toml::from_str::<librefang_types::agent::AgentManifest>(
+                                        &toml_str,
+                                    )
+                                    .ok()
+                                    .or_else(|| extract_manifest_from_hand_toml(&toml_str, &name));
+                                match parsed {
+                                    Some(mut disk_manifest) => {
                                         // Compare key fields to detect changes
                                         let changed = serde_json::to_value(&disk_manifest).ok()
                                             != serde_json::to_value(&entry.manifest).ok();
@@ -2537,11 +2610,11 @@ impl LibreFangKernel {
                                             }
                                         }
                                     }
-                                    Err(e) => {
+                                    None => {
                                         warn!(
                                             agent = %name,
                                             path = %toml_path.display(),
-                                            "Invalid agent TOML on disk, using DB version: {e}"
+                                            "Cannot parse TOML on disk as agent manifest, using DB version"
                                         );
                                     }
                                 }
@@ -2605,11 +2678,18 @@ impl LibreFangKernel {
                     // Inherit kernel exec_policy for agents that lack one.
                     // Promote to Full when shell_exec is declared in capabilities.
                     if restored_entry.manifest.exec_policy.is_none() {
-                        if restored_entry.manifest.capabilities.tools.iter().any(|t| t == "shell_exec" || t == "*") {
-                            restored_entry.manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
-                                mode: librefang_types::config::ExecSecurityMode::Full,
-                                ..cfg.exec_policy.clone()
-                            });
+                        if restored_entry
+                            .manifest
+                            .capabilities
+                            .tools
+                            .iter()
+                            .any(|t| t == "shell_exec" || t == "*")
+                        {
+                            restored_entry.manifest.exec_policy =
+                                Some(librefang_types::config::ExecPolicy {
+                                    mode: librefang_types::config::ExecSecurityMode::Full,
+                                    ..cfg.exec_policy.clone()
+                                });
                         } else {
                             restored_entry.manifest.exec_policy = Some(cfg.exec_policy.clone());
                         }
@@ -2673,6 +2753,15 @@ impl LibreFangKernel {
                                     .model
                                     .base_url
                                     .clone_from(&dm.base_url);
+                            }
+                            // Merge extra_params from default_model
+                            for (key, value) in &dm.extra_params {
+                                restored_entry
+                                    .manifest
+                                    .model
+                                    .extra_params
+                                    .entry(key.clone())
+                                    .or_insert(value.clone());
                             }
                         }
                     }
@@ -2837,7 +2926,12 @@ system_prompt = "You are a helpful assistant."
         let cfg = self.config.load();
         let mut manifest = manifest;
         if manifest.exec_policy.is_none() {
-            if manifest.capabilities.tools.iter().any(|t| t == "shell_exec" || t == "*") {
+            if manifest
+                .capabilities
+                .tools
+                .iter()
+                .any(|t| t == "shell_exec" || t == "*")
+            {
                 manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
                     mode: librefang_types::config::ExecSecurityMode::Full,
                     ..cfg.exec_policy.clone()
@@ -3635,12 +3729,19 @@ system_prompt = "You are a helpful assistant."
         }
 
         // LLM agent: true streaming via agent loop
+        // Derive session ID: use channel-specific session when SenderContext
+        // provides a non-empty channel, otherwise fall back to agent's default.
+        let effective_session_id = match sender_context {
+            Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
+            _ => entry.session_id,
+        };
+
         let mut session = self
             .memory
-            .get_session(entry.session_id)
+            .get_session(effective_session_id)
             .map_err(KernelError::LibreFang)?
             .unwrap_or_else(|| librefang_memory::session::Session {
-                id: entry.session_id,
+                id: effective_session_id,
                 agent_id,
                 messages: Vec::new(),
                 context_window_tokens: 0,
@@ -4334,6 +4435,7 @@ system_prompt = "You are a helpful assistant."
             prompt_caching: false,
             response_format: None,
             timeout_secs: None,
+            extra_body: None,
         };
 
         let result = match tokio::time::timeout(
@@ -4412,12 +4514,115 @@ system_prompt = "You are a helpful assistant."
         }
         drop(entry);
 
-        // Skip auto-routing for channel messages. When a channel has
-        // `default_agent = "assistant"`, the user explicitly chose the
-        // assistant — keyword/semantic routing must not override that.
-        // Users can still switch agents via `/agent <name>`.
-        if sender_context.is_some() {
-            return Ok(agent_id);
+        // Per-channel auto-routing strategy gate.
+        //
+        // When `auto_route` is `Off` (the default for all channels), channel messages
+        // bypass classification entirely — preserving legacy behaviour.
+        // Other strategies allow opt-in routing with different cache semantics.
+        if let Some(ctx) = sender_context {
+            let cache_key = format!(
+                "{}:{}:{}:{}",
+                agent_id,
+                ctx.channel,
+                ctx.account_id.as_deref().unwrap_or(""),
+                ctx.user_id,
+            );
+            let ttl = std::time::Duration::from_secs(ctx.auto_route_ttl_minutes as u64 * 60);
+
+            match ctx.auto_route {
+                AutoRouteStrategy::Off => return Ok(agent_id),
+
+                AutoRouteStrategy::ExplicitOnly => {
+                    if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                        let target = entry.value().0.clone();
+                        drop(entry);
+                        match self.resolve_assistant_route_target(&target) {
+                            Ok(routed_id) => return Ok(routed_id),
+                            Err(_) => {
+                                self.assistant_routes.remove(&cache_key);
+                            }
+                        }
+                    }
+                    // No cached entry — fall through to LLM classification once,
+                    // then store the result.
+                }
+
+                AutoRouteStrategy::StickyTtl => {
+                    if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                        if entry.value().1.elapsed() < ttl {
+                            let target = entry.value().0.clone();
+                            drop(entry);
+                            match self.resolve_assistant_route_target(&target) {
+                                Ok(routed_id) => return Ok(routed_id),
+                                Err(_) => {
+                                    self.assistant_routes.remove(&cache_key);
+                                }
+                            }
+                        }
+                    }
+                    // Cache miss or TTL expired — fall through to re-classify.
+                }
+
+                AutoRouteStrategy::StickyHeuristic => {
+                    let heuristic_target = self.route_assistant_by_metadata(message);
+                    if let Some(h_target) = heuristic_target {
+                        if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                            let cached = entry.value().0.clone();
+                            drop(entry);
+
+                            if h_target == cached {
+                                // Heuristic agrees with cache — reset divergence counter.
+                                self.route_divergence.remove(&cache_key);
+                                match self.resolve_assistant_route_target(&cached) {
+                                    Ok(routed_id) => return Ok(routed_id),
+                                    Err(_) => {
+                                        self.assistant_routes.remove(&cache_key);
+                                    }
+                                }
+                            } else {
+                                // Disagreement — increment divergence counter.
+                                let count = {
+                                    let mut div_entry =
+                                        self.route_divergence.entry(cache_key.clone()).or_insert(0);
+                                    *div_entry += 1;
+                                    *div_entry
+                                };
+                                if count < ctx.auto_route_divergence_count {
+                                    // Not enough divergence yet — stay on cached route.
+                                    if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                                        let target = entry.value().0.clone();
+                                        drop(entry);
+                                        match self.resolve_assistant_route_target(&target) {
+                                            Ok(routed_id) => return Ok(routed_id),
+                                            Err(_) => {
+                                                self.assistant_routes.remove(&cache_key);
+                                            }
+                                        }
+                                    }
+                                }
+                                // Enough divergence — fall through to LLM re-classification.
+                                self.route_divergence.remove(&cache_key);
+                            }
+                        }
+                        // No cached entry — fall through to LLM classification.
+                    } else {
+                        // Heuristic returned nothing — reuse cache within TTL if available.
+                        if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                            if entry.value().1.elapsed() < ttl {
+                                let target = entry.value().0.clone();
+                                drop(entry);
+                                match self.resolve_assistant_route_target(&target) {
+                                    Ok(routed_id) => return Ok(routed_id),
+                                    Err(_) => {
+                                        self.assistant_routes.remove(&cache_key);
+                                    }
+                                }
+                            }
+                        }
+                        // Cache miss or expired — fall through to LLM classification.
+                    }
+                }
+            }
         }
 
         let route_key = Self::assistant_route_key(agent_id, sender_context);
@@ -4621,12 +4826,19 @@ system_prompt = "You are a helpful assistant."
             .check_quota(agent_id, &entry.manifest.resources)
             .map_err(KernelError::LibreFang)?;
 
+        // Derive session ID: use channel-specific session when SenderContext
+        // provides a non-empty channel, otherwise fall back to agent's default.
+        let effective_session_id = match sender_context {
+            Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
+            _ => entry.session_id,
+        };
+
         let mut session = self
             .memory
-            .get_session(entry.session_id)
+            .get_session(effective_session_id)
             .map_err(KernelError::LibreFang)?
             .unwrap_or_else(|| librefang_memory::session::Session {
-                id: entry.session_id,
+                id: effective_session_id,
                 agent_id,
                 messages: Vec::new(),
                 context_window_tokens: 0,
@@ -4859,6 +5071,7 @@ system_prompt = "You are a helpful assistant."
                 prompt_caching: false,
                 response_format: None,
                 timeout_secs: None,
+                extra_body: None,
             };
             let (complexity, routed_model) = router.select_model(&probe);
             // Check if the routed model's provider has a valid API key.
@@ -5157,15 +5370,20 @@ system_prompt = "You are a helpful assistant."
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        // Auto-save session context to workspace memory before clearing
-        if let Ok(Some(old_session)) = self.memory.get_session(entry.session_id) {
-            if old_session.messages.len() >= 2 {
-                self.save_session_summary(agent_id, &entry, &old_session);
+        // Auto-save session summaries for ALL sessions (default + per-channel)
+        // before clearing, so no channel's conversation history is silently lost.
+        if let Ok(session_ids) = self.memory.get_agent_session_ids(agent_id) {
+            for sid in session_ids {
+                if let Ok(Some(old_session)) = self.memory.get_session(sid) {
+                    if old_session.messages.len() >= 2 {
+                        self.save_session_summary(agent_id, &entry, &old_session);
+                    }
+                }
             }
         }
 
-        // Delete the old session
-        let _ = self.memory.delete_session(entry.session_id);
+        // Delete ALL sessions for this agent (default + per-channel)
+        let _ = self.memory.delete_agent_sessions(agent_id);
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -5191,12 +5409,12 @@ system_prompt = "You are a helpful assistant."
     /// More aggressive than `reset_session` (which auto-saves a summary) but less
     /// destructive than `clear_agent_history` (which wipes ALL sessions).
     pub fn reboot_session(&self, agent_id: AgentId) -> KernelResult<()> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let _entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        // Delete the old session WITHOUT saving a summary
-        let _ = self.memory.delete_session(entry.session_id);
+        // Delete ALL sessions for this agent (default + per-channel)
+        let _ = self.memory.delete_agent_sessions(agent_id);
 
         // Create a fresh session
         let new_session = self
@@ -5778,13 +5996,17 @@ system_prompt = "You are a helpful assistant."
             )))
         })?;
 
-        let mut disk_manifest: librefang_types::agent::AgentManifest = toml::from_str(&toml_str)
-            .map_err(|e| {
-                KernelError::LibreFang(LibreFangError::Internal(format!(
-                    "Invalid TOML in {}: {e}",
-                    toml_path.display()
-                )))
-            })?;
+        // Parse as AgentManifest; if that fails, try extracting from a hand.toml.
+        let mut disk_manifest: librefang_types::agent::AgentManifest =
+            toml::from_str::<librefang_types::agent::AgentManifest>(&toml_str)
+                .ok()
+                .or_else(|| extract_manifest_from_hand_toml(&toml_str, &entry.name))
+                .ok_or_else(|| {
+                    KernelError::LibreFang(LibreFangError::Internal(format!(
+                        "Invalid TOML in {}: not an agent manifest or hand definition",
+                        toml_path.display()
+                    )))
+                })?;
 
         // Preserve workspace if TOML leaves it unset — workspace is
         // populated at spawn time with the real directory path.
@@ -6276,7 +6498,7 @@ system_prompt = "You are a helpful assistant."
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
     ) -> KernelResult<librefang_hands::HandInstance> {
-        self.activate_hand_with_id(hand_id, config, None)
+        self.activate_hand_with_id(hand_id, config, None, None)
     }
 
     /// Like [`activate_hand`](Self::activate_hand) but allows specifying an
@@ -6286,6 +6508,7 @@ system_prompt = "You are a helpful assistant."
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
         instance_id: Option<uuid::Uuid>,
+        timestamps: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> KernelResult<librefang_hands::HandInstance> {
         let cfg = self.config.load();
         use librefang_hands::HandError;
@@ -6321,7 +6544,7 @@ system_prompt = "You are a helpful assistant."
         // Create the instance in the registry
         let instance = self
             .hand_registry
-            .activate_with_id(hand_id, config, instance_id)
+            .activate_with_id(hand_id, config, instance_id, timestamps)
             .map_err(|e| match e {
                 HandError::AlreadyActive(id) => KernelError::LibreFang(LibreFangError::Internal(
                     format!("Hand already active: {id}"),
@@ -6394,55 +6617,101 @@ system_prompt = "You are a helpful assistant."
             // standalone specialist agents spawned by routing.
             manifest.name = format!("{hand_id}:{}", manifest.name);
 
-            // Reuse existing hand agent if one with the same prefixed name is already running
+            // Reuse existing hand agent if one with the same prefixed name is already running.
+            // NOTE: this check-then-spawn is not atomic, but is safe because hand activation
+            // is serialized by the activate_lock mutex at the HandRegistry level.
             if let Some(existing) = self.registry.find_by_name(&manifest.name) {
                 agent_ids_map.insert(role.clone(), existing.id);
                 continue;
             }
 
-            // Inherit kernel defaults when hand declares "default" provider/model
+            // Inherit kernel defaults when hand declares "default" provider/model.
+            // When provider is "default", api_key_env and base_url MUST also be
+            // overridden — a base template might have set them for a different provider.
             if manifest.model.provider == "default" {
                 manifest.model.provider = cfg.default_model.provider.clone();
-                if manifest.model.api_key_env.is_none() {
-                    manifest.model.api_key_env = Some(cfg.default_model.api_key_env.clone());
-                }
-                if manifest.model.base_url.is_none() {
-                    manifest.model.base_url = cfg.default_model.base_url.clone();
-                }
+                manifest.model.api_key_env = Some(cfg.default_model.api_key_env.clone());
+                manifest.model.base_url = cfg.default_model.base_url.clone();
             }
             if manifest.model.model == "default" {
                 manifest.model.model = cfg.default_model.model.clone();
             }
 
-            // Hand-level tool inheritance + agent_send for multi-agent hands
+            // Merge extra_params from default_model (agent-level keys take precedence)
+            for (key, value) in &cfg.default_model.extra_params {
+                manifest
+                    .model
+                    .extra_params
+                    .entry(key.clone())
+                    .or_insert(value.clone());
+            }
+
+            // Hand-level tool inheritance: hand controls WHICH tools are available,
+            // but preserve agent-level capability fields (network, shell, memory, etc.)
             let mut tools = def.tools.clone();
             if is_multi_agent && !tools.contains(&"agent_send".to_string()) {
                 tools.push("agent_send".to_string());
             }
-            manifest.capabilities = ManifestCapabilities {
-                tools,
-                ..Default::default()
-            };
+            manifest.capabilities.tools = tools;
 
-            // Tags: hand, instance, role
-            manifest.tags = vec![
+            // Tags: append hand-level tags to agent's existing tags
+            manifest.tags.extend([
                 format!("hand:{hand_id}"),
                 format!("hand_instance:{}", instance.instance_id),
                 format!("hand_role:{role}"),
-            ];
+            ]);
             manifest.is_hand = true;
-            manifest.skills = def.skills.clone();
-            manifest.mcp_servers = def.mcp_servers.clone();
 
-            // Autonomous scheduling
-            if manifest.autonomous.is_some() {
+            // Skills merge semantics:
+            //   hand skills = []  (empty)     → no restriction, agent keeps its own list
+            //   hand skills = ["a", "b"]      → allowlist; agent list is intersected
+            //   hand skills = ["a"] + agent [] → agent gets hand's list
+            //   hand skills = ["a"] + agent ["a","c"] → agent gets ["a"] (intersection)
+            if !def.skills.is_empty() {
+                if manifest.skills.is_empty() {
+                    // Agent has no preference → use hand allowlist
+                    manifest.skills = def.skills.clone();
+                } else {
+                    // Agent has its own list → intersect with hand allowlist
+                    manifest.skills.retain(|s| def.skills.contains(s));
+                }
+            }
+
+            // MCP servers: same merge logic as skills
+            if !def.mcp_servers.is_empty() {
+                if manifest.mcp_servers.is_empty() {
+                    manifest.mcp_servers = def.mcp_servers.clone();
+                } else {
+                    manifest.mcp_servers.retain(|s| def.mcp_servers.contains(s));
+                }
+            }
+
+            // Plugins: same merge logic as skills/mcp_servers
+            if !def.allowed_plugins.is_empty() {
+                if manifest.allowed_plugins.is_empty() {
+                    manifest.allowed_plugins = def.allowed_plugins.clone();
+                } else {
+                    manifest
+                        .allowed_plugins
+                        .retain(|p| def.allowed_plugins.contains(p));
+                }
+            }
+
+            // Autonomous scheduling: only override if agent doesn't already have
+            // a non-default schedule (respect agent-level schedule config)
+            if manifest.autonomous.is_some() && matches!(manifest.schedule, ScheduleMode::Reactive)
+            {
                 manifest.schedule = ScheduleMode::Continuous {
-                    check_interval_secs: 60,
+                    check_interval_secs: manifest
+                        .autonomous
+                        .as_ref()
+                        .map(|a| a.heartbeat_interval_secs)
+                        .unwrap_or(60),
                 };
             }
 
-            // Shell exec policy
-            if def.tools.iter().any(|t| t == "shell_exec") {
+            // Shell exec policy: only set if agent doesn't already have one
+            if manifest.exec_policy.is_none() && def.tools.iter().any(|t| t == "shell_exec") {
                 manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
                     mode: librefang_types::config::ExecSecurityMode::Full,
                     timeout_secs: 300,
@@ -6471,8 +6740,15 @@ system_prompt = "You are a helpful assistant."
                 );
             }
 
-            // Inject skill content
-            if let Some(ref skill_content) = def.skill_content {
+            // Inject skill content: per-role override takes precedence over shared.
+            // SKILL-{role}.md filenames are lowercased during scan, so normalize
+            // the role name to match.
+            let role_lower = role.to_lowercase();
+            let effective_skill = def
+                .agent_skill_content
+                .get(&role_lower)
+                .or(def.skill_content.as_ref());
+            if let Some(skill_content) = effective_skill {
                 manifest.model.system_prompt = format!(
                     "{}\n\n---\n\n## Reference Knowledge\n\n{}",
                     manifest.model.system_prompt, skill_content
@@ -6532,12 +6808,36 @@ system_prompt = "You are a helpful assistant."
             // When `instance_id` is Some (multi-instance or restart recovery),
             // uses the new format with instance UUID for uniqueness.
             let deterministic_id = AgentId::from_hand_agent(hand_id, role, instance_id);
-            let agent_id = self.spawn_agent_inner(
+            let agent_id = match self.spawn_agent_inner(
                 manifest,
                 None,
                 Some(hand_toml_path),
                 Some(deterministic_id),
-            )?;
+            ) {
+                Ok(id) => id,
+                Err(e) => {
+                    // Rollback: kill all agents spawned so far in this activation
+                    for spawned_id in agent_ids_map.values() {
+                        if let Err(kill_err) = self.kill_agent(*spawned_id) {
+                            warn!(
+                                hand = %hand_id,
+                                agent = %spawned_id,
+                                error = %kill_err,
+                                "Failed to rollback agent during hand activation failure"
+                            );
+                        }
+                    }
+                    // Deactivate the hand instance
+                    if let Err(e) = self.hand_registry.deactivate(instance.instance_id) {
+                        warn!(
+                            instance_id = %instance.instance_id,
+                            error = %e,
+                            "Failed to deactivate hand instance during rollback"
+                        );
+                    }
+                    return Err(e);
+                }
+            };
 
             agent_ids_map.insert(role.clone(), agent_id);
         }
@@ -7263,7 +7563,15 @@ system_prompt = "You are a helpful assistant."
                         }
                     }
                 }
-                match self.activate_hand_with_id(&hand_id, config, persisted_instance_id) {
+                let timestamps = saved_hand
+                    .activated_at
+                    .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+                match self.activate_hand_with_id(
+                    &hand_id,
+                    config,
+                    persisted_instance_id,
+                    timestamps,
+                ) {
                     Ok(inst) => {
                         if matches!(status, librefang_hands::HandStatus::Paused) {
                             if let Err(e) = self.pause_hand(inst.instance_id) {
@@ -7638,6 +7946,39 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Periodic cleanup of expired image uploads (24h TTL)
+        {
+            let kernel = Arc::clone(self);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // every hour
+                interval.tick().await; // skip first immediate tick
+                loop {
+                    interval.tick().await;
+                    if kernel.supervisor.is_shutting_down() {
+                        break;
+                    }
+                    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+                    if let Ok(mut entries) = tokio::fs::read_dir(&upload_dir).await {
+                        let cutoff = std::time::SystemTime::now()
+                            - std::time::Duration::from_secs(24 * 3600);
+                        let mut removed = 0u64;
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            if let Ok(meta) = entry.metadata().await {
+                                let expired = meta.modified().map(|t| t < cutoff).unwrap_or(false);
+                                if expired && tokio::fs::remove_file(entry.path()).await.is_ok() {
+                                    removed += 1;
+                                }
+                            }
+                        }
+                        if removed > 0 {
+                            info!("Image upload cleanup: removed {removed} expired file(s)");
+                        }
+                    }
+                }
+            });
+            info!("Image upload cleanup scheduled every 1 hour (TTL=24h)");
+        }
+
         // Periodic memory consolidation (decays stale memory confidence)
         {
             let interval_hours = cfg.memory.consolidation_interval_hours;
@@ -7796,9 +8137,27 @@ system_prompt = "You are a helpful assistant."
                                 let kh: std::sync::Arc<
                                     dyn librefang_runtime::kernel_handle::KernelHandle,
                                 > = kernel.clone();
+                                // Cron jobs use a synthetic SenderContext so they
+                                // get their own isolated session (channel="cron").
+                                let cron_sender = SenderContext {
+                                    channel: "cron".to_string(),
+                                    user_id: String::new(),
+                                    display_name: "cron".to_string(),
+                                    is_group: false,
+                                    was_mentioned: false,
+                                    thread_id: None,
+                                    account_id: None,
+                                    ..Default::default()
+                                };
                                 match tokio::time::timeout(
                                     timeout,
-                                    kernel.send_message_with_handle(agent_id, message, Some(kh)),
+                                    kernel.send_message_full(
+                                        agent_id,
+                                        message,
+                                        Some(kh),
+                                        None,
+                                        Some(&cron_sender),
+                                    ),
                                 )
                                 .await
                                 {
@@ -8352,6 +8711,7 @@ system_prompt = "You are a helpful assistant."
                         Some(gfb.api_key_env.clone())
                     },
                     base_url: gfb.base_url.clone(),
+                    extra_params: std::collections::HashMap::new(),
                 });
             }
         }
@@ -8899,7 +9259,11 @@ system_prompt = "You are a helpful assistant."
         };
         for skill_tool in skill_tools {
             // If agent declares specific tools, only include matching skill tools
-            if !tools_unrestricted && !declared_tools.iter().any(|d| glob_matches(d, &skill_tool.name)) {
+            if !tools_unrestricted
+                && !declared_tools
+                    .iter()
+                    .any(|d| glob_matches(d, &skill_tool.name))
+            {
                 continue;
             }
             all_tools.push(ToolDefinition {
@@ -9548,6 +9912,32 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
 /// A well-known agent ID used for shared memory operations across agents.
 /// This is a fixed UUID so all agents read/write to the same namespace.
 /// Parse an agent.toml string and return true if `enabled` is explicitly set
+/// Try to extract an `AgentManifest` from a `hand.toml` file (HandDefinition format).
+///
+/// When `source_toml_path` points to a hand.toml rather than an agent.toml, the file
+/// contains a `HandDefinition` with multiple agent manifests keyed by role name.
+/// This function parses the file as a `HandDefinition` and returns the manifest whose
+/// `name` field (or role key) matches `agent_name`.
+fn extract_manifest_from_hand_toml(
+    toml_str: &str,
+    agent_name: &str,
+) -> Option<librefang_types::agent::AgentManifest> {
+    let def: librefang_hands::HandDefinition = toml::from_str(toml_str).ok()?;
+    for (role, hand_agent) in &def.agents {
+        if hand_agent.manifest.name == agent_name || role == agent_name {
+            return Some(hand_agent.manifest.clone());
+        }
+    }
+    // Also try matching by the "{hand_id}-{role}" convention used for spawned agents.
+    for (role, hand_agent) in &def.agents {
+        let qualified = format!("{}-{}", def.id, role);
+        if qualified == agent_name {
+            return Some(hand_agent.manifest.clone());
+        }
+    }
+    None
+}
+
 /// to `false`. Uses proper TOML parsing to handle all valid whitespace variants
 /// and avoid false positives from commented-out lines.
 fn toml_enabled_false(content: &str) -> bool {
@@ -9705,6 +10095,14 @@ impl LibreFangKernel {
                         if dm.base_url.is_some() && e.manifest.model.base_url.is_none() {
                             e.manifest.model.base_url.clone_from(&dm.base_url);
                         }
+                        // Merge extra_params from default_model (agent-level keys take precedence)
+                        for (key, value) in &dm.extra_params {
+                            e.manifest
+                                .model
+                                .extra_params
+                                .entry(key.clone())
+                                .or_insert(value.clone());
+                        }
                         let _ = self.memory.save_agent(&e);
                     }
                 } else if let Some(e) = self.registry.get(entry.id) {
@@ -9760,6 +10158,9 @@ impl LibreFangKernel {
     }
 
     /// Push an interactive approval notification with Approve/Reject buttons.
+    ///
+    /// When TOTP is enabled, the message includes instructions for providing
+    /// the TOTP code and the Approve button is removed (code must be typed).
     async fn push_approval_interactive(
         &self,
         target: &librefang_types::approval::NotificationTarget,
@@ -9767,9 +10168,24 @@ impl LibreFangKernel {
         request_id: &str,
     ) {
         let short_id = &request_id[..std::cmp::min(8, request_id.len())];
-        let interactive = librefang_channels::types::InteractiveMessage {
-            text: message.to_string(),
-            buttons: vec![vec![
+        let totp_enabled = self.approval_manager.requires_totp();
+
+        let display_message = if totp_enabled {
+            format!("{message}\n\nTOTP required. Reply: /approve {short_id} <6-digit-code>")
+        } else {
+            message.to_string()
+        };
+
+        // When TOTP is enabled, only show Reject button (approve needs typed code).
+        let buttons = if totp_enabled {
+            vec![vec![librefang_channels::types::InteractiveButton {
+                label: "Reject".to_string(),
+                action: format!("/reject {short_id}"),
+                style: Some("danger".to_string()),
+                url: None,
+            }]]
+        } else {
+            vec![vec![
                 librefang_channels::types::InteractiveButton {
                     label: "Approve".to_string(),
                     action: format!("/approve {short_id}"),
@@ -9782,7 +10198,12 @@ impl LibreFangKernel {
                     style: Some("danger".to_string()),
                     url: None,
                 },
-            ]],
+            ]]
+        };
+
+        let interactive = librefang_channels::types::InteractiveMessage {
+            text: display_message.clone(),
+            buttons,
         };
 
         if let Some(adapter) = self.channel_adapters.get(&target.channel_type) {
@@ -9798,11 +10219,11 @@ impl LibreFangKernel {
                     "Failed to send interactive approval notification, falling back to text"
                 );
                 // Fallback to plain text
-                self.push_to_target(target, message).await;
+                self.push_to_target(target, &display_message).await;
             }
         } else {
             // No adapter found — fall back to send_channel_message
-            self.push_to_target(target, message).await;
+            self.push_to_target(target, &display_message).await;
         }
     }
 
@@ -10583,6 +11004,8 @@ impl KernelHandle for LibreFangKernel {
         request_id: uuid::Uuid,
         decision: librefang_types::approval::ApprovalDecision,
         decided_by: Option<String>,
+        totp_verified: bool,
+        user_id: Option<&str>,
     ) -> Result<
         (
             librefang_types::approval::ApprovalResponse,
@@ -10590,9 +11013,13 @@ impl KernelHandle for LibreFangKernel {
         ),
         String,
     > {
-        let (response, deferred) = self
-            .approval_manager
-            .resolve(request_id, decision, decided_by)?;
+        let (response, deferred) = self.approval_manager.resolve(
+            request_id,
+            decision,
+            decided_by,
+            totp_verified,
+            user_id,
+        )?;
 
         // Deferred approval execution resumes in the background so API callers do
         // not block on slow tools.
@@ -11123,6 +11550,38 @@ impl KernelHandle for LibreFangKernel {
     fn max_agent_call_depth(&self) -> u32 {
         let cfg = self.config.load();
         cfg.max_agent_call_depth
+    }
+
+    async fn run_workflow(
+        &self,
+        workflow_id: &str,
+        input: &str,
+    ) -> Result<(String, String), String> {
+        use crate::workflow::WorkflowId;
+
+        // Try parsing as UUID first, then fall back to name lookup.
+        let wf_id = if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id) {
+            WorkflowId(uuid)
+        } else {
+            // Name-based lookup: scan all registered workflows.
+            let name_lower = workflow_id.to_lowercase();
+            let workflows = self.workflows.list_workflows().await;
+            workflows
+                .iter()
+                .find(|w| w.name.to_lowercase() == name_lower)
+                .map(|w| w.id)
+                .ok_or_else(|| {
+                    format!(
+                        "Workflow '{workflow_id}' not found. Use a valid UUID or workflow name."
+                    )
+                })?
+        };
+
+        let (run_id, output) = LibreFangKernel::run_workflow(self, wf_id, input.to_string())
+            .await
+            .map_err(|e| format!("Workflow execution failed: {e}"))?;
+
+        Ok((run_id.to_string(), output))
     }
 
     fn goal_list_active(
@@ -12121,6 +12580,7 @@ mod tests {
                         system_prompt: String::new(),
                         api_key_env: None,
                         base_url: None,
+                        extra_params: std::collections::HashMap::new(),
                     },
                     ..Default::default()
                 },
@@ -12389,7 +12849,10 @@ mod tests {
         let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
 
         // Verify exec_policy was promoted to Full
-        let entry = kernel.registry.get(agent_id).expect("agent must be registered");
+        let entry = kernel
+            .registry
+            .get(agent_id)
+            .expect("agent must be registered");
         assert_eq!(
             entry.manifest.exec_policy.as_ref().map(|p| p.mode),
             Some(librefang_types::config::ExecSecurityMode::Full),
@@ -12428,6 +12891,7 @@ mod tests {
             was_mentioned: false,
             thread_id: Some("thread-9".to_string()),
             account_id: None,
+            ..Default::default()
         };
 
         let with_sender = LibreFangKernel::assistant_route_key(agent_id, Some(&sender));

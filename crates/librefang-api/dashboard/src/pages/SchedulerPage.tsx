@@ -25,6 +25,7 @@ export function SchedulerPage() {
   const [showCronPicker, setShowCronPicker] = useState(false);
   const [name, setName] = useState("");
   const [cron, setCron] = useState("0 9 * * *");
+  const [cronTz, setCronTz] = useState<string | undefined>(undefined);
   const [targetType, setTargetType] = useState<"agent" | "workflow">("agent");
   const [agentId, setAgentId] = useState("");
   const [workflowId, setWorkflowId] = useState("");
@@ -60,10 +61,10 @@ export function SchedulerPage() {
     if (!name.trim()) return;
     try {
       await createMut.mutateAsync({
-        name, cron, message, enabled: true,
+        name, cron, tz: cronTz, message, enabled: true,
         ...(targetType === "agent" ? { agent_id: agentId } : { workflow_id: workflowId }),
       });
-      setShowCreate(false); setName(""); setMessage(""); setCron("0 9 * * *"); setAgentId(""); setWorkflowId(""); setTargetType("agent");
+      setShowCreate(false); setName(""); setMessage(""); setCron("0 9 * * *"); setCronTz(undefined); setAgentId(""); setWorkflowId(""); setTargetType("agent");
       await queryClient.invalidateQueries({ queryKey: ["schedules"] });
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
@@ -182,6 +183,7 @@ export function SchedulerPage() {
                   <div className="flex items-center gap-2 sm:gap-3 pl-9 sm:pl-11 text-[9px] sm:text-[10px] text-text-dim/60 flex-wrap">
                     <span className="font-mono bg-main px-1 sm:px-1.5 py-0.5 rounded">{s.cron}</span>
                     <span className="text-text-dim hidden sm:inline">{cronHint(s.cron || "")}</span>
+                    <span className="text-text-dim/40">{s.tz || "UTC"}</span>
                     {agent && <span className="font-bold text-brand truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</span>}
                     {s.next_run && <span className="text-text-dim/40">{t("scheduler.next_run", { defaultValue: "Next" })}: {new Date(s.next_run).toLocaleString()}</span>}
                   </div>
@@ -265,8 +267,8 @@ export function SchedulerPage() {
                   className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-border-subtle bg-main hover:border-brand transition-colors text-left"
                 >
                   <div>
-                    <p className="text-sm">{cronHint(cron)}</p>
-                    <p className="text-[10px] font-mono text-text-dim/50">{cron}</p>
+                    <p className="text-sm">{cronHint(cron)}{cronTz && cronTz !== "UTC" ? ` (${cronTz.split("/").pop()?.replace(/_/g, " ")})` : ""}</p>
+                    <p className="text-[10px] font-mono text-text-dim/50">{cron}{cronTz ? ` · ${cronTz}` : ""}</p>
                   </div>
                   <ChevronRight className="w-4 h-4 text-text-dim/40 flex-shrink-0" />
                 </button>
@@ -275,7 +277,8 @@ export function SchedulerPage() {
                 <ScheduleModal
                   title={t("scheduler.cron_exp")}
                   initialCron={cron}
-                  onSave={(c) => { setCron(c); setShowCronPicker(false); }}
+                  initialTz={cronTz}
+                  onSave={(c, tz) => { setCron(c); setCronTz(tz); setShowCronPicker(false); }}
                   onClose={() => setShowCronPicker(false)}
                 />
               )}

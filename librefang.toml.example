@@ -324,3 +324,11 @@ debounce_ms = 500
 # [[approval.channel_rules]]
 # channel = "admin_cli"
 # allowed_tools = ["shell_exec", "file_write", "file_delete"]  # Only these tools from admin CLI
+#
+# # TOTP second-factor verification for critical tool approvals.
+# # When enabled, approving a tool requires a 6-digit TOTP code from an authenticator app.
+# # Setup: POST /api/approvals/totp/setup → scan QR → POST /api/approvals/totp/confirm
+# second_factor = "none"                   # "none" (default) or "totp"
+# totp_issuer = "LibreFang"                # Issuer name shown in authenticator app
+# totp_grace_period_secs = 300             # Skip TOTP re-verification within this window (0 = always require)
+# totp_tools = ["shell_exec"]              # Only these tools require TOTP (empty = all tools in require_approval)

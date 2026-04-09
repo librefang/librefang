@@ -245,6 +245,11 @@ impl MemorySubstrate {
         self.sessions.delete_session(session_id)
     }
 
+    /// Return all session IDs belonging to an agent.
+    pub fn get_agent_session_ids(&self, agent_id: AgentId) -> LibreFangResult<Vec<SessionId>> {
+        self.sessions.get_agent_session_ids(agent_id)
+    }
+
     /// Delete all sessions belonging to an agent.
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
         self.sessions.delete_agent_sessions(agent_id)

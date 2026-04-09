@@ -369,6 +369,9 @@ pub async fn execute_tool_raw(
         // Goal tracking tool
         "goal_update" => tool_goal_update(input, *kernel),
 
+        // Workflow execution tool
+        "workflow_run" => tool_workflow_run(input, *kernel).await,
+
         // Browser automation tools
         "browser_navigate" => {
             let Some(url) = input["url"].as_str() else {
@@ -1529,6 +1532,19 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["goal_id"]
             }),
         },
+        // --- Workflow execution tool ---
+        ToolDefinition {
+            name: "workflow_run".to_string(),
+            description: "Run a registered workflow pipeline end-to-end. Workflows are multi-step agent pipelines (e.g., bug-triage, code-review, test-generation). Accepts a workflow UUID or name.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "workflow_id": { "type": "string", "description": "The workflow UUID or registered name (e.g., 'bug-triage', 'code-review')" },
+                    "input": { "type": "object", "description": "Optional input parameters to pass to the workflow's first step (JSON object)" }
+                },
+                "required": ["workflow_id"]
+            }),
+        },
         // --- System time tool ---
         ToolDefinition {
             name: "system_time".to_string(),
@@ -1611,7 +1627,9 @@ async fn tool_file_list(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
 ) -> Result<String, String> {
-    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    let raw_path = input["path"].as_str().ok_or(
+        "Missing 'path' parameter — retry with {\"path\": \".\"} to list the workspace root",
+    )?;
     let resolved = resolve_file_path(raw_path, workspace_root)?;
     let mut entries = tokio::fs::read_dir(&resolved)
         .await
@@ -2264,6 +2282,37 @@ fn tool_goal_update(
     let kh = require_kernel(kernel)?;
     let updated = kh.goal_update(goal_id, status, progress)?;
     Ok(serde_json::to_string_pretty(&updated).unwrap_or_else(|_| updated.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Workflow execution tool
+// ---------------------------------------------------------------------------
+
+async fn tool_workflow_run(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let workflow_id = input["workflow_id"]
+        .as_str()
+        .ok_or("Missing 'workflow_id' parameter")?;
+
+    // Serialize optional input object to a JSON string for the workflow engine.
+    let input_str = match input.get("input") {
+        Some(v) if v.is_object() => serde_json::to_string(v)
+            .map_err(|e| format!("Failed to serialize workflow input: {e}"))?,
+        Some(v) if v.is_null() => String::new(),
+        Some(_) => return Err("'input' must be a JSON object or null".to_string()),
+        None => String::new(),
+    };
+
+    let kh = require_kernel(kernel)?;
+    let (run_id, output) = kh.run_workflow(workflow_id, &input_str).await?;
+
+    Ok(serde_json::json!({
+        "run_id": run_id,
+        "output": output,
+    })
+    .to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -4345,6 +4394,8 @@ mod tests {
         assert!(names.contains(&"docker_exec"));
         // Goal tracking tool
         assert!(names.contains(&"goal_update"));
+        // Workflow execution tool
+        assert!(names.contains(&"workflow_run"));
         // Canvas tool
         assert!(names.contains(&"canvas_present"));
     }

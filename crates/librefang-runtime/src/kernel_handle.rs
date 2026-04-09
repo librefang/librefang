@@ -196,6 +196,8 @@ pub trait KernelHandle: Send + Sync {
         request_id: uuid::Uuid,
         decision: librefang_types::approval::ApprovalDecision,
         decided_by: Option<String>,
+        totp_verified: bool,
+        user_id: Option<&str>,
     ) -> Result<
         (
             librefang_types::approval::ApprovalResponse,
@@ -203,7 +205,7 @@ pub trait KernelHandle: Send + Sync {
         ),
         String,
     > {
-        let _ = (request_id, decision, decided_by);
+        let _ = (request_id, decision, decided_by, totp_verified, user_id);
         Err("Approval system not available".to_string())
     }
 
@@ -453,6 +455,18 @@ pub trait KernelHandle: Send + Sync {
     /// Returns a JSON array of goal objects.
     fn goal_list_active(&self, _agent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
         Ok(Vec::new())
+    }
+
+    /// Run a workflow by ID or name. The `workflow_id` can be a UUID string or a
+    /// workflow name. The `input` is an arbitrary string (typically JSON-encoded
+    /// parameters) passed to the first step. Returns `(run_id, output)` on success.
+    async fn run_workflow(
+        &self,
+        workflow_id: &str,
+        input: &str,
+    ) -> Result<(String, String), String> {
+        let _ = (workflow_id, input);
+        Err("Workflow engine not available".to_string())
     }
 
     /// Update a goal's status and/or progress. Returns the updated goal JSON.

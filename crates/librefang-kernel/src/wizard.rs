@@ -159,6 +159,7 @@ impl SetupWizard {
                 system_prompt,
                 api_key_env: None,
                 base_url: None,
+                extra_params: std::collections::HashMap::new(),
             },
             resources: ResourceQuota::default(),
             priority: Priority::default(),

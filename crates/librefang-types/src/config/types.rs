@@ -50,6 +50,26 @@ pub enum OutputFormat {
     PlainText,
 }
 
+/// Auto-routing strategy for a channel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoRouteStrategy {
+    /// Disable auto-routing entirely (default). Channel messages always go to
+    /// the configured agent without keyword/semantic classification.
+    #[default]
+    Off,
+    /// Only route if the cache already has an entry; never trigger LLM
+    /// classification on the first message.
+    ExplicitOnly,
+    /// Use the cached route for up to `auto_route_ttl_minutes`; re-classify
+    /// via LLM once the TTL expires.
+    StickyTtl,
+    /// Use a cheap metadata heuristic to decide whether the cached route is
+    /// still valid; fall back to full LLM classification after
+    /// `auto_route_divergence_count` consecutive mismatches.
+    StickyHeuristic,
+}
+
 /// Per-channel behavior overrides.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -122,6 +142,24 @@ pub struct ChannelOverrides {
     /// the agent.
     #[serde(default)]
     pub blocked_commands: Vec<String>,
+    /// Auto-routing strategy for this channel. Defaults to `off` (no routing).
+    #[serde(default)]
+    pub auto_route: AutoRouteStrategy,
+    /// How long (in minutes) a cached route stays valid for `sticky_ttl` strategy.
+    #[serde(default = "default_auto_route_ttl")]
+    pub auto_route_ttl_minutes: u32,
+    /// Minimum heuristic confidence score (0–10) before a route is cached for
+    /// `sticky_heuristic` strategy.
+    #[serde(default = "default_auto_route_confidence")]
+    pub auto_route_confidence_threshold: u32,
+    /// Extra score added to the cached route in `sticky_heuristic` to prefer
+    /// stability over churn.
+    #[serde(default = "default_auto_route_bonus")]
+    pub auto_route_sticky_bonus: u32,
+    /// How many consecutive heuristic mismatches trigger a full LLM
+    /// re-classification in `sticky_heuristic` mode.
+    #[serde(default = "default_auto_route_divergence")]
+    pub auto_route_divergence_count: u32,
 }
 
 impl Default for ChannelOverrides {
@@ -145,6 +183,11 @@ impl Default for ChannelOverrides {
             disable_commands: false,
             allowed_commands: Vec::new(),
             blocked_commands: Vec::new(),
+            auto_route: AutoRouteStrategy::Off,
+            auto_route_ttl_minutes: default_auto_route_ttl(),
+            auto_route_confidence_threshold: default_auto_route_confidence(),
+            auto_route_sticky_bonus: default_auto_route_bonus(),
+            auto_route_divergence_count: default_auto_route_divergence(),
         }
     }
 }
@@ -155,6 +198,22 @@ fn default_message_debounce_max_ms() -> u64 {
 
 fn default_message_debounce_max_buffer() -> usize {
     64
+}
+
+fn default_auto_route_ttl() -> u32 {
+    30
+}
+
+fn default_auto_route_confidence() -> u32 {
+    6
+}
+
+fn default_auto_route_bonus() -> u32 {
+    4
+}
+
+fn default_auto_route_divergence() -> u32 {
+    2
 }
 
 /// Controls what usage info appears in response footers.
@@ -2463,6 +2522,20 @@ pub struct ContextEngineHooks {
     /// Called when another plugin emits an event via the event bus.
     #[serde(default)]
     pub on_event: Option<String>,
+    /// Vault secret names that this plugin's hooks are allowed to access.
+    ///
+    /// Each entry is a key name in the LibreFang credential vault. The runtime
+    /// resolves the secret value at engine init time and injects it into every
+    /// hook subprocess as `LIBREFANG_SECRET_<NAME>` (uppercased). If a named
+    /// secret does not exist in the vault a warning is logged and the variable
+    /// is not injected.
+    ///
+    /// ```toml
+    /// [hooks]
+    /// allowed_secrets = ["GITHUB_TOKEN", "OPENAI_KEY"]
+    /// ```
+    #[serde(default)]
+    pub allowed_secrets: Vec<String>,
 }
 
 /// Circuit-breaker settings for a hook.
@@ -2520,6 +2593,30 @@ pub enum HookFailurePolicy {
 
 /// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.
 ///
+/// Type of a plugin config field.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginConfigFieldType {
+    #[default]
+    String,
+    Number,
+    Boolean,
+}
+
+/// A single user-configurable field declared in `[config]` of plugin.toml.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginConfigField {
+    /// Field value type.
+    #[serde(rename = "type", default)]
+    pub field_type: PluginConfigFieldType,
+    /// Default value (always a JSON-compatible value).
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    /// Human-readable description of what this field controls.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// # Example `plugin.toml`
 ///
 /// ```toml
@@ -2532,7 +2629,7 @@ pub enum HookFailurePolicy {
 /// ingest = "hooks/ingest.py"      # relative to plugin dir
 /// after_turn = "hooks/after_turn.py"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginManifest {
     /// Plugin name (must match directory name).
     pub name: String,
@@ -2601,6 +2698,18 @@ pub struct PluginManifest {
     /// ```
     #[serde(default)]
     pub plugin_depends: Vec<String>,
+    /// User-configurable plugin settings declared in `[config]`.
+    ///
+    /// ```toml
+    /// [config]
+    /// model = { type = "string", default = "small", description = "Whisper model size" }
+    /// max_file_size_mb = { type = "number", default = 10 }
+    /// ```
+    ///
+    /// The resolved config (defaults merged with user overrides) is written as JSON to
+    /// the path in `LIBREFANG_PLUGIN_CONFIG` before each hook subprocess runs.
+    #[serde(default)]
+    pub config: std::collections::HashMap<String, PluginConfigField>,
 }
 
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"
@@ -3439,6 +3548,10 @@ pub struct DefaultModelConfig {
     /// many seconds of silence on stdout, not wall-clock time.
     #[serde(default = "default_message_timeout_secs")]
     pub message_timeout_secs: u64,
+    /// Provider-specific extension parameters that are flattened directly
+    /// into the API request body.
+    #[serde(default, flatten)]
+    pub extra_params: HashMap<String, serde_json::Value>,
 }
 
 fn default_message_timeout_secs() -> u64 {
@@ -3453,6 +3566,7 @@ impl Default for DefaultModelConfig {
             api_key_env: String::new(),
             base_url: None,
             message_timeout_secs: default_message_timeout_secs(),
+            extra_params: HashMap::new(),
         }
     }
 }

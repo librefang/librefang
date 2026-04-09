@@ -318,6 +318,9 @@ require_approval = ["shell_exec"]
 timeout_secs = 60
 auto_approve_autonomous = false
 auto_approve = false
+second_factor = "none"
+totp_issuer = "LibreFang"
+totp_grace_period_secs = 300
 ```
 
 | Field | Type | Default | Description |
@@ -326,6 +329,34 @@ auto_approve = false
 | `timeout_secs` | u64 | `60` | Timeout for approval requests in seconds. |
 | `auto_approve_autonomous` | bool | `false` | Auto-approve tools when agent is in autonomous mode. |
 | `auto_approve` | bool | `false` | Auto-approve all tool executions (unsafe, dev only). |
+| `second_factor` | string | `"none"` | Second-factor verification: `"none"` or `"totp"`. When `"totp"`, approvals require a 6-digit TOTP code from an authenticator app. |
+| `totp_issuer` | string | `"LibreFang"` | Issuer name displayed in authenticator apps during enrollment. |
+| `totp_grace_period_secs` | u64 | `300` | After a successful TOTP verification, skip re-verification for this many seconds. Set to `0` to always require a code. Max: `3600`. |
+| `totp_tools` | list of strings | `[]` | Tools requiring TOTP (glob patterns supported). Empty = all tools in `require_approval` need TOTP. Example: `["shell_exec"]`. |
+
+#### TOTP Setup
+
+When `second_factor = "totp"`, you must first enroll an authenticator app:
+
+1. **Generate secret:** `POST /api/approvals/totp/setup` — returns a base32 secret, `otpauth://` URI, QR code (base64 PNG), and 8 recovery codes.
+2. **Add to authenticator:** Scan the QR code or enter the secret in Google Authenticator, 1Password, Authy, etc.
+3. **Save recovery codes:** Store the 8 recovery codes safely — each can be used once in place of a TOTP code if you lose your authenticator device.
+4. **Confirm enrollment:** `POST /api/approvals/totp/confirm` with `{"code": "123456"}` — verifies a code from the app.
+5. **Enable enforcement:** Set `second_factor = "totp"` in config (hot-reloadable).
+
+You can also set up TOTP from the Dashboard under **Settings > Security**.
+
+Once enforced, the approval flow changes:
+- **Dashboard:** Clicking "Approve" prompts for a 6-digit code inline.
+- **Channel (Telegram/Slack):** Use `/approve <id> <6-digit-code>` instead of `/approve <id>`.
+- **API:** Send `{"totp_code": "123456"}` in the body of `POST /api/approvals/{id}/approve`.
+- **Recovery:** Send a recovery code (format: `xxxx-xxxx`) in place of a TOTP code. Each recovery code is consumed on use.
+
+To revoke TOTP, use `DELETE /api/approvals/totp` with `{"code": "..."}` or use the Dashboard. Resetting requires verification with a current TOTP or recovery code.
+
+**Rate limiting:** 5 consecutive TOTP failures lock the account for 5 minutes.
+
+The TOTP secret is stored in the encrypted vault (`~/.librefang/vault.enc`) using AES-256-GCM.
 
 ---
 

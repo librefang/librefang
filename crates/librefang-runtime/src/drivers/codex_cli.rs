@@ -1,7 +1,7 @@
 //! Codex CLI backend driver.
 //!
-//! Spawns the `codex` CLI (OpenAI Codex CLI) as a subprocess in quiet mode (`-q`),
-//! which is non-interactive and handles its own authentication.
+//! Spawns the `codex` CLI (OpenAI Codex CLI) via the non-interactive `exec`
+//! subcommand, which handles its own authentication.
 //! This allows users with Codex CLI installed to use it as an LLM provider
 //! without needing additional configuration beyond OpenAI credentials.
 
@@ -86,7 +86,7 @@ impl CodexCliDriver {
 
     /// Build the CLI arguments for a given request.
     pub fn build_args(&self, prompt: &str, model: &str) -> Vec<String> {
-        let mut args = vec!["-q".to_string(), prompt.to_string()];
+        let mut args = vec!["exec".to_string()];
 
         if self.skip_permissions {
             args.push("--full-auto".to_string());
@@ -97,6 +97,8 @@ impl CodexCliDriver {
             args.push("--model".to_string());
             args.push(m.clone());
         }
+
+        args.push(prompt.to_string());
 
         args
     }
@@ -281,7 +283,7 @@ mod tests {
     fn test_build_args_with_full_auto() {
         let driver = CodexCliDriver::new(None, true);
         let args = driver.build_args("test prompt", "codex-cli/o4-mini");
-        assert!(args.contains(&"-q".to_string()));
+        assert_eq!(args.first().map(String::as_str), Some("exec"));
         assert!(args.contains(&"test prompt".to_string()));
         assert!(args.contains(&"--full-auto".to_string()));
         assert!(args.contains(&"--model".to_string()));
@@ -293,7 +295,8 @@ mod tests {
         let driver = CodexCliDriver::new(None, false);
         let args = driver.build_args("test prompt", "codex-cli/o3");
         assert!(!args.contains(&"--full-auto".to_string()));
-        assert!(args.contains(&"-q".to_string()));
+        assert_eq!(args.first().map(String::as_str), Some("exec"));
+        assert!(!args.contains(&"-q".to_string()));
     }
 
     #[test]
