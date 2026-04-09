@@ -57,6 +57,7 @@ result
 .idea/
 .vscode/
 .claude/
+.codex
 .qwen/
 *.swp
 *.swo

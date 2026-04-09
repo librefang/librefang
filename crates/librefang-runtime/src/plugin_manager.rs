@@ -2624,25 +2624,34 @@ pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
         return Ok("No requirements.txt found — nothing to install".to_string());
     }
 
+    // In virtualenv/conda environments, pip forbids --user installs.
+    let in_venv = std::env::var("VIRTUAL_ENV").is_ok() || std::env::var("CONDA_PREFIX").is_ok();
+    let mut args = vec!["-m", "pip", "install"];
+    if !in_venv {
+        args.push("--user");
+    }
+    args.push("-r");
+
     warn!(
         plugin = plugin_name,
         requirements = %requirements.display(),
-        "Installing Python requirements with pip3 --user"
+        venv = in_venv,
+        "Installing Python requirements"
     );
 
-    let output = tokio::process::Command::new("pip3")
-        .args(["install", "--user", "-r"])
+    let output = tokio::process::Command::new("python")
+        .args(&args)
         .arg(&requirements)
         .output()
         .await
-        .map_err(|e| format!("Failed to run pip3: {e}"))?;
+        .map_err(|e| format!("Failed to run python -m pip: {e}"))?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(stdout.to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("pip3 install failed: {stderr}"))
+        Err(format!("python -m pip install failed: {stderr}"))
     }
 }
 
