@@ -1952,10 +1952,7 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
             dm_override.as_ref(),
         )
     };
-    let mut agent_entries_visible: Vec<_> = agent_entries
-        .iter()
-        .filter(|e| !e.is_hand)
-        .collect();
+    let mut agent_entries_visible: Vec<_> = agent_entries.iter().filter(|e| !e.is_hand).collect();
     // Sort by last_active descending — matches AgentsPage default query order.
     agent_entries_visible.sort_by(|a, b| b.last_active.cmp(&a.last_active));
     let agents: Vec<serde_json::Value> = agent_entries_visible
@@ -1968,13 +1965,17 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
     static SKILL_COUNT_CACHE: std::sync::Mutex<Option<(usize, std::time::Instant)>> =
         std::sync::Mutex::new(None);
     let skill_count = {
-        let cached = SKILL_COUNT_CACHE.lock().unwrap_or_else(|p| p.into_inner()).as_ref().and_then(|(n, t)| {
-            if t.elapsed() < std::time::Duration::from_secs(30) {
-                Some(*n)
-            } else {
-                None
-            }
-        });
+        let cached = SKILL_COUNT_CACHE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .and_then(|(n, t)| {
+                if t.elapsed() < std::time::Duration::from_secs(30) {
+                    Some(*n)
+                } else {
+                    None
+                }
+            });
         match cached {
             Some(n) => n,
             None => {
@@ -1982,7 +1983,8 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
                 let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
                 let _ = registry.load_all();
                 let n = registry.list().len();
-                *SKILL_COUNT_CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((n, std::time::Instant::now()));
+                *SKILL_COUNT_CACHE.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some((n, std::time::Instant::now()));
                 n
             }
         }
