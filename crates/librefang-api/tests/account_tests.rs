@@ -3647,6 +3647,83 @@ async fn mt_budget_agent_status_returns_404_cross_tenant() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn mt_memory_relations_are_invisible_across_tenants() {
+    let h = start_mt_router().await;
+
+    let tenant_a = make_agent_entry("tenant-a-memory-agent", Some("tenant-a"));
+    let tenant_b = make_agent_entry("tenant-b-memory-agent", Some("tenant-b"));
+    let tenant_a_id = tenant_a.id;
+    let tenant_b_id = tenant_b.id;
+    let _ = h.state.kernel.agent_registry().register(tenant_a);
+    let _ = h.state.kernel.agent_registry().register(tenant_b);
+
+    let create_resp = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/memory/agents/{tenant_a_id}/relations"))
+                .header("x-account-id", "tenant-a")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!([{
+                        "subject": "Alice",
+                        "subject_type": "person",
+                        "relation": "works_at",
+                        "object": "Acme",
+                        "object_type": "organization"
+                    }]))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(create_resp.status(), StatusCode::OK);
+
+    let own_resp = h
+        .send(
+            Request::builder()
+                .uri(format!(
+                    "/api/memory/agents/{tenant_a_id}/relations?source=Alice&relation=works_at"
+                ))
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(own_resp.status(), StatusCode::OK);
+    let own_json = read_json(own_resp).await;
+    assert_eq!(own_json["count"], 1);
+
+    let cross_agent_resp = h
+        .send(
+            Request::builder()
+                .uri(format!(
+                    "/api/memory/agents/{tenant_b_id}/relations?source=Alice&relation=works_at"
+                ))
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(cross_agent_resp.status(), StatusCode::OK);
+    let cross_agent_json = read_json(cross_agent_resp).await;
+    assert_eq!(cross_agent_json["count"], 0);
+
+    let wrong_tenant_resp = h
+        .send(
+            Request::builder()
+                .uri(format!(
+                    "/api/memory/agents/{tenant_a_id}/relations?source=Alice&relation=works_at"
+                ))
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(wrong_tenant_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn mt_network_protocol_routes_reject_missing_account_and_forbid_non_admin() {
     let h = start_mt_router_with_admin("admin-tenant").await;
 

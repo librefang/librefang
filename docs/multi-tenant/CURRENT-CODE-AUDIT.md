@@ -202,6 +202,16 @@ right policy.
 - hands are tenant-owned at the instance/settings layer
 - broader tenant-authored skill content or overlays remain future design work
 
+### 5. Knowledge-graph generic API follow-up
+
+- tenant-facing memory relations writes/queries are now account-scoped and no
+  longer share graph rows across tenants
+- knowledge graph entities/relations now persist concrete `account_id` in
+  addition to `agent_id`
+- generic runtime/kernel knowledge graph APIs still do not carry caller tenant
+  context, so the unscoped substrate entry points are intentionally fail-closed
+  until that ownership model is wired end to end
+
 ---
 
 ## Bottom Line

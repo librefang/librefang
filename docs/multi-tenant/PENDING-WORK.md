@@ -49,6 +49,15 @@ If a module is already converged, it should not stay here as generic â€œdrift.â€
   - legacy storage round-trip helpers such as `"system"`
   - stale comments/tests that still describe compatibility behavior too casually
 
+### 5. Knowledge-graph caller-context wiring
+
+- tenant-facing memory relations routes are now account-scoped and the knowledge
+  graph schema persists `account_id`
+- the remaining gap is narrower:
+  generic runtime/kernel knowledge graph APIs still lack caller account context
+  and therefore remain intentionally fail-closed until they can be scoped
+  correctly end to end
+
 ---
 
 ## Intentionally Not Pending

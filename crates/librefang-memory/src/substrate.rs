@@ -889,24 +889,27 @@ impl Memory for MemorySubstrate {
     }
 
     async fn add_entity(&self, entity: Entity) -> LibreFangResult<String> {
-        let store = self.knowledge.clone();
-        tokio::task::spawn_blocking(move || store.add_entity(entity, ""))
-            .await
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+        let _ = entity;
+        Err(LibreFangError::Memory(
+            "unscoped knowledge graph writes are disabled; use agent-scoped proactive memory APIs"
+                .to_string(),
+        ))
     }
 
     async fn add_relation(&self, relation: Relation) -> LibreFangResult<String> {
-        let store = self.knowledge.clone();
-        tokio::task::spawn_blocking(move || store.add_relation(relation, ""))
-            .await
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+        let _ = relation;
+        Err(LibreFangError::Memory(
+            "unscoped knowledge graph writes are disabled; use agent-scoped proactive memory APIs"
+                .to_string(),
+        ))
     }
 
     async fn query_graph(&self, pattern: GraphPattern) -> LibreFangResult<Vec<GraphMatch>> {
-        let store = self.knowledge.clone();
-        tokio::task::spawn_blocking(move || store.query_graph(pattern))
-            .await
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+        let _ = pattern;
+        Err(LibreFangError::Memory(
+            "unscoped knowledge graph queries are disabled; use agent-scoped proactive memory APIs"
+                .to_string(),
+        ))
     }
 
     async fn consolidate(&self) -> LibreFangResult<ConsolidationReport> {

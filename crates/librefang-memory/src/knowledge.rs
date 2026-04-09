@@ -25,7 +25,12 @@ impl KnowledgeStore {
     }
 
     /// Add an entity to the knowledge graph.
-    pub fn add_entity(&self, entity: Entity, agent_id: &str) -> LibreFangResult<String> {
+    pub fn add_entity(
+        &self,
+        entity: Entity,
+        agent_id: &str,
+        account_id: Option<&str>,
+    ) -> LibreFangResult<String> {
         let conn = self
             .conn
             .lock()
@@ -41,17 +46,30 @@ impl KnowledgeStore {
             .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO entities (id, entity_type, name, properties, created_at, updated_at, agent_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
-             ON CONFLICT(id) DO UPDATE SET name = ?3, properties = ?4, updated_at = ?5",
-            rusqlite::params![id, entity_type_str, entity.name, props_str, now, agent_id],
+            "INSERT INTO entities (id, entity_type, name, properties, created_at, updated_at, agent_id, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET name = ?3, properties = ?4, updated_at = ?5, agent_id = ?6, account_id = ?7",
+            rusqlite::params![
+                id,
+                entity_type_str,
+                entity.name,
+                props_str,
+                now,
+                agent_id,
+                account_id,
+            ],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(id)
     }
 
     /// Add a relation between two entities.
-    pub fn add_relation(&self, relation: Relation, agent_id: &str) -> LibreFangResult<String> {
+    pub fn add_relation(
+        &self,
+        relation: Relation,
+        agent_id: &str,
+        account_id: Option<&str>,
+    ) -> LibreFangResult<String> {
         let conn = self
             .conn
             .lock()
@@ -63,8 +81,8 @@ impl KnowledgeStore {
             .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO relations (id, source_entity, relation_type, target_entity, properties, confidence, created_at, agent_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO relations (id, source_entity, relation_type, target_entity, properties, confidence, created_at, agent_id, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 id,
                 relation.source,
@@ -74,6 +92,7 @@ impl KnowledgeStore {
                 relation.confidence as f64,
                 now,
                 agent_id,
+                account_id,
             ],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -102,11 +121,13 @@ impl KnowledgeStore {
     }
 
     /// Check if a relation already exists between two entities with a given type.
-    pub fn has_relation(
+    pub fn has_relation_scoped(
         &self,
         source_id: &str,
         relation_type: &RelationType,
         target_id: &str,
+        agent_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> LibreFangResult<bool> {
         let conn = self
             .conn
@@ -114,21 +135,42 @@ impl KnowledgeStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let rel_str = serde_json::to_string(relation_type)
             .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let mut sql = String::from(
+            "SELECT COUNT(*) FROM relations r
+             WHERE (r.source_entity = ?1 OR EXISTS (SELECT 1 FROM entities e WHERE e.id = ?1 AND e.name = r.source_entity))
+             AND r.relation_type = ?2
+             AND (r.target_entity = ?3 OR EXISTS (SELECT 1 FROM entities e WHERE e.id = ?3 AND e.name = r.target_entity))",
+        );
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+            Box::new(source_id.to_string()),
+            Box::new(rel_str),
+            Box::new(target_id.to_string()),
+        ];
+        let mut idx = 4;
+        if let Some(agent_id) = agent_id {
+            sql.push_str(&format!(" AND r.agent_id = ?{idx}"));
+            params.push(Box::new(agent_id.to_string()));
+            idx += 1;
+        }
+        if let Some(account_id) = account_id {
+            sql.push_str(&format!(" AND r.account_id = ?{idx}"));
+            params.push(Box::new(account_id.to_string()));
+        }
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
         let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM relations r
-                 WHERE (r.source_entity = ?1 OR EXISTS (SELECT 1 FROM entities e WHERE e.id = ?1 AND e.name = r.source_entity))
-                 AND r.relation_type = ?2
-                 AND (r.target_entity = ?3 OR EXISTS (SELECT 1 FROM entities e WHERE e.id = ?3 AND e.name = r.target_entity))",
-                rusqlite::params![source_id, rel_str, target_id],
-                |row| row.get(0),
-            )
+            .query_row(&sql, param_refs.as_slice(), |row| row.get(0))
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(count > 0)
     }
 
     /// Query the knowledge graph with a pattern.
-    pub fn query_graph(&self, pattern: GraphPattern) -> LibreFangResult<Vec<GraphMatch>> {
+    pub fn query_graph_scoped(
+        &self,
+        pattern: GraphPattern,
+        agent_id: Option<&str>,
+        account_id: Option<&str>,
+    ) -> LibreFangResult<Vec<GraphMatch>> {
         let conn = self
             .conn
             .lock()
@@ -146,6 +188,21 @@ impl KnowledgeStore {
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut idx = 1;
+
+        if let Some(agent_id) = agent_id {
+            sql.push_str(&format!(
+                " AND r.agent_id = ?{idx} AND s.agent_id = ?{idx} AND t.agent_id = ?{idx}"
+            ));
+            params.push(Box::new(agent_id.to_string()));
+            idx += 1;
+        }
+        if let Some(account_id) = account_id {
+            sql.push_str(&format!(
+                " AND r.account_id = ?{idx} AND s.account_id = ?{idx} AND t.account_id = ?{idx}"
+            ));
+            params.push(Box::new(account_id.to_string()));
+            idx += 1;
+        }
 
         if let Some(ref source) = pattern.source {
             sql.push_str(&format!(" AND (s.id = ?{} OR s.name = ?{})", idx, idx + 1));
@@ -233,6 +290,10 @@ impl KnowledgeStore {
             });
         }
         Ok(matches)
+    }
+
+    pub fn query_graph(&self, pattern: GraphPattern) -> LibreFangResult<Vec<GraphMatch>> {
+        self.query_graph_scoped(pattern, None, None)
     }
 }
 
@@ -344,6 +405,7 @@ mod tests {
                     updated_at: Utc::now(),
                 },
                 "test-agent",
+                Some("tenant-a"),
             )
             .unwrap();
         assert!(!id.is_empty());
@@ -363,6 +425,7 @@ mod tests {
                     updated_at: Utc::now(),
                 },
                 "test-agent",
+                Some("tenant-a"),
             )
             .unwrap();
         let company_id = store
@@ -376,6 +439,7 @@ mod tests {
                     updated_at: Utc::now(),
                 },
                 "test-agent",
+                Some("tenant-a"),
             )
             .unwrap();
         store
@@ -389,6 +453,7 @@ mod tests {
                     created_at: Utc::now(),
                 },
                 "test-agent",
+                Some("tenant-a"),
             )
             .unwrap();
 
@@ -421,6 +486,7 @@ mod tests {
                     updated_at: Utc::now(),
                 },
                 "",
+                None,
             )
             .unwrap();
         let _corp_id = store
@@ -434,6 +500,7 @@ mod tests {
                     updated_at: Utc::now(),
                 },
                 "",
+                None,
             )
             .unwrap();
         // Relation references entities by name (as MCP knowledge_add_relation does)
@@ -448,6 +515,7 @@ mod tests {
                     created_at: Utc::now(),
                 },
                 "",
+                None,
             )
             .unwrap();
 
@@ -466,5 +534,109 @@ mod tests {
         );
         assert_eq!(matches[0].source.name, "Alice");
         assert_eq!(matches[0].target.name, "Acme Corp");
+    }
+
+    #[test]
+    fn test_query_graph_scoped_hides_other_tenant_rows() {
+        let store = setup();
+        let alice_a = store
+            .add_entity(
+                Entity {
+                    id: "tenant-a-alice".to_string(),
+                    entity_type: EntityType::Person,
+                    name: "Alice".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "agent-a",
+                Some("tenant-a"),
+            )
+            .unwrap();
+        let corp_a = store
+            .add_entity(
+                Entity {
+                    id: "tenant-a-acme".to_string(),
+                    entity_type: EntityType::Organization,
+                    name: "Acme".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "agent-a",
+                Some("tenant-a"),
+            )
+            .unwrap();
+        let alice_b = store
+            .add_entity(
+                Entity {
+                    id: "tenant-b-alice".to_string(),
+                    entity_type: EntityType::Person,
+                    name: "Alice".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "agent-b",
+                Some("tenant-b"),
+            )
+            .unwrap();
+        let corp_b = store
+            .add_entity(
+                Entity {
+                    id: "tenant-b-acme".to_string(),
+                    entity_type: EntityType::Organization,
+                    name: "Acme".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "agent-b",
+                Some("tenant-b"),
+            )
+            .unwrap();
+        store
+            .add_relation(
+                Relation {
+                    source: alice_a,
+                    relation: RelationType::WorksAt,
+                    target: corp_a,
+                    properties: HashMap::new(),
+                    confidence: 1.0,
+                    created_at: Utc::now(),
+                },
+                "agent-a",
+                Some("tenant-a"),
+            )
+            .unwrap();
+        store
+            .add_relation(
+                Relation {
+                    source: alice_b,
+                    relation: RelationType::WorksAt,
+                    target: corp_b,
+                    properties: HashMap::new(),
+                    confidence: 1.0,
+                    created_at: Utc::now(),
+                },
+                "agent-b",
+                Some("tenant-b"),
+            )
+            .unwrap();
+
+        let matches = store
+            .query_graph_scoped(
+                GraphPattern {
+                    source: Some("Alice".to_string()),
+                    relation: Some(RelationType::WorksAt),
+                    target: None,
+                    max_depth: 1,
+                },
+                Some("agent-a"),
+                Some("tenant-a"),
+            )
+            .unwrap();
+
+        assert_eq!(matches.len(), 1);
     }
 }

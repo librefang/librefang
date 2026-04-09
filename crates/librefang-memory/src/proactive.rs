@@ -1165,6 +1165,34 @@ impl ProactiveMemoryStore {
     ///
     /// Deduplicates: skips if an identical (source, relation, target) already exists.
     pub fn store_relations(&self, triples: &[RelationTriple], agent_id: &str) {
+        self.store_relations_internal(triples, agent_id, None);
+    }
+
+    pub fn store_relations_scoped(
+        &self,
+        triples: &[RelationTriple],
+        agent_id: &str,
+        account_id: &str,
+    ) -> LibreFangResult<()> {
+        if agent_id.trim().is_empty() || account_id.trim().is_empty() {
+            return Err(LibreFangError::Memory(
+                "knowledge graph writes require concrete agent_id and account_id".to_string(),
+            ));
+        }
+        self.store_relations_internal(triples, agent_id, Some(account_id));
+        Ok(())
+    }
+
+    fn store_relations_internal(
+        &self,
+        triples: &[RelationTriple],
+        agent_id: &str,
+        account_id: Option<&str>,
+    ) {
+        if agent_id.trim().is_empty() {
+            tracing::warn!("Refusing to store knowledge graph relations without agent ownership");
+            return;
+        }
         for triple in triples {
             let source_type = parse_entity_type(&triple.subject_type);
             let target_type = parse_entity_type(&triple.object_type);
@@ -1172,7 +1200,7 @@ impl ProactiveMemoryStore {
             // Upsert source entity
             let source_id = match self.knowledge.add_entity(
                 Entity {
-                    id: normalize_entity_id(&triple.subject),
+                    id: scoped_entity_id(agent_id, &triple.subject),
                     entity_type: source_type,
                     name: triple.subject.clone(),
                     properties: HashMap::new(),
@@ -1180,6 +1208,7 @@ impl ProactiveMemoryStore {
                     updated_at: chrono::Utc::now(),
                 },
                 agent_id,
+                account_id,
             ) {
                 Ok(id) => id,
                 Err(e) => {
@@ -1191,7 +1220,7 @@ impl ProactiveMemoryStore {
             // Upsert target entity
             let target_id = match self.knowledge.add_entity(
                 Entity {
-                    id: normalize_entity_id(&triple.object),
+                    id: scoped_entity_id(agent_id, &triple.object),
                     entity_type: target_type,
                     name: triple.object.clone(),
                     properties: HashMap::new(),
@@ -1199,6 +1228,7 @@ impl ProactiveMemoryStore {
                     updated_at: chrono::Utc::now(),
                 },
                 agent_id,
+                account_id,
             ) {
                 Ok(id) => id,
                 Err(e) => {
@@ -1209,10 +1239,13 @@ impl ProactiveMemoryStore {
 
             // Add relation (skip if already exists)
             let relation_type = parse_relation_type(&triple.relation);
-            match self
-                .knowledge
-                .has_relation(&source_id, &relation_type, &target_id)
-            {
+            match self.knowledge.has_relation_scoped(
+                &source_id,
+                &relation_type,
+                &target_id,
+                Some(agent_id),
+                account_id,
+            ) {
                 Ok(true) => {
                     tracing::debug!(
                         "Skipping duplicate relation: {} -> {} -> {}",
@@ -1232,6 +1265,7 @@ impl ProactiveMemoryStore {
                             created_at: chrono::Utc::now(),
                         },
                         agent_id,
+                        account_id,
                     ) {
                         tracing::warn!(
                             "Failed to add relation '{}' -> '{}': {}",
@@ -1252,7 +1286,7 @@ impl ProactiveMemoryStore {
     ///
     /// Extracts candidate entity names from the query, then does targeted
     /// graph lookups instead of loading all relations.
-    fn graph_context(&self, query: &str) -> Option<String> {
+    fn graph_context(&self, agent_id: &str, query: &str) -> Option<String> {
         // Extract capitalized words and significant terms as entity candidates
         let candidates = extract_entity_candidates(query);
         if candidates.is_empty() {
@@ -1264,12 +1298,16 @@ impl ProactiveMemoryStore {
 
         for candidate in &candidates {
             // Query as source
-            if let Ok(matches) = self.knowledge.query_graph(GraphPattern {
-                source: Some(candidate.clone()),
-                relation: None,
-                target: None,
-                max_depth: 1,
-            }) {
+            if let Ok(matches) = self.knowledge.query_graph_scoped(
+                GraphPattern {
+                    source: Some(candidate.clone()),
+                    relation: None,
+                    target: None,
+                    max_depth: 1,
+                },
+                Some(agent_id),
+                None,
+            ) {
                 for m in matches {
                     let key = format!("{}-{:?}-{}", m.source.id, m.relation.relation, m.target.id);
                     if seen.insert(key) {
@@ -1278,12 +1316,16 @@ impl ProactiveMemoryStore {
                 }
             }
             // Query as target
-            if let Ok(matches) = self.knowledge.query_graph(GraphPattern {
-                source: None,
-                relation: None,
-                target: Some(candidate.clone()),
-                max_depth: 1,
-            }) {
+            if let Ok(matches) = self.knowledge.query_graph_scoped(
+                GraphPattern {
+                    source: None,
+                    relation: None,
+                    target: Some(candidate.clone()),
+                    max_depth: 1,
+                },
+                Some(agent_id),
+                None,
+            ) {
                 for m in matches {
                     let key = format!("{}-{:?}-{}", m.source.id, m.relation.relation, m.target.id);
                     if seen.insert(key) {
@@ -1319,9 +1361,18 @@ impl ProactiveMemoryStore {
         let mut context = self.extractor.format_context(memories);
 
         // Append knowledge graph context if relevant
-        if let Some(graph_ctx) = self.graph_context(query) {
-            context.push('\n');
-            context.push_str(&graph_ctx);
+        if let Ok(agent_id) = memories
+            .iter()
+            .find_map(|m| m.agent_id.as_deref())
+            .map(Self::parse_agent_id)
+            .transpose()
+        {
+            if let Some(graph_ctx) =
+                agent_id.and_then(|id| self.graph_context(&id.to_string(), query))
+            {
+                context.push('\n');
+                context.push_str(&graph_ctx);
+            }
         }
 
         context
@@ -1654,6 +1705,21 @@ impl ProactiveMemoryStore {
         pattern: GraphPattern,
     ) -> LibreFangResult<Vec<librefang_types::memory::GraphMatch>> {
         self.knowledge.query_graph(pattern)
+    }
+
+    pub fn query_relations_scoped(
+        &self,
+        pattern: GraphPattern,
+        agent_id: &str,
+        account_id: &str,
+    ) -> LibreFangResult<Vec<librefang_types::memory::GraphMatch>> {
+        if agent_id.trim().is_empty() || account_id.trim().is_empty() {
+            return Err(LibreFangError::Memory(
+                "knowledge graph queries require concrete agent_id and account_id".to_string(),
+            ));
+        }
+        self.knowledge
+            .query_graph_scoped(pattern, Some(agent_id), Some(account_id))
     }
 
     /// Find duplicate/near-duplicate memories for a user/agent.
@@ -2426,7 +2492,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
         // Enrich with knowledge graph: if entities in query match graph nodes,
         // synthesize a context memory from graph relations.
         if items.len() < limit {
-            if let Some(graph_ctx) = self.graph_context(query) {
+            if let Some(graph_ctx) = self.graph_context(&agent_id.to_string(), query) {
                 items.push(
                     MemoryItem::new(graph_ctx, MemoryLevel::Agent).with_category("knowledge_graph"),
                 );
@@ -2781,6 +2847,10 @@ fn normalize_entity_id(name: &str) -> String {
     name.to_lowercase().replace(' ', "_")
 }
 
+fn scoped_entity_id(agent_id: &str, name: &str) -> String {
+    format!("kg:{agent_id}:{}", normalize_entity_id(name))
+}
+
 /// Parse entity type string from LLM into EntityType enum.
 fn parse_entity_type(s: &str) -> EntityType {
     match s.to_lowercase().as_str() {
@@ -3081,6 +3151,26 @@ mod tests {
         // Search
         let results = store.search("dark mode", &agent_id, 10).await.unwrap();
         assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_store_relations_scoped_rejects_blank_ownership() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let triples = vec![RelationTriple {
+            subject: "Alice".to_string(),
+            subject_type: "person".to_string(),
+            relation: "works_at".to_string(),
+            object: "Acme".to_string(),
+            object_type: "organization".to_string(),
+        }];
+
+        assert!(store
+            .store_relations_scoped(&triples, "", "tenant-a")
+            .is_err());
+        assert!(store
+            .store_relations_scoped(&triples, "agent-a", "")
+            .is_err());
     }
 
     #[tokio::test]

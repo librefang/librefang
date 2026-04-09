@@ -1206,16 +1206,24 @@ pub async fn memory_store_relations(
     Path(agent_id): Path<String>,
     Json(triples): Json<Vec<librefang_types::memory::RelationTriple>>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
-        return e;
-    }
+    let parsed_agent_id = match require_agent_access(&state, &account, &agent_id) {
+        Ok(agent_id) => agent_id,
+        Err(e) => return e,
+    };
+    let account_id = match scoped_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(e) => return e,
+    };
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
 
     let count = triples.len();
-    store.store_relations(&triples, &agent_id);
+    if let Err(e) = store.store_relations_scoped(&triples, &parsed_agent_id.to_string(), account_id)
+    {
+        return internal_error(e);
+    }
 
     (
         StatusCode::OK,
@@ -1259,9 +1267,14 @@ pub async fn memory_query_relations(
     Path(agent_id): Path<String>,
     Query(params): Query<RelationQueryParams>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
-        return e;
-    }
+    let parsed_agent_id = match require_agent_access(&state, &account, &agent_id) {
+        Ok(agent_id) => agent_id,
+        Err(e) => return e,
+    };
+    let account_id = match scoped_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(e) => return e,
+    };
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -1279,7 +1292,7 @@ pub async fn memory_query_relations(
         max_depth: 1,
     };
 
-    match store.query_relations(pattern) {
+    match store.query_relations_scoped(pattern, &parsed_agent_id.to_string(), account_id) {
         Ok(matches) => {
             let results: Vec<serde_json::Value> = matches
                 .iter()
