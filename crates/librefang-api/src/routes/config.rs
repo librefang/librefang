@@ -9,7 +9,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/health", axum::routing::get(health))
         .route("/health/detail", axum::routing::get(health_detail))
         .route("/status", axum::routing::get(status))
-        .route("/dashboard/snapshot", axum::routing::get(dashboard_snapshot))
+        .route(
+            "/dashboard/snapshot",
+            axum::routing::get(dashboard_snapshot),
+        )
         .route("/version", axum::routing::get(version))
         .route("/config", axum::routing::get(get_config))
         .route("/config/export", axum::routing::get(export_config))
@@ -1925,12 +1928,6 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
 
     // Agents list — fully enriched (same fields as /api/agents) so AgentsPage
     // can use this snapshot directly instead of polling /api/agents separately.
-    //
-    // IMPORTANT: `catalog` is an `Option<RwLockReadGuard<...>>` which is !Send.
-    // It must be dropped before the `tokio::join!` await below, otherwise the
-    // async future becomes !Send and axum's Handler impl won't be satisfied.
-    // Scoping the guard inside this block ensures it is released before any
-    // await point.
     let agents: Vec<serde_json::Value> = {
         let catalog = state.kernel.model_catalog_ref().read().ok();
         let dm = {
@@ -1949,7 +1946,6 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
             .iter()
             .map(|e| super::agents::enrich_agent_json(e, &dm, &catalog))
             .collect()
-        // `catalog` (RwLockReadGuard) and `dm_override` are dropped here.
     };
 
     // Skills count — cached behind a 30s TTL to avoid scanning the skills
