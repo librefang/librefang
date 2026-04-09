@@ -171,35 +171,6 @@ use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
-// ---------------------------------------------------------------------------
-// Assign account ownership to a newly spawned agent
-// ---------------------------------------------------------------------------
-
-/// Attach tenant ownership to a freshly spawned agent in the registry.
-///
-/// Assign tenant ownership to a freshly spawned agent.
-///
-/// Calls [`AgentRegistry::set_account_id`] directly — no clone/mutate
-/// round-trip. Tenant-facing spawn flows must provide a concrete account.
-///
-/// Returns `Err` if ownership could not be attached. Callers **must** treat
-/// this as a hard failure: an agent that exists without `account_id` in a
-/// scoped request is a security invariant violation.
-fn finalize_spawned_agent_in_registry(
-    state: &AppState,
-    id: AgentId,
-    account: &AccountId,
-) -> Result<(), String> {
-    if let Some(ref owner) = account.0 {
-        state
-            .kernel
-            .agent_registry()
-            .set_account_id(id, Some(owner.clone()))
-            .map_err(|e| format!("Failed to attach account_id to agent {id}: {e}"))?;
-    }
-    Ok(())
-}
-
 fn tenant_owner<'a>(
     account: &'a AccountId,
 ) -> Result<&'a str, (StatusCode, Json<serde_json::Value>)> {
@@ -353,6 +324,10 @@ pub async fn spawn_agent(
     Json(req): Json<SpawnRequest>,
 ) -> impl IntoResponse {
     let l = super::resolve_lang(lang.as_ref());
+    let owner = match tenant_owner(&account) {
+        Ok(owner) => owner,
+        Err((code, json)) => return (code, json),
+    };
 
     let resolved = match resolve_manifest(&state, &req, l).await {
         Ok(r) => r,
@@ -371,26 +346,14 @@ pub async fn spawn_agent(
         }
     };
 
-    match state.kernel.spawn_agent(resolved.manifest) {
-        Ok(id) => {
-            // Attach tenant ownership — failure is a hard error: an unowned
-            // agent in a scoped session is a security invariant violation.
-            if let Err(e) = finalize_spawned_agent_in_registry(&state, id, &account) {
-                // Best-effort cleanup: stop the agent so it does not linger unowned.
-                let _ = state.kernel.kill_agent(id);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": e})),
-                );
-            }
-            (
-                StatusCode::CREATED,
-                Json(serde_json::json!(SpawnResponse {
-                    agent_id: id.to_string(),
-                    name: resolved.name,
-                })),
-            )
-        }
+    match state.kernel.spawn_agent_owned(resolved.manifest, owner) {
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!(SpawnResponse {
+                agent_id: id.to_string(),
+                name: resolved.name,
+            })),
+        ),
         Err(e) => {
             tracing::warn!("Spawn failed: {e}");
             let t = ErrorTranslator::new(l);
@@ -402,9 +365,7 @@ pub async fn spawn_agent(
             };
             (
                 status,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-agent-error", &[("error", &e.to_string())])}),
-                ),
+                Json(serde_json::json!({"error": t.t("api-error-agent-error")})),
             )
         }
     }
@@ -457,6 +418,10 @@ pub async fn bulk_create_agents(
     Json(req): Json<BulkCreateRequest>,
 ) -> impl IntoResponse {
     let l = super::resolve_lang(lang.as_ref());
+    let owner = match tenant_owner(&account) {
+        Ok(owner) => owner.to_string(),
+        Err((code, json)) => return (code, json),
+    };
     if let Err(resp) = validate_bulk_size(req.agents.len(), l) {
         return resp;
     }
@@ -476,20 +441,11 @@ pub async fn bulk_create_agents(
             }
             Ok(resolved) => {
                 let name = resolved.name.clone();
-                match state.kernel.spawn_agent(resolved.manifest) {
+                match state
+                    .kernel
+                    .spawn_agent_owned(resolved.manifest, owner.clone())
+                {
                     Ok(id) => {
-                        // Attach tenant ownership — hard failure per spawn contract.
-                        if let Err(e) = finalize_spawned_agent_in_registry(&state, id, &account) {
-                            let _ = state.kernel.kill_agent(id);
-                            results.push(BulkCreateResult {
-                                index,
-                                success: false,
-                                agent_id: None,
-                                name: Some(name),
-                                error: Some(e),
-                            });
-                            continue;
-                        }
                         results.push(BulkCreateResult {
                             index,
                             success: true,
@@ -498,17 +454,14 @@ pub async fn bulk_create_agents(
                             error: None,
                         });
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         let t = ErrorTranslator::new(l);
                         results.push(BulkCreateResult {
                             index,
                             success: false,
                             agent_id: None,
                             name: None,
-                            error: Some(t.t_args(
-                                "api-error-agent-clone-spawn-failed",
-                                &[("error", &e.to_string())],
-                            )),
+                            error: Some(t.t("api-error-agent-clone-spawn-failed")),
                         });
                     }
                 }
@@ -1425,18 +1378,18 @@ pub async fn send_message(
         }
         Err(e) => {
             tracing::warn!("send_message failed for agent {id}: {e}");
-            let status = if format!("{e}").contains("Agent not found") {
+            let err = e.to_string();
+            let lower = err.to_lowercase();
+            let status = if err.contains("Agent not found") {
                 StatusCode::NOT_FOUND
-            } else if format!("{e}").contains("quota") || format!("{e}").contains("Quota") {
+            } else if lower.contains("quota") {
                 StatusCode::TOO_MANY_REQUESTS
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
             (status, {
                 let t = ErrorTranslator::new(l);
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-message-delivery-failed", &[("reason", &e.to_string())])}),
-                )
+                Json(serde_json::json!({"error": t.t("api-error-message-delivery-failed")}))
             })
         }
     }
@@ -1770,10 +1723,13 @@ pub async fn suspend_agent(
             StatusCode::OK,
             Json(serde_json::json!({"status": "suspended", "agent_id": id})),
         ),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => {
+            tracing::warn!("Failed to suspend agent {id}: {e}");
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Agent not found"})),
+            )
+        }
     }
 }
 
@@ -1812,10 +1768,13 @@ pub async fn resume_agent(
             StatusCode::OK,
             Json(serde_json::json!({"status": "running", "agent_id": id})),
         ),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => {
+            tracing::warn!("Failed to resume agent {id}: {e}");
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Agent not found"})),
+            )
+        }
     }
 }
 
@@ -2388,10 +2347,11 @@ pub async fn import_session(
     let export: librefang_memory::session::SessionExport = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {
+            tracing::warn!("import_session invalid export payload for agent {agent_id}: {e}");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("Invalid export format: {e}")})),
-            )
+                Json(serde_json::json!({"error": "Invalid export format"})),
+            );
         }
     };
     match state.kernel.import_session(agent_id, export) {
@@ -3997,7 +3957,11 @@ pub async fn clone_agent(
     apply_clone_inclusion_flags(&mut cloned_manifest, &req);
 
     // Spawn the cloned agent
-    let new_id = match state.kernel.spawn_agent(cloned_manifest) {
+    let owner = match tenant_owner(&account) {
+        Ok(owner) => owner,
+        Err((code, json)) => return (code, json),
+    };
+    let new_id = match state.kernel.spawn_agent_owned(cloned_manifest, owner) {
         Ok(id) => id,
         Err(e) => {
             return (
@@ -4008,15 +3972,6 @@ pub async fn clone_agent(
             );
         }
     };
-
-    // Attach tenant ownership to the cloned agent — hard failure per spawn contract.
-    if let Err(e) = finalize_spawned_agent_in_registry(&state, new_id, &account) {
-        let _ = state.kernel.kill_agent(new_id);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        );
-    }
 
     // Copy workspace files from source to destination
     let new_entry = state.kernel.agent_registry().get(new_id);
@@ -4998,12 +4953,16 @@ pub async fn inject_message(
             Json(serde_json::json!({"injected": injected})),
         )
             .into_response(),
-        Err(e) => if e.to_string().contains("not found") {
-            ApiErrorResponse::not_found(e.to_string())
-        } else {
-            ApiErrorResponse::internal(e.to_string())
+        Err(e) => {
+            let err = e.to_string();
+            tracing::warn!("inject_message failed for agent {agent_id}: {err}");
+            if err.contains("not found") {
+                ApiErrorResponse::not_found("Agent not found")
+            } else {
+                ApiErrorResponse::internal("Message injection failed")
+            }
+            .into_response()
         }
-        .into_response(),
     }
 }
 
@@ -5090,14 +5049,18 @@ pub async fn push_message(
                 "agent_id": agent_id.to_string(),
             })),
         ),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({
-                "success": false,
-                "detail": e,
-                "agent_id": agent_id.to_string(),
-            })),
-        ),
+        Err(e) => {
+            tracing::warn!("push_message failed for agent {agent_id}: {e}");
+            let t = ErrorTranslator::new(l);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "success": false,
+                    "detail": t.t("api-error-message-delivery-failed"),
+                    "agent_id": agent_id.to_string(),
+                })),
+            )
+        }
     }
 }
 
@@ -5107,6 +5070,77 @@ pub async fn push_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::AppState;
+    use axum::{extract::State, Json};
+    use librefang_types::{
+        agent::{AgentEntry, AgentIdentity, AgentManifest, AgentMode, AgentState},
+        config::KernelConfig,
+    };
+    use std::{collections::HashMap, sync::Arc};
+
+    fn test_app_state() -> (tempfile::TempDir, Arc<AppState>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-api-agents-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        let state = Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home_dir.join("webhooks.json")),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+        (tmp, state)
+    }
+
+    fn tenant_agent(name: &str, account_id: &str) -> AgentEntry {
+        AgentEntry {
+            id: librefang_types::agent::AgentId::new(),
+            account_id: Some(account_id.to_string()),
+            name: name.to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        }
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
 
     #[test]
     fn test_clone_request_defaults() {
@@ -5334,6 +5368,212 @@ mod tests {
         let req: PatchAgentConfigRequest = serde_json::from_str(json).unwrap();
         assert!(req.temperature.is_none());
         assert_eq!(req.max_tokens, Some(4096));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_message_sanitizes_backend_errors() {
+        let (_tmp, state) = test_app_state();
+        let agent = tenant_agent("push-sender", "tenant-a");
+        let agent_id = agent.id;
+        state.kernel.agent_registry().register(agent).unwrap();
+
+        let response = push_message(
+            State(state),
+            AccountId(Some("tenant-a".to_string())),
+            Path(agent_id.to_string()),
+            None,
+            Json(crate::types::PushMessageRequest {
+                channel: "bogus-channel".to_string(),
+                recipient: "bogus-recipient".to_string(),
+                message: "hello".to_string(),
+                thread_id: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = response_json(response).await;
+        let detail = body["detail"].as_str().expect("detail string");
+        assert_eq!(detail, "Message delivery failed");
+        assert!(!detail.contains("bogus-channel"));
+        assert!(!detail.contains("bogus-recipient"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spawn_agent_sanitizes_backend_errors() {
+        let (_tmp, state) = test_app_state();
+        let owner = "tenant-a";
+        let manifest_toml = r#"name = "duplicate-agent-name-leak""#.to_string();
+        let request = SpawnRequest {
+            manifest_toml,
+            template: None,
+            signed_manifest: None,
+        };
+        let first = spawn_agent(
+            State(state.clone()),
+            AccountId(Some(owner.to_string())),
+            None,
+            Json(SpawnRequest {
+                manifest_toml: request.manifest_toml.clone(),
+                template: request.template.clone(),
+                signed_manifest: request.signed_manifest.clone(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let response = spawn_agent(
+            State(state),
+            AccountId(Some(owner.to_string())),
+            None,
+            Json(request),
+        )
+        .await
+        .into_response();
+
+        let body = response_json(response).await;
+        let err = body["error"].as_str().expect("error string");
+        assert!(
+            !err.contains("duplicate-agent-name-leak"),
+            "raw backend error leaked: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bulk_create_agents_sanitizes_backend_errors() {
+        let (_tmp, state) = test_app_state();
+        let owner = "tenant-a";
+        let request = crate::types::BulkCreateRequest {
+            agents: vec![
+                SpawnRequest {
+                    manifest_toml: r#"name = "bulk-duplicate-leak""#.to_string(),
+                    template: None,
+                    signed_manifest: None,
+                },
+                SpawnRequest {
+                    manifest_toml: r#"name = "bulk-duplicate-leak""#.to_string(),
+                    template: None,
+                    signed_manifest: None,
+                },
+            ],
+        };
+
+        let response = bulk_create_agents(
+            State(state),
+            AccountId(Some(owner.to_string())),
+            None,
+            Json(request),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let results = body["results"].as_array().expect("results array");
+        let error = results[1]["error"].as_str().expect("error string");
+        assert!(
+            !error.contains("bulk-duplicate-leak"),
+            "raw backend error leaked: {error}"
+        );
+    }
+
+    fn inject_test_app_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-api-inject-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        let state = Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home_dir.join("webhooks.json")),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            account_sig_secret: None,
+        });
+        (state, tmp)
+    }
+
+    fn spawn_inject_test_agent(state: &Arc<AppState>, name: &str, account_id: &str) -> AgentId {
+        let manifest = AgentManifest {
+            name: name.to_string(),
+            ..AgentManifest::default()
+        };
+        state
+            .kernel
+            .spawn_agent_owned(manifest, account_id)
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inject_message_sanitizes_internal_errors() {
+        let (state, _tmp) = inject_test_app_state();
+        let agent_id = spawn_inject_test_agent(&state, "inject-failure", "tenant-a");
+
+        let response = inject_message(
+            State(state),
+            AccountId(Some("tenant-a".to_string())),
+            Path(agent_id.to_string()),
+            Json(InjectMessageRequest {
+                message: "inject".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["injected"], false);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_session_sanitizes_invalid_export_errors() {
+        let (state, _tmp) = inject_test_app_state();
+        let agent_id = spawn_inject_test_agent(&state, "import-session", "tenant-a");
+
+        let response = import_session(
+            State(state),
+            AccountId(Some("tenant-a".to_string())),
+            Path(agent_id.to_string()),
+            None,
+            Json(serde_json::json!({"not": "a valid session export"})),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let err = json["error"].as_str().expect("error string");
+        assert!(
+            !err.contains("missing field"),
+            "raw serde error leaked: {err}"
+        );
     }
 }
 
@@ -5605,13 +5845,10 @@ mod monitoring_tests {
             name: name.to_string(),
             ..AgentManifest::default()
         };
-        let agent_id = state.kernel.spawn_agent(manifest).unwrap();
         state
             .kernel
-            .agent_registry()
-            .set_account_id(agent_id, Some(account_id.to_string()))
-            .unwrap();
-        agent_id
+            .spawn_agent_owned(manifest, account_id)
+            .unwrap()
     }
 
     async fn json_response(response: impl IntoResponse) -> (StatusCode, serde_json::Value) {

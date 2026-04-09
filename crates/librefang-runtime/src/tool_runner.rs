@@ -299,7 +299,7 @@ pub async fn execute_tool_raw(
         "task_claim" => tool_task_claim(*kernel, *caller_agent_id).await,
         "task_complete" => tool_task_complete(input, *kernel).await,
         "task_list" => tool_task_list(input, *kernel).await,
-        "event_publish" => tool_event_publish(input, *kernel).await,
+        "event_publish" => tool_event_publish(input, *kernel, *caller_agent_id).await,
 
         // Scheduling tools (delegate to CronScheduler via kernel handle)
         "schedule_create" => tool_schedule_create(input, *kernel, *caller_agent_id).await,
@@ -2230,8 +2230,11 @@ async fn tool_task_list(
 async fn tool_event_publish(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for event_publish".to_string())?;
     let event_type = input["event_type"]
         .as_str()
         .ok_or("Missing 'event_type' parameter")?;
@@ -2239,7 +2242,8 @@ async fn tool_event_publish(
         .get("payload")
         .cloned()
         .unwrap_or(serde_json::json!({}));
-    kh.publish_event(event_type, payload).await?;
+    kh.publish_event_for_agent(caller_agent_id, event_type, payload)
+        .await?;
     Ok(format!("Event '{event_type}' published successfully."))
 }
 
@@ -5376,6 +5380,7 @@ mod tests {
         // Parent only has file_read, but child requests shell_exec.
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: true,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: None,
             expected_knowledge_entity_caller: None,
             expected_knowledge_relation_caller: None,
@@ -5432,6 +5437,7 @@ mod tests {
         // Sub-agent requests only capabilities the parent has — should succeed.
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: None,
             expected_knowledge_entity_caller: None,
             expected_knowledge_relation_caller: None,
@@ -5871,6 +5877,7 @@ mod tests {
     /// Mock kernel that validates capability inheritance in spawn_agent_checked.
     struct SpawnCheckKernel {
         should_fail_escalation: bool,
+        expected_event_publish_caller: Option<String>,
         expected_goal_update_caller: Option<String>,
         expected_knowledge_entity_caller: Option<String>,
         expected_knowledge_relation_caller: Option<String>,
@@ -6016,6 +6023,22 @@ mod tests {
             Err("not used".to_string())
         }
 
+        async fn publish_event_for_agent(
+            &self,
+            caller_agent_id: &str,
+            event_type: &str,
+            payload: serde_json::Value,
+        ) -> Result<(), String> {
+            if let Some(expected) = &self.expected_event_publish_caller {
+                assert_eq!(caller_agent_id, expected);
+                assert_eq!(event_type, "tenant.alert");
+                assert_eq!(payload, serde_json::json!({"ok": true}));
+                Ok(())
+            } else {
+                Err("not used".to_string())
+            }
+        }
+
         async fn knowledge_add_entity(
             &self,
             caller_agent_id: &str,
@@ -6087,6 +6110,7 @@ mod tests {
         });
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: Some("agent-123".to_string()),
             expected_knowledge_entity_caller: None,
             expected_knowledge_relation_caller: None,
@@ -6104,6 +6128,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_event_publish_passes_caller_agent_context() {
+        let input = serde_json::json!({
+            "event_type": "tenant.alert",
+            "payload": {"ok": true}
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: Some("agent-123".to_string()),
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+
+        let result = tool_event_publish(&input, Some(&kernel), Some("agent-123")).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_knowledge_add_entity_requires_calling_agent_context() {
         let input = serde_json::json!({
             "name": "Alice",
@@ -6111,6 +6160,7 @@ mod tests {
         });
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: None,
             expected_knowledge_entity_caller: None,
             expected_knowledge_relation_caller: None,
@@ -6135,6 +6185,7 @@ mod tests {
         });
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: None,
             expected_knowledge_entity_caller: Some("agent-123".to_string()),
             expected_knowledge_relation_caller: None,
@@ -6159,6 +6210,7 @@ mod tests {
         });
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: None,
             expected_knowledge_entity_caller: None,
             expected_knowledge_relation_caller: None,
@@ -6184,6 +6236,7 @@ mod tests {
         });
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: None,
             expected_knowledge_entity_caller: None,
             expected_knowledge_relation_caller: Some("agent-123".to_string()),
@@ -6208,6 +6261,7 @@ mod tests {
         });
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: None,
             expected_knowledge_entity_caller: None,
             expected_knowledge_relation_caller: None,
@@ -6235,6 +6289,7 @@ mod tests {
         });
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: None,
             expected_knowledge_entity_caller: None,
             expected_knowledge_relation_caller: None,
@@ -6259,6 +6314,7 @@ mod tests {
         });
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: None,
             expected_knowledge_entity_caller: None,
             expected_knowledge_relation_caller: None,
@@ -6281,6 +6337,7 @@ mod tests {
         });
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: None,
             expected_knowledge_entity_caller: None,
             expected_knowledge_relation_caller: None,
@@ -6301,6 +6358,7 @@ mod tests {
     fn test_memory_list_passes_caller_agent_and_peer_context() {
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
             expected_goal_update_caller: None,
             expected_knowledge_entity_caller: None,
             expected_knowledge_relation_caller: None,

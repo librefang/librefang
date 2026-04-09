@@ -327,6 +327,9 @@ pub struct Event {
     /// Time-to-live: event expires after this duration.
     #[serde(with = "duration_ms")]
     pub ttl: Option<Duration>,
+    /// Tenant/account scope for this event. `None` means global/unscoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl Event {
@@ -340,6 +343,7 @@ impl Event {
             timestamp: Utc::now(),
             correlation_id: None,
             ttl: None,
+            account_id: None,
         }
     }
 
@@ -352,6 +356,12 @@ impl Event {
     /// Set the TTL for this event.
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set the tenant/account scope for this event.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
         self
     }
 }
@@ -371,6 +381,7 @@ mod tests {
         assert_eq!(event.source, agent_id);
         assert!(event.correlation_id.is_none());
         assert!(event.ttl.is_none());
+        assert!(event.account_id.is_none());
     }
 
     #[test]

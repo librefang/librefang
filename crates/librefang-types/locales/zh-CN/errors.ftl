@@ -8,7 +8,7 @@ api-error-agent-already-exists = 智能体已存在
 
 # Message errors
 api-error-message-too-large = 消息过大（最大 64KB）
-api-error-message-delivery-failed = 消息发送失败：{ $reason }
+api-error-message-delivery-failed = 消息发送失败
 
 # Template errors
 api-error-template-invalid-name = 无效的模板名称

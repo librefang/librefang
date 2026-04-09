@@ -59,6 +59,15 @@ pub fn require_admin_account(
     }
 }
 
+/// Require admin access and return the concrete validated admin account ID.
+pub fn require_admin_owner<'a>(
+    account: &'a AccountId,
+    admin_accounts: &[String],
+) -> Result<&'a str, (StatusCode, Json<serde_json::Value>)> {
+    require_admin_account(account, admin_accounts)?;
+    require_concrete_account(account)
+}
+
 /// Reject non-admin callers from admin-only endpoints.
 ///
 /// This is the Qwntik-safe admin guard: non-public infrastructure endpoints
@@ -206,6 +215,15 @@ mod tests {
         let (code, json) = require_admin(&account, &[String::from("admin")]).unwrap_err();
         assert_eq!(code, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"], "X-Account-Id required");
+    }
+
+    #[test]
+    fn test_require_admin_owner_returns_admin_account_id() {
+        let account = AccountId(Some("admin".to_string()));
+        assert_eq!(
+            require_admin_owner(&account, &[String::from("admin")]).unwrap(),
+            "admin"
+        );
     }
 
     #[test]

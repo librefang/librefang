@@ -912,7 +912,7 @@ pub async fn dry_run_workflow(
         }
         Err(e) => {
             tracing::warn!("Workflow dry-run failed for {id}: {e}");
-            ApiErrorResponse::not_found(e.to_string()).into_json_tuple()
+            ApiErrorResponse::not_found("Workflow not found").into_json_tuple()
         }
     }
     .into_response()
@@ -1656,9 +1656,13 @@ pub async fn create_schedule(
             entry["id"] = serde_json::Value::String(job_id.to_string());
             (StatusCode::CREATED, Json(entry)).into_response()
         }
-        Err(e) => ApiErrorResponse::internal(format!("Failed to create schedule: {e}"))
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => {
+            tracing::warn!("Failed to create schedule: {e}");
+            ApiErrorResponse::internal("Failed to create schedule")
+                .with_code("schedule_create_failed")
+                .into_json_tuple()
+                .into_response()
+        }
     }
 }
 
@@ -1734,7 +1738,10 @@ pub async fn update_schedule(
                 Json(serde_json::json!({"status": "updated", "schedule_id": id})),
             )
         }
-        Err(e) => ApiErrorResponse::not_found(format!("Schedule not found: {e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::warn!("Failed to update schedule {id}: {e}");
+            ApiErrorResponse::not_found("Schedule not found").into_json_tuple()
+        }
     }
     .into_response()
 }
@@ -1765,7 +1772,10 @@ pub async fn delete_schedule(
                 Json(serde_json::json!({"status": "removed", "schedule_id": id})),
             )
         }
-        Err(e) => ApiErrorResponse::not_found(format!("Schedule not found: {e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::warn!("Failed to delete schedule {id}: {e}");
+            ApiErrorResponse::not_found("Schedule not found").into_json_tuple()
+        }
     }
     .into_response()
 }
@@ -1828,14 +1838,9 @@ pub async fn run_schedule(
                         "output": output,
                     })),
                 ),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "status": "failed",
-                        "schedule_id": id,
-                        "error": format!("{e}"),
-                    })),
-                ),
+                Err(_e) => ApiErrorResponse::internal("Workflow execution failed")
+                    .with_code("schedule_run_failed")
+                    .into_json_tuple(),
             }
         }
         librefang_types::scheduler::CronAction::AgentTurn { message, .. } => {
@@ -1855,14 +1860,9 @@ pub async fn run_schedule(
                         "response": result.response,
                     })),
                 ),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "status": "failed",
-                        "schedule_id": id,
-                        "error": format!("{e}"),
-                    })),
-                ),
+                Err(_e) => ApiErrorResponse::internal("Scheduled agent execution failed")
+                    .with_code("schedule_run_failed")
+                    .into_json_tuple(),
             }
         }
         librefang_types::scheduler::CronAction::SystemEvent { text } => {
@@ -1871,7 +1871,8 @@ pub async fn run_schedule(
                 AgentId::new(),
                 librefang_types::event::EventTarget::Broadcast,
                 librefang_types::event::EventPayload::Custom(text.as_bytes().to_vec()),
-            );
+            )
+            .with_account_id(job.account_id.clone());
             state.kernel.publish_event(event).await;
             (
                 StatusCode::OK,
@@ -1974,7 +1975,10 @@ pub async fn delete_cron_job(
                         Json(serde_json::json!({"status": "deleted"})),
                     )
                 }
-                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+                Err(e) => {
+                    tracing::warn!("Failed to delete cron job {id}: {e}");
+                    ApiErrorResponse::not_found("Cron job not found").into_json_tuple()
+                }
             }
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
@@ -2004,7 +2008,10 @@ pub async fn update_cron_job(
                         Json(serde_json::to_value(&job).unwrap_or_default()),
                     )
                 }
-                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+                Err(e) => {
+                    tracing::warn!("Failed to update cron job {id}: {e}");
+                    ApiErrorResponse::not_found("Cron job not found").into_json_tuple()
+                }
             }
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
@@ -2037,7 +2044,10 @@ pub async fn toggle_cron_job(
                         Json(serde_json::json!({"id": id, "enabled": enabled})),
                     )
                 }
-                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+                Err(e) => {
+                    tracing::warn!("Failed to toggle cron job {id}: {e}");
+                    ApiErrorResponse::not_found("Cron job not found").into_json_tuple()
+                }
             }
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
@@ -2255,7 +2265,78 @@ pub async fn instantiate_template(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode as HttpStatusCode;
+    use http_body_util::BodyExt;
+    use librefang_types::agent::{AgentEntry, AgentIdentity, AgentManifest, AgentMode, AgentState};
+    use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn test_app_state() -> (tempfile::TempDir, Arc<AppState>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..Default::default()
+        };
+        let kernel =
+            Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"));
+        let state = Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+        (tmp, state)
+    }
+
+    fn tenant_agent(name: &str, account_id: &str) -> AgentEntry {
+        AgentEntry {
+            id: AgentId::new(),
+            account_id: Some(account_id.to_string()),
+            name: name.to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        }
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        serde_json::from_slice(&body).expect("json")
+    }
 
     // -----------------------------------------------------------------------
     // parse_step_mode tests
@@ -2572,5 +2653,225 @@ mod tests {
     fn error_mode_empty_object_defaults_fail() {
         let mode = parse_error_mode(&json!({}), &json!({}));
         assert!(matches!(mode, ErrorMode::Fail));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_schedule_system_event_does_not_trigger_other_tenants() {
+        let (_tmp, state) = test_app_state();
+
+        let tenant_a_source = tenant_agent("tenant-a-source", "tenant-a");
+        let tenant_a_target = tenant_agent("tenant-a-target", "tenant-a");
+        let tenant_b_target = tenant_agent("tenant-b-target", "tenant-b");
+        let tenant_a_source_id = tenant_a_source.id;
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        state
+            .kernel
+            .agent_registry()
+            .register(tenant_a_source)
+            .unwrap();
+        state
+            .kernel
+            .agent_registry()
+            .register(tenant_a_target)
+            .unwrap();
+        state
+            .kernel
+            .agent_registry()
+            .register(tenant_b_target)
+            .unwrap();
+
+        let tenant_a_trigger = state
+            .kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                TriggerPattern::All,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_b_trigger = state
+            .kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                TriggerPattern::All,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let job = CronJob {
+            id: CronJobId::new(),
+            agent_id: tenant_a_source_id,
+            account_id: Some("tenant-a".to_string()),
+            name: "tenant-a-system-event".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 60 },
+            action: CronAction::SystemEvent {
+                text: "scheduled wake".to_string(),
+            },
+            delivery: CronDelivery::None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        };
+        let job_id = job.id;
+        state.kernel.cron().add_job(job, false).unwrap();
+
+        let response = run_schedule(
+            State(state.clone()),
+            AccountId(Some("tenant-a".to_string())),
+            Path(job_id.to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), HttpStatusCode::OK);
+
+        let tenant_a = state
+            .kernel
+            .trigger_engine()
+            .get(tenant_a_trigger)
+            .expect("tenant-a trigger");
+        let tenant_b = state
+            .kernel
+            .trigger_engine()
+            .get(tenant_b_trigger)
+            .expect("tenant-b trigger");
+        assert_eq!(
+            tenant_a.fire_count, 1,
+            "same-tenant trigger should still fire"
+        );
+        assert_eq!(
+            tenant_b.fire_count, 0,
+            "manual tenant-a schedule must not wake tenant-b trigger"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_schedule_sanitizes_internal_errors() {
+        let (_tmp, state) = test_app_state();
+
+        let tenant_a_source = tenant_agent("tenant-a-source", "tenant-a");
+        let tenant_a_source_id = tenant_a_source.id;
+        state
+            .kernel
+            .agent_registry()
+            .register(tenant_a_source)
+            .unwrap();
+
+        let job = CronJob {
+            id: CronJobId::new(),
+            agent_id: tenant_a_source_id,
+            account_id: Some("tenant-a".to_string()),
+            name: "tenant-a-failing-workflow".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 60 },
+            action: CronAction::Workflow {
+                workflow_id: uuid::Uuid::new_v4().to_string(),
+                input: Some("hello".to_string()),
+                timeout_secs: Some(30),
+            },
+            delivery: CronDelivery::None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        };
+        let job_id = job.id;
+        state.kernel.cron().add_job(job, false).unwrap();
+
+        let response = run_schedule(
+            State(state),
+            AccountId(Some("tenant-a".to_string())),
+            Path(job_id.to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), HttpStatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = response_json(response).await;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert_eq!(
+            error, "Workflow execution failed",
+            "route should return the stable sanitized execution error"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dry_run_workflow_sanitizes_internal_errors() {
+        let (_tmp, state) = test_app_state();
+
+        let response = dry_run_workflow(
+            State(state),
+            AccountId(Some("tenant-a".to_string())),
+            Path(uuid::Uuid::new_v4().to_string()),
+            Json(serde_json::json!({"input": "hello"})),
+        )
+        .await;
+        assert_eq!(response.status(), HttpStatusCode::NOT_FOUND);
+
+        let body = response_json(response).await;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert_eq!(
+            error, "Workflow not found",
+            "route should return the stable sanitized not-found message"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_schedule_workflow_succeeds_for_same_tenant() {
+        let (_tmp, state) = test_app_state();
+
+        let tenant_a_source = tenant_agent("tenant-a-source", "tenant-a");
+        let tenant_a_source_id = tenant_a_source.id;
+        state
+            .kernel
+            .agent_registry()
+            .register(tenant_a_source)
+            .unwrap();
+
+        let workflow = Workflow {
+            id: WorkflowId::new(),
+            name: "tenant-a-empty-workflow".to_string(),
+            description: "A workflow with no steps for deterministic testing".to_string(),
+            steps: vec![],
+            created_at: chrono::Utc::now(),
+            account_id: Some("tenant-a".to_string()),
+            layout: None,
+        };
+        let workflow_id = workflow.id;
+        state.kernel.register_workflow(workflow).await;
+
+        let job = CronJob {
+            id: CronJobId::new(),
+            agent_id: tenant_a_source_id,
+            account_id: Some("tenant-a".to_string()),
+            name: "tenant-a-scheduled-workflow".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 60 },
+            action: CronAction::Workflow {
+                workflow_id: workflow_id.to_string(),
+                input: Some("hello".to_string()),
+                timeout_secs: Some(30),
+            },
+            delivery: CronDelivery::None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        };
+        let job_id = job.id;
+        state.kernel.cron().add_job(job, false).unwrap();
+
+        let response = run_schedule(
+            State(state),
+            AccountId(Some("tenant-a".to_string())),
+            Path(job_id.to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), HttpStatusCode::OK);
+
+        let body = response_json(response).await;
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["workflow_id"], workflow_id.to_string());
+        assert_eq!(body["output"], "hello");
     }
 }

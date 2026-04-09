@@ -20,7 +20,7 @@ api-error-agent-invalid-sort = Invalid sort field '{ $field }'. Valid fields: { 
 
 # Message errors
 api-error-message-too-large = Message too large (max 64KB)
-api-error-message-delivery-failed = Message delivery failed: { $reason }
+api-error-message-delivery-failed = Message delivery failed
 api-error-message-required = Message is required
 api-error-message-missing-field = Missing 'message' field
 api-error-message-streaming-failed = Failed to send streaming message

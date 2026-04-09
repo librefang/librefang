@@ -19,7 +19,7 @@ api-error-agent-not-found-with-id = エージェントが見つかりません: 
 
 # メッセージエラー
 api-error-message-too-large = メッセージが大きすぎます（最大 64KB）
-api-error-message-delivery-failed = メッセージの配信に失敗しました: { $reason }
+api-error-message-delivery-failed = メッセージの配信に失敗しました
 api-error-message-required = メッセージは必須です
 api-error-message-missing-field = 'message' フィールドがありません
 api-error-message-streaming-failed = ストリーミングメッセージの送信に失敗しました

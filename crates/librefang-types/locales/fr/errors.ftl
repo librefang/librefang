@@ -8,7 +8,7 @@ api-error-agent-already-exists = L'agent existe deja
 
 # Message errors
 api-error-message-too-large = Message trop volumineux (max 64 Ko)
-api-error-message-delivery-failed = Echec de la livraison du message : { $reason }
+api-error-message-delivery-failed = Echec de la livraison du message
 
 # Template errors
 api-error-template-invalid-name = Nom de modele non valide

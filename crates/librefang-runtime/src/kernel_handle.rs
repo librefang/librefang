@@ -107,6 +107,33 @@ pub trait KernelHandle: Send + Sync {
         payload: serde_json::Value,
     ) -> Result<(), String>;
 
+    /// Publish a custom event with an explicit tenant/account scope.
+    async fn publish_event_scoped(
+        &self,
+        event_type: &str,
+        payload: serde_json::Value,
+        account_id: Option<&str>,
+    ) -> Result<(), String> {
+        if account_id.is_some() {
+            return Err(
+                "Tenant-scoped event publishing is not available on this kernel handle."
+                    .to_string(),
+            );
+        }
+        self.publish_event(event_type, payload).await
+    }
+
+    /// Publish a custom event using the caller agent's tenant/account scope.
+    async fn publish_event_for_agent(
+        &self,
+        caller_agent_id: &str,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), String> {
+        let _ = caller_agent_id;
+        self.publish_event(event_type, payload).await
+    }
+
     /// Add an entity to the knowledge graph.
     async fn knowledge_add_entity(
         &self,
@@ -480,5 +507,173 @@ pub trait KernelHandle: Send + Sync {
         _progress: Option<u8>,
     ) -> Result<serde_json::Value, String> {
         Err("Goal system not available".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct FallbackEventKernel {
+        published: Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    #[async_trait]
+    impl KernelHandle for FallbackEventKernel {
+        async fn spawn_agent(
+            &self,
+            _manifest_toml: &str,
+            _parent_id: Option<&str>,
+        ) -> Result<(String, String), String> {
+            Err("not used".to_string())
+        }
+
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        fn list_agents(&self) -> Vec<AgentInfo> {
+            Vec::new()
+        }
+
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        fn memory_store(
+            &self,
+            _caller_agent_id: &str,
+            _key: &str,
+            _value: serde_json::Value,
+            _peer_id: Option<&str>,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        fn memory_recall(
+            &self,
+            _caller_agent_id: &str,
+            _key: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        fn memory_list(
+            &self,
+            _caller_agent_id: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Vec<String>, String> {
+            Err("not used".to_string())
+        }
+
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            Vec::new()
+        }
+
+        async fn task_post(
+            &self,
+            _title: &str,
+            _description: &str,
+            _assigned_to: Option<&str>,
+            _created_by: Option<&str>,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_complete(&self, _task_id: &str, _result: &str) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+
+        async fn publish_event(
+            &self,
+            event_type: &str,
+            payload: serde_json::Value,
+        ) -> Result<(), String> {
+            self.published
+                .lock()
+                .unwrap()
+                .push((event_type.to_string(), payload));
+            Ok(())
+        }
+
+        async fn knowledge_add_entity(
+            &self,
+            _caller_agent_id: &str,
+            _entity: librefang_types::memory::Entity,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn knowledge_add_relation(
+            &self,
+            _caller_agent_id: &str,
+            _relation: librefang_types::memory::Relation,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn knowledge_query(
+            &self,
+            _caller_agent_id: &str,
+            _pattern: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+            Err("not used".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_publish_event_scoped_default_fails_closed_with_account_scope() {
+        let handle = FallbackEventKernel {
+            published: Mutex::new(Vec::new()),
+        };
+
+        let result = handle
+            .publish_event_scoped(
+                "tenant.alert",
+                serde_json::json!({"ok": true}),
+                Some("tenant-a"),
+            )
+            .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Tenant-scoped event publishing is not available on this kernel handle."
+        );
+        assert!(handle.published.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_publish_event_scoped_default_falls_back_without_account_scope() {
+        let handle = FallbackEventKernel {
+            published: Mutex::new(Vec::new()),
+        };
+
+        handle
+            .publish_event_scoped("tenant.alert", serde_json::json!({"ok": true}), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            handle.published.lock().unwrap().clone(),
+            vec![("tenant.alert".to_string(), serde_json::json!({"ok": true}))]
+        );
     }
 }

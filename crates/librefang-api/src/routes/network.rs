@@ -1365,7 +1365,14 @@ fn audit_to_comms_event(
 
 #[cfg(test)]
 mod tests {
-    use super::mcp_http_requires_caller_agent;
+    use super::*;
+    use crate::routes::AppState;
+    use axum::{extract::State, Json};
+    use librefang_types::{
+        agent::{AgentEntry, AgentIdentity, AgentManifest, AgentMode, AgentState},
+        config::KernelConfig,
+    };
+    use std::{collections::HashMap, sync::Arc};
 
     #[test]
     fn test_mcp_http_denies_tenant_scoped_memory_and_knowledge_tools_without_caller() {
@@ -1392,6 +1399,133 @@ mod tests {
                 "did not expect {tool_name} to require caller agent context"
             );
         }
+    }
+
+    fn test_app_state() -> (tempfile::TempDir, Arc<AppState>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let config = KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            admin_accounts: vec!["tenant-a".to_string()],
+            ..Default::default()
+        };
+        let kernel =
+            Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"));
+        let state = Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+        (tmp, state)
+    }
+
+    fn tenant_agent(name: &str, account_id: &str) -> AgentEntry {
+        AgentEntry {
+            id: librefang_types::agent::AgentId::new(),
+            account_id: Some(account_id.to_string()),
+            name: name.to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        }
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&body).expect("json")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn comms_send_sanitizes_internal_errors() {
+        let (_tmp, state) = test_app_state();
+        let from = tenant_agent("from", "tenant-a");
+        let to = tenant_agent("to", "tenant-a");
+        let from_id = from.id.to_string();
+        let to_id = to.id.to_string();
+        state
+            .kernel
+            .agent_registry()
+            .register(from)
+            .expect("register from");
+        state
+            .kernel
+            .agent_registry()
+            .register(to)
+            .expect("register to");
+
+        let response = comms_send(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            Json(librefang_types::comms::CommsSendRequest {
+                from_agent_id: from_id,
+                to_agent_id: to_id,
+                message: "trigger backend failure".to_string(),
+                thread_id: None,
+                attachments: vec![],
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_json(response).await;
+        let err = body["error"].as_str().expect("error string");
+        assert!(
+            !err.contains("No provider configured"),
+            "raw backend error leaked: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn comms_task_sanitizes_internal_errors() {
+        let (_tmp, state) = test_app_state();
+
+        let response = comms_task(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            Json(librefang_types::comms::CommsTaskRequest {
+                title: "tenant task".to_string(),
+                description: "should fail without leaking internals".to_string(),
+                assigned_to: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await;
+        assert_eq!(body["ok"], true);
+        assert!(
+            body["task_id"].as_str().is_some(),
+            "task id should be returned"
+        );
     }
 }
 
@@ -1651,9 +1785,12 @@ pub async fn comms_send(
             }
             (StatusCode::OK, Json(resp)).into_response()
         }
-        Err(e) => ApiErrorResponse::internal(format!("Message delivery failed: {e}"))
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => {
+            tracing::warn!("comms_send failed for tenant {:?}: {e}", account.0);
+            ApiErrorResponse::internal("Message delivery failed")
+                .into_json_tuple()
+                .into_response()
+        }
     }
 }
 
@@ -1703,9 +1840,12 @@ pub async fn comms_task(
             })),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::internal(format!("Failed to post task: {e}"))
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => {
+            tracing::warn!("comms_task failed for tenant {:?}: {e}", account.0);
+            ApiErrorResponse::internal("Failed to post task")
+                .into_json_tuple()
+                .into_response()
+        }
     }
 }
 

@@ -1154,38 +1154,19 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_triggers_text(&self) -> String {
-        let triggers = self.kernel.trigger_engine().list_all();
-        if triggers.is_empty() {
-            return "No triggers configured.".to_string();
-        }
-        let mut msg = format!("Triggers ({}):\n", triggers.len());
-        for t in &triggers {
-            let agent_name = self
-                .kernel
-                .agent_registry()
-                .get(t.agent_id)
-                .map(|e| e.name.clone())
-                .unwrap_or_else(|| t.agent_id.to_string());
-            let status = if t.enabled { "on" } else { "off" };
-            let id_str = t.id.0.to_string();
-            let id_short = safe_truncate_str(&id_str, 8);
-            msg.push_str(&format!(
-                "  [{}] {} -> {} ({:?}) fires:{} [{}]\n",
-                id_short,
-                agent_name,
-                t.prompt_template.chars().take(40).collect::<String>(),
-                t.pattern,
-                t.fire_count,
-                status,
-            ));
-        }
-        msg
+        self.list_triggers_text_scoped(None).await
     }
 
     async fn list_triggers_text_scoped(&self, account_id: Option<&str>) -> String {
         let triggers = match account_id {
             Some(account_id) => self.kernel.list_triggers_scoped(account_id, None),
-            None => self.kernel.trigger_engine().list_all(),
+            None => self
+                .kernel
+                .trigger_engine()
+                .list_all()
+                .into_iter()
+                .filter(|trigger| trigger.account_id.is_none())
+                .collect(),
         };
         if triggers.is_empty() {
             return "No triggers configured.".to_string();
@@ -1220,31 +1201,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         pattern_str: &str,
         prompt: &str,
     ) -> String {
-        let agent = match self.kernel.agent_registry().find_by_name(agent_name) {
-            Some(e) => e,
-            None => return format!("Agent '{agent_name}' not found."),
-        };
-
-        let pattern = match parse_trigger_pattern(pattern_str) {
-            Some(p) => p,
-            None => {
-                return format!(
-                "Unknown pattern '{pattern_str}'. Valid: lifecycle, spawned:<name>, terminated, \
-                 system, system:<keyword>, memory, memory:<key>, match:<text>, all"
-            )
-            }
-        };
-
-        let trigger_id = self.kernel.trigger_engine().register(
-            agent.account_id.clone(),
-            agent.id,
-            pattern,
-            prompt.to_string(),
-            0,
-        );
-        let id_str = trigger_id.0.to_string();
-        let id_short = safe_truncate_str(&id_str, 8);
-        format!("Trigger created [{id_short}] for agent '{agent_name}'.")
+        self.create_trigger_text_scoped(None, agent_name, pattern_str, prompt)
+            .await
     }
 
     async fn create_trigger_text_scoped(
@@ -1258,6 +1216,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             Some(e) => e,
             None => return format!("Agent '{agent_name}' not found."),
         };
+        if account_id.is_none() && agent.account_id.is_some() {
+            return format!("Agent '{agent_name}' not found.");
+        }
 
         let pattern = match parse_trigger_pattern(pattern_str) {
             Some(p) => p,
@@ -1286,24 +1247,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn delete_trigger_text(&self, id_prefix: &str) -> String {
-        let triggers = self.kernel.trigger_engine().list_all();
-        let matched: Vec<_> = triggers
-            .iter()
-            .filter(|t| t.id.0.to_string().starts_with(id_prefix))
-            .collect();
-        match matched.len() {
-            0 => format!("No trigger found matching '{id_prefix}'."),
-            1 => {
-                let t = matched[0];
-                if self.kernel.trigger_engine().remove(t.id) {
-                    let id_str = t.id.0.to_string();
-                    format!("Trigger [{}] removed.", safe_truncate_str(&id_str, 8))
-                } else {
-                    "Failed to remove trigger.".to_string()
-                }
-            }
-            n => format!("{n} triggers match '{id_prefix}'. Be more specific."),
-        }
+        self.delete_trigger_text_scoped(None, id_prefix).await
     }
 
     async fn delete_trigger_text_scoped(
@@ -1313,7 +1257,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> String {
         let triggers = match account_id {
             Some(account_id) => self.kernel.list_triggers_scoped(account_id, None),
-            None => self.kernel.trigger_engine().list_all(),
+            None => self
+                .kernel
+                .trigger_engine()
+                .list_all()
+                .into_iter()
+                .filter(|trigger| trigger.account_id.is_none())
+                .collect(),
         };
         let matched: Vec<_> = triggers
             .iter()
@@ -1341,46 +1291,19 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_schedules_text(&self) -> String {
-        let jobs = self.kernel.cron().list_all_jobs();
-        if jobs.is_empty() {
-            return "No scheduled jobs.".to_string();
-        }
-        let mut msg = format!("Cron jobs ({}):\n", jobs.len());
-        for job in &jobs {
-            let agent_name = self
-                .kernel
-                .agent_registry()
-                .get(job.agent_id)
-                .map(|e| e.name.clone())
-                .unwrap_or_else(|| job.agent_id.to_string());
-            let status = if job.enabled { "on" } else { "off" };
-            let id_str = job.id.0.to_string();
-            let id_short = safe_truncate_str(&id_str, 8);
-            let sched = match &job.schedule {
-                librefang_types::scheduler::CronSchedule::Cron { expr, .. } => expr.clone(),
-                librefang_types::scheduler::CronSchedule::Every { every_secs } => {
-                    format!("every {every_secs}s")
-                }
-                librefang_types::scheduler::CronSchedule::At { at } => {
-                    format!("at {}", at.format("%Y-%m-%d %H:%M"))
-                }
-            };
-            let last = job
-                .last_run
-                .map(|t| t.format("%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| "never".to_string());
-            msg.push_str(&format!(
-                "  [{}] {} — {} ({}) last:{} [{}]\n",
-                id_short, job.name, sched, agent_name, last, status,
-            ));
-        }
-        msg
+        self.list_schedules_text_scoped(None).await
     }
 
     async fn list_schedules_text_scoped(&self, account_id: Option<&str>) -> String {
         let jobs = match account_id {
             Some(account_id) => self.kernel.cron().list_jobs_by_account(account_id),
-            None => self.kernel.cron().list_all_jobs(),
+            None => self
+                .kernel
+                .cron()
+                .list_all_jobs()
+                .into_iter()
+                .filter(|job| job.account_id.is_none())
+                .collect(),
         };
         if jobs.is_empty() {
             return "No scheduled jobs.".to_string();
@@ -1418,153 +1341,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn manage_schedule_text(&self, action: &str, args: &[String]) -> String {
-        match action {
-            "add" => {
-                // Expected: <agent> <f1> <f2> <f3> <f4> <f5> <message...>
-                // 5 cron fields: min hour dom month dow
-                if args.len() < 7 {
-                    return "Usage: /schedule add <agent> <min> <hour> <dom> <month> <dow> <message>".to_string();
-                }
-                let agent_name = &args[0];
-                let agent = match self.kernel.agent_registry().find_by_name(agent_name) {
-                    Some(e) => e,
-                    None => return format!("Agent '{agent_name}' not found."),
-                };
-                let cron_expr = args[1..6].join(" ");
-                let message = args[6..].join(" ");
-
-                let job = librefang_types::scheduler::CronJob {
-                    id: librefang_types::scheduler::CronJobId::new(),
-                    agent_id: agent.id,
-                    account_id: agent.account_id.clone(),
-                    name: format!("chat-{}", &agent.name),
-                    enabled: true,
-                    schedule: librefang_types::scheduler::CronSchedule::Cron {
-                        expr: cron_expr.clone(),
-                        tz: None,
-                    },
-                    action: librefang_types::scheduler::CronAction::AgentTurn {
-                        message: message.clone(),
-                        model_override: None,
-                        timeout_secs: None,
-                    },
-                    delivery: librefang_types::scheduler::CronDelivery::None,
-                    created_at: chrono::Utc::now(),
-                    last_run: None,
-                    next_run: None,
-                };
-
-                match self.kernel.cron().add_job(job, false) {
-                    Ok(id) => {
-                        let id_str = id.0.to_string();
-                        let id_short = safe_truncate_str(&id_str, 8);
-                        format!("Job [{id_short}] created: '{cron_expr}' -> {agent_name}: \"{message}\"")
-                    }
-                    Err(e) => format!("Failed to create job: {e}"),
-                }
-            }
-            "del" => {
-                if args.is_empty() {
-                    return "Usage: /schedule del <id-prefix>".to_string();
-                }
-                let prefix = &args[0];
-                let jobs = self.kernel.cron().list_all_jobs();
-                let matched: Vec<_> = jobs
-                    .iter()
-                    .filter(|j| j.id.0.to_string().starts_with(prefix.as_str()))
-                    .collect();
-                match matched.len() {
-                    0 => format!("No job found matching '{prefix}'."),
-                    1 => {
-                        let j = matched[0];
-                        match self.kernel.cron().remove_job(j.id) {
-                            Ok(_) => {
-                                let id_str = j.id.0.to_string();
-                                format!(
-                                    "Job [{}] '{}' removed.",
-                                    safe_truncate_str(&id_str, 8),
-                                    j.name
-                                )
-                            }
-                            Err(e) => format!("Failed to remove job: {e}"),
-                        }
-                    }
-                    n => format!("{n} jobs match '{prefix}'. Be more specific."),
-                }
-            }
-            "run" => {
-                if args.is_empty() {
-                    return "Usage: /schedule run <id-prefix>".to_string();
-                }
-                let prefix = &args[0];
-                let jobs = self.kernel.cron().list_all_jobs();
-                let matched: Vec<_> = jobs
-                    .iter()
-                    .filter(|j| j.id.0.to_string().starts_with(prefix.as_str()))
-                    .collect();
-                match matched.len() {
-                    0 => format!("No job found matching '{prefix}'."),
-                    1 => {
-                        let j = matched[0];
-                        let id_str = j.id.0.to_string();
-                        let id_short = safe_truncate_str(&id_str, 8);
-                        match &j.action {
-                            librefang_types::scheduler::CronAction::AgentTurn {
-                                message, ..
-                            } => match self.kernel.send_message(j.agent_id, message).await {
-                                Ok(result) => {
-                                    format!("Job [{id_short}] ran:\n{}", result.response)
-                                }
-                                Err(e) => format!("Failed to run job: {e}"),
-                            },
-                            librefang_types::scheduler::CronAction::SystemEvent { text } => {
-                                match self.kernel.send_message(j.agent_id, text).await {
-                                    Ok(result) => {
-                                        format!("Job [{id_short}] ran:\n{}", result.response)
-                                    }
-                                    Err(e) => format!("Failed to run job: {e}"),
-                                }
-                            }
-                            librefang_types::scheduler::CronAction::Workflow {
-                                workflow_id,
-                                input,
-                                ..
-                            } => {
-                                // Resolve workflow by UUID or name
-                                let resolved = if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id)
-                                {
-                                    Some(librefang_kernel::workflow::WorkflowId(uuid))
-                                } else {
-                                    let workflows =
-                                        self.kernel.workflow_engine().list_workflows().await;
-                                    workflows
-                                        .iter()
-                                        .find(|w| w.name == *workflow_id)
-                                        .map(|w| w.id)
-                                };
-                                match resolved {
-                                    Some(wf_id) => {
-                                        let input_text = input.clone().unwrap_or_default();
-                                        match self.kernel.run_workflow(wf_id, input_text).await {
-                                            Ok((_run_id, output)) => {
-                                                format!(
-                                                    "Job [{id_short}] workflow ran:\n{}",
-                                                    output
-                                                )
-                                            }
-                                            Err(e) => format!("Failed to run workflow: {e}"),
-                                        }
-                                    }
-                                    None => format!("Workflow not found: {workflow_id}"),
-                                }
-                            }
-                        }
-                    }
-                    n => format!("{n} jobs match '{prefix}'. Be more specific."),
-                }
-            }
-            _ => "Unknown schedule action. Use: add, del, run".to_string(),
-        }
+        self.manage_schedule_text_scoped(None, action, args).await
     }
 
     async fn manage_schedule_text_scoped(
@@ -1584,6 +1361,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     Some(e) => e,
                     None => return format!("Agent '{agent_name}' not found."),
                 };
+                if account_id.is_none() && agent.account_id.is_some() {
+                    return format!("Agent '{agent_name}' not found.");
+                }
                 let cron_expr = args[1..6].join(" ");
                 let message = args[6..].join(" ");
 
@@ -1628,7 +1408,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 let prefix = &args[0];
                 let jobs = match account_id {
                     Some(account_id) => self.kernel.cron().list_jobs_by_account(account_id),
-                    None => self.kernel.cron().list_all_jobs(),
+                    None => self
+                        .kernel
+                        .cron()
+                        .list_all_jobs()
+                        .into_iter()
+                        .filter(|job| job.account_id.is_none())
+                        .collect(),
                 };
                 let matched: Vec<_> = jobs
                     .iter()
@@ -1666,7 +1452,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 let prefix = &args[0];
                 let jobs = match account_id {
                     Some(account_id) => self.kernel.cron().list_jobs_by_account(account_id),
-                    None => self.kernel.cron().list_all_jobs(),
+                    None => self
+                        .kernel
+                        .cron()
+                        .list_all_jobs()
+                        .into_iter()
+                        .filter(|job| job.account_id.is_none())
+                        .collect(),
                 };
                 let matched: Vec<_> = jobs
                     .iter()
@@ -1683,15 +1475,27 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 message, ..
                             } => match self.kernel.send_message(j.agent_id, message).await {
                                 Ok(result) => format!("Job [{id_short}] ran:\n{}", result.response),
-                                Err(e) => format!("Failed to run job: {e}"),
+                                Err(e) => {
+                                    warn!(
+                                        job_id = %j.id.0,
+                                        agent_id = %j.agent_id,
+                                        error = %e,
+                                        "Scoped bridge schedule agent turn failed"
+                                    );
+                                    "Failed to run job.".to_string()
+                                }
                             },
                             librefang_types::scheduler::CronAction::SystemEvent { text } => {
-                                match self.kernel.send_message(j.agent_id, text).await {
-                                    Ok(result) => {
-                                        format!("Job [{id_short}] ran:\n{}", result.response)
-                                    }
-                                    Err(e) => format!("Failed to run job: {e}"),
-                                }
+                                let event = librefang_types::event::Event::new(
+                                    AgentId::new(),
+                                    librefang_types::event::EventTarget::Broadcast,
+                                    librefang_types::event::EventPayload::Custom(
+                                        text.as_bytes().to_vec(),
+                                    ),
+                                )
+                                .with_account_id(j.account_id.clone());
+                                self.kernel.publish_event(event).await;
+                                format!("Job [{id_short}] system event published.")
                             }
                             librefang_types::scheduler::CronAction::Workflow {
                                 workflow_id,
@@ -1723,10 +1527,18 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                                     output
                                                 )
                                             }
-                                            Err(e) => format!("Failed to run workflow: {e}"),
+                                            Err(e) => {
+                                                warn!(
+                                                    job_id = %j.id.0,
+                                                    workflow_id = %wf_id.0,
+                                                    error = %e,
+                                                    "Scoped bridge schedule workflow failed"
+                                                );
+                                                "Failed to run workflow.".to_string()
+                                            }
                                         }
                                     }
-                                    None => format!("Workflow not found: {workflow_id}"),
+                                    None => "Workflow not found.".to_string(),
                                 }
                             }
                         }
@@ -2161,16 +1973,28 @@ impl KernelBridgeAdapter {
         manifest_name: &str,
         account_id: Option<&str>,
     ) -> Result<AgentId, String> {
-        let agent_id = self.spawn_agent_by_name(manifest_name).await?;
-
-        if let Some(owner) = account_id {
-            self.kernel
-                .agent_registry()
-                .set_account_id(agent_id, Some(owner.to_string()))
-                .map_err(|e| format!("Failed to attach account_id to spawned agent: {e}"))?;
+        match account_id {
+            Some(owner) => {
+                let manifest_path = self
+                    .kernel
+                    .home_dir()
+                    .join("workspaces")
+                    .join("agents")
+                    .join(manifest_name)
+                    .join("agent.toml");
+                if !manifest_path.exists() {
+                    return Err(format!("Manifest not found: {}", manifest_path.display()));
+                }
+                let contents = std::fs::read_to_string(&manifest_path)
+                    .map_err(|e| format!("Failed to read manifest: {e}"))?;
+                let manifest: librefang_types::agent::AgentManifest =
+                    toml::from_str(&contents).map_err(|e| format!("Invalid manifest TOML: {e}"))?;
+                self.kernel
+                    .spawn_agent_owned(manifest, owner)
+                    .map_err(|e| format!("Failed to spawn agent: {e}"))
+            }
+            None => self.spawn_agent_by_name(manifest_name).await,
         }
-
-        Ok(agent_id)
     }
 }
 
@@ -3709,8 +3533,71 @@ mod tests {
     use librefang_channels::types::{
         ChannelAdapterMultiplicity, ChannelContent, ChannelType, ChannelUser,
     };
+    use librefang_kernel::triggers::TriggerPattern;
     use librefang_types::config::{ChannelsConfig, NtfyConfig, OneOrMany, WebhookConfig};
+    use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
     use std::pin::Pin;
+    use std::sync::Arc;
+
+    fn tenant_agent(name: &str, account_id: &str) -> librefang_types::agent::AgentEntry {
+        librefang_types::agent::AgentEntry {
+            id: AgentId::new(),
+            account_id: Some(account_id.to_string()),
+            name: name.to_string(),
+            manifest: librefang_types::agent::AgentManifest::default(),
+            state: librefang_types::agent::AgentState::Created,
+            mode: librefang_types::agent::AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: librefang_types::agent::AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        }
+    }
+
+    fn unowned_agent(name: &str) -> librefang_types::agent::AgentEntry {
+        librefang_types::agent::AgentEntry {
+            id: AgentId::new(),
+            account_id: None,
+            name: name.to_string(),
+            manifest: librefang_types::agent::AgentManifest::default(),
+            state: librefang_types::agent::AgentState::Created,
+            mode: librefang_types::agent::AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: librefang_types::agent::AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        }
+    }
+
+    fn test_bridge_adapter() -> (tempfile::TempDir, KernelBridgeAdapter) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..Default::default()
+        };
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel"));
+        let bridge = KernelBridgeAdapter {
+            kernel,
+            started_at: Instant::now(),
+        };
+        (tmp, bridge)
+    }
 
     #[test]
     fn test_looks_like_tool_call_detects_markdown_tool_call_with_preamble() {
@@ -3982,5 +3869,369 @@ mod tests {
         assert!(error.contains("webhook"));
         assert!(error.contains("tenant-a"));
         assert!(error.contains("tenant-b"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_manage_schedule_text_scoped_system_event_stays_tenant_scoped() {
+        let (_tmp, bridge) = test_bridge_adapter();
+
+        let tenant_a_source = tenant_agent("tenant-a-source", "tenant-a");
+        let tenant_a_target = tenant_agent("tenant-a-target", "tenant-a");
+        let tenant_b_target = tenant_agent("tenant-b-target", "tenant-b");
+        let tenant_a_source_id = tenant_a_source.id;
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        bridge
+            .kernel
+            .agent_registry()
+            .register(tenant_a_source)
+            .unwrap();
+        bridge
+            .kernel
+            .agent_registry()
+            .register(tenant_a_target)
+            .unwrap();
+        bridge
+            .kernel
+            .agent_registry()
+            .register(tenant_b_target)
+            .unwrap();
+
+        let tenant_a_trigger = bridge
+            .kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                TriggerPattern::All,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_b_trigger = bridge
+            .kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                TriggerPattern::All,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let job = CronJob {
+            id: CronJobId::new(),
+            agent_id: tenant_a_source_id,
+            account_id: Some("tenant-a".to_string()),
+            name: "tenant-a-bridge-system-event".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 60 },
+            action: CronAction::SystemEvent {
+                text: "bridge wake".to_string(),
+            },
+            delivery: CronDelivery::None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        };
+        let prefix = job.id.0.to_string()[..8].to_string();
+        bridge.kernel.cron().add_job(job, false).unwrap();
+
+        let response = bridge
+            .manage_schedule_text_scoped(Some("tenant-a"), "run", &[prefix])
+            .await;
+        assert!(response.contains("system event published"));
+
+        let tenant_a = bridge
+            .kernel
+            .trigger_engine()
+            .get(tenant_a_trigger)
+            .expect("tenant-a trigger");
+        let tenant_b = bridge
+            .kernel
+            .trigger_engine()
+            .get(tenant_b_trigger)
+            .expect("tenant-b trigger");
+        assert_eq!(tenant_a.fire_count, 1);
+        assert_eq!(tenant_b.fire_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_manage_schedule_text_scoped_agent_turn_sanitizes_internal_errors() {
+        let (_tmp, bridge) = test_bridge_adapter();
+
+        let tenant_a_source = tenant_agent("tenant-a-source", "tenant-a");
+        let tenant_a_source_id = tenant_a_source.id;
+        bridge
+            .kernel
+            .agent_registry()
+            .register(tenant_a_source)
+            .unwrap();
+
+        let job = CronJob {
+            id: CronJobId::new(),
+            agent_id: tenant_a_source_id,
+            account_id: Some("tenant-a".to_string()),
+            name: "tenant-a-bridge-agent-turn".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 60 },
+            action: CronAction::AgentTurn {
+                message: "hello".to_string(),
+                timeout_secs: Some(30),
+                model_override: None,
+            },
+            delivery: CronDelivery::None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        };
+        let prefix = job.id.0.to_string()[..8].to_string();
+        bridge.kernel.cron().add_job(job, false).unwrap();
+
+        let response = bridge
+            .manage_schedule_text_scoped(Some("tenant-a"), "run", &[prefix])
+            .await;
+        assert!(
+            response.contains("Failed to run job."),
+            "expected sanitized bridge error, got: {response}"
+        );
+        assert!(
+            !response.contains("No provider configured"),
+            "raw backend error leaked: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_manage_schedule_text_scoped_workflow_sanitizes_internal_errors() {
+        let (_tmp, bridge) = test_bridge_adapter();
+
+        let tenant_a_source = tenant_agent("tenant-a-source", "tenant-a");
+        let tenant_a_source_id = tenant_a_source.id;
+        bridge
+            .kernel
+            .agent_registry()
+            .register(tenant_a_source)
+            .unwrap();
+
+        let job = CronJob {
+            id: CronJobId::new(),
+            agent_id: tenant_a_source_id,
+            account_id: Some("tenant-a".to_string()),
+            name: "tenant-a-bridge-workflow".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 60 },
+            action: CronAction::Workflow {
+                workflow_id: uuid::Uuid::new_v4().to_string(),
+                input: Some("hello".to_string()),
+                timeout_secs: Some(30),
+            },
+            delivery: CronDelivery::None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        };
+        let prefix = job.id.0.to_string()[..8].to_string();
+        bridge.kernel.cron().add_job(job, false).unwrap();
+
+        let response = bridge
+            .manage_schedule_text_scoped(Some("tenant-a"), "run", &[prefix])
+            .await;
+        assert!(
+            response.contains("Workflow not found."),
+            "expected sanitized bridge error, got: {response}"
+        );
+        assert!(
+            !response.contains("tenant-a"),
+            "response should not leak internal details: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_none_scoped_schedule_commands_ignore_tenant_owned_jobs() {
+        let (_tmp, bridge) = test_bridge_adapter();
+
+        let tenant_agent = tenant_agent("tenant-a-source", "tenant-a");
+        let unowned_agent = unowned_agent("global-source");
+        let tenant_agent_id = tenant_agent.id;
+        let unowned_agent_id = unowned_agent.id;
+        bridge
+            .kernel
+            .agent_registry()
+            .register(tenant_agent)
+            .unwrap();
+        bridge
+            .kernel
+            .agent_registry()
+            .register(unowned_agent)
+            .unwrap();
+
+        let tenant_job = CronJob {
+            id: CronJobId::new(),
+            agent_id: tenant_agent_id,
+            account_id: Some("tenant-a".to_string()),
+            name: "tenant-job".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 60 },
+            action: CronAction::SystemEvent {
+                text: "tenant wake".to_string(),
+            },
+            delivery: CronDelivery::None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        };
+        let tenant_prefix = tenant_job.id.0.to_string()[..8].to_string();
+        bridge.kernel.cron().add_job(tenant_job, false).unwrap();
+
+        let global_job = CronJob {
+            id: CronJobId::new(),
+            agent_id: unowned_agent_id,
+            account_id: None,
+            name: "global-job".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 60 },
+            action: CronAction::SystemEvent {
+                text: "global wake".to_string(),
+            },
+            delivery: CronDelivery::None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        };
+        let global_prefix = global_job.id.0.to_string()[..8].to_string();
+        bridge.kernel.cron().add_job(global_job, false).unwrap();
+
+        let listed = bridge.list_schedules_text_scoped(None).await;
+        assert!(listed.contains("global-job"));
+        assert!(!listed.contains("tenant-job"));
+
+        let tenant_delete = bridge
+            .manage_schedule_text_scoped(None, "del", &[tenant_prefix])
+            .await;
+        assert!(tenant_delete.contains("No job found"));
+
+        let global_run = bridge
+            .manage_schedule_text_scoped(None, "run", &[global_prefix])
+            .await;
+        assert!(global_run.contains("system event published"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_none_scoped_trigger_commands_ignore_tenant_owned_triggers() {
+        let (_tmp, bridge) = test_bridge_adapter();
+
+        let tenant_agent = tenant_agent("tenant-a-target", "tenant-a");
+        let unowned_agent = unowned_agent("global-target");
+        let tenant_agent_id = tenant_agent.id;
+        let unowned_agent_id = unowned_agent.id;
+        bridge
+            .kernel
+            .agent_registry()
+            .register(tenant_agent)
+            .unwrap();
+        bridge
+            .kernel
+            .agent_registry()
+            .register(unowned_agent)
+            .unwrap();
+
+        let tenant_trigger = bridge
+            .kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_agent_id,
+                TriggerPattern::All,
+                "tenant".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_prefix = tenant_trigger.0.to_string()[..8].to_string();
+
+        let global_trigger = bridge
+            .kernel
+            .register_trigger(
+                None,
+                unowned_agent_id,
+                TriggerPattern::All,
+                "global".to_string(),
+                0,
+            )
+            .unwrap();
+        let global_prefix = global_trigger.0.to_string()[..8].to_string();
+
+        let listed = bridge.list_triggers_text_scoped(None).await;
+        assert!(listed.contains("global-target"));
+        assert!(!listed.contains("tenant-a-target"));
+
+        let tenant_delete = bridge
+            .delete_trigger_text_scoped(None, &tenant_prefix)
+            .await;
+        assert!(tenant_delete.contains("No trigger found"));
+
+        let global_delete = bridge
+            .delete_trigger_text_scoped(None, &global_prefix)
+            .await;
+        assert!(global_delete.contains("removed"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_none_scoped_add_refuses_tenant_owned_agents() {
+        let (_tmp, bridge) = test_bridge_adapter();
+
+        let tenant_agent = tenant_agent("tenant-a-agent", "tenant-a");
+        let unowned_agent = unowned_agent("global-agent");
+        bridge
+            .kernel
+            .agent_registry()
+            .register(tenant_agent)
+            .unwrap();
+        bridge
+            .kernel
+            .agent_registry()
+            .register(unowned_agent)
+            .unwrap();
+
+        let tenant_trigger = bridge
+            .create_trigger_text_scoped(None, "tenant-a-agent", "all", "wake")
+            .await;
+        assert!(tenant_trigger.contains("not found"));
+
+        let tenant_schedule = bridge
+            .manage_schedule_text_scoped(
+                None,
+                "add",
+                &[
+                    "tenant-a-agent".to_string(),
+                    "*".to_string(),
+                    "*".to_string(),
+                    "*".to_string(),
+                    "*".to_string(),
+                    "*".to_string(),
+                    "hello".to_string(),
+                ],
+            )
+            .await;
+        assert!(tenant_schedule.contains("not found"));
+
+        let global_trigger = bridge
+            .create_trigger_text_scoped(None, "global-agent", "all", "wake")
+            .await;
+        assert!(global_trigger.contains("Trigger created"));
+
+        let global_schedule = bridge
+            .manage_schedule_text_scoped(
+                None,
+                "add",
+                &[
+                    "global-agent".to_string(),
+                    "*".to_string(),
+                    "*".to_string(),
+                    "*".to_string(),
+                    "*".to_string(),
+                    "*".to_string(),
+                    "hello".to_string(),
+                ],
+            )
+            .await;
+        assert!(global_schedule.contains("created"));
     }
 }

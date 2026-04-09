@@ -214,7 +214,10 @@ pub trait ChannelBridgeHandle: Send + Sync {
 
     /// List workflows scoped to a tenant account when one is present.
     async fn list_workflows_text_scoped(&self, account_id: Option<&str>) -> String {
-        let _ = account_id;
+        if account_id.is_some() {
+            return "Tenant-scoped workflow listing is not available on this channel bridge."
+                .to_string();
+        }
         self.list_workflows_text().await
     }
 
@@ -230,7 +233,10 @@ pub trait ChannelBridgeHandle: Send + Sync {
         name: &str,
         input: &str,
     ) -> String {
-        let _ = account_id;
+        if account_id.is_some() {
+            return "Tenant-scoped workflow execution is not available on this channel bridge."
+                .to_string();
+        }
         self.run_workflow_text(name, input).await
     }
 
@@ -241,7 +247,10 @@ pub trait ChannelBridgeHandle: Send + Sync {
 
     /// List triggers scoped to a tenant account when one is present.
     async fn list_triggers_text_scoped(&self, account_id: Option<&str>) -> String {
-        let _ = account_id;
+        if account_id.is_some() {
+            return "Tenant-scoped trigger listing is not available on this channel bridge."
+                .to_string();
+        }
         self.list_triggers_text().await
     }
 
@@ -263,7 +272,10 @@ pub trait ChannelBridgeHandle: Send + Sync {
         pattern: &str,
         prompt: &str,
     ) -> String {
-        let _ = account_id;
+        if account_id.is_some() {
+            return "Tenant-scoped trigger creation is not available on this channel bridge."
+                .to_string();
+        }
         self.create_trigger_text(agent_name, pattern, prompt).await
     }
 
@@ -278,7 +290,10 @@ pub trait ChannelBridgeHandle: Send + Sync {
         account_id: Option<&str>,
         id_prefix: &str,
     ) -> String {
-        let _ = account_id;
+        if account_id.is_some() {
+            return "Tenant-scoped trigger deletion is not available on this channel bridge."
+                .to_string();
+        }
         self.delete_trigger_text(id_prefix).await
     }
 
@@ -289,7 +304,10 @@ pub trait ChannelBridgeHandle: Send + Sync {
 
     /// List cron jobs scoped to a tenant account when one is present.
     async fn list_schedules_text_scoped(&self, account_id: Option<&str>) -> String {
-        let _ = account_id;
+        if account_id.is_some() {
+            return "Tenant-scoped schedule listing is not available on this channel bridge."
+                .to_string();
+        }
         self.list_schedules_text().await
     }
 
@@ -305,7 +323,10 @@ pub trait ChannelBridgeHandle: Send + Sync {
         action: &str,
         args: &[String],
     ) -> String {
-        let _ = account_id;
+        if account_id.is_some() {
+            return "Tenant-scoped schedule management is not available on this channel bridge."
+                .to_string();
+        }
         self.manage_schedule_text(action, args).await
     }
 
@@ -3164,6 +3185,10 @@ mod tests {
         sent_texts: Mutex<Vec<String>>,
     }
 
+    struct FallbackScopeHandle {
+        unscoped_calls: Mutex<Vec<String>>,
+    }
+
     #[async_trait]
     impl ChannelAdapter for MockAdapter {
         fn name(&self) -> &str {
@@ -3297,6 +3322,86 @@ mod tests {
                 args.join("|")
             ));
             "scoped schedule".to_string()
+        }
+    }
+
+    #[async_trait]
+    impl ChannelBridgeHandle for FallbackScopeHandle {
+        async fn send_message(&self, _agent_id: AgentId, _message: &str) -> Result<String, String> {
+            Err("send_message not implemented in fallback mock".to_string())
+        }
+
+        async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+            Ok(None)
+        }
+
+        async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+            Ok(Vec::new())
+        }
+
+        async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+            Err("spawn not implemented in fallback mock".to_string())
+        }
+
+        async fn list_workflows_text(&self) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push("workflows".to_string());
+            "unscoped workflows".to_string()
+        }
+
+        async fn run_workflow_text(&self, name: &str, input: &str) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("workflow-run:{name}:{input}"));
+            "unscoped workflow run".to_string()
+        }
+
+        async fn list_triggers_text(&self) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push("triggers".to_string());
+            "unscoped triggers".to_string()
+        }
+
+        async fn create_trigger_text(
+            &self,
+            agent_name: &str,
+            pattern: &str,
+            prompt: &str,
+        ) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("trigger:{agent_name}:{pattern}:{prompt}"));
+            "unscoped trigger add".to_string()
+        }
+
+        async fn delete_trigger_text(&self, id_prefix: &str) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("trigger-del:{id_prefix}"));
+            "unscoped trigger del".to_string()
+        }
+
+        async fn list_schedules_text(&self) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push("schedules".to_string());
+            "unscoped schedules".to_string()
+        }
+
+        async fn manage_schedule_text(&self, action: &str, args: &[String]) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("schedule:{action}:{}", args.join("|")));
+            "unscoped schedule".to_string()
         }
     }
 
@@ -3679,6 +3784,116 @@ mod tests {
         assert!(calls.contains(&"trigger-add:Some(\"tenant-a\"):agent-a:system:wake".to_string()));
         assert!(calls.contains(&"schedules:Some(\"tenant-a\")".to_string()));
         assert!(calls.contains(&"schedule:Some(\"tenant-a\"):run:abc123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_scoped_trigger_default_fails_closed_with_account_scope() {
+        let handle = FallbackScopeHandle {
+            unscoped_calls: Mutex::new(Vec::new()),
+        };
+
+        let result = handle
+            .create_trigger_text_scoped(Some("tenant-a"), "agent-a", "system", "wake")
+            .await;
+
+        assert_eq!(
+            result,
+            "Tenant-scoped trigger creation is not available on this channel bridge."
+        );
+        assert!(handle.unscoped_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scoped_schedule_default_fails_closed_with_account_scope() {
+        let handle = FallbackScopeHandle {
+            unscoped_calls: Mutex::new(Vec::new()),
+        };
+
+        let result = handle
+            .manage_schedule_text_scoped(Some("tenant-a"), "run", &["abc123".to_string()])
+            .await;
+
+        assert_eq!(
+            result,
+            "Tenant-scoped schedule management is not available on this channel bridge."
+        );
+        assert!(handle.unscoped_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scoped_read_defaults_fail_closed_with_account_scope() {
+        let handle = FallbackScopeHandle {
+            unscoped_calls: Mutex::new(Vec::new()),
+        };
+
+        let workflows = handle.list_workflows_text_scoped(Some("tenant-a")).await;
+        let workflow_run = handle
+            .run_workflow_text_scoped(Some("tenant-a"), "daily", "hello")
+            .await;
+        let triggers = handle.list_triggers_text_scoped(Some("tenant-a")).await;
+        let trigger_delete = handle
+            .delete_trigger_text_scoped(Some("tenant-a"), "abc123")
+            .await;
+        let schedules = handle.list_schedules_text_scoped(Some("tenant-a")).await;
+
+        assert_eq!(
+            workflows,
+            "Tenant-scoped workflow listing is not available on this channel bridge."
+        );
+        assert_eq!(
+            workflow_run,
+            "Tenant-scoped workflow execution is not available on this channel bridge."
+        );
+        assert_eq!(
+            triggers,
+            "Tenant-scoped trigger listing is not available on this channel bridge."
+        );
+        assert_eq!(
+            trigger_delete,
+            "Tenant-scoped trigger deletion is not available on this channel bridge."
+        );
+        assert_eq!(
+            schedules,
+            "Tenant-scoped schedule listing is not available on this channel bridge."
+        );
+        assert!(handle.unscoped_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scoped_defaults_fallback_without_account_scope() {
+        let handle = FallbackScopeHandle {
+            unscoped_calls: Mutex::new(Vec::new()),
+        };
+
+        let workflows_result = handle.list_workflows_text_scoped(None).await;
+        let workflow_run_result = handle
+            .run_workflow_text_scoped(None, "daily", "hello")
+            .await;
+        let triggers_result = handle.list_triggers_text_scoped(None).await;
+        let trigger_result = handle
+            .create_trigger_text_scoped(None, "agent-a", "system", "wake")
+            .await;
+        let trigger_delete_result = handle.delete_trigger_text_scoped(None, "abc123").await;
+        let schedules_result = handle.list_schedules_text_scoped(None).await;
+        let schedule_result = handle
+            .manage_schedule_text_scoped(None, "run", &["abc123".to_string()])
+            .await;
+
+        assert_eq!(workflows_result, "unscoped workflows");
+        assert_eq!(workflow_run_result, "unscoped workflow run");
+        assert_eq!(triggers_result, "unscoped triggers");
+        assert_eq!(trigger_result, "unscoped trigger add");
+        assert_eq!(trigger_delete_result, "unscoped trigger del");
+        assert_eq!(schedules_result, "unscoped schedules");
+        assert_eq!(schedule_result, "unscoped schedule");
+        let calls = handle.unscoped_calls.lock().unwrap().clone();
+        assert!(calls.contains(&"workflows".to_string()));
+        assert!(calls.contains(&"workflow-run:daily:hello".to_string()));
+        assert!(calls.contains(&"triggers".to_string()));
+        assert!(calls.contains(&"trigger:agent-a:system:wake".to_string()));
+        assert!(calls.contains(&"trigger-del:abc123".to_string()));
+        assert!(calls.contains(&"schedules".to_string()));
+        assert!(calls.contains(&"schedule:run:abc123".to_string()));
     }
 
     #[test]

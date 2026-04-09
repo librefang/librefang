@@ -2,7 +2,7 @@
 //! bindings, pairing, webhooks, and miscellaneous system handlers.
 
 use super::shared::check_account;
-use super::shared::require_admin;
+use super::shared::{require_admin, require_admin_owner};
 use super::AppState;
 use crate::middleware::AccountId;
 
@@ -1385,10 +1385,7 @@ pub async fn list_approvals(
     let pending = state.kernel.approvals().list_pending();
     let recent = state.kernel.approvals().list_recent(50);
 
-    let registry_agents = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
-        None => state.kernel.agent_registry().list(),
-    };
+    let registry_agents = state.kernel.agent_registry().list();
     let agent_name_for = |agent_id: &str| {
         registry_agents
             .iter()
@@ -1468,10 +1465,7 @@ pub async fn get_approval(
 
     match state.kernel.approvals().get_pending(uuid) {
         Some(a) => {
-            let registry_agents = match account.0 {
-                Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
-                None => state.kernel.agent_registry().list(),
-            };
+            let registry_agents = state.kernel.agent_registry().list();
             (StatusCode::OK, Json(approval_to_json(&a, &registry_agents))).into_response()
         }
         None => {
@@ -1835,9 +1829,11 @@ pub async fn webhook_wake(
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<librefang_types::webhook::WakePayload>,
 ) -> axum::response::Response {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json).into_response();
-    }
+    let admin_owner = match require_admin_owner(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        Ok(owner) => owner,
+        Err((code, json)) => return (code, json).into_response(),
+    };
     let (err_webhook_not_enabled, err_invalid_token) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
@@ -1878,16 +1874,18 @@ pub async fn webhook_wake(
         "mode": body.mode,
         "text": body.text,
     });
-    if let Err(e) =
-        KernelHandle::publish_event(state.kernel.as_ref(), "webhook.wake", event_payload).await
+    if let Err(e) = KernelHandle::publish_event_scoped(
+        state.kernel.as_ref(),
+        "webhook.wake",
+        event_payload,
+        Some(admin_owner),
+    )
+    .await
     {
         tracing::warn!("Webhook wake event publish failed: {e}");
         let err_msg = {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            t.t_args(
-                "api-error-webhook-publish-failed",
-                &[("error", &e.to_string())],
-            )
+            t.t("api-error-webhook-publish-failed")
         };
         return ApiErrorResponse::internal(err_msg)
             .into_json_tuple()
@@ -1913,9 +1911,11 @@ pub async fn webhook_agent(
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<librefang_types::webhook::AgentHookPayload>,
 ) -> axum::response::Response {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json).into_response();
-    }
+    let admin_owner = match require_admin_owner(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        Ok(owner) => owner,
+        Err((code, json)) => return (code, json).into_response(),
+    };
     let (err_webhook_not_enabled, err_invalid_token, err_no_agents) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
@@ -1953,10 +1953,27 @@ pub async fn webhook_agent(
     // Resolve the agent by name or ID (if not specified, use the first running agent)
     let agent_id: AgentId = match &body.agent {
         Some(agent_ref) => match agent_ref.parse() {
-            Ok(id) => id,
+            Ok(id) => match state.kernel.agent_registry().get(id) {
+                Some(entry) if entry.account_id.as_deref() == Some(admin_owner) => id,
+                _ => {
+                    let err_msg = {
+                        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+                        t.t_args("api-error-webhook-agent-not-found", &[("id", agent_ref)])
+                    };
+                    return ApiErrorResponse::not_found(err_msg)
+                        .into_json_tuple()
+                        .into_response();
+                }
+            },
             Err(_) => {
                 // Try name lookup
-                match state.kernel.agent_registry().find_by_name(agent_ref) {
+                let candidate = state
+                    .kernel
+                    .agent_registry()
+                    .list_by_account(admin_owner)
+                    .into_iter()
+                    .find(|entry| entry.name == *agent_ref);
+                match candidate {
                     Some(entry) => entry.id,
                     None => {
                         let err_msg = {
@@ -1972,10 +1989,7 @@ pub async fn webhook_agent(
         },
         None => {
             // No agent specified — use the first available agent
-            let agents = match account.0 {
-                Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
-                None => state.kernel.agent_registry().list(),
-            };
+            let agents = state.kernel.agent_registry().list_by_account(admin_owner);
             match agents.first() {
                 Some(entry) => entry.id,
                 None => {
@@ -2003,11 +2017,9 @@ pub async fn webhook_agent(
         )
             .into_response(),
         Err(e) => {
+            tracing::warn!("Webhook agent execution failed: {e}");
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            let msg = t.t_args(
-                "api-error-webhook-agent-exec-failed",
-                &[("error", &e.to_string())],
-            );
+            let msg = t.t("api-error-webhook-agent-exec-failed");
             ApiErrorResponse::internal(msg)
                 .into_json_tuple()
                 .into_response()
@@ -2045,10 +2057,7 @@ pub async fn add_binding(
         return (code, json).into_response();
     }
     // Validate agent exists
-    let agents = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
-        None => state.kernel.agent_registry().list(),
-    };
+    let agents = state.kernel.agent_registry().list();
     let agent_exists = agents.iter().any(|e| e.name == binding.agent)
         || binding.agent.parse::<uuid::Uuid>().is_ok();
     if !agent_exists {
@@ -4157,6 +4166,7 @@ mod event_webhook_tests {
         let config = librefang_types::config::KernelConfig {
             home_dir: home.clone(),
             data_dir: home.join("data"),
+            admin_accounts: vec!["admin".to_string()],
             ..Default::default()
         };
         let kernel = std::sync::Arc::new(
@@ -4199,8 +4209,34 @@ mod event_webhook_tests {
             .with_state(state)
     }
 
+    fn admin_request(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+        builder.header("x-account-id", "admin")
+    }
+
     async fn clear_webhooks() {
         EVENT_WEBHOOKS.write().await.clear();
+    }
+
+    fn tenant_agent(name: &str, account_id: &str) -> librefang_types::agent::AgentEntry {
+        librefang_types::agent::AgentEntry {
+            id: AgentId::new(),
+            account_id: Some(account_id.to_string()),
+            name: name.to_string(),
+            manifest: AgentManifest::default(),
+            state: librefang_types::agent::AgentState::Created,
+            mode: librefang_types::agent::AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: librefang_types::agent::AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4210,7 +4246,7 @@ mod event_webhook_tests {
         let app = webhook_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .uri("/api/webhooks/events")
                     .body(Body::empty())
                     .unwrap(),
@@ -4238,7 +4274,7 @@ mod event_webhook_tests {
         let resp = app
             .clone()
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("POST")
                     .uri("/api/webhooks/events")
                     .header("content-type", "application/json")
@@ -4259,7 +4295,7 @@ mod event_webhook_tests {
         // List should contain the webhook with redacted secret
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .uri("/api/webhooks/events")
                     .body(Body::empty())
                     .unwrap(),
@@ -4285,7 +4321,7 @@ mod event_webhook_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("POST")
                     .uri("/api/webhooks/events")
                     .header("content-type", "application/json")
@@ -4309,7 +4345,7 @@ mod event_webhook_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("POST")
                     .uri("/api/webhooks/events")
                     .header("content-type", "application/json")
@@ -4359,7 +4395,7 @@ mod event_webhook_tests {
         let resp = app
             .clone()
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("POST")
                     .uri("/api/webhooks/events")
                     .header("content-type", "application/json")
@@ -4378,7 +4414,7 @@ mod event_webhook_tests {
         });
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("PUT")
                     .uri(format!("/api/webhooks/events/{id}"))
                     .header("content-type", "application/json")
@@ -4407,7 +4443,7 @@ mod event_webhook_tests {
         let resp = app
             .clone()
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("POST")
                     .uri("/api/webhooks/events")
                     .header("content-type", "application/json")
@@ -4423,7 +4459,7 @@ mod event_webhook_tests {
         let resp = app
             .clone()
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("DELETE")
                     .uri(format!("/api/webhooks/events/{id}"))
                     .body(Body::empty())
@@ -4435,7 +4471,7 @@ mod event_webhook_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .uri("/api/webhooks/events")
                     .body(Body::empty())
                     .unwrap(),
@@ -4455,7 +4491,7 @@ mod event_webhook_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("DELETE")
                     .uri("/api/webhooks/events/nonexistent-id")
                     .body(Body::empty())
@@ -4475,7 +4511,7 @@ mod event_webhook_tests {
         let payload = serde_json::json!({"enabled": false});
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("PUT")
                     .uri("/api/webhooks/events/nonexistent-id")
                     .header("content-type", "application/json")
@@ -4485,5 +4521,277 @@ mod event_webhook_tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_webhook_wake_keeps_event_scoped_to_request_account() {
+        let _guard = TEST_LOCK.lock().await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let token = "0123456789abcdef0123456789abcdef";
+        std::env::set_var("LIBREFANG_TEST_WEBHOOK_TOKEN", token);
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            admin_accounts: vec!["tenant-a".to_string()],
+            webhook_triggers: Some(librefang_types::config::WebhookTriggerConfig {
+                enabled: true,
+                token_env: "LIBREFANG_TEST_WEBHOOK_TOKEN".to_string(),
+                max_payload_bytes: 65_536,
+                rate_limit_per_minute: 30,
+            }),
+            ..Default::default()
+        };
+        let kernel = std::sync::Arc::new(
+            librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"),
+        );
+        let tenant_a_source = tenant_agent("tenant-a-source", "tenant-a");
+        let tenant_a_target = tenant_agent("tenant-a-target", "tenant-a");
+        let tenant_b_target = tenant_agent("tenant-b-target", "tenant-b");
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        kernel.agent_registry().register(tenant_a_source).unwrap();
+        kernel.agent_registry().register(tenant_a_target).unwrap();
+        kernel.agent_registry().register(tenant_b_target).unwrap();
+
+        let tenant_a_trigger = kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                librefang_kernel::triggers::TriggerPattern::All,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_b_trigger = kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                librefang_kernel::triggers::TriggerPattern::All,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let state = std::sync::Arc::new(AppState {
+            kernel: kernel.clone(),
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            api_key_lock: std::sync::Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+                Router::new(),
+            ))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+
+        let response = webhook_wake(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            axum::http::HeaderMap::from_iter([(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            )]),
+            None,
+            Json(librefang_types::webhook::WakePayload {
+                mode: librefang_types::webhook::WakeMode::Now,
+                text: "wake tenant a".to_string(),
+            }),
+        )
+        .await;
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "same-tenant webhook target should pass payload/token validation"
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "same-tenant webhook target should resolve within owner scope"
+        );
+
+        let tenant_a = kernel
+            .trigger_engine()
+            .get(tenant_a_trigger)
+            .expect("tenant-a trigger");
+        let tenant_b = kernel
+            .trigger_engine()
+            .get(tenant_b_trigger)
+            .expect("tenant-b trigger");
+        assert_eq!(tenant_a.fire_count, 1);
+        assert_eq!(
+            tenant_b.fire_count, 0,
+            "webhook-triggered event should not cross tenant boundaries"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_webhook_agent_cannot_target_other_tenant_by_name() {
+        let _guard = TEST_LOCK.lock().await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let token = "0123456789abcdef0123456789abcdef";
+        std::env::set_var("LIBREFANG_TEST_WEBHOOK_TOKEN", token);
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            admin_accounts: vec!["tenant-a".to_string()],
+            webhook_triggers: Some(librefang_types::config::WebhookTriggerConfig {
+                enabled: true,
+                token_env: "LIBREFANG_TEST_WEBHOOK_TOKEN".to_string(),
+                max_payload_bytes: 65_536,
+                rate_limit_per_minute: 30,
+            }),
+            ..Default::default()
+        };
+        let kernel = std::sync::Arc::new(
+            librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"),
+        );
+        kernel
+            .agent_registry()
+            .register(tenant_agent("tenant-b-agent", "tenant-b"))
+            .unwrap();
+
+        let state = std::sync::Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            api_key_lock: std::sync::Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+                Router::new(),
+            ))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+
+        let response = webhook_agent(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            axum::http::HeaderMap::from_iter([(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            )]),
+            None,
+            Json(librefang_types::webhook::AgentHookPayload {
+                agent: Some("tenant-b-agent".to_string()),
+                message: "hello".to_string(),
+                deliver: false,
+                channel: None,
+                model: None,
+                timeout_secs: 120,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_webhook_agent_can_target_same_tenant_by_name() {
+        let _guard = TEST_LOCK.lock().await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let token = "0123456789abcdef0123456789abcdef";
+        std::env::set_var("LIBREFANG_TEST_WEBHOOK_TOKEN", token);
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            admin_accounts: vec!["tenant-a".to_string()],
+            webhook_triggers: Some(librefang_types::config::WebhookTriggerConfig {
+                enabled: true,
+                token_env: "LIBREFANG_TEST_WEBHOOK_TOKEN".to_string(),
+                max_payload_bytes: 65_536,
+                rate_limit_per_minute: 30,
+            }),
+            ..Default::default()
+        };
+        let kernel = std::sync::Arc::new(
+            librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"),
+        );
+        kernel
+            .agent_registry()
+            .register(tenant_agent("tenant-a-agent", "tenant-a"))
+            .unwrap();
+
+        let state = std::sync::Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            api_key_lock: std::sync::Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+                Router::new(),
+            ))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+
+        let response = webhook_agent(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            axum::http::HeaderMap::from_iter([(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            )]),
+            None,
+            Json(librefang_types::webhook::AgentHookPayload {
+                agent: Some("tenant-a-agent".to_string()),
+                message: "hello".to_string(),
+                deliver: false,
+                channel: None,
+                model: None,
+                timeout_secs: 120,
+            }),
+        )
+        .await;
+
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "same-tenant webhook target should pass payload/token validation"
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "same-tenant webhook target should resolve within owner scope"
+        );
     }
 }
