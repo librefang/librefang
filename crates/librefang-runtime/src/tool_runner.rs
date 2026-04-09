@@ -1428,6 +1428,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "text": { "type": "string", "description": "The text to convert to speech (max 4096 chars)" },
                     "voice": { "type": "string", "description": "Voice name (provider-specific). OpenAI: 'alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'. Default: 'alloy'" },
                     "format": { "type": "string", "description": "Output format: 'mp3', 'opus', 'aac', 'flac', 'wav' (default: 'mp3')" },
+                    "output_format": { "type": "string", "enum": ["mp3", "ogg_opus"], "description": "Final output format. 'ogg_opus' converts to OGG Opus via ffmpeg (required for WhatsApp voice notes); falls back to provider format if ffmpeg is unavailable or conversion fails. Default: 'mp3'" },
                     "provider": { "type": "string", "description": "Provider: 'openai', 'gemini', 'minimax'. Auto-detected if omitted." },
                     "model": { "type": "string", "description": "Model ID (provider-specific). OpenAI: 'tts-1', 'tts-1-hd'. Default varies by provider." },
                     "speed": { "type": "number", "description": "Playback speed (0.25-4.0). OpenAI only. Default: 1.0" }
@@ -3739,6 +3740,7 @@ async fn tool_text_to_speech(
     let voice = input["voice"].as_str();
     let format = input["format"].as_str();
     let provider = input["provider"].as_str();
+    let output_format = input["output_format"].as_str().unwrap_or("mp3");
 
     if let Some(cache) = media_drivers {
         let resolved_provider =
@@ -3792,6 +3794,7 @@ async fn tool_text_to_speech(
                 &result.provider,
                 result.duration_ms,
                 workspace_root,
+                output_format,
             )
             .await;
         }
@@ -3810,44 +3813,194 @@ async fn tool_text_to_speech(
         &result.provider,
         Some(result.duration_estimate_ms),
         workspace_root,
+        output_format,
     )
     .await
 }
 
+/// Convert audio data to OGG Opus via ffmpeg.
+/// Returns `Ok(None)` if ffmpeg is not installed (caller should fall back to
+/// saving the original format). Returns `Ok(Some(...))` on success with the
+/// saved path, format string, and file size.
+async fn convert_to_ogg_opus(
+    audio_data: &[u8],
+    output_dir: &Path,
+    timestamp: &str,
+) -> Result<Option<(Option<String>, String, usize)>, String> {
+    let ogg_filename = format!("tts_{timestamp}.ogg");
+    let ogg_path = output_dir.join(&ogg_filename);
+    let ogg_path_str = ogg_path
+        .to_str()
+        .ok_or_else(|| "Output path contains invalid UTF-8".to_string())?;
+
+    let spawn_result = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            "pipe:0",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "32k",
+            "-ar",
+            "48000",
+            "-ac",
+            "1",
+            ogg_path_str,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+
+    let mut child = match spawn_result {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to run ffmpeg: {e}")),
+    };
+
+    // Write audio to ffmpeg stdin, then close it (EOF triggers encoding).
+    // Sequential write→wait is safe: stdout is Stdio::null() so ffmpeg
+    // never blocks on output, and stderr is piped but read after exit.
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(audio_data)
+            .await
+            .map_err(|e| format!("Failed to pipe audio to ffmpeg: {e}"))?;
+        // stdin drops here → EOF sent to ffmpeg
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("ffmpeg process error: {e}"))?;
+
+    if !output.status.success() {
+        // Clean up partial output file
+        let _ = tokio::fs::remove_file(&ogg_path).await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let last_lines: String = stderr
+            .lines()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!(
+            "ffmpeg conversion to OGG Opus failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            last_lines
+        ));
+    }
+
+    let ogg_size = tokio::fs::metadata(&ogg_path)
+        .await
+        .map(|m| m.len() as usize)
+        .unwrap_or(0);
+
+    if ogg_size == 0 {
+        let _ = tokio::fs::remove_file(&ogg_path).await;
+        return Err("ffmpeg exited successfully but produced an empty OGG file".into());
+    }
+
+    Ok(Some((
+        Some(ogg_path.display().to_string()),
+        "ogg".to_string(),
+        ogg_size,
+    )))
+}
+
 /// Save TTS audio to workspace and build JSON response.
+/// When `output_format` is `"ogg_opus"` and ffmpeg is available, the saved file
+/// is converted from the provider format (typically MP3) to OGG Opus so it can
+/// be sent as a WhatsApp voice note. Falls back to the original format if ffmpeg
+/// is not installed.
 async fn finish_tts_result(
     audio_data: &[u8],
     format: &str,
     provider: &str,
     duration_ms: Option<u64>,
     workspace_root: Option<&Path>,
+    output_format: &str,
 ) -> Result<String, String> {
-    let saved_path = if let Some(workspace) = workspace_root {
+    let (saved_path, final_format, final_size, warning) = if let Some(workspace) = workspace_root {
         let output_dir = workspace.join("output");
         tokio::fs::create_dir_all(&output_dir)
             .await
             .map_err(|e| format!("Failed to create output dir: {e}"))?;
 
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let filename = format!("tts_{timestamp}.{format}");
-        let path = output_dir.join(&filename);
 
-        tokio::fs::write(&path, audio_data)
-            .await
-            .map_err(|e| format!("Failed to write audio file: {e}"))?;
+        if output_format == "ogg_opus" && !matches!(format, "ogg" | "opus" | "ogg_opus") {
+            // Try ffmpeg conversion; fall back to saving the original format if
+            // ffmpeg is not installed (preserves backward compatibility).
+            match convert_to_ogg_opus(audio_data, &output_dir, &timestamp).await {
+                Ok(Some(result)) => (result.0, result.1, result.2, None),
+                Ok(None) => {
+                    let filename = format!("tts_{timestamp}.{format}");
+                    let path = output_dir.join(&filename);
+                    tokio::fs::write(&path, audio_data)
+                        .await
+                        .map_err(|e| format!("Failed to write audio file: {e}"))?;
+                    (
+                        Some(path.display().to_string()),
+                        format.to_string(),
+                        audio_data.len(),
+                        Some(
+                            "ffmpeg not found; saved as original format instead of ogg_opus"
+                                .to_string(),
+                        ),
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!("OGG Opus conversion failed, falling back to {format}: {e}");
+                    let filename = format!("tts_{timestamp}.{format}");
+                    let path = output_dir.join(&filename);
+                    tokio::fs::write(&path, audio_data)
+                        .await
+                        .map_err(|e| format!("Failed to write audio file: {e}"))?;
+                    (
+                        Some(path.display().to_string()),
+                        format.to_string(),
+                        audio_data.len(),
+                        Some(format!(
+                            "OGG Opus conversion failed, saved as {format}: {e}"
+                        )),
+                    )
+                }
+            }
+        } else {
+            let filename = format!("tts_{timestamp}.{format}");
+            let path = output_dir.join(&filename);
+            tokio::fs::write(&path, audio_data)
+                .await
+                .map_err(|e| format!("Failed to write audio file: {e}"))?;
 
-        Some(path.display().to_string())
+            (
+                Some(path.display().to_string()),
+                format.to_string(),
+                audio_data.len(),
+                None,
+            )
+        }
     } else {
-        None
+        (None, format.to_string(), audio_data.len(), None)
     };
 
     let mut response = serde_json::json!({
         "saved_to": saved_path,
-        "format": format,
+        "format": final_format,
         "provider": provider,
         "duration_estimate_ms": duration_ms,
-        "size_bytes": audio_data.len(),
+        "size_bytes": final_size,
     });
+
+    if let Some(w) = &warning {
+        response["warning"] = serde_json::json!(w);
+    }
 
     // When no workspace is available (e.g. MCP context), include base64 audio
     if saved_path.is_none() && !audio_data.is_empty() {
