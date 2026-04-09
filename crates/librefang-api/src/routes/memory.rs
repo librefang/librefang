@@ -828,10 +828,11 @@ pub async fn memory_stats_agent(
         Err(e) => return e,
     };
 
-    let scope = match account.0.as_deref() {
-        Some(owner) => MemoryScope::tenant(owner),
-        None => MemoryScope::global(),
+    let owner = match scoped_account_id(&account) {
+        Ok(owner) => owner,
+        Err(err) => return err,
     };
+    let scope = MemoryScope::tenant(owner);
     let result = store.stats_agent_scoped(&agent_id, scope).await;
 
     match result {
@@ -944,14 +945,13 @@ pub async fn memory_consolidate(
         Err(e) => return e,
     };
 
-    let result = match account.0.as_deref() {
-        Some(owner) => {
-            store
-                .consolidate_scoped(&agent_id, MemoryScope::tenant(owner))
-                .await
-        }
-        None => store.consolidate(&agent_id).await,
+    let owner = match scoped_account_id(&account) {
+        Ok(owner) => owner,
+        Err(err) => return err,
     };
+    let result = store
+        .consolidate_scoped(&agent_id, MemoryScope::tenant(owner))
+        .await;
 
     match result {
         Ok(merged) => (
@@ -1071,10 +1071,11 @@ pub async fn memory_import_agent(
         Err(e) => return e,
     };
 
-    let scope = match account.0.as_deref() {
-        Some(owner) => MemoryScope::tenant(owner),
-        None => MemoryScope::global(),
+    let owner = match scoped_account_id(&account) {
+        Ok(owner) => owner,
+        Err(err) => return err,
     };
+    let scope = MemoryScope::tenant(owner);
     match store.import_memories_scoped(&agent_id, body, scope).await {
         Ok(count) => (
             StatusCode::OK,

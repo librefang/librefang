@@ -7,7 +7,7 @@
 //! Supports both streaming (SSE) and non-streaming responses.
 
 use crate::middleware::AccountId;
-use crate::routes::shared::check_account;
+use crate::routes::shared::{check_account, require_concrete_account};
 use crate::routes::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -561,10 +561,11 @@ pub async fn list_models(
     State(state): State<Arc<AppState>>,
     account: AccountId,
 ) -> impl IntoResponse {
-    let agents = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
-        None => state.kernel.agent_registry().list(),
+    let owner = match require_concrete_account(&account) {
+        Ok(owner) => owner,
+        Err((code, json)) => return (code, json).into_response(),
     };
+    let agents = state.kernel.agent_registry().list_by_account(owner);
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -587,6 +588,8 @@ pub async fn list_models(
         })
         .unwrap_or_default(),
     )
+    .into_response()
+    .into_response()
 }
 
 #[cfg(test)]

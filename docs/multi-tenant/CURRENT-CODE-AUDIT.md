@@ -148,7 +148,8 @@ classifications and should be audited by endpoint class, not file name.
 
 ## Intentionally Admin-Only or Global
 
-- inbox diagnostics in `inbox.rs`
+- inbox operator/admin intake infrastructure in `inbox.rs`, including
+  `/api/inbox/status` admin-only diagnostics
 - workflow templates
 - raw cron infrastructure
 - plugin lifecycle
@@ -173,18 +174,30 @@ right policy.
 - config/runtime ownership is converged
 - QR/bootstrap/session ownership rules are still product work
 
-### 3. Inbox product decision
+### 3. Residual `AccountId(None)` migration debt
 
-- current inbox endpoint is still daemon diagnostics
-- there is no tenant-owned inbox product model yet
+- active product paths now target explicit concrete account scope
+- tenant-owned `agents` handlers no longer use daemon-global fallback reads/writes
+- `/v1/models` no longer falls back to daemon-global agent listing
+- proactive-memory agent-scoped handlers no longer carry dead global-scope
+  fallback branches
+- `/api/status` and `/api/health/detail` now require a concrete account and only
+  return the full daemon view to configured admin accounts
+- remaining debt is now small and classified:
+  - intentional admin/global compatibility path:
+    `require_admin()` still permits `AccountId(None)` for documented operator
+    infrastructure endpoints during migration
+  - intentional admin/global compatibility path:
+    a few `system` handlers still branch on `account.0` only after
+    `require_admin()` for daemon-global compatibility views
+  - migration debt:
+    extractor-level missing-header representation in `middleware.rs`
+  - migration debt:
+    legacy storage round-trip helpers such as `"system"` sentinels
+  - migration debt:
+    compatibility comments/tests that still need eventual pruning
 
-### 4. Residual `AccountId(None)` migration debt
-
-- active product paths now target explicit account scope
-- any remaining `AccountId(None)` behavior should be treated as migration debt or
-  explicitly admin/global-only compatibility logic
-
-### 5. Broader tenant-owned skill content model
+### 4. Broader tenant-owned skill content model
 
 - hands are tenant-owned at the instance/settings layer
 - broader tenant-authored skill content or overlays remain future design work

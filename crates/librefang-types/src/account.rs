@@ -18,7 +18,7 @@ pub struct AccountId(pub Option<String>);
 
 impl AccountId {
     /// Compatibility sentinel for legacy storage defaults.
-    /// This is migration debt, not a target runtime identity.
+    /// This is migration debt, not a valid runtime identity.
     pub const SYSTEM: &'static str = "system";
 
     /// Create a new random account ID (UUID v4).
@@ -33,6 +33,9 @@ impl AccountId {
 
     /// Returns the inner string, or the legacy `"system"` sentinel for
     /// compatibility layers that still need to round-trip old storage.
+    ///
+    /// New tenant-facing or admin-facing runtime paths should prefer explicit
+    /// concrete-account checks instead of calling this helper.
     pub fn as_str_or_system(&self) -> &str {
         match &self.0 {
             Some(s) => s.as_str(),
@@ -63,19 +66,18 @@ mod tests {
     use std::collections::HashSet;
 
     // ─────────────────────────────────────────────────────────────
-    // Default Account Behavior (System Mode)
+    // Default Account Behavior (Compatibility State)
     // ─────────────────────────────────────────────────────────────
 
-    /// Default account is unscoped (None). Validates backward compatibility for
-    /// single-tenant / desktop mode where no X-Account-Id header is present.
+    /// Default account is unscoped (None). This is compatibility state, not a
+    /// valid Qwntik request identity.
     #[test]
     fn test_account_id_default_is_none() {
         assert_eq!(AccountId::default().0, None);
     }
 
-    /// System mode fallback: Default account returns "system" string for database
-    /// compatibility. Migrations use DEFAULT 'system' — this test ensures the
-    /// type system matches the storage layer contract.
+    /// Legacy storage fallback: default account returns "system" for round-trip
+    /// compatibility with older persisted records.
     #[test]
     fn test_account_id_as_str_or_system_returns_system_for_default() {
         assert_eq!(AccountId::default().as_str_or_system(), "system");
@@ -112,16 +114,14 @@ mod tests {
     // Scoped vs Unscoped (is_scoped Check)
     // ─────────────────────────────────────────────────────────────
 
-    /// is_scoped() returns true for Some accounts. Used by API extractors to
-    /// distinguish multi-tenant requests (X-Account-Id present) from legacy
-    /// mode (no header).
+    /// is_scoped() returns true for concrete tenant accounts.
     #[test]
     fn test_account_id_is_scoped_true_for_some() {
         let scoped = AccountId(Some("tenant-123".to_string()));
         assert!(scoped.is_scoped());
     }
 
-    /// is_scoped() returns false for None accounts (system/legacy mode).
+    /// is_scoped() returns false for compatibility/unscoped states.
     #[test]
     fn test_account_id_is_scoped_false_for_none() {
         assert!(!AccountId::default().is_scoped());
@@ -157,8 +157,8 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// Scoped and unscoped accounts are not equal. Prevents treating system
-    /// mode as a valid tenant ID.
+    /// Scoped and unscoped accounts are not equal. Prevents treating the
+    /// compatibility sentinel as a valid tenant ID.
     #[test]
     fn test_account_id_scoped_and_unscoped_are_not_equal() {
         let scoped = AccountId(Some("tenant-a".to_string()));
@@ -166,8 +166,7 @@ mod tests {
         assert_ne!(scoped, unscoped);
     }
 
-    /// All unscoped (None) accounts are equal to each other. System mode
-    /// doesn't have tenant boundaries.
+    /// All unscoped compatibility states are equal to each other.
     #[test]
     fn test_account_id_all_unscoped_accounts_are_equal() {
         assert_eq!(AccountId::default(), AccountId::default());

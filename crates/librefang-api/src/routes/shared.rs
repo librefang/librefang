@@ -61,28 +61,16 @@ pub fn require_admin_account(
 
 /// Reject non-admin callers from admin-only endpoints.
 ///
-/// Passes through when:
-/// - `AccountId(None)` — legacy compatibility path outside normal Qwntik traffic
-/// - `AccountId(Some(id))` where `id` is in `admin_accounts` — elevated tenant
+/// This is the Qwntik-safe admin guard: non-public infrastructure endpoints
+/// require a concrete `X-Account-Id`, and that account must be listed in
+/// `KernelConfig::admin_accounts`.
 ///
-/// Returns 403 Forbidden for all other scoped tenants.
-///
-/// `admin_accounts` comes from `KernelConfig::admin_accounts`. In multi-tenant
-/// mode, `require_account_id` middleware forces all requests to carry an
-/// `X-Account-Id`, so without this list admin-guarded endpoints would be
-/// unreachable.
+/// Missing account identity is rejected with 400. Non-admin tenants receive 403.
 pub fn require_admin(
     account: &AccountId,
     admin_accounts: &[String],
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    match &account.0 {
-        None => Ok(()),                                    // legacy compatibility/admin path
-        Some(id) if admin_accounts.contains(id) => Ok(()), // elevated admin tenant
-        Some(_) => Err((
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "This endpoint requires admin access"})),
-        )),
-    }
+    require_admin_account(account, admin_accounts)
 }
 
 /// Finalize a newly spawned agent by attaching the account ID.
@@ -91,9 +79,8 @@ pub fn require_admin(
 /// contexts. It sets the `account_id` field on the agent entry to enforce
 /// ownership boundaries for subsequent access checks.
 ///
-/// When `AccountId(None)` reaches this helper, the agent remains unowned as a
-/// compatibility fallback. Tenant-facing runtime flows should supply a concrete
-/// account and persist ownership.
+/// When `AccountId(None)` reaches this helper, the agent remains unowned. That
+/// state is migration debt and should not occur on tenant-facing request flows.
 #[allow(dead_code)] // Available for channels/config route scoping in Phase 2
 pub fn finalize_spawned_agent(entry: &mut AgentEntry, account: &AccountId) {
     if let Some(ref account_id) = account.0 {
@@ -209,6 +196,14 @@ mod tests {
     fn test_require_admin_account_rejects_missing_header() {
         let account = AccountId(None);
         let (code, json) = require_admin_account(&account, &[String::from("admin")]).unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "X-Account-Id required");
+    }
+
+    #[test]
+    fn test_require_admin_rejects_missing_header() {
+        let account = AccountId(None);
+        let (code, json) = require_admin(&account, &[String::from("admin")]).unwrap_err();
         assert_eq!(code, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"], "X-Account-Id required");
     }

@@ -156,6 +156,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 use crate::middleware::{AccountId, RequestLanguage};
+use crate::routes::shared::require_concrete_account;
 use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -179,7 +180,7 @@ use std::sync::{Arc, LazyLock};
 /// Assign tenant ownership to a freshly spawned agent.
 ///
 /// Calls [`AgentRegistry::set_account_id`] directly — no clone/mutate
-/// round-trip. When `AccountId(None)` (system / admin mode) this is a no-op.
+/// round-trip. Tenant-facing spawn flows must provide a concrete account.
 ///
 /// Returns `Err` if ownership could not be attached. Callers **must** treat
 /// this as a hard failure: an agent that exists without `account_id` in a
@@ -197,6 +198,21 @@ fn finalize_spawned_agent_in_registry(
             .map_err(|e| format!("Failed to attach account_id to agent {id}: {e}"))?;
     }
     Ok(())
+}
+
+fn tenant_owner<'a>(
+    account: &'a AccountId,
+) -> Result<&'a str, (StatusCode, Json<serde_json::Value>)> {
+    require_concrete_account(account)
+}
+
+fn tenant_agent_entry(
+    state: &AppState,
+    account: &AccountId,
+    agent_id: AgentId,
+) -> Result<Option<librefang_types::agent::AgentEntry>, (StatusCode, Json<serde_json::Value>)> {
+    let owner = tenant_owner(account)?;
+    Ok(state.kernel.agent_registry().get_scoped(agent_id, owner))
 }
 
 // ---------------------------------------------------------------------------
@@ -552,9 +568,22 @@ pub async fn bulk_delete_agents(
             }
         };
         // Check account ownership before deleting
-        let entry = match account.0 {
-            Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-            None => state.kernel.agent_registry().get(agent_id),
+        let entry = match tenant_agent_entry(&state, &account, agent_id) {
+            Ok(entry) => entry,
+            Err(resp) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some(
+                        resp.1["error"]
+                            .as_str()
+                            .unwrap_or("X-Account-Id required")
+                            .to_string(),
+                    ),
+                });
+                continue;
+            }
         };
         if entry.is_none() {
             results.push(BulkActionResult {
@@ -640,9 +669,22 @@ pub async fn bulk_start_agents(
         };
 
         // Check account ownership before starting
-        let entry = match account.0 {
-            Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-            None => state.kernel.agent_registry().get(agent_id),
+        let entry = match tenant_agent_entry(&state, &account, agent_id) {
+            Ok(entry) => entry,
+            Err(resp) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some(
+                        resp.1["error"]
+                            .as_str()
+                            .unwrap_or("X-Account-Id required")
+                            .to_string(),
+                    ),
+                });
+                continue;
+            }
         };
         if entry.is_none() {
             results.push(BulkActionResult {
@@ -730,9 +772,22 @@ pub async fn bulk_stop_agents(
             }
         };
         // Check account ownership before stopping
-        let entry = match account.0 {
-            Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-            None => state.kernel.agent_registry().get(agent_id),
+        let entry = match tenant_agent_entry(&state, &account, agent_id) {
+            Ok(entry) => entry,
+            Err(resp) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some(
+                        resp.1["error"]
+                            .as_str()
+                            .unwrap_or("X-Account-Id required")
+                            .to_string(),
+                    ),
+                });
+                continue;
+            }
         };
         if entry.is_none() {
             results.push(BulkActionResult {
@@ -892,12 +947,12 @@ pub async fn list_agents(
         )
     };
 
-    // Multi-tenant isolation: use registry.list_by_account() for scoped requests,
-    // or registry.list() for admin/legacy mode (AccountId(None)).
-    let mut agents: Vec<librefang_types::agent::AgentEntry> = match account.0 {
-        Some(ref owner_id) => state.kernel.agent_registry().list_by_account(owner_id),
-        None => state.kernel.agent_registry().list(),
+    let owner_id = match tenant_owner(&account) {
+        Ok(owner_id) => owner_id,
+        Err((code, json)) => return (code, json),
     };
+    let mut agents: Vec<librefang_types::agent::AgentEntry> =
+        state.kernel.agent_registry().list_by_account(owner_id);
 
     // -- Filtering --
     // Exclude hand agents by default; pass ?include_hands=true to include them.
@@ -937,8 +992,7 @@ pub async fn list_agents(
             Json(serde_json::json!({
                 "error": msg
             })),
-        )
-            .into_response();
+        );
     }
     let descending = params
         .order
@@ -974,13 +1028,18 @@ pub async fn list_agents(
         .map(|e| enrich_agent_json(e, &dm, &catalog))
         .collect();
 
-    Json(PaginatedResponse {
-        items,
-        total,
-        offset,
-        limit,
-    })
-    .into_response()
+    (
+        StatusCode::OK,
+        Json(
+            serde_json::to_value(PaginatedResponse {
+                items,
+                total,
+                offset,
+                limit,
+            })
+            .unwrap_or_default(),
+        ),
+    )
 }
 
 /// Resolve uploaded file attachments into ContentBlock::Image blocks.
@@ -1225,9 +1284,9 @@ pub async fn send_message(
     }
 
     // Check agent exists and account ownership before processing
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(entry) => entry,
@@ -1426,9 +1485,9 @@ pub async fn get_agent_session(
         }
     };
 
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let entry = match entry {
         Some(e) => e,
@@ -1647,9 +1706,9 @@ pub async fn kill_agent(
     };
 
     // Check account ownership before killing
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -1693,9 +1752,9 @@ pub async fn suspend_agent(
         }
     };
     // Check account ownership before suspending
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -1735,9 +1794,9 @@ pub async fn resume_agent(
         }
     };
     // Check account ownership before resuming
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -1790,9 +1849,9 @@ pub async fn set_agent_mode(
     };
 
     // Check account ownership before changing mode
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -1852,9 +1911,9 @@ pub async fn get_agent(
         }
     };
 
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let entry = match entry {
         Some(e) => e,
@@ -1959,9 +2018,9 @@ pub async fn send_message_stream(
         }
     };
 
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json).into_response(),
     };
     let _entry = match entry {
         Some(entry) => entry,
@@ -2069,9 +2128,9 @@ pub async fn list_agent_sessions(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -2125,9 +2184,9 @@ pub async fn create_agent_session(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -2180,9 +2239,9 @@ pub async fn switch_agent_session(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -2248,9 +2307,9 @@ pub async fn export_session(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -2313,9 +2372,9 @@ pub async fn import_session(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -2382,9 +2441,9 @@ pub async fn reset_session(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -2436,9 +2495,9 @@ pub async fn reboot_session(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -2492,9 +2551,9 @@ pub async fn clear_agent_history(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -2553,9 +2612,9 @@ pub async fn compact_session(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -2610,9 +2669,9 @@ pub async fn stop_agent(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -2679,9 +2738,9 @@ pub async fn set_model(
     };
     let explicit_provider = body["provider"].as_str();
     // Check agent exists and account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(entry) => entry,
@@ -2758,9 +2817,9 @@ pub async fn get_agent_traces(
     };
 
     // Check agent exists and account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(entry) => entry,
@@ -2811,9 +2870,9 @@ pub async fn get_agent_tools(
             )
         }
     };
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let entry = match entry {
         Some(e) => e,
@@ -2887,9 +2946,9 @@ pub async fn set_agent_tools(
     }
 
     // Check agent exists and account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(entry) => entry,
@@ -2943,9 +3002,9 @@ pub async fn get_agent_skills(
             )
         }
     };
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let entry = match entry {
         Some(e) => e,
@@ -3002,9 +3061,9 @@ pub async fn set_agent_skills(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -3063,9 +3122,9 @@ pub async fn get_agent_mcp_servers(
             )
         }
     };
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let entry = match entry {
         Some(e) => e,
@@ -3141,9 +3200,9 @@ pub async fn set_agent_mcp_servers(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -3212,9 +3271,9 @@ pub async fn update_agent(
         }
     };
 
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(entry) => entry,
@@ -3278,9 +3337,9 @@ pub async fn patch_agent(
         }
     };
 
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(entry) => entry,
@@ -3417,9 +3476,9 @@ pub async fn update_agent_identity(
     };
 
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -3546,9 +3605,9 @@ pub async fn patch_agent_config(
     };
 
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -3915,9 +3974,9 @@ pub async fn clone_agent(
         );
     }
 
-    let source = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let source = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let source = match source {
         Some(e) => e,
@@ -4027,9 +4086,9 @@ pub async fn reload_agent_manifest(
         }
     };
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -4097,9 +4156,9 @@ pub async fn list_agent_files(
         }
     };
 
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let entry = match entry {
         Some(e) => e,
@@ -4178,9 +4237,9 @@ pub async fn get_agent_file(
         );
     }
 
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let entry = match entry {
         Some(e) => e,
@@ -4305,9 +4364,9 @@ pub async fn set_agent_file(
         );
     }
 
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let entry = match entry {
         Some(e) => e,
@@ -4433,9 +4492,9 @@ pub async fn delete_agent_file(
         );
     }
 
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let workspace = match entry {
         Some(e) => match e.manifest.workspace {
@@ -4598,9 +4657,9 @@ pub async fn upload_file(
     };
 
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(_agent_id, owner),
-        None => state.kernel.agent_registry().get(_agent_id),
+    let entry = match tenant_agent_entry(&state, &account, _agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -4846,9 +4905,9 @@ pub async fn get_agent_deliveries(
     };
 
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -4914,9 +4973,9 @@ pub async fn inject_message(
     };
 
     // Check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json).into_response(),
     };
     let _entry = match entry {
         Some(e) => e,
@@ -4984,9 +5043,9 @@ pub async fn push_message(
     };
 
     // Validate agent exists and check account ownership
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(entry) => entry,
@@ -5299,9 +5358,9 @@ pub async fn agent_metrics(
         }
     };
 
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let entry = match entry {
         Some(e) => e,
@@ -5423,9 +5482,9 @@ pub async fn agent_logs(
     };
 
     // Verify the agent exists and check account ownership.
-    let entry = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
-        None => state.kernel.agent_registry().get(agent_id),
+    let entry = match tenant_agent_entry(&state, &account, agent_id) {
+        Ok(entry) => entry,
+        Err((code, json)) => return (code, json),
     };
     let _entry = match entry {
         Some(entry) => entry,
@@ -5537,12 +5596,18 @@ mod monitoring_tests {
         (state, tmp)
     }
 
-    fn spawn_monitoring_test_agent(state: &Arc<AppState>, name: &str) -> AgentId {
+    fn spawn_monitoring_test_agent(state: &Arc<AppState>, name: &str, account_id: &str) -> AgentId {
         let manifest = AgentManifest {
             name: name.to_string(),
             ..AgentManifest::default()
         };
-        state.kernel.spawn_agent(manifest).unwrap()
+        let agent_id = state.kernel.spawn_agent(manifest).unwrap();
+        state
+            .kernel
+            .agent_registry()
+            .set_account_id(agent_id, Some(account_id.to_string()))
+            .unwrap();
+        agent_id
     }
 
     async fn json_response(response: impl IntoResponse) -> (StatusCode, serde_json::Value) {
@@ -5558,12 +5623,12 @@ mod monitoring_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_agent_metrics_returns_json_shape_for_existing_agent() {
         let (state, _tmp) = monitoring_test_app_state();
-        let agent_id = spawn_monitoring_test_agent(&state, "metrics-shape");
+        let agent_id = spawn_monitoring_test_agent(&state, "metrics-shape", "tenant-a");
 
         let (status, body) = json_response(
             agent_metrics(
                 State(state),
-                AccountId(None),
+                AccountId(Some("tenant-a".to_string())),
                 Path(agent_id.to_string()),
                 None,
             )
@@ -5585,7 +5650,7 @@ mod monitoring_tests {
         let (status, body) = json_response(
             agent_metrics(
                 State(state),
-                AccountId(None),
+                AccountId(Some("tenant-a".to_string())),
                 Path(AgentId::new().to_string()),
                 None,
             )
@@ -5600,7 +5665,7 @@ mod monitoring_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_agent_logs_filters_level_by_exact_match() {
         let (state, _tmp) = monitoring_test_app_state();
-        let agent_id = spawn_monitoring_test_agent(&state, "logs-filter");
+        let agent_id = spawn_monitoring_test_agent(&state, "logs-filter", "tenant-a");
         let agent_id_str = agent_id.to_string();
 
         state.kernel.audit().record(
@@ -5622,7 +5687,7 @@ mod monitoring_tests {
         let (status, body) = json_response(
             agent_logs(
                 State(state),
-                AccountId(None),
+                AccountId(Some("tenant-a".to_string())),
                 Path(agent_id_str),
                 None,
                 Query(params),
@@ -5637,6 +5702,26 @@ mod monitoring_tests {
         let logs = body["logs"].as_array().unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0]["outcome"], "custom_error");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_agent_metrics_rejects_missing_account_header() {
+        let (state, _tmp) = monitoring_test_app_state();
+        let agent_id = spawn_monitoring_test_agent(&state, "metrics-missing-account", "tenant-a");
+
+        let (status, body) = json_response(
+            agent_metrics(
+                State(state),
+                AccountId(None),
+                Path(agent_id.to_string()),
+                None,
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "X-Account-Id required");
     }
 
     #[test]

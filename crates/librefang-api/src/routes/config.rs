@@ -21,7 +21,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/shutdown", axum::routing::post(shutdown))
         .route("/init", axum::routing::post(quick_init))
 }
-use super::shared::require_admin;
+use super::shared::{require_admin, require_concrete_account};
 use crate::middleware::AccountId;
 use crate::types::*;
 use axum::extract::State;
@@ -39,9 +39,20 @@ use std::sync::Arc;
     )
 )]
 pub async fn status(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let entries = match account.0 {
-        Some(ref owner_id) => state.kernel.agent_registry().list_by_account(owner_id),
-        None => state.kernel.agent_registry().list(),
+    let account_id = match require_concrete_account(&account) {
+        Ok(account_id) => account_id,
+        Err((code, json)) => return (code, json).into_response(),
+    };
+    let is_admin = state
+        .kernel
+        .config_ref()
+        .admin_accounts
+        .iter()
+        .any(|id| id == account_id);
+    let entries = if is_admin {
+        state.kernel.agent_registry().list()
+    } else {
+        state.kernel.agent_registry().list_by_account(account_id)
     };
 
     // Compute counts from the (already tenant-filtered) entries before consuming them.
@@ -67,13 +78,12 @@ pub async fn status(account: AccountId, State(state): State<Arc<AppState>>) -> i
         })
         .collect();
 
-    // H7 fix: scoped tenants get a restricted response — no global telemetry.
-    // Only admin/single-tenant (AccountId(None)) sees system-wide metrics.
-    if account.0.is_some() {
-        return Json(build_tenant_status(agent_count, active_agent_count, agents));
+    // Non-admin tenants get a restricted response — no global telemetry.
+    if !is_admin {
+        return Json(build_tenant_status(agent_count, active_agent_count, agents)).into_response();
     }
 
-    // --- Full global view (admin / single-tenant) ---
+    // --- Full global view (concrete admin account only) ---
 
     let uptime = state.started_at.elapsed().as_secs();
     let session_count = state
@@ -147,6 +157,7 @@ pub async fn status(account: AccountId, State(state): State<Arc<AppState>>) -> i
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
         "agents": agents,
     }))
+    .into_response()
 }
 
 /// POST /api/init — Quick initialization (detect provider, write config, reload).
@@ -337,6 +348,16 @@ pub async fn health_detail(
     account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    let account_id = match require_concrete_account(&account) {
+        Ok(account_id) => account_id,
+        Err((code, json)) => return (code, json).into_response(),
+    };
+    let is_admin = state
+        .kernel
+        .config_ref()
+        .admin_accounts
+        .iter()
+        .any(|id| id == account_id);
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
     ]));
@@ -348,22 +369,23 @@ pub async fn health_detail(
 
     let status = if db_ok { "ok" } else { "degraded" };
 
-    let agent_count = match account.0 {
-        Some(ref owner_id) => state
+    let agent_count = if is_admin {
+        state.kernel.agent_registry().count()
+    } else {
+        state
             .kernel
             .agent_registry()
-            .list_by_account(owner_id)
-            .len(),
-        None => state.kernel.agent_registry().count(),
+            .list_by_account(account_id)
+            .len()
     };
 
-    // H7 fix: scoped tenants get a restricted health view — no supervisor
+    // H7 fix: non-admin tenants get a restricted health view — no supervisor
     // internals, memory config, config warnings, or event-bus stats.
-    if account.0.is_some() {
-        return Json(build_tenant_health_detail(status, agent_count, db_ok));
+    if !is_admin {
+        return Json(build_tenant_health_detail(status, agent_count, db_ok)).into_response();
     }
 
-    // --- Full global view (admin / single-tenant) ---
+    // --- Full global view (concrete admin account only) ---
 
     let health = state.kernel.supervisor_ref().health();
     let hcfg = state.kernel.config_ref();
@@ -389,6 +411,7 @@ pub async fn health_detail(
             "dropped_events": state.kernel.event_bus_ref().dropped_count(),
         },
     }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -2032,8 +2055,9 @@ mod telemetry_redaction_tests {
     }
 
     // -----------------------------------------------------------------------
-    // Admin (AccountId(None)) path coverage — validate the full JSON has
-    // the global fields that tenants should NOT see.
+    // Concrete admin accounts are the only supported way to reach the full
+    // daemon view. Validate the JSON still carries the global-only fields that
+    // tenant responses must not expose.
     // -----------------------------------------------------------------------
 
     #[test]
