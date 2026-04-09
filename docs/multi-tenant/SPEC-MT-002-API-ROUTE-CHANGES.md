@@ -22,7 +22,6 @@ Define the approved route-policy model for the Qwntik multi-tenant fork.
 - channels
 - workflows
 - goals
-- inbox
 - media tasks and artifacts
 
 Rules:
@@ -33,6 +32,7 @@ Rules:
 
 ### Admin-Only Infrastructure
 
+- inbox operator/admin intake infrastructure and diagnostics
 - most of system
 - most of config
 - most of network
@@ -94,3 +94,5 @@ Rules:
 - prefer scoped lookup helpers over post-fetch permissive fallback
 - do not encode route policy through legacy fallback macros
 - if a module is hard to classify, split the module or split the endpoints
+- treat `/api/inbox/status` as admin-only diagnostics, not as a tenant-owned
+  inbox surface

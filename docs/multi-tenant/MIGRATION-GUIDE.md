@@ -1,4 +1,4 @@
-# MIGRATION-GUIDE: Converging to the Qwntik Multi-Tenant Runtime
+# MIGRATION-GUIDE: Normalized Migration Checklist
 
 **Status:** Current
 **Date:** 2026-04-08
@@ -8,10 +8,11 @@
 
 ## Purpose
 
-This is an engineering convergence guide, not an operator upgrade guide.
+This is an engineering normalization guide, not an operator upgrade guide.
 
-Its goal is to remove stale fallback assumptions and bring the fork fully in line
-with the current multi-tenant architecture.
+The main convergence is already in place on this branch.
+This document remains useful as a checklist for auditing residual compatibility
+debt and stale assumptions.
 
 ---
 
@@ -25,14 +26,13 @@ with the current multi-tenant architecture.
 
 ---
 
-## Practical Sequence
+## Practical Audit Sequence
 
-1. Approve `TENANT-INVARIANTS.md`
-2. Build the per-route policy matrix
-3. Backfill or rewrite integration tests
-4. Reconcile handlers
-5. Reconcile stores
-6. Remove remaining fallback debt
+1. Start from `TENANT-INVARIANTS.md` and `ROUTE-POLICY-MATRIX.md`
+2. Confirm current code/tests still match those docs
+3. Remove stale fallback-oriented tests or handler branches
+4. Isolate any remaining admin/global compatibility logic explicitly
+5. Keep deferred product questions out of the migration-debt bucket
 
 ---
 

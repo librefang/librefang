@@ -18,7 +18,6 @@ The API surface is classified into four policy classes.
 - channels
 - workflows
 - goals
-- inbox
 - media tasks and artifacts
 
 Rules:
@@ -29,6 +28,7 @@ Rules:
 
 ### 2. Admin-Only Infrastructure
 
+- inbox operator/admin intake infrastructure and diagnostics
 - most of system
 - most of config
 - most of network
@@ -67,4 +67,7 @@ Rules:
 
 - blanket fallback patterns are not acceptable end-state design
 - “extractor present but unused” is not isolation
-- temporary admin clamps are acceptable as a short-term safety move, but must not be mistaken for final product behavior where tenant ownership is intended
+- temporary admin clamps are acceptable as a short-term safety move, but must
+  not be mistaken for final product behavior where tenant ownership is intended
+- inbox is not one of those temporary clamps in the current architecture; it is
+  currently classified as daemon-level operator/admin infrastructure

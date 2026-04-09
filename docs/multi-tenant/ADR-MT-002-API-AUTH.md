@@ -52,8 +52,8 @@ The policy is enforced by middleware and route classification:
 
 ---
 
-## Outstanding Work
+## Remaining Follow-Up
 
-- finish removing legacy HMAC acceptance
-- add nonce-cache replay protection if still missing
-- ensure docs and tests do not encode missing-account fallback behavior
+- ensure any residual legacy HMAC acceptance paths are removed or isolated
+- add nonce-cache replay protection if still missing in the implementation
+- keep docs and tests from encoding missing-account fallback behavior

@@ -10,7 +10,7 @@
 
 Turn the multi-tenant policy into executable guardrails.
 
-The tests should encode the current target architecture:
+The tests should encode the current branch architecture:
 
 - always multi-tenant
 - no implicit `system` fallback
@@ -18,11 +18,17 @@ The tests should encode the current target architecture:
 - `404` for cross-tenant tenant-owned access
 - `403` for admin-only endpoint misuse
 
+Many of these guardrails already exist on this branch.
+This document distinguishes current enforcement expectations from useful future
+coverage expansion.
+
 ---
 
 ## Priority Test Classes
 
 ### 1. Request Identity
+
+Already expected as active guardrails:
 
 - non-public routes reject missing `X-Account-Id`
 - public/auth bootstrap routes remain accessible without account header
@@ -46,8 +52,15 @@ This applies to:
 - channels
 - workflows
 - goals
-- inbox
 - media artifacts
+
+Already expected as active guardrails for the converged slices:
+
+- channels
+- workflows
+- goals
+- provider tenant-owned runtime/config paths
+- hand-instance tenancy within skills
 
 ### 3. Admin-Only Endpoints
 
@@ -57,12 +70,18 @@ For each admin-only route family:
 - non-admin tenant gets `403`
 - missing account header is rejected before handler logic
 
+This includes inbox diagnostics/operator intake and other explicitly global
+operational surfaces.
+
 ### 4. Split-Surface Modules
 
 For providers, skills, hands, and budget:
 
 - catalog/discovery behavior is tested separately from admin lifecycle behavior
 - tenant-owned overlays or instances are tested separately from global catalog paths
+
+Budget, network, and system should also keep route-class guardrails aligned with
+their now-converged public/admin/tenant-derived policy boundaries.
 
 ### 5. Opaque ID Lookups
 
@@ -90,6 +109,8 @@ For messaging and integration entry points:
 - ambiguous or missing bindings must fail closed
 - session partitioning tests must be kept separate from tenant ownership tests
 
+This remains one of the main areas where additional coverage is still useful.
+
 ---
 
 ## Anti-Goals
@@ -101,6 +122,15 @@ Do not keep tests that encode obsolete behavior such as:
 - `"system"` fallback is part of the normal runtime model
 
 If such tests still exist, they should be removed or rewritten.
+
+## Future Coverage Expansion
+
+Still useful even after the core policy gates are in place:
+
+- broader channel QR/session ownership coverage once that product model is fixed
+- shared integration user/chat/thread binding cases beyond integration-instance
+  ownership
+- additional regression coverage for residual compatibility-debt removal
 
 ---
 

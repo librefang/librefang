@@ -1,30 +1,31 @@
-# PLAN-MT-002: Remaining Multi-Tenant Convergence
+# PLAN-MT-002: Phase 2-4 Historical Convergence Summary
 
-**Status:** Current
+**Status:** Historical plan, normalized 2026-04-08
 **Date:** 2026-04-08
 **Related:** `TENANT-INVARIANTS.md`, `ADR-MT-003-RESOURCE-ISOLATION.md`, `ADR-MT-004-DATA-MEMORY-ISOLATION.md`
 
 ---
 
-## Objective
+## Purpose
 
-Finish converging the fork onto the invariant multi-tenant model.
+Record what Phase 2-4 should now be understood as, without leaving old plan text
+that reads like current unresolved architecture.
 
 ---
 
-## Workstreams
+## What Phase 2-4 Delivered
 
 ### 1. Route Policy Reconciliation
 
-- convert tenant-owned modules from temporary admin clamps to real tenant scoping where required
-- split mixed modules by policy class
-- keep admin-only surfaces explicitly admin-only
+- converged the main tenant-owned slices
+- classified mixed modules by endpoint class instead of one blanket policy
+- kept intentionally global/admin infrastructure explicitly global/admin
 
 ### 2. Store/Data Convergence
 
-- add concrete ownership to remaining stores
-- eliminate runtime dependency on fallback ownership semantics
-- make query-layer filtering explicit
+- persisted concrete ownership across the core tenant-owned paths
+- reduced fallback ownership semantics to residual compatibility debt
+- moved the branch toward explicit query/store scoping
 
 ### 3. Event Bus / Background Flows
 
@@ -32,15 +33,22 @@ Finish converging the fork onto the invariant multi-tenant model.
 
 ### 4. Test Backfill
 
-- lock route policy into integration tests
-- add missing cross-tenant denial coverage
-- remove tests that encode obsolete fallback behavior
+- locked major route-policy expectations into tests
+- expanded cross-tenant denial coverage for converged slices
+- identified remaining fallback-oriented tests as debt, not target behavior
+
+## What Is Still Actually Open
+
+- channel QR/session ownership modeling
+- shared integration user/chat/thread binding beyond integration-instance scope
+- broader tenant-owned skill content beyond hands, only if product requires it
+- residual `AccountId(None)` compatibility debt
 
 ---
 
-## Completion Criteria
+## Completion State
 
-- docs describe one runtime model
-- routes match the approved policy matrix
-- stores persist and filter by concrete account identity
-- tests enforce the model end to end
+- the historical phase plan should now be read alongside
+  `CURRENT-CODE-AUDIT.md` and `PENDING-WORK.md`, which describe the live branch
+  state
+- this file is historical context, not the current backlog

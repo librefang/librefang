@@ -153,8 +153,14 @@ Temporary clamps must be documented as drift, not mistaken for final product pol
 
 Current examples:
 
-- inbox diagnostics while no tenant-owned inbox model exists
-- remaining split-surface modules that still need endpoint-class cleanup
+- narrowly scoped containment while a route family is being decomposed to its
+  documented endpoint classes
+- short-lived protection for residual compatibility paths that are not intended
+  as branch end-state behavior
+
+Inbox is not one of those temporary clamps in the current architecture.
+It is currently classified as daemon-level operator/admin intake
+infrastructure, and `/api/inbox/status` is admin-only diagnostics.
 
 ---
 
@@ -227,12 +233,14 @@ choose the cleaner security model for this fork.
 
 ### Recommended Implementation Order
 
-1. `channels`
-2. `workflows`
-3. `goals`
-4. `inbox` policy clarification
-5. split-surface module decomposition
-6. removal of remaining fallback semantics in tests and handlers
+1. channel QR/session ownership modeling
+2. shared integration user/chat/thread binding beyond integration-instance ownership
+3. broader tenant-owned skill content beyond hands, only if product requires it
+4. removal of residual `AccountId(None)` compatibility debt outside explicit admin/global paths
+
+At the current branch state, this primarily means cleanup of extractor/storage
+compatibility semantics and stale comments/tests, not continued admin-route
+fallback behavior.
 
 ---
 

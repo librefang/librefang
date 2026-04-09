@@ -20,9 +20,9 @@ Not part of the target architecture:
 
 ---
 
-## Goal
+## Current Runtime Model
 
-Converge the fork onto one clean runtime model:
+The branch target is now the branch reality:
 
 - every non-public request carries a concrete account
 - tenant-owned resources persist concrete ownership
@@ -38,7 +38,7 @@ Converge the fork onto one clean runtime model:
 - `ENTERPRISE-DECISIONS.md`: enterprise SaaS rationale and non-negotiable tradeoffs
 - `COMP-HERMES-AGENT.md`: external reference comparison for shared-agent versus true multi-tenant runtime design
 - `DESIGN-CHANNEL-TENANT-BINDING.md`: ingress model for mapping messaging identities to concrete tenant accounts
-- `CURRENT-CODE-AUDIT.md`: concrete implementation drift against the target model
+- `CURRENT-CODE-AUDIT.md`: current implementation audit and residual gaps
 - `ADR-MT-001`: account model
 - `ADR-MT-002`: auth and account resolution
 - `ADR-MT-003`: route/resource isolation
@@ -62,14 +62,12 @@ Converge the fork onto one clean runtime model:
 - agents
 - memory
 - prompts
-- channels
-- workflows
 - goals
-- inbox
 - media tasks and artifacts
 
 ### Admin-Only Infrastructure
 
+- inbox operator/admin intake infrastructure and diagnostics
 - most of system
 - most of config
 - most of network
@@ -77,6 +75,8 @@ Converge the fork onto one clean runtime model:
 
 ### Split-Surface
 
+- channels
+- workflows
 - providers
 - skills
 - hands
@@ -90,13 +90,20 @@ Converge the fork onto one clean runtime model:
 
 ---
 
-## Implementation Sequence
+## What Is Converged
 
-1. Normalize docs to the invariant model
-2. Produce a per-route policy matrix
-3. Backfill integration tests
-4. Reconcile handlers and stores to the matrix
-5. Remove or isolate remaining fallback semantics
+- core tenant-owned slices are converged for channels, workflows, goals,
+  providers, and hand-instance tenancy within skills
+- route-policy cleanup is converged for budget, network, and system
+- inbox is intentionally admin/operator infrastructure, not a tenant-owned
+  product surface
+
+## What Remains Open
+
+- channel QR/session ownership modeling
+- shared integration user/chat/thread binding beyond integration-instance scope
+- broader tenant-owned skill content beyond hands, only if product requires it
+- residual `AccountId(None)` and fallback compatibility debt
 
 ---
 
