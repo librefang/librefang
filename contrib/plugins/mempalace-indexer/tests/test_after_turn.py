@@ -204,3 +204,50 @@ def test_custom_min_chars_env():
 def test_custom_window_size_env():
     mod = _load_module({"MEMPALACE_WINDOW_SIZE": "10"})
     assert mod.WINDOW_SIZE == 10
+
+
+# ---------------------------------------------------------------------------
+# Language detection
+# ---------------------------------------------------------------------------
+
+def test_detect_language_returns_string():
+    lang = _mod._detect_language("I have a meeting with the client tomorrow afternoon.")
+    assert isinstance(lang, str)
+    assert len(lang) > 0
+
+
+def test_is_english_known_english():
+    assert _mod._is_english("en") is True
+
+
+def test_is_english_unknown_treated_as_english():
+    # unknown = langdetect unavailable or failed → don't block on keyword check
+    assert _mod._is_english("unknown") is True
+
+
+def test_is_english_other_language():
+    assert _mod._is_english("zh") is False
+    assert _mod._is_english("ja") is False
+    assert _mod._is_english("fr") is False
+
+
+def test_lang_detect_disabled_returns_unknown():
+    mod = _load_module({"MEMPALACE_LANG_DETECT": "0"})
+    lang = mod._detect_language("Ich habe morgen einen Termin beim Zahnarzt.")
+    assert lang == "unknown"
+
+
+def test_non_english_skips_relevance_check():
+    """A non-English exchange long enough to pass length check should not be
+    blocked by the English-only RELEVANCE_RE."""
+    # This text is in Chinese and contains no English keywords from RELEVANCE_RE,
+    # so without language detection it would be skipped as "not relevant".
+    messages = [
+        {"role": "user",
+         "content": "我明天下午三点有个牙医预约，在城市医院，请帮我记住这件事。"},
+        {"role": "assistant",
+         "content": "好的，我已经记住了您明天下午三点在城市医院的牙医预约。"},
+    ]
+    out = run_hook({"type": "after_turn", "agent_id": "a1", "messages": messages})
+    # Should NOT be skipped for "not relevant" — may fail at mempalace import (error) or dedup
+    assert out.get("reason") != "not relevant"

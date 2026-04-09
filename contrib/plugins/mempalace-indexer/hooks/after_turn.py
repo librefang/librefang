@@ -18,6 +18,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from langdetect import detect as _langdetect, LangDetectException
+    _LANGDETECT_AVAILABLE = True
+except ImportError:
+    _LANGDETECT_AVAILABLE = False
+
 PALACE_PATH = os.environ.get(
     "MEMPALACE_PALACE_PATH",
     os.path.expanduser("~/.mempalace/palace"),
@@ -28,6 +34,9 @@ MIN_CONTENT_LENGTH = int(os.environ.get("MEMPALACE_MIN_CHARS", "80"))
 WINDOW_SIZE = int(os.environ.get("MEMPALACE_WINDOW_SIZE", "6"))
 # Max content hashes to keep in the dedup store (rolling, oldest dropped first).
 DEDUP_MAX = int(os.environ.get("MEMPALACE_DEDUP_MAX", "500"))
+# When langdetect is available, RELEVANCE_RE is only applied to English text.
+# Non-English text passes on length + dedup alone. Set to "0" to disable detection.
+LANG_DETECT_ENABLED = os.environ.get("MEMPALACE_LANG_DETECT", "1") != "0"
 
 # Room classification: all matching rules win (multi-room).
 # Falls back to ("default", "sessions") when nothing matches.
@@ -104,6 +113,20 @@ NOISE_RE = re.compile(
 def emit(obj: dict) -> None:
     json.dump(obj, sys.stdout)
     sys.stdout.write("\n")
+
+
+def _detect_language(text: str) -> str:
+    """Return ISO 639-1 language code, or 'unknown' on failure."""
+    if not _LANGDETECT_AVAILABLE or not LANG_DETECT_ENABLED:
+        return "unknown"
+    try:
+        return _langdetect(text[:400])
+    except Exception:
+        return "unknown"
+
+
+def _is_english(lang: str) -> bool:
+    return lang in ("en", "unknown")
 
 
 def _classify_rooms(text: str) -> list[tuple[str, str]]:
@@ -216,7 +239,9 @@ def main() -> None:
         emit({"status": "skip", "reason": "too short"})
         return
 
-    if not RELEVANCE_RE.search(text):
+    lang = _detect_language(text)
+    # RELEVANCE_RE is English-only; skip it for non-English to avoid false negatives.
+    if _is_english(lang) and not RELEVANCE_RE.search(text):
         emit({"status": "skip", "reason": "not relevant"})
         return
 
@@ -245,6 +270,7 @@ def main() -> None:
         emit({
             "status": "indexed",
             "chars": len(text),
+            "lang": lang,
             "rooms": [{"wing": w, "room": r} for w, r in rooms],
         })
     except Exception as e:
