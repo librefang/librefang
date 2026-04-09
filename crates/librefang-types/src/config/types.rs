@@ -2594,18 +2594,13 @@ pub enum HookFailurePolicy {
 /// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.
 ///
 /// Type of a plugin config field.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginConfigFieldType {
+    #[default]
     String,
     Number,
     Boolean,
-}
-
-impl Default for PluginConfigFieldType {
-    fn default() -> Self {
-        Self::String
-    }
 }
 
 /// A single user-configurable field declared in `[config]` of plugin.toml.
