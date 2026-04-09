@@ -2710,6 +2710,28 @@ pub struct PluginManifest {
     /// the path in `LIBREFANG_PLUGIN_CONFIG` before each hook subprocess runs.
     #[serde(default)]
     pub config: std::collections::HashMap<String, PluginConfigField>,
+    /// System binaries required by this plugin.
+    ///
+    /// The runtime checks each binary against `PATH` at install and lint time
+    /// and warns when one is missing. Hooks still execute — this is advisory only.
+    ///
+    /// ```toml
+    /// [[requires]]
+    /// binary = "ffmpeg"
+    /// install_hint = "brew install ffmpeg"
+    /// ```
+    #[serde(default)]
+    pub requires: Vec<PluginSystemRequirement>,
+}
+
+/// A single system-binary requirement declared in `plugin.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginSystemRequirement {
+    /// Name of the binary that must exist on `PATH`.
+    pub binary: String,
+    /// Human-readable install hint shown when the binary is missing.
+    #[serde(default)]
+    pub install_hint: Option<String>,
 }
 
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"
