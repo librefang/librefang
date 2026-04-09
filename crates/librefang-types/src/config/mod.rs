@@ -909,4 +909,97 @@ mod tests {
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
         assert!(config.thinking.is_none());
     }
+
+    #[test]
+    fn test_plugin_manifest_config_section_deserialization() {
+        let toml_str = r#"
+            name = "whisper-transcribe"
+            version = "0.1.0"
+
+            [config]
+            model = { type = "string", default = "small", description = "Whisper model size" }
+            language = { type = "string", default = "ru", description = "Transcription language (ISO 639-1)" }
+            max_file_size_mb = { type = "number", default = 10, description = "Max audio file size in MB" }
+        "#;
+
+        let manifest: PluginManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.name, "whisper-transcribe");
+        assert_eq!(manifest.config.len(), 3);
+
+        let model_field = manifest.config.get("model").unwrap();
+        assert_eq!(model_field.field_type, PluginConfigFieldType::String);
+        assert_eq!(
+            model_field.default,
+            Some(serde_json::Value::String("small".to_string()))
+        );
+        assert_eq!(
+            model_field.description.as_deref(),
+            Some("Whisper model size")
+        );
+
+        let size_field = manifest.config.get("max_file_size_mb").unwrap();
+        assert_eq!(size_field.field_type, PluginConfigFieldType::Number);
+        assert_eq!(size_field.default, Some(serde_json::json!(10)));
+    }
+
+    #[test]
+    fn test_plugin_manifest_config_section_absent_is_empty() {
+        let toml_str = r#"
+            name = "my-plugin"
+            version = "1.0.0"
+        "#;
+
+        let manifest: PluginManifest = toml::from_str(toml_str).unwrap();
+        assert!(manifest.config.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_config_field_defaults() {
+        let field = PluginConfigField::default();
+        assert_eq!(field.field_type, PluginConfigFieldType::String);
+        assert!(field.default.is_none());
+        assert!(field.description.is_none());
+    }
+
+    #[test]
+    fn test_plugin_config_field_type_serde() {
+        let string_type = PluginConfigFieldType::String;
+        let json = serde_json::to_string(&string_type).unwrap();
+        assert_eq!(json, "\"string\"");
+
+        let number_type = PluginConfigFieldType::Number;
+        let json = serde_json::to_string(&number_type).unwrap();
+        assert_eq!(json, "\"number\"");
+
+        let bool_type = PluginConfigFieldType::Boolean;
+        let json = serde_json::to_string(&bool_type).unwrap();
+        assert_eq!(json, "\"boolean\"");
+
+        let back: PluginConfigFieldType = serde_json::from_str("\"string\"").unwrap();
+        assert_eq!(back, PluginConfigFieldType::String);
+    }
+
+    #[test]
+    fn test_plugin_manifest_config_serde_roundtrip() {
+        let mut manifest = PluginManifest {
+            name: "test-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            ..Default::default()
+        };
+        manifest.config.insert(
+            "debug".to_string(),
+            PluginConfigField {
+                field_type: PluginConfigFieldType::Boolean,
+                default: Some(serde_json::Value::Bool(false)),
+                description: Some("Enable debug mode".to_string()),
+            },
+        );
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        let back: PluginManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "test-plugin");
+        let debug_field = back.config.get("debug").unwrap();
+        assert_eq!(debug_field.field_type, PluginConfigFieldType::Boolean);
+        assert_eq!(debug_field.default, Some(serde_json::Value::Bool(false)));
+    }
 }

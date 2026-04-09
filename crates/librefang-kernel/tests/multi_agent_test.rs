@@ -26,6 +26,7 @@ fn test_config(name: &str) -> KernelConfig {
             api_key_env: "GROQ_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
         },
         ..KernelConfig::default()
     }
@@ -354,12 +355,28 @@ fn test_hand_state_persistence() {
     let state_json = std::fs::read_to_string(&state_path).unwrap();
     let state: serde_json::Value = serde_json::from_str(&state_json).unwrap();
 
-    assert_eq!(state["version"], 3, "State should be version 3");
+    assert_eq!(state["version"], 4, "State should be version 4");
     let instances = state["instances"].as_array().unwrap();
     assert_eq!(instances.len(), 1);
 
     let inst = &instances[0];
     assert_eq!(inst["hand_id"], "test-clip");
+
+    // Validate v4 typed persistence fields
+    assert!(
+        inst["instance_id"].is_string(),
+        "v4 should have string instance_id"
+    );
+    assert!(inst["status"].is_string(), "v4 should have string status");
+    assert!(
+        inst["activated_at"].is_string(),
+        "v4 should have string activated_at"
+    );
+    assert!(
+        inst["updated_at"].is_string(),
+        "v4 should have string updated_at"
+    );
+
     // v3 uses agent_ids map
     let agent_ids_map = inst["agent_ids"].as_object().unwrap();
     assert!(agent_ids_map

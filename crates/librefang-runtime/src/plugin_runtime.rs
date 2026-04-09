@@ -46,10 +46,10 @@ fn classify_exit_status(status: &std::process::ExitStatus) -> String {
     use std::os::unix::process::ExitStatusExt;
     if let Some(signal) = status.signal() {
         return match signal {
-            9  => format!("OOM-killed or SIGKILL (signal {signal})"),
+            9 => format!("OOM-killed or SIGKILL (signal {signal})"),
             11 => format!("SIGSEGV — segfault (signal {signal})"),
             31 => format!("SIGSYS — disallowed syscall, seccomp triggered (signal {signal})"),
-            _  => format!("killed by signal {signal}"),
+            _ => format!("killed by signal {signal}"),
         };
     }
     // On Unix, exit code 128+N means "killed by signal N" when reported via wait().
@@ -58,7 +58,7 @@ fn classify_exit_status(status: &std::process::ExitStatus) -> String {
             137 => "OOM-killed or SIGKILL (exit 137)".to_string(),
             139 => "SIGSEGV — segfault (exit 139)".to_string(),
             159 => "SIGSYS — disallowed syscall, seccomp triggered (exit 159)".to_string(),
-            _   => format!("exit code {code}"),
+            _ => format!("exit code {code}"),
         };
     }
     "unknown exit status".to_string()
@@ -131,14 +131,14 @@ pub async fn lock_state_file(path: &std::path::Path) -> tokio::sync::OwnedMutexG
     let arc = {
         let mut map = STATE_FILE_LOCKS.lock().unwrap();
         map.entry(path.to_string_lossy().into_owned())
-           .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-           .clone()
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     };
     arc.lock_owned().await
 }
 
 /// Which launcher runs a hook script.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginRuntime {
     /// `python3 script.py` — the original (and default) runtime.
     Python,
@@ -166,6 +166,12 @@ pub enum PluginRuntime {
     /// Execute the hook as a WebAssembly module via wasmtime + WASI.
     /// The `.wasm` file path is used directly — no interpreter needed.
     Wasm,
+    /// A full path (or any string containing `/` or `\`) used verbatim as the
+    /// launcher binary.  The script path is passed as the sole argument.
+    ///
+    /// Example: `runtime = "/opt/homebrew/bin/python3"` in `plugin.toml`
+    /// produces the command `/opt/homebrew/bin/python3 <script>`.
+    Custom(String),
 }
 
 impl PluginRuntime {
@@ -186,35 +192,54 @@ impl PluginRuntime {
             Some("lua") => Self::Lua,
             Some("wasm") | Some("webassembly") => Self::Wasm,
             Some(other) => {
+                // If the tag looks like a file system path (contains '/' or '\'),
+                // treat it as a custom launcher binary rather than silently
+                // falling back to Python.  This is the common case for users
+                // who set `runtime = "/opt/homebrew/bin/python3"` (or any other
+                // full path) in their plugin.toml.
+                if other.contains('/') || other.contains('\\') {
+                    // Use the *original* (un-lowercased) tag so the path survives.
+                    let original = tag.map(str::trim).unwrap_or("").to_string();
+                    return Self::Custom(original);
+                }
                 warn!(
                     "Unknown plugin runtime '{other}', falling back to 'python'. \
-                     Valid values: python, native, v, node, deno, go, ruby, bash, bun, php, lua, wasm."
+                     Valid values: python, native, v, node, deno, go, ruby, bash, bun, php, lua, wasm. \
+                     To use a custom launcher binary, provide its full path (e.g. /usr/bin/python3)."
                 );
                 Self::Python
             }
         }
     }
 
-    /// Human-readable label for error messages.
-    pub fn label(&self) -> &'static str {
+    /// Human-readable label for error messages and config serialisation.
+    ///
+    /// Returns a `Cow<'static, str>` so that well-known runtimes avoid an
+    /// allocation while `Custom` runtimes can return their path as an owned
+    /// string.  Callers can use `Deref` coercion to treat the result as
+    /// `&str`, or call `.into_owned()` / `.to_string()` when a `String` is
+    /// needed.
+    pub fn label(&self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Python => "python",
-            Self::Native => "native",
-            Self::V => "v",
-            Self::Node => "node",
-            Self::Deno => "deno",
-            Self::Go => "go",
-            Self::Ruby => "ruby",
-            Self::Bash => "bash",
-            Self::Bun => "bun",
-            Self::Php => "php",
-            Self::Lua => "lua",
-            Self::Wasm => "wasm",
+            Self::Python => "python".into(),
+            Self::Native => "native".into(),
+            Self::V => "v".into(),
+            Self::Node => "node".into(),
+            Self::Deno => "deno".into(),
+            Self::Go => "go".into(),
+            Self::Ruby => "ruby".into(),
+            Self::Bash => "bash".into(),
+            Self::Bun => "bun".into(),
+            Self::Php => "php".into(),
+            Self::Lua => "lua".into(),
+            Self::Wasm => "wasm".into(),
+            Self::Custom(path) => path.clone().into(),
         }
     }
 
     /// Whether this runtime requires the script file to carry an executable
-    /// bit (only `Native` does — everything else is fed to an interpreter).
+    /// bit (`Native` always does; `Custom` does not because the script is
+    /// passed as an argument to the custom launcher binary).
     pub fn requires_executable_bit(&self) -> bool {
         matches!(self, Self::Native)
     }
@@ -223,6 +248,7 @@ impl PluginRuntime {
     ///
     /// `Wasm` hooks run inside the daemon via wasmtime, so the persistent
     /// process pool and subprocess-based sandboxing do not apply.
+    /// `Custom` runtimes always spawn a subprocess.
     pub fn is_inline(&self) -> bool {
         matches!(self, Self::Wasm)
     }
@@ -243,13 +269,16 @@ impl PluginRuntime {
             Self::Php => "php",
             Self::Lua => "lua",
             Self::Wasm => "wasm",
+            // Custom launchers don't impose a specific extension.
+            Self::Custom(_) => "",
         }
     }
 
     /// Arguments to pass when probing the launcher for its version.
     /// Most runtimes use `--version`; a few have their own conventions
     /// (Go uses `go version`, Lua uses `lua -v`).
-    /// `Wasm` has no launcher, so this is never called in practice.
+    /// `Wasm` and `Custom` have no fixed launcher, so this is never called in
+    /// practice for those variants.
     pub fn version_args(&self) -> &'static [&'static str] {
         match self {
             Self::Go => &["version"],
@@ -258,8 +287,9 @@ impl PluginRuntime {
         }
     }
 
-    /// Canonical launcher binary to probe on PATH. `Native` and `Wasm` have no
-    /// launcher (the script *is* the binary / module), so they return `None`.
+    /// Canonical launcher binary to probe on PATH. `Native`, `Wasm`, and
+    /// `Custom` return `None` — either the script is the binary, the hook
+    /// runs inline, or the caller must probe the custom path directly.
     pub fn launcher_binary(&self) -> Option<&'static str> {
         match self {
             // Python has a fallback chain (python3 → python → py). The doctor
@@ -277,6 +307,8 @@ impl PluginRuntime {
             Self::Lua => Some("lua"),
             // Wasm runs inline via wasmtime — no external launcher binary.
             Self::Wasm => None,
+            // Custom launcher: the path is user-supplied, not a fixed binary name.
+            Self::Custom(_) => None,
         }
     }
 
@@ -295,10 +327,14 @@ impl PluginRuntime {
             Self::Php => "Install PHP from https://www.php.net/downloads.php or your OS package manager",
             Self::Lua => "Install Lua from https://www.lua.org/download.html or your OS package manager",
             Self::Wasm => "Wasm hooks run inline via the built-in wasmtime engine — no external launcher needed",
+            Self::Custom(_) => "Custom runtime: verify that the binary path is correct and the binary is executable",
         }
     }
 
-    /// All runtime variants, in a stable order (useful for diagnostics).
+    /// All named runtime variants, in a stable order (useful for diagnostics).
+    ///
+    /// `Custom` is intentionally excluded because it carries a user-supplied
+    /// path and has no fixed canonical form.
     pub fn all() -> &'static [Self] {
         &[
             Self::Python,
@@ -360,7 +396,7 @@ pub fn check_runtime_status(runtime: PluginRuntime) -> RuntimeStatus {
     // `find_python_interpreter`'s discovery path.
     // Wasm has no launcher so it should have been caught by the early-return above,
     // but handle it defensively here too.
-    let candidates: &[&str] = match runtime {
+    let candidates: &[&str] = match &runtime {
         PluginRuntime::Python => &["python3", "python", "py"],
         _ => std::slice::from_ref(&primary),
     };
@@ -578,8 +614,7 @@ impl HookConfig {
         if attempt == 0 {
             return self.retry_delay_ms;
         }
-        let delay = self.retry_delay_ms as f64
-            * self.retry_backoff_multiplier.powi(attempt as i32);
+        let delay = self.retry_delay_ms as f64 * self.retry_backoff_multiplier.powi(attempt as i32);
         delay.min(self.max_retry_delay_ms as f64) as u64
     }
 }
@@ -652,6 +687,10 @@ fn build_command(
              dispatched via run_wasm_hook before reaching build_command"
                 .to_string(),
         )),
+        // Custom launcher: use the full path verbatim, pass the script as the
+        // sole argument.  This is the fix for hooks whose `runtime` is set to
+        // a full binary path such as `/opt/homebrew/bin/python3`.
+        PluginRuntime::Custom(launcher) => Ok((launcher.clone(), vec![script_path.to_string()])),
     }
 }
 
@@ -687,6 +726,9 @@ fn runtime_passthrough_vars(runtime: PluginRuntime) -> &'static [&'static str] {
         PluginRuntime::Native => &[],
         // Wasm runs inline — no subprocess, no passthrough vars needed.
         PluginRuntime::Wasm => &[],
+        // Custom launchers get nothing runtime-specific by default — users
+        // can add any required env vars via `config.allowed_env_vars`.
+        PluginRuntime::Custom(_) => &[],
     }
 }
 
@@ -708,11 +750,7 @@ fn try_wrap_with_unshare(launcher: &str, args: &[String]) -> (String, Vec<String
         .unwrap_or(false);
 
     if available {
-        let mut new_args = vec![
-            "--net".to_string(),
-            "--".to_string(),
-            launcher.to_string(),
-        ];
+        let mut new_args = vec!["--net".to_string(), "--".to_string(), launcher.to_string()];
         new_args.extend_from_slice(args);
         return ("unshare".to_string(), new_args);
     }
@@ -814,47 +852,131 @@ fn try_apply_landlock_readonly(_allow_write_dir: Option<&std::path::Path>) -> bo
 /// when compiled without the `seccomp-sandbox` feature.
 #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
 fn apply_seccomp_allowlist(allow_network: bool) -> bool {
-    use seccompiler::{
-        BpfProgram, SeccompAction, SeccompFilter, SeccompRule,
-        syscall_name_to_num,
-    };
+    use seccompiler::{syscall_name_to_num, BpfProgram, SeccompAction, SeccompFilter, SeccompRule};
 
     // Core syscalls every process needs.
     let allowed: Vec<&str> = vec![
         // Memory
-        "mmap", "mprotect", "munmap", "brk", "madvise", "mremap",
+        "mmap",
+        "mprotect",
+        "munmap",
+        "brk",
+        "madvise",
+        "mremap",
         // File I/O
-        "read", "write", "readv", "writev", "pread64", "pwrite64",
-        "open", "openat", "close", "fstat", "stat", "lstat",
-        "lseek", "dup", "dup2", "dup3", "pipe", "pipe2",
-        "fcntl", "ioctl", "fsync", "fdatasync",
-        "mkdir", "rmdir", "unlink", "rename", "symlink", "readlink",
-        "getcwd", "chdir",
+        "read",
+        "write",
+        "readv",
+        "writev",
+        "pread64",
+        "pwrite64",
+        "open",
+        "openat",
+        "close",
+        "fstat",
+        "stat",
+        "lstat",
+        "lseek",
+        "dup",
+        "dup2",
+        "dup3",
+        "pipe",
+        "pipe2",
+        "fcntl",
+        "ioctl",
+        "fsync",
+        "fdatasync",
+        "mkdir",
+        "rmdir",
+        "unlink",
+        "rename",
+        "symlink",
+        "readlink",
+        "getcwd",
+        "chdir",
         // Process
-        "exit", "exit_group", "getpid", "getppid", "gettid",
-        "set_tid_address", "futex", "nanosleep", "clock_gettime",
-        "clock_nanosleep", "getrlimit", "setrlimit", "prlimit64",
-        "uname", "sysinfo", "times",
+        "exit",
+        "exit_group",
+        "getpid",
+        "getppid",
+        "gettid",
+        "set_tid_address",
+        "futex",
+        "nanosleep",
+        "clock_gettime",
+        "clock_nanosleep",
+        "getrlimit",
+        "setrlimit",
+        "prlimit64",
+        "uname",
+        "sysinfo",
+        "times",
         // Signals
-        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sigaltstack",
-        "kill", "tgkill",
+        "rt_sigaction",
+        "rt_sigprocmask",
+        "rt_sigreturn",
+        "sigaltstack",
+        "kill",
+        "tgkill",
         // Threads
-        "clone", "clone3", "fork", "execve", "execveat", "wait4", "waitid",
+        "clone",
+        "clone3",
+        "fork",
+        "execve",
+        "execveat",
+        "wait4",
+        "waitid",
         // I/O multiplexing
-        "select", "pselect6", "poll", "ppoll", "epoll_create", "epoll_create1",
-        "epoll_ctl", "epoll_wait", "epoll_pwait",
+        "select",
+        "pselect6",
+        "poll",
+        "ppoll",
+        "epoll_create",
+        "epoll_create1",
+        "epoll_ctl",
+        "epoll_wait",
+        "epoll_pwait",
         // Sockets (needed even without network for Unix domain sockets / IPC)
-        "socket", "connect", "bind", "listen", "accept", "accept4",
-        "getsockopt", "setsockopt", "getsockname", "getpeername",
-        "sendto", "recvfrom", "sendmsg", "recvmsg", "shutdown",
+        "socket",
+        "connect",
+        "bind",
+        "listen",
+        "accept",
+        "accept4",
+        "getsockopt",
+        "setsockopt",
+        "getsockname",
+        "getpeername",
+        "sendto",
+        "recvfrom",
+        "sendmsg",
+        "recvmsg",
+        "shutdown",
         // Anonymous pipes / tmpfiles
-        "eventfd", "eventfd2", "timerfd_create", "timerfd_settime", "timerfd_gettime",
+        "eventfd",
+        "eventfd2",
+        "timerfd_create",
+        "timerfd_settime",
+        "timerfd_gettime",
         // Misc
-        "arch_prctl", "prctl", "getdents", "getdents64",
-        "access", "faccessat", "newfstatat",
-        "readdir", "getuid", "getgid", "geteuid", "getegid",
-        "getgroups", "setgroups",
-        "mlock", "munlock", "mlockall", "munlockall",
+        "arch_prctl",
+        "prctl",
+        "getdents",
+        "getdents64",
+        "access",
+        "faccessat",
+        "newfstatat",
+        "readdir",
+        "getuid",
+        "getgid",
+        "geteuid",
+        "getegid",
+        "getgroups",
+        "setgroups",
+        "mlock",
+        "munlock",
+        "mlockall",
+        "munlockall",
         "getrandom",
     ];
 
@@ -870,7 +992,9 @@ fn apply_seccomp_allowlist(allow_network: bool) -> bool {
         rules.into_iter().collect(),
         SeccompAction::KillProcess,
         SeccompAction::Allow,
-        std::env::consts::ARCH.try_into().unwrap_or(seccompiler::TargetArch::x86_64),
+        std::env::consts::ARCH
+            .try_into()
+            .unwrap_or(seccompiler::TargetArch::x86_64),
     ) {
         Ok(f) => f,
         Err(_) => return false,
@@ -921,7 +1045,7 @@ pub async fn run_hook_json(
 
     let input_line =
         serde_json::to_string(input).map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
-    let (base_launcher, base_args) = build_command(runtime, script_path)?;
+    let (base_launcher, base_args) = build_command(runtime.clone(), script_path)?;
 
     // On Linux, attempt true network namespace isolation via `unshare --net`.
     // On other platforms, proxy-blocking env vars (set below) are the only mechanism.
@@ -969,7 +1093,7 @@ pub async fn run_hook_json(
     cmd.env_clear();
     cmd.env("LIBREFANG_AGENT_ID", agent_id);
     cmd.env("LIBREFANG_MESSAGE", message);
-    cmd.env("LIBREFANG_RUNTIME", runtime.label());
+    cmd.env("LIBREFANG_RUNTIME", runtime.label().as_ref());
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", path);
     }
@@ -1006,7 +1130,8 @@ pub async fn run_hook_json(
     // Plugin-declared env vars from [env] in plugin.toml.
     // Values of the form `${VAR_NAME}` are expanded from the daemon's env.
     for (key, val) in &config.plugin_env {
-        let expanded = if let Some(inner) = val.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        let expanded = if let Some(inner) = val.strip_prefix("${").and_then(|s| s.strip_suffix('}'))
+        {
             std::env::var(inner).unwrap_or_default()
         } else {
             val.clone()
@@ -1034,8 +1159,7 @@ pub async fn run_hook_json(
     let _hook_tmpdir: Option<std::path::PathBuf> = if !config.allow_filesystem {
         cmd.env("LIBREFANG_READONLY_FS", "1");
         cmd.env("HOME", "/dev/null");
-        let tmp = std::env::temp_dir()
-            .join(format!("librefang_hook_{}", uuid_v4_hex()));
+        let tmp = std::env::temp_dir().join(format!("librefang_hook_{}", uuid_v4_hex()));
         let _ = std::fs::create_dir_all(&tmp);
         cmd.env("TMPDIR", tmp.display().to_string());
         debug!(
@@ -1054,7 +1178,10 @@ pub async fn run_hook_json(
     // their own limits.
     if let Some(mb) = config.max_memory_mb {
         cmd.env("LIBREFANG_MAX_MEMORY_MB", mb.to_string());
-        debug!(max_memory_mb = mb, "Memory limit set (advisory via env var; hard limit requires libc dep)");
+        debug!(
+            max_memory_mb = mb,
+            "Memory limit set (advisory via env var; hard limit requires libc dep)"
+        );
     }
 
     // Shared state KV store: ensure the file exists and inject its path so hook
@@ -1066,7 +1193,10 @@ pub async fn run_hook_json(
             }
             let _ = std::fs::write(state_path, "{}");
         }
-        cmd.env("LIBREFANG_STATE_FILE", state_path.to_string_lossy().as_ref());
+        cmd.env(
+            "LIBREFANG_STATE_FILE",
+            state_path.to_string_lossy().as_ref(),
+        );
         debug!(state_file = %state_path.display(), "Shared state file injected");
     }
 
@@ -1200,7 +1330,7 @@ pub async fn run_hook_json(
         Ok::<(Vec<String>, String, std::process::ExitStatus), PluginRuntimeError>((
             stdout_lines,
             stderr_text,
-            status.into(),
+            status,
         ))
     })
     .await;
@@ -1224,8 +1354,7 @@ pub async fn run_hook_json(
                     return Err(PluginRuntimeError::InvalidOutput(format!(
                         "Hook output exceeds maximum size ({} bytes > {} bytes limit). \
                          Truncate your hook's JSON response.",
-                        total_output_bytes,
-                        MAX_OUTPUT_BYTES
+                        total_output_bytes, MAX_OUTPUT_BYTES
                     )));
                 }
                 parse_output(&stdout_lines)
@@ -1350,7 +1479,10 @@ struct PersistentProcess {
 #[derive(Default)]
 pub struct HookProcessPool {
     procs: std::sync::Mutex<
-        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>>,
+        std::collections::HashMap<
+            String,
+            std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>,
+        >,
     >,
 }
 
@@ -1395,7 +1527,7 @@ impl HookProcessPool {
 
         // Ensure process is running.
         if guard.is_none() {
-            *guard = Some(Self::spawn(script_path, runtime, config).await?);
+            *guard = Some(Self::spawn(script_path, runtime.clone(), config).await?);
         }
 
         // Try to call; on failure, evict the dead slot then restart and retry once.
@@ -1562,7 +1694,10 @@ impl HookProcessPool {
     /// Returns the list of script-path keys for alive processes.
     pub async fn health_check(&self) -> Vec<String> {
         let mut alive = Vec::new();
-        let entries: Vec<(String, std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>)> = {
+        let entries: Vec<(
+            String,
+            std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>,
+        )> = {
             let procs = self.procs.lock().unwrap();
             procs.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
@@ -1643,7 +1778,10 @@ impl HookProcessPool {
         let new_proc = match Self::spawn(script_path, runtime, config).await {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(hook = hook_name, "swap_prewarm: failed to spawn new process: {e}");
+                tracing::warn!(
+                    hook = hook_name,
+                    "swap_prewarm: failed to spawn new process: {e}"
+                );
                 return 0;
             }
         };
@@ -1651,7 +1789,10 @@ impl HookProcessPool {
         // Step 2: verify the new process is alive — child.id() returns Some
         // only while the process is still running.
         if new_proc.child.id().is_none() {
-            tracing::warn!(hook = hook_name, "swap_prewarm: new process died immediately");
+            tracing::warn!(
+                hook = hook_name,
+                "swap_prewarm: new process died immediately"
+            );
             return 0;
         }
 
@@ -1672,7 +1813,11 @@ impl HookProcessPool {
             let _ = old_proc.child.kill().await;
         }
         *guard = Some(new_proc);
-        tracing::info!(hook = hook_name, script = script_path, "swap_prewarm: hot-reload complete, slot replaced");
+        tracing::info!(
+            hook = hook_name,
+            script = script_path,
+            "swap_prewarm: hot-reload complete, slot replaced"
+        );
         1
     }
 

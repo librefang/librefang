@@ -751,9 +751,47 @@ Get details for a specific approval request.
 
 Approve a pending request. The waiting agent proceeds with the action.
 
+When TOTP second factor is enabled (`second_factor = "totp"` in config), include a TOTP code in the request body:
+
+```json
+{ "totp_code": "123456" }
+```
+
+Without a valid TOTP code, the request returns `400 Bad Request`.
+
 ### POST /api/approvals/&lbrace;id&rbrace;/reject
 
 Reject a pending request. The waiting agent receives a rejection and halts the action.
+
+### POST /api/approvals/totp/setup
+
+Generate a new TOTP secret for second-factor enrollment. Returns a base32 secret and an `otpauth://` URI for authenticator apps. The secret is stored in the encrypted vault but is not active until confirmed.
+
+### POST /api/approvals/totp/confirm
+
+Confirm TOTP enrollment by verifying a 6-digit code from the authenticator app.
+
+```json
+{ "code": "123456" }
+```
+
+### GET /api/approvals/totp/status
+
+Check TOTP enrollment status. Returns:
+
+```json
+{ "enrolled": true, "confirmed": true, "enforced": false, "remaining_recovery_codes": 7 }
+```
+
+### DELETE /api/approvals/totp
+
+Revoke TOTP enrollment. Requires verification with a valid TOTP or recovery code.
+
+```json
+{ "code": "123456" }
+```
+
+Returns `400` if the code is invalid or TOTP is not enrolled.
 
 ---
 

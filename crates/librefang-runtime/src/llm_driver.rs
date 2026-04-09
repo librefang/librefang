@@ -2,6 +2,8 @@
 //!
 //! Abstracts over multiple LLM providers (Anthropic, OpenAI, Ollama, etc.).
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use librefang_types::config::{AzureOpenAiConfig, ResponseFormat, VertexAiConfig};
 use librefang_types::message::{ContentBlock, Message, StopReason, TokenUsage};
@@ -91,6 +93,12 @@ pub struct CompletionRequest {
     /// this instead of the global `message_timeout_secs`.  Allows the agent
     /// loop to grant longer timeouts for requests that involve browser tools.
     pub timeout_secs: Option<u64>,
+    /// Provider-specific extension parameters merged directly into the
+    /// top-level API request body.
+    ///
+    /// When keys conflict with standard parameters (temperature, max_tokens, etc.),
+    /// values from `extra_body` take precedence (last-wins in JSON serialization).
+    pub extra_body: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// A response from an LLM completion.
@@ -359,6 +367,7 @@ mod tests {
             prompt_caching: false,
             response_format: None,
             timeout_secs: None,
+            extra_body: None,
         };
 
         let response = driver.stream(request, tx).await.unwrap();

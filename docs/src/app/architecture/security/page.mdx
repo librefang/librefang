@@ -29,8 +29,9 @@ the source code.
 16. [Session Repair](#16-session-repair)
 17. [Health Endpoint Redaction](#17-health-endpoint-redaction)
 18. [Dashboard Authentication](#18-dashboard-authentication)
-19. [Security Configuration](#19-security-configuration)
-20. [Security Dependencies](#20-security-dependencies)
+19. [TOTP Second-Factor Verification](#19-totp-second-factor-verification)
+20. [Security Configuration](#20-security-configuration)
+21. [Security Dependencies](#21-security-dependencies)
 
 ---
 
@@ -58,6 +59,7 @@ overlapping layers so that a failure in any one layer is caught by others.
 | 14 | Loop Guard | `librefang-runtime` | Stuck agent tool loops |
 | 15 | Session Repair | `librefang-runtime` | Corrupted LLM conversation history |
 | 16 | Health Endpoint Redaction | `librefang-api` | Information leakage |
+| 17 | TOTP Second-Factor | `librefang-kernel` | Compromised channel self-approval |
 
 ---
 
@@ -1433,9 +1435,111 @@ The vault uses AES-256-GCM encryption with a master key stored in the OS keyring
 
 ---
 
-## 19. Security Configuration
+## 19. TOTP Second-Factor Verification
 
-### 18.1 config.toml Reference
+### 19.1 Threat Model
+
+The approval gate sends confirmation requests to notification channels
+(Telegram, Slack, etc.). If the originating channel is compromised, an attacker
+can both initiate and approve dangerous operations — the approval gate provides
+no protection.
+
+TOTP (Time-based One-Time Password, RFC 6238) adds an **out-of-band** second
+factor: the TOTP secret lives in an authenticator app on the operator's device,
+completely independent of the messaging channel. Compromising the Telegram
+account is not sufficient — the attacker also needs the authenticator app.
+
+### 19.2 Architecture
+
+```
+                                    ┌──────────────────┐
+  Agent requests                    │  Authenticator   │
+  shell_exec                        │  App (phone)     │
+       │                            │                  │
+       ▼                            │  TOTP Secret ──┐ │
+  ┌─────────────┐                   └────────────────│─┘
+  │ ApprovalMgr │◄── resolve(Approved, totp_verified)│
+  │             │         ▲                          │
+  │ TOTP gate   │─────────┤                          │
+  │ Grace cache │    ┌────────────┐                  │
+  └─────────────┘    │ API/Channel│ verify_totp_code()
+                     │ Layer      │◄─── 6-digit code─┘
+                     └────────────┘
+                          ▲
+                     User types code
+```
+
+**Key components:**
+
+| Component | Location | Role |
+|-----------|----------|------|
+| `SecondFactor` enum | `librefang-types/approval.rs` | Config: `none` or `totp` |
+| `ApprovalManager::resolve()` | `librefang-kernel/approval.rs` | TOTP gate — rejects `Approved` without verification |
+| `ApprovalManager::verify_totp_code()` | `librefang-kernel/approval.rs` | RFC 6238 verification (SHA-1, 6 digits, 30s step, ±1 window) |
+| `ApprovalManager::generate_totp_secret()` | `librefang-kernel/approval.rs` | Secret generation for enrollment |
+| Grace period cache | `ApprovalManager::totp_grace` | `HashMap<user_id, Instant>` — skip re-verification within window |
+| Vault storage | `librefang-extensions/vault.rs` | TOTP secret stored as `totp_secret` key in AES-256-GCM vault |
+
+### 19.3 Enrollment Flow
+
+```
+1. POST /api/approvals/totp/setup
+   → Generates random TOTP secret (totp-rs Secret::generate_secret)
+   → Stores in vault as "totp_secret" (not yet active)
+   → Returns base32 secret + otpauth:// URI
+
+2. User adds secret to authenticator app (Google Authenticator, 1Password, etc.)
+
+3. POST /api/approvals/totp/confirm  { "code": "123456" }
+   → Verifies code against stored secret
+   → Sets "totp_confirmed" = "true" in vault
+
+4. User sets second_factor = "totp" in config (hot-reloadable)
+   → ApprovalManager.requires_totp() returns true
+   → All future approvals require TOTP verification
+```
+
+### 19.4 Approval Flow with TOTP
+
+```
+1. Agent calls shell_exec → approval required
+2. Kernel sends interactive notification to channel
+   → Message includes: "TOTP required. Reply: /approve <id> <6-digit-code>"
+   → Approve button hidden (code must be typed)
+3. User replies: /approve abc123 654321
+4. Channel bridge calls ApprovalManager::verify_totp_code(secret, "654321")
+5. Code valid → resolve(Approved, totp_verified=true, user_id="channel_user")
+6. Grace period recorded for user_id
+7. Agent unblocked → tool executes
+```
+
+### 19.5 Grace Period
+
+To avoid requiring a TOTP code on every approval, a configurable grace period
+(`totp_grace_period_secs`, default 300s) allows skipping re-verification.
+
+- Grace is tracked per `user_id` (not per source like "api" or "channel")
+- `totp_grace_period_secs = 0` disables grace — every approval requires a code
+- Maximum: 3600 seconds (1 hour)
+- Grace cache is in-memory only — restarting the daemon resets it
+
+### 19.6 Security Properties
+
+| Property | Guarantee |
+|----------|-----------|
+| Secret storage | AES-256-GCM vault with Argon2id key derivation |
+| Algorithm | TOTP (RFC 6238), SHA-1, 6 digits, 30s step |
+| Clock skew tolerance | ±1 window (±30 seconds) |
+| Verification layer | API/channel layer verifies before calling `resolve()` |
+| Kernel enforcement | `resolve()` rejects `Approved` without `totp_verified=true` when TOTP enabled |
+| Reject bypass | Reject/Deny decisions do NOT require TOTP (denying is always safe) |
+| Batch limitation | Batch approve is blocked when TOTP is enforced |
+
+---
+
+## 20. Security Configuration
+
+### 20.1 config.toml Reference
 
 ```toml
 # API Authentication

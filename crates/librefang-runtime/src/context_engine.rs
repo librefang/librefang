@@ -65,7 +65,13 @@ fn agent_scoped_state_path(
             // Sanitise the agent ID — keep only alphanumeric, '-', '_'.
             let safe_id: String = id
                 .chars()
-                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
             // base_path is e.g. `/home/user/.librefang/plugins/my_plugin/state.json`
             // We place agent state alongside: `…/agents/{safe_id}/state.json`
@@ -631,7 +637,11 @@ struct CircuitBreakerState {
 
 impl CircuitBreakerState {
     fn new() -> Self {
-        Self { consecutive_failures: 0, opened_at: None, half_open: false }
+        Self {
+            consecutive_failures: 0,
+            opened_at: None,
+            half_open: false,
+        }
     }
 
     /// Returns `true` when the hook should be skipped (circuit open + not half-open).
@@ -671,7 +681,7 @@ impl CircuitBreakerState {
     fn record_failure(&mut self, max_failures: u32) {
         self.consecutive_failures += 1;
         self.half_open = false; // probe failed → close half-open window
-        // (Re-)latch the circuit when threshold is reached
+                                // (Re-)latch the circuit when threshold is reached
         if self.consecutive_failures >= max_failures {
             self.opened_at = Some(std::time::Instant::now());
         }
@@ -702,7 +712,11 @@ impl HookRateLimiter {
         let now = std::time::Instant::now();
         let window = std::time::Duration::from_secs(60);
         // Evict calls older than the window.
-        while self.calls.front().map_or(false, |t| now.duration_since(*t) > window) {
+        while self
+            .calls
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > window)
+        {
             self.calls.pop_front();
         }
         if self.calls.len() >= max_per_minute as usize {
@@ -818,7 +832,8 @@ pub struct ScriptableContextEngine {
     /// Path to the per-plugin shared state JSON file (when `enable_shared_state = true`).
     shared_state_path: Option<std::path::PathBuf>,
     /// Circuit breaker states per hook name.
-    circuit_breakers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, CircuitBreakerState>>>,
+    circuit_breakers:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, CircuitBreakerState>>>,
     /// Circuit breaker config (None = disabled).
     circuit_breaker_cfg: Option<librefang_types::config::CircuitBreakerConfig>,
     /// Semaphore bounding concurrent `after_turn` background tasks.
@@ -826,7 +841,8 @@ pub struct ScriptableContextEngine {
     /// Whether to pre-warm subprocesses on engine init.
     prewarm_subprocesses: bool,
     /// Per-agent hook call counters: agent_id → HookStats.
-    per_agent_metrics: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, HookStats>>>,
+    per_agent_metrics:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, HookStats>>>,
     /// OTel OTLP endpoint for this plugin (advisory; logged if set).
     #[allow(dead_code)]
     otel_endpoint: Option<String>,
@@ -841,12 +857,19 @@ pub struct ScriptableContextEngine {
     /// Overrides applied by the bootstrap hook at startup.
     bootstrap_applied_overrides: std::sync::Arc<std::sync::Mutex<BootstrapOverrides>>,
     /// Per-hook sliding-window rate limiters.
-    rate_limiters: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, HookRateLimiter>>>,
+    rate_limiters:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, HookRateLimiter>>>,
     /// Script to invoke when an event is received from the event bus.
     on_event_script: Option<String>,
     /// Optional shared event bus. When set, events emitted by this plugin's
     /// hooks are published to all subscribers.
     event_bus: Option<std::sync::Arc<PluginEventBus>>,
+    /// Config schema declared in `[config]` of plugin.toml.
+    ///
+    /// Used to build the resolved config JSON file passed to hook subprocesses
+    /// via `LIBREFANG_PLUGIN_CONFIG`.
+    plugin_config_schema:
+        std::collections::HashMap<String, librefang_types::config::PluginConfigField>,
 }
 
 impl ScriptableContextEngine {
@@ -861,14 +884,14 @@ impl ScriptableContextEngine {
     ) -> Self {
         // Warn at construction time for any declared script that cannot be found.
         let all_declared: &[(&str, &Option<String>)] = &[
-            ("ingest",           &hooks.ingest),
-            ("after_turn",       &hooks.after_turn),
-            ("bootstrap",        &hooks.bootstrap),
-            ("assemble",         &hooks.assemble),
-            ("compact",          &hooks.compact),
+            ("ingest", &hooks.ingest),
+            ("after_turn", &hooks.after_turn),
+            ("bootstrap", &hooks.bootstrap),
+            ("assemble", &hooks.assemble),
+            ("compact", &hooks.compact),
             ("prepare_subagent", &hooks.prepare_subagent),
-            ("merge_subagent",   &hooks.merge_subagent),
-            ("on_event",         &hooks.on_event),
+            ("merge_subagent", &hooks.merge_subagent),
+            ("on_event", &hooks.on_event),
         ];
         for (name, path_opt) in all_declared {
             if let Some(path) = path_opt {
@@ -935,15 +958,15 @@ impl ScriptableContextEngine {
             compact_cache: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
-            ingest_regex: hooks.ingest_regex.as_deref().and_then(|pat| {
-                match regex_lite::Regex::new(pat) {
+            ingest_regex: hooks.ingest_regex.as_deref().and_then(
+                |pat| match regex_lite::Regex::new(pat) {
                     Ok(r) => Some(r),
                     Err(e) => {
                         warn!(pattern = pat, error = %e, "Invalid ingest_regex — ignored");
                         None
                     }
-                }
-            }),
+                },
+            ),
             // When enable_shared_state is true, set a placeholder path; the
             // actual plugin-scoped path is filled in by `with_plugin_name()`.
             shared_state_path: if hooks.enable_shared_state {
@@ -965,12 +988,19 @@ impl ScriptableContextEngine {
             otel_endpoint: hooks.otel_endpoint.clone(),
             plugin_name: String::new(), // filled in by with_plugin_name()
             trace_store: None,          // filled in by with_plugin_name()
-            after_turn_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(tokio::task::JoinSet::new())),
+            after_turn_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(
+                tokio::task::JoinSet::new(),
+            )),
             memory_substrate,
-            bootstrap_applied_overrides: std::sync::Arc::new(std::sync::Mutex::new(BootstrapOverrides::default())),
-            rate_limiters: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            bootstrap_applied_overrides: std::sync::Arc::new(std::sync::Mutex::new(
+                BootstrapOverrides::default(),
+            )),
+            rate_limiters: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             on_event_script: hooks.on_event.clone(),
             event_bus: None,
+            plugin_config_schema: std::collections::HashMap::new(), // populated via with_plugin_config()
         }
     }
 
@@ -1012,7 +1042,8 @@ impl ScriptableContextEngine {
                                     let elapsed_secs = chrono::Utc::now()
                                         .signed_duration_since(dt.with_timezone(&chrono::Utc))
                                         .num_seconds()
-                                        .max(0) as u64;
+                                        .max(0)
+                                        as u64;
                                     std::time::Instant::now()
                                         .checked_sub(std::time::Duration::from_secs(elapsed_secs))
                                         .unwrap_or_else(std::time::Instant::now)
@@ -1038,6 +1069,58 @@ impl ScriptableContextEngine {
         self
     }
 
+    /// Set the config schema declared in `[config]` of plugin.toml.
+    ///
+    /// Before each hook invocation the resolved config (defaults only for now)
+    /// is written to a temporary JSON file and the path is exposed to the
+    /// subprocess as `LIBREFANG_PLUGIN_CONFIG`.
+    pub fn with_plugin_config(
+        mut self,
+        schema: std::collections::HashMap<String, librefang_types::config::PluginConfigField>,
+    ) -> Self {
+        self.plugin_config_schema = schema;
+        self
+    }
+
+    /// Write the resolved plugin config (defaults merged with user overrides) to a
+    /// temporary JSON file.
+    ///
+    /// Returns the file path, or `None` if the schema is empty.
+    ///
+    /// The file is written to the system temp directory as
+    /// `librefang-plugin-config-<plugin_name>.json` and is overwritten on each
+    /// hook invocation (no temp dir cleanup needed — the OS handles it).
+    fn write_plugin_config_file(
+        plugin_name: &str,
+        config_schema: &std::collections::HashMap<
+            String,
+            librefang_types::config::PluginConfigField,
+        >,
+        user_overrides: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Option<std::path::PathBuf> {
+        if config_schema.is_empty() {
+            return None;
+        }
+        let mut resolved: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        // Start with defaults from the schema.
+        for (key, field) in config_schema {
+            if let Some(ref default_val) = field.default {
+                resolved.insert(key.clone(), default_val.clone());
+            }
+        }
+        // Apply user overrides (only for keys declared in the schema).
+        for (key, val) in user_overrides {
+            if config_schema.contains_key(key.as_str()) {
+                resolved.insert(key.clone(), val.clone());
+            }
+        }
+        let json = serde_json::to_string_pretty(&resolved).ok()?;
+        let path = std::env::temp_dir().join(format!("librefang-plugin-config-{plugin_name}.json"));
+        std::fs::write(&path, json).ok()?;
+        Some(path)
+    }
+
     /// Attach a shared event bus to this engine.
     ///
     /// Attach an event bus so this engine both emits events (from `after_turn` output)
@@ -1054,7 +1137,7 @@ impl ScriptableContextEngine {
             // Using Arc clones keeps it cheap; the spawned task holds them for its lifetime.
             let plugin_name = self.plugin_name.clone();
             let on_event_script = self.on_event_script.clone().unwrap();
-            let runtime = self.runtime;
+            let runtime = self.runtime.clone();
             let hook_timeout_secs = self.hook_timeout_secs;
             let plugin_env = self.plugin_env.clone();
             let bootstrap_overrides = self.bootstrap_applied_overrides.clone();
@@ -1072,7 +1155,9 @@ impl ScriptableContextEngine {
                     match rx.recv().await {
                         Ok(event) => {
                             // Skip events emitted by this same plugin to avoid infinite loops.
-                            if event.source_plugin == plugin_name { continue; }
+                            if event.source_plugin == plugin_name {
+                                continue;
+                            }
 
                             let effective_env = {
                                 let guard = bootstrap_overrides
@@ -1099,6 +1184,7 @@ impl ScriptableContextEngine {
                             let schemas_c = hook_schemas.clone();
                             let state_c = shared_state_path.clone();
                             let store_c = trace_store.clone();
+                            let runtime = runtime.clone();
                             tokio::spawn(async move {
                                 let _ = ScriptableContextEngine::run_hook(
                                     "on_event",
@@ -1136,7 +1222,10 @@ impl ScriptableContextEngine {
 
     /// Return a snapshot of all hook invocation metrics.
     pub fn metrics(&self) -> HookMetrics {
-        self.metrics.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.metrics
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Return recent hook invocation traces (up to `TRACE_BUFFER_CAPACITY`).
@@ -1186,20 +1275,24 @@ impl ScriptableContextEngine {
     ///
     /// Returns a list of human-readable violation messages (empty = valid).
     /// The caller decides whether to warn or error based on `output_schema_strict`.
-    fn validate_schema(schema: &serde_json::Value, value: &serde_json::Value, context: &str) -> Vec<String> {
+    fn validate_schema(
+        schema: &serde_json::Value,
+        value: &serde_json::Value,
+        context: &str,
+    ) -> Vec<String> {
         let mut errors: Vec<String> = Vec::new();
 
         // --- type check ---
         if let Some(expected_type) = schema.get("type").and_then(|t| t.as_str()) {
             let actual_matches = match expected_type {
-                "object"  => value.is_object(),
-                "array"   => value.is_array(),
-                "string"  => value.is_string(),
-                "number"  => value.is_number(),
+                "object" => value.is_object(),
+                "array" => value.is_array(),
+                "string" => value.is_string(),
+                "number" => value.is_number(),
                 "integer" => value.is_i64() || value.is_u64(),
                 "boolean" => value.is_boolean(),
-                "null"    => value.is_null(),
-                _         => true, // unknown type — don't reject
+                "null" => value.is_null(),
+                _ => true, // unknown type — don't reject
             };
             if !actual_matches {
                 errors.push(format!(
@@ -1223,12 +1316,16 @@ impl ScriptableContextEngine {
         if let Some(n) = value.as_f64() {
             if let Some(min) = schema.get("minimum").and_then(|v| v.as_f64()) {
                 if n < min {
-                    errors.push(format!("[{context}] below minimum: value={n}, minimum={min}"));
+                    errors.push(format!(
+                        "[{context}] below minimum: value={n}, minimum={min}"
+                    ));
                 }
             }
             if let Some(max) = schema.get("maximum").and_then(|v| v.as_f64()) {
                 if n > max {
-                    errors.push(format!("[{context}] above maximum: value={n}, maximum={max}"));
+                    errors.push(format!(
+                        "[{context}] above maximum: value={n}, maximum={max}"
+                    ));
                 }
             }
         }
@@ -1237,12 +1334,18 @@ impl ScriptableContextEngine {
         if let Some(s) = value.as_str() {
             if let Some(min_len) = schema.get("minLength").and_then(|v| v.as_u64()) {
                 if (s.len() as u64) < min_len {
-                    errors.push(format!("[{context}] string too short: len={}, min_len={min_len}", s.len()));
+                    errors.push(format!(
+                        "[{context}] string too short: len={}, min_len={min_len}",
+                        s.len()
+                    ));
                 }
             }
             if let Some(max_len) = schema.get("maxLength").and_then(|v| v.as_u64()) {
                 if (s.len() as u64) > max_len {
-                    errors.push(format!("[{context}] string too long: len={}, max_len={max_len}", s.len()));
+                    errors.push(format!(
+                        "[{context}] string too long: len={}, max_len={max_len}",
+                        s.len()
+                    ));
                 }
             }
         }
@@ -1279,26 +1382,33 @@ impl ScriptableContextEngine {
     }
 
     fn circuit_is_open(&self, hook: &str, agent_id: Option<&AgentId>) -> bool {
-        let Some(ref cfg) = self.circuit_breaker_cfg else { return false; };
+        let Some(ref cfg) = self.circuit_breaker_cfg else {
+            return false;
+        };
         let key = match agent_id {
             Some(id) => format!("{}:{}", id.0, hook),
             None => hook.to_string(),
         };
         let mut guard = self.circuit_breakers.lock().unwrap();
-        guard.entry(key)
-             .or_insert_with(CircuitBreakerState::new)
-             .is_open(cfg.max_failures, cfg.reset_secs)
+        guard
+            .entry(key)
+            .or_insert_with(CircuitBreakerState::new)
+            .is_open(cfg.max_failures, cfg.reset_secs)
     }
 
     fn circuit_record(&self, hook: &str, agent_id: Option<&AgentId>, success: bool) {
-        let Some(ref cfg) = self.circuit_breaker_cfg else { return; };
+        let Some(ref cfg) = self.circuit_breaker_cfg else {
+            return;
+        };
         let key = match agent_id {
             Some(id) => format!("{}:{}", id.0, hook),
             None => hook.to_string(),
         };
         let (failures, opened_at_rfc3339, just_reset) = {
             let mut guard = self.circuit_breakers.lock().unwrap();
-            let state = guard.entry(key.clone()).or_insert_with(CircuitBreakerState::new);
+            let state = guard
+                .entry(key.clone())
+                .or_insert_with(CircuitBreakerState::new);
             if success {
                 state.record_success();
                 // Reset — signal deletion from SQLite.
@@ -1306,7 +1416,11 @@ impl ScriptableContextEngine {
             } else {
                 state.record_failure(cfg.max_failures);
                 if state.consecutive_failures == cfg.max_failures {
-                    warn!(hook, cooldown_secs = cfg.reset_secs, "Hook circuit breaker opened");
+                    warn!(
+                        hook,
+                        cooldown_secs = cfg.reset_secs,
+                        "Hook circuit breaker opened"
+                    );
                 }
                 // Compute RFC-3339 opened_at from the stored Instant if available.
                 let opened_str = state.opened_at.map(|instant| {
@@ -1333,17 +1447,26 @@ impl ScriptableContextEngine {
             let stats = map.entry(agent_id.0.to_string()).or_default();
             stats.calls += 1;
             stats.total_ms += elapsed_ms;
-            if success { stats.successes += 1; } else { stats.failures += 1; }
+            if success {
+                stats.successes += 1;
+            } else {
+                stats.failures += 1;
+            }
         }
     }
 
     pub fn per_agent_metrics_snapshot(&self) -> std::collections::HashMap<String, HookStats> {
-        self.per_agent_metrics.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.per_agent_metrics
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     pub async fn prewarm(&self) {
-        if !self.prewarm_subprocesses || !self.persistent_subprocess { return; }
-        let runtime = self.runtime;
+        if !self.prewarm_subprocesses || !self.persistent_subprocess {
+            return;
+        }
+        let runtime = self.runtime.clone();
         let hooks: &[(&str, &Option<String>)] = &[
             ("ingest", &self.ingest_script),
             ("after_turn", &self.after_turn_script),
@@ -1356,7 +1479,12 @@ impl ScriptableContextEngine {
             if let Some(ref script) = script_opt {
                 let resolved = Self::resolve_script_path(script);
                 if std::path::Path::new(&resolved).exists() {
-                    match self.process_pool.prewarm(&resolved, runtime, &self.plugin_env).await {
+                    let runtime = runtime.clone();
+                    match self
+                        .process_pool
+                        .prewarm(&resolved, runtime.clone(), &self.plugin_env)
+                        .await
+                    {
                         Ok(()) => debug!(hook = name, "Pre-warmed hook subprocess"),
                         Err(e) => warn!(hook = name, error = %e, "Pre-warm failed"),
                     }
@@ -1371,7 +1499,9 @@ impl ScriptableContextEngine {
     /// a plugin hot-reload so the new script version is picked up immediately
     /// rather than waiting for the old process to die naturally.
     pub async fn evict_hook_processes(&self) {
-        if !self.persistent_subprocess { return; }
+        if !self.persistent_subprocess {
+            return;
+        }
         let hooks: &[&Option<String>] = &[
             &self.ingest_script,
             &self.after_turn_script,
@@ -1380,11 +1510,9 @@ impl ScriptableContextEngine {
             &self.compact_script,
             &self.on_event_script,
         ];
-        for script_opt in hooks {
-            if let Some(ref script) = script_opt {
-                let resolved = Self::resolve_script_path(script);
-                self.process_pool.evict(&resolved).await;
-            }
+        for script in hooks.iter().filter_map(|opt| opt.as_deref()) {
+            let resolved = Self::resolve_script_path(script);
+            self.process_pool.evict(&resolved).await;
         }
     }
 
@@ -1393,8 +1521,7 @@ impl ScriptableContextEngine {
     /// Call this during daemon shutdown after stopping the agent loop so that
     /// no after_turn work is silently dropped. Times out after `timeout_secs`.
     pub async fn wait_for_after_turn_tasks(&self, timeout_secs: u64) {
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(timeout_secs);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
         // Lock once and drain; this is called during shutdown so no new tasks will
         // be spawned. Holding the async Mutex across join_next().await is safe here.
         let mut tasks = self.after_turn_tasks.lock().await;
@@ -1419,7 +1546,9 @@ impl ScriptableContextEngine {
             return true;
         }
         let id_str = agent_id.0.to_string();
-        self.agent_id_filter.iter().any(|f| id_str.contains(f.as_str()))
+        self.agent_id_filter
+            .iter()
+            .any(|f| id_str.contains(f.as_str()))
     }
 
     /// Record the outcome of one hook invocation into the named slot.
@@ -1469,14 +1598,23 @@ impl ScriptableContextEngine {
         // "log" field — emit as info log from the plugin's perspective.
         if let Some(msg) = output.get("log").and_then(|v| v.as_str()) {
             let trimmed = msg.chars().take(512).collect::<String>();
-            tracing::info!(agent_id, plugin_log = trimmed.as_str(), "after_turn hook log");
+            tracing::info!(
+                agent_id,
+                plugin_log = trimmed.as_str(),
+                "after_turn hook log"
+            );
         }
 
         // "annotations" field — debug-level dump for observability.
         if let Some(ann) = output.get("annotations") {
             tracing::debug!(
                 agent_id,
-                annotations = ann.to_string().chars().take(1024).collect::<String>().as_str(),
+                annotations = ann
+                    .to_string()
+                    .chars()
+                    .take(1024)
+                    .collect::<String>()
+                    .as_str(),
                 "after_turn hook annotations"
             );
         }
@@ -1494,9 +1632,9 @@ impl ScriptableContextEngine {
                         .and_then(|v| v.as_array())
                         .map(|arr| {
                             arr.iter()
-                               .filter_map(|t| t.as_str().map(String::from))
-                               .take(16)
-                               .collect()
+                                .filter_map(|t| t.as_str().map(String::from))
+                                .take(16)
+                                .collect()
                         })
                         .unwrap_or_default();
 
@@ -1535,7 +1673,9 @@ impl ScriptableContextEngine {
             for ev in events {
                 if let (Some(name), payload) = (
                     ev.get("name").and_then(|v| v.as_str()),
-                    ev.get("payload").cloned().unwrap_or(serde_json::Value::Null),
+                    ev.get("payload")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
                 ) {
                     let event = PluginEvent {
                         name: name.to_string(),
@@ -1562,10 +1702,13 @@ impl ScriptableContextEngine {
 
         let input = serde_json::json!({"event": event});
         let plugin_name = self.plugin_name.clone();
-        let runtime = self.runtime;
+        let runtime = self.runtime.clone();
         let timeout_secs = self.hook_timeout_secs;
         let plugin_env = {
-            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self
+                .bootstrap_applied_overrides
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             let mut env = self.plugin_env.clone();
             for (k, v) in &guard.env_overrides {
                 if !env.iter().any(|(ek, _)| ek == k) {
@@ -1582,7 +1725,10 @@ impl ScriptableContextEngine {
         let retry_delay_ms = 0u64;
         let max_memory_mb = self.max_memory_mb;
         let allow_network = {
-            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self
+                .bootstrap_applied_overrides
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             guard.allow_network.unwrap_or(self.allow_network)
         };
         let output_schema_strict = self.inner.config.output_schema_strict;
@@ -1655,7 +1801,8 @@ impl ScriptableContextEngine {
         // Validate input schema if declared (always warn-only — input validation is advisory).
         if let Some(schema) = hook_schemas.get(hook_name) {
             if let Some(ref input_schema) = schema.input {
-                let errs = Self::validate_schema(input_schema, &input, &format!("{hook_name}/input"));
+                let errs =
+                    Self::validate_schema(input_schema, &input, &format!("{hook_name}/input"));
                 for e in &errs {
                     warn!("{e}");
                 }
@@ -1685,21 +1832,34 @@ impl ScriptableContextEngine {
         let mut last_err = String::new();
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(config.delay_for_attempt(attempt))).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    config.delay_for_attempt(attempt),
+                ))
+                .await;
                 debug!(
                     script = resolved.as_str(),
-                    attempt,
-                    max_retries,
-                    "Retrying hook after failure: {last_err}"
+                    attempt, max_retries, "Retrying hook after failure: {last_err}"
                 );
             }
-            match crate::plugin_runtime::run_hook_json(hook_name, &resolved, runtime, &input, &config).await {
+            match crate::plugin_runtime::run_hook_json(
+                hook_name,
+                &resolved,
+                runtime.clone(),
+                &input,
+                &config,
+            )
+            .await
+            {
                 Ok(v) => {
                     let elapsed_ms = t.elapsed().as_millis() as u64;
                     // Validate output schema if declared.
                     if let Some(schema) = hook_schemas.get(hook_name) {
                         if let Some(ref output_schema) = schema.output {
-                            let errs = Self::validate_schema(output_schema, &v, &format!("{hook_name}/output"));
+                            let errs = Self::validate_schema(
+                                output_schema,
+                                &v,
+                                &format!("{hook_name}/output"),
+                            );
                             if !errs.is_empty() {
                                 if output_schema_strict {
                                     let err_msg = format!(
@@ -1708,18 +1868,23 @@ impl ScriptableContextEngine {
                                     );
                                     // Record the failure trace before surfacing the error so
                                     // the trace store is never missing an entry for this call.
-                                    Self::push_trace(traces, HookTrace {
-                                        trace_id: trace_id.clone(),
-                                        correlation_id: correlation_id.to_string(),
-                                        hook: hook_name.to_string(),
-                                        started_at: started_at.clone(),
-                                        elapsed_ms: t.elapsed().as_millis() as u64,
-                                        success: false,
-                                        error: Some(err_msg.clone()),
-                                        input_preview: input_preview.clone(),
-                                        output_preview: None,
-                                        annotations: None,
-                                    }, trace_store, plugin_name);
+                                    Self::push_trace(
+                                        traces,
+                                        HookTrace {
+                                            trace_id: trace_id.clone(),
+                                            correlation_id: correlation_id.to_string(),
+                                            hook: hook_name.to_string(),
+                                            started_at: started_at.clone(),
+                                            elapsed_ms: t.elapsed().as_millis() as u64,
+                                            success: false,
+                                            error: Some(err_msg.clone()),
+                                            input_preview: input_preview.clone(),
+                                            output_preview: None,
+                                            annotations: None,
+                                        },
+                                        trace_store,
+                                        plugin_name,
+                                    );
                                     return Err(err_msg);
                                 }
                                 for e in &errs {
@@ -1728,18 +1893,23 @@ impl ScriptableContextEngine {
                             }
                         }
                     }
-                    Self::push_trace(traces, HookTrace {
-                        trace_id: trace_id.clone(),
-                        correlation_id: correlation_id.to_string(),
-                        hook: hook_name.to_string(),
-                        started_at: started_at.clone(),
-                        elapsed_ms,
-                        success: true,
-                        error: None,
-                        input_preview: input_preview.clone(),
-                        output_preview: Some(v.clone()),
-                        annotations: v.get("annotations").cloned(),
-                    }, trace_store, plugin_name);
+                    Self::push_trace(
+                        traces,
+                        HookTrace {
+                            trace_id: trace_id.clone(),
+                            correlation_id: correlation_id.to_string(),
+                            hook: hook_name.to_string(),
+                            started_at: started_at.clone(),
+                            elapsed_ms,
+                            success: true,
+                            error: None,
+                            input_preview: input_preview.clone(),
+                            output_preview: Some(v.clone()),
+                            annotations: v.get("annotations").cloned(),
+                        },
+                        trace_store,
+                        plugin_name,
+                    );
                     return Ok((v, elapsed_ms));
                 }
                 Err(e) => last_err = e.to_string(),
@@ -1747,18 +1917,23 @@ impl ScriptableContextEngine {
         }
         let elapsed_ms = t.elapsed().as_millis() as u64;
         let err_msg = format!("Hook script failed after {max_retries} retries: {last_err}");
-        Self::push_trace(traces, HookTrace {
-            trace_id: trace_id.clone(),
-            correlation_id: correlation_id.to_string(),
-            hook: hook_name.to_string(),
-            started_at,
-            elapsed_ms,
-            success: false,
-            error: Some(err_msg.clone()),
-            input_preview,
-            output_preview: None,
-            annotations: None,
-        }, trace_store, plugin_name);
+        Self::push_trace(
+            traces,
+            HookTrace {
+                trace_id: trace_id.clone(),
+                correlation_id: correlation_id.to_string(),
+                hook: hook_name.to_string(),
+                started_at,
+                elapsed_ms,
+                success: false,
+                error: Some(err_msg.clone()),
+                input_preview,
+                output_preview: None,
+                annotations: None,
+            },
+            trace_store,
+            plugin_name,
+        );
         Err(err_msg)
     }
 
@@ -1778,7 +1953,9 @@ impl ScriptableContextEngine {
     ) -> Result<(serde_json::Value, u64), String> {
         // Circuit breaker: reject immediately when open
         if self.circuit_is_open(hook_name, agent_id) {
-            return Err(format!("circuit-open: '{hook_name}' suspended after repeated failures"));
+            return Err(format!(
+                "circuit-open: '{hook_name}' suspended after repeated failures"
+            ));
         }
         // Rate limiting check.
         let max_rpm = self.inner.config.max_hook_calls_per_minute;
@@ -1788,15 +1965,14 @@ impl ScriptableContextEngine {
             // rate limit for all other agents sharing the same plugin.
             let rl_key = format!(
                 "{}:{}",
-                agent_id.map(|id| id.0.as_str()).unwrap_or(""),
+                agent_id.map(|id| id.0.to_string()).unwrap_or_default(),
                 hook_name
             );
             let limiter = limiters.entry(rl_key).or_default();
             if !limiter.check_and_record(max_rpm) {
                 warn!(
                     hook = hook_name,
-                    max_rpm,
-                    "hook rate limit exceeded — skipping call"
+                    max_rpm, "hook rate limit exceeded — skipping call"
                 );
                 // Return a neutral result: empty object (passthrough for callers).
                 return Ok((serde_json::Value::Object(serde_json::Map::new()), 0));
@@ -1804,7 +1980,16 @@ impl ScriptableContextEngine {
         }
         let correlation_id = generate_trace_id();
         let agent_id_str = agent_id.map(|id| id.0.to_string());
-        let result = self.call_hook_dispatch_raw(hook_name, script_path, input, timeout_secs, &correlation_id, agent_id_str.as_deref()).await;
+        let result = self
+            .call_hook_dispatch_raw(
+                hook_name,
+                script_path,
+                input,
+                timeout_secs,
+                &correlation_id,
+                agent_id_str.as_deref(),
+            )
+            .await;
         // Update circuit breaker.
         // Schema validation is performed inside call_hook_dispatch_raw (persistent path)
         // and run_hook (non-persistent path) so that Err propagates here correctly.
@@ -1825,8 +2010,11 @@ impl ScriptableContextEngine {
         agent_id: Option<&str>,
     ) -> Result<(serde_json::Value, u64), String> {
         // Compute effective env and network permission, merging bootstrap overrides.
-        let (effective_env, effective_allow_network) = {
-            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
+        let (mut effective_env, effective_allow_network) = {
+            let guard = self
+                .bootstrap_applied_overrides
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             let mut env = self.plugin_env.clone();
             for (k, v) in &guard.env_overrides {
                 if !env.iter().any(|(ek, _)| ek == k) {
@@ -1837,10 +2025,25 @@ impl ScriptableContextEngine {
             (env, allow_net)
         };
 
+        // Write the resolved plugin config JSON file and expose its path via
+        // LIBREFANG_PLUGIN_CONFIG so hook scripts can read typed settings.
+        let empty_overrides = std::collections::HashMap::new();
+        if let Some(config_path) = Self::write_plugin_config_file(
+            &self.plugin_name,
+            &self.plugin_config_schema,
+            &empty_overrides,
+        ) {
+            effective_env.push((
+                "LIBREFANG_PLUGIN_CONFIG".to_string(),
+                config_path.to_string_lossy().into_owned(),
+            ));
+        }
+
         // Scope state file to this agent when agent_id is known.
-        let effective_state_path = self.shared_state_path.as_deref().map(|p| {
-            agent_scoped_state_path(p, agent_id)
-        });
+        let effective_state_path = self
+            .shared_state_path
+            .as_deref()
+            .map(|p| agent_scoped_state_path(p, agent_id));
 
         if self.persistent_subprocess {
             let config = crate::plugin_runtime::HookConfig {
@@ -1861,7 +2064,7 @@ impl ScriptableContextEngine {
             let t = std::time::Instant::now();
             let call_result = self
                 .process_pool
-                .call(script_path, self.runtime, &input, &config)
+                .call(script_path, self.runtime.clone(), &input, &config)
                 .await;
             let elapsed_ms = t.elapsed().as_millis() as u64;
             match call_result {
@@ -1872,7 +2075,11 @@ impl ScriptableContextEngine {
                     // circuit_record(false)).  Mirrors the identical logic in run_hook().
                     if let Some(schema) = self.hook_schemas.get(hook_name) {
                         if let Some(ref output_schema) = schema.output {
-                            let errs = Self::validate_schema(output_schema, &output, &format!("{hook_name}/output"));
+                            let errs = Self::validate_schema(
+                                output_schema,
+                                &output,
+                                &format!("{hook_name}/output"),
+                            );
                             if !errs.is_empty() {
                                 if self.inner.config.output_schema_strict {
                                     let err_msg = format!(
@@ -1949,7 +2156,7 @@ impl ScriptableContextEngine {
             Self::run_hook(
                 hook_name,
                 script_path,
-                self.runtime,
+                self.runtime.clone(),
                 input,
                 timeout_secs,
                 &effective_env,
@@ -1973,21 +2180,21 @@ impl ScriptableContextEngine {
     ///
     /// Returns `Ok(None)` when the policy is Warn or Skip (continue with
     /// fallback), or `Err(…)` when the policy is Abort.
-    fn apply_failure_policy(
-        &self,
-        hook: &str,
-        err: &str,
-    ) -> LibreFangResult<()> {
+    fn apply_failure_policy(&self, hook: &str, err: &str) -> LibreFangResult<()> {
         use librefang_types::config::HookFailurePolicy;
         match self.on_hook_failure {
             HookFailurePolicy::Warn => {
-                warn!(hook, error = err, "Hook failed (warn policy — using fallback)");
+                warn!(
+                    hook,
+                    error = err,
+                    "Hook failed (warn policy — using fallback)"
+                );
                 Ok(())
             }
             HookFailurePolicy::Skip => Ok(()), // silent
-            HookFailurePolicy::Abort => Err(LibreFangError::Internal(
-                format!("Hook '{hook}' failed (abort policy): {err}"),
-            )),
+            HookFailurePolicy::Abort => Err(LibreFangError::Internal(format!(
+                "Hook '{hook}' failed (abort policy): {err}"
+            ))),
         }
     }
 
@@ -1997,7 +2204,10 @@ impl ScriptableContextEngine {
         // Keys are stored as "{agent_id}:{hook}" or bare "{hook}".
         // We report bare hook names; agent-scoped keys use the portion after the last ':'.
         let circuit_open: std::collections::HashMap<String, bool> = {
-            let guard = self.circuit_breakers.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self
+                .circuit_breakers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             guard
                 .iter()
                 .map(|(key, state)| {
@@ -2130,7 +2340,10 @@ impl ContextEngine for ScriptableContextEngine {
                 "stable_prefix_mode": config.stable_prefix_mode,
                 "max_recall_results": config.max_recall_results,
             });
-            match self.call_hook_dispatch("bootstrap", script, input, bootstrap_timeout, None).await {
+            match self
+                .call_hook_dispatch("bootstrap", script, input, bootstrap_timeout, None)
+                .await
+            {
                 Ok((ref output, ms)) => {
                     Self::record_hook(&self.metrics, "bootstrap", ms, true);
                     debug!("Bootstrap hook completed (timeout={bootstrap_timeout}s, {ms}ms)");
@@ -2167,12 +2380,21 @@ impl ContextEngine for ScriptableContextEngine {
         // Apply ingest_filter — skip hook when message doesn't match.
         // Bootstrap overrides take precedence over the statically configured filter.
         let effective_ingest_filter: Option<String> = {
-            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
-            guard.ingest_filter.clone().or_else(|| self.ingest_filter.clone())
+            let guard = self
+                .bootstrap_applied_overrides
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            guard
+                .ingest_filter
+                .clone()
+                .or_else(|| self.ingest_filter.clone())
         };
         if let Some(ref filter) = effective_ingest_filter {
             if !user_message.contains(filter.as_str()) {
-                debug!(filter = filter.as_str(), "Ingest hook skipped (filter mismatch)");
+                debug!(
+                    filter = filter.as_str(),
+                    "Ingest hook skipped (filter mismatch)"
+                );
                 return self.inner.ingest(agent_id, user_message, peer_id).await;
             }
         }
@@ -2211,13 +2433,20 @@ impl ContextEngine for ScriptableContextEngine {
             let cached = {
                 let guard = self.ingest_cache.lock().unwrap();
                 guard.get(&cache_key).and_then(|(val, inserted_at)| {
-                    if inserted_at.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
+                    if inserted_at.elapsed().as_secs() < ttl_secs {
+                        Some(val.clone())
+                    } else {
+                        None
+                    }
                 })
             };
             if let Some(cached_output) = cached {
+                tracing::info!(hook = "ingest", agent_id = %agent_id, ttl_secs, "Ingest hook succeeded (cache hit)");
                 debug!("Ingest hook cache hit (ttl={}s)", ttl_secs);
                 let mut memories = default_result.recalled_memories;
-                if let Some(hook_memories) = cached_output.get("memories").and_then(|m| m.as_array()) {
+                if let Some(hook_memories) =
+                    cached_output.get("memories").and_then(|m| m.as_array())
+                {
                     for mem in hook_memories {
                         if let Some(content) = mem.get("content").and_then(|c| c.as_str()) {
                             memories.push(MemoryFragment {
@@ -2239,21 +2468,35 @@ impl ContextEngine for ScriptableContextEngine {
                         }
                     }
                 }
-                return Ok(IngestResult { recalled_memories: memories });
+                return Ok(IngestResult {
+                    recalled_memories: memories,
+                });
             }
             // Cache miss — run hook and store result below
             let cache_key_owned = cache_key;
             let cache_arc = self.ingest_cache.clone();
-            match self.call_hook_dispatch("ingest", script, input.clone(), self.hook_timeout_secs, Some(&agent_id)).await {
+            match self
+                .call_hook_dispatch(
+                    "ingest",
+                    script,
+                    input.clone(),
+                    self.hook_timeout_secs,
+                    Some(&agent_id),
+                )
+                .await
+            {
                 Ok((output, ms)) => {
                     Self::record_hook(&self.metrics, "ingest", ms, true);
+                    tracing::info!(hook = "ingest", agent_id = %agent_id, elapsed_ms = ms, "Ingest hook succeeded (cache miss)");
                     // Store in cache
                     {
                         let mut guard = cache_arc.lock().unwrap();
                         guard.insert(cache_key_owned, (output.clone(), std::time::Instant::now()));
                         // Evict expired entries when cache grows large
                         if guard.len() > 512 {
-                            guard.retain(|_, (_, inserted_at)| inserted_at.elapsed().as_secs() < ttl_secs);
+                            guard.retain(|_, (_, inserted_at)| {
+                                inserted_at.elapsed().as_secs() < ttl_secs
+                            });
                         }
                     }
                     let mut memories = default_result.recalled_memories;
@@ -2279,7 +2522,9 @@ impl ContextEngine for ScriptableContextEngine {
                             }
                         }
                     }
-                    return Ok(IngestResult { recalled_memories: memories });
+                    return Ok(IngestResult {
+                        recalled_memories: memories,
+                    });
                 }
                 Err(err) => {
                     Self::record_hook(&self.metrics, "ingest", 0, false);
@@ -2289,10 +2534,20 @@ impl ContextEngine for ScriptableContextEngine {
             }
         }
 
-        match self.call_hook_dispatch("ingest", script, input, self.hook_timeout_secs, Some(&agent_id)).await {
+        match self
+            .call_hook_dispatch(
+                "ingest",
+                script,
+                input,
+                self.hook_timeout_secs,
+                Some(&agent_id),
+            )
+            .await
+        {
             Ok((output, ms)) => {
                 Self::record_hook(&self.metrics, "ingest", ms, true);
                 self.record_per_agent(&agent_id, ms, true);
+                tracing::info!(hook = "ingest", agent_id = %agent_id, elapsed_ms = ms, "Ingest hook succeeded (no cache)");
                 // Merge hook memories with default memories
                 let mut memories = default_result.recalled_memories;
                 if let Some(hook_memories) = output.get("memories").and_then(|m| m.as_array()) {
@@ -2341,7 +2596,13 @@ impl ContextEngine for ScriptableContextEngine {
         let Some(ref script) = self.assemble_script else {
             return self
                 .inner
-                .assemble(agent_id, messages, system_prompt, tools, context_window_tokens)
+                .assemble(
+                    agent_id,
+                    messages,
+                    system_prompt,
+                    tools,
+                    context_window_tokens,
+                )
                 .await;
         };
 
@@ -2361,7 +2622,16 @@ impl ContextEngine for ScriptableContextEngine {
 
         // Apply agent_id_filter for assemble hook.
         if !self.agent_passes_filter(&agent_id) {
-            return self.inner.assemble(agent_id, messages, system_prompt, tools, context_window_tokens).await;
+            return self
+                .inner
+                .assemble(
+                    agent_id,
+                    messages,
+                    system_prompt,
+                    tools,
+                    context_window_tokens,
+                )
+                .await;
         }
 
         // TTL-based cache for assemble hook.
@@ -2372,7 +2642,11 @@ impl ContextEngine for ScriptableContextEngine {
             let cached = {
                 let guard = self.assemble_cache.lock().unwrap();
                 guard.get(&cache_key).and_then(|(val, inserted_at)| {
-                    if inserted_at.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
+                    if inserted_at.elapsed().as_secs() < ttl_secs {
+                        Some(val.clone())
+                    } else {
+                        None
+                    }
                 })
             };
             if let Some(cached_output) = cached {
@@ -2390,18 +2664,37 @@ impl ContextEngine for ScriptableContextEngine {
                     }
                 }
                 // Cached result had no messages; fall through to default
-                return self.inner.assemble(agent_id, messages, system_prompt, tools, context_window_tokens).await;
+                return self
+                    .inner
+                    .assemble(
+                        agent_id,
+                        messages,
+                        system_prompt,
+                        tools,
+                        context_window_tokens,
+                    )
+                    .await;
             }
             // Cache miss — run hook and store result.
             let cache_arc = self.assemble_cache.clone();
-            let result = self.call_hook_dispatch("assemble", script, input, self.hook_timeout_secs, Some(&agent_id)).await;
+            let result = self
+                .call_hook_dispatch(
+                    "assemble",
+                    script,
+                    input,
+                    self.hook_timeout_secs,
+                    Some(&agent_id),
+                )
+                .await;
             match result {
                 Ok((output, ms)) => {
                     {
                         let mut guard = cache_arc.lock().unwrap();
                         guard.insert(cache_key, (output.clone(), std::time::Instant::now()));
                         if guard.len() > 256 {
-                            guard.retain(|_, (_, inserted_at)| inserted_at.elapsed().as_secs() < ttl_secs);
+                            guard.retain(|_, (_, inserted_at)| {
+                                inserted_at.elapsed().as_secs() < ttl_secs
+                            });
                         }
                     }
                     if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
@@ -2418,17 +2711,44 @@ impl ContextEngine for ScriptableContextEngine {
                         }
                     }
                     Self::record_hook(&self.metrics, "assemble", ms, false);
-                    return self.inner.assemble(agent_id, messages, system_prompt, tools, context_window_tokens).await;
+                    return self
+                        .inner
+                        .assemble(
+                            agent_id,
+                            messages,
+                            system_prompt,
+                            tools,
+                            context_window_tokens,
+                        )
+                        .await;
                 }
                 Err(e) => {
                     Self::record_hook(&self.metrics, "assemble", 0, false);
                     self.apply_failure_policy("assemble", &e)?;
-                    return self.inner.assemble(agent_id, messages, system_prompt, tools, context_window_tokens).await;
+                    return self
+                        .inner
+                        .assemble(
+                            agent_id,
+                            messages,
+                            system_prompt,
+                            tools,
+                            context_window_tokens,
+                        )
+                        .await;
                 }
             }
         }
 
-        match self.call_hook_dispatch("assemble", script, input, self.hook_timeout_secs, Some(&agent_id)).await {
+        match self
+            .call_hook_dispatch(
+                "assemble",
+                script,
+                input,
+                self.hook_timeout_secs,
+                Some(&agent_id),
+            )
+            .await
+        {
             Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let assembled: Vec<Message> = new_msgs
@@ -2445,20 +2765,30 @@ impl ContextEngine for ScriptableContextEngine {
                     }
                     warn!("Assemble hook returned empty messages, falling back to default");
                 } else {
-                    warn!(
-                        "Assemble hook returned no 'messages' field, falling back to default"
-                    );
+                    warn!("Assemble hook returned no 'messages' field, falling back to default");
                 }
                 Self::record_hook(&self.metrics, "assemble", ms, false);
                 self.inner
-                    .assemble(agent_id, messages, system_prompt, tools, context_window_tokens)
+                    .assemble(
+                        agent_id,
+                        messages,
+                        system_prompt,
+                        tools,
+                        context_window_tokens,
+                    )
                     .await
             }
             Err(e) => {
                 Self::record_hook(&self.metrics, "assemble", 0, false);
                 self.apply_failure_policy("assemble", &e)?;
                 self.inner
-                    .assemble(agent_id, messages, system_prompt, tools, context_window_tokens)
+                    .assemble(
+                        agent_id,
+                        messages,
+                        system_prompt,
+                        tools,
+                        context_window_tokens,
+                    )
                     .await
             }
         }
@@ -2487,7 +2817,11 @@ impl ContextEngine for ScriptableContextEngine {
 
         // Build token pressure metadata for the compact hook.
         let used_tokens = crate::compactor::estimate_token_count(messages, None, None);
-        let max_ctx = if context_window_tokens > 0 { context_window_tokens } else { 100_000 };
+        let max_ctx = if context_window_tokens > 0 {
+            context_window_tokens
+        } else {
+            100_000
+        };
         let pressure = (used_tokens as f64 / max_ctx as f64).min(1.0);
         let recommendation = match pressure {
             p if p >= 0.9 => "critical",
@@ -2521,7 +2855,11 @@ impl ContextEngine for ScriptableContextEngine {
             let cached = {
                 let guard = self.compact_cache.lock().unwrap();
                 guard.get(&cache_key).and_then(|(val, inserted_at)| {
-                    if inserted_at.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
+                    if inserted_at.elapsed().as_secs() < ttl_secs {
+                        Some(val.clone())
+                    } else {
+                        None
+                    }
                 })
             };
             if let Some(cached_output) = cached {
@@ -2532,8 +2870,11 @@ impl ContextEngine for ScriptableContextEngine {
                         .filter_map(|v| serde_json::from_value(v.clone()).ok())
                         .collect();
                     if !compacted.is_empty() {
-                        let summary = cached_output.get("summary").and_then(|v| v.as_str())
-                            .unwrap_or("plugin compaction (cached)").to_string();
+                        let summary = cached_output
+                            .get("summary")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("plugin compaction (cached)")
+                            .to_string();
                         let removed = messages.len().saturating_sub(compacted.len());
                         return Ok(CompactionResult {
                             summary,
@@ -2544,28 +2885,45 @@ impl ContextEngine for ScriptableContextEngine {
                         });
                     }
                 }
-                return self.inner.compact(agent_id, messages, driver, model, context_window_tokens).await;
+                return self
+                    .inner
+                    .compact(agent_id, messages, driver, model, context_window_tokens)
+                    .await;
             }
             // Cache miss — run hook and store result.
             let cache_arc = self.compact_cache.clone();
-            let result = self.call_hook_dispatch("compact", script, input, self.hook_timeout_secs, Some(&agent_id)).await;
+            let result = self
+                .call_hook_dispatch(
+                    "compact",
+                    script,
+                    input,
+                    self.hook_timeout_secs,
+                    Some(&agent_id),
+                )
+                .await;
             match result {
                 Ok((output, ms)) => {
                     {
                         let mut guard = cache_arc.lock().unwrap();
                         guard.insert(cache_key, (output.clone(), std::time::Instant::now()));
                         if guard.len() > 256 {
-                            guard.retain(|_, (_, inserted_at)| inserted_at.elapsed().as_secs() < ttl_secs);
+                            guard.retain(|_, (_, inserted_at)| {
+                                inserted_at.elapsed().as_secs() < ttl_secs
+                            });
                         }
                     }
                     if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
-                        let compacted: Vec<Message> = new_msgs.iter()
+                        let compacted: Vec<Message> = new_msgs
+                            .iter()
                             .filter_map(|v| serde_json::from_value(v.clone()).ok())
                             .collect();
                         if !compacted.is_empty() {
                             Self::record_hook(&self.metrics, "compact", ms, true);
-                            let summary = output.get("summary").and_then(|v| v.as_str())
-                                .unwrap_or("plugin compaction").to_string();
+                            let summary = output
+                                .get("summary")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("plugin compaction")
+                                .to_string();
                             let removed = messages.len().saturating_sub(compacted.len());
                             return Ok(CompactionResult {
                                 summary,
@@ -2577,17 +2935,32 @@ impl ContextEngine for ScriptableContextEngine {
                         }
                     }
                     Self::record_hook(&self.metrics, "compact", ms, false);
-                    return self.inner.compact(agent_id, messages, driver, model, context_window_tokens).await;
+                    return self
+                        .inner
+                        .compact(agent_id, messages, driver, model, context_window_tokens)
+                        .await;
                 }
                 Err(e) => {
                     Self::record_hook(&self.metrics, "compact", 0, false);
                     self.apply_failure_policy("compact", &e)?;
-                    return self.inner.compact(agent_id, messages, driver, model, context_window_tokens).await;
+                    return self
+                        .inner
+                        .compact(agent_id, messages, driver, model, context_window_tokens)
+                        .await;
                 }
             }
         }
 
-        match self.call_hook_dispatch("compact", script, input, self.hook_timeout_secs, Some(&agent_id)).await {
+        match self
+            .call_hook_dispatch(
+                "compact",
+                script,
+                input,
+                self.hook_timeout_secs,
+                Some(&agent_id),
+            )
+            .await
+        {
             Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let compacted: Vec<Message> = new_msgs
@@ -2613,9 +2986,7 @@ impl ContextEngine for ScriptableContextEngine {
                     }
                     warn!("Compact hook returned empty messages, falling back to default");
                 } else {
-                    warn!(
-                        "Compact hook returned no 'messages' field, falling back to default"
-                    );
+                    warn!("Compact hook returned no 'messages' field, falling back to default");
                 }
                 Self::record_hook(&self.metrics, "compact", ms, false);
                 self.inner
@@ -2668,11 +3039,14 @@ impl ContextEngine for ScriptableContextEngine {
         }
 
         let script = script.clone();
-        let runtime = self.runtime;
+        let runtime = self.runtime.clone();
         let timeout_secs = self.hook_timeout_secs;
         // Merge bootstrap env overrides into the env passed to the background task.
         let plugin_env = {
-            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self
+                .bootstrap_applied_overrides
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             let mut env = self.plugin_env.clone();
             for (k, v) in &guard.env_overrides {
                 if !env.iter().any(|(ek, _)| ek == k) {
@@ -2686,7 +3060,10 @@ impl ContextEngine for ScriptableContextEngine {
         let retry_delay_ms = self.retry_delay_ms;
         let max_memory_mb = self.max_memory_mb;
         let allow_network = {
-            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self
+                .bootstrap_applied_overrides
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             guard.allow_network.unwrap_or(self.allow_network)
         };
         let traces = std::sync::Arc::clone(&self.traces);
@@ -2698,9 +3075,10 @@ impl ContextEngine for ScriptableContextEngine {
         let plugin_name = self.plugin_name.clone();
         let agent_id_str = agent_id.0.to_string();
         // Compute agent-scoped state path for this after_turn call.
-        let shared_state_path = self.shared_state_path.as_deref().map(|p| {
-            agent_scoped_state_path(p, Some(agent_id_str.as_str()))
-        });
+        let shared_state_path = self
+            .shared_state_path
+            .as_deref()
+            .map(|p| agent_scoped_state_path(p, Some(agent_id_str.as_str())));
         let memory_substrate = std::sync::Arc::clone(&self.memory_substrate);
         let output_schema_strict = self.inner.config.output_schema_strict;
         let after_turn_correlation_id = generate_trace_id();
@@ -2785,7 +3163,26 @@ impl ContextEngine for ScriptableContextEngine {
                         }
                     }
                 } else {
-                    Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref(), trace_store.as_ref(), &plugin_name, &correlation_id_at, output_schema_strict).await
+                    Self::run_hook(
+                        "after_turn",
+                        &script,
+                        runtime,
+                        input,
+                        timeout_secs,
+                        &plugin_env,
+                        max_retries,
+                        retry_delay_ms,
+                        max_memory_mb,
+                        allow_network,
+                        &traces,
+                        &hook_schemas,
+                        shared_state_path.as_deref(),
+                        trace_store.as_ref(),
+                        &plugin_name,
+                        &correlation_id_at,
+                        output_schema_strict,
+                    )
+                    .await
                 };
                 let success = result.is_ok();
                 match result {
@@ -2793,7 +3190,13 @@ impl ContextEngine for ScriptableContextEngine {
                         Self::record_hook(&metrics, "after_turn", ms, true);
                         debug!("After-turn hook completed ({ms}ms)");
                         // Inspect hook output for memories, logs, and annotations.
-                        Self::process_after_turn_output(&output, &agent_id_str, Some(&memory_substrate), &plugin_name, event_bus_arc.as_ref());
+                        Self::process_after_turn_output(
+                            &output,
+                            &agent_id_str,
+                            Some(&memory_substrate),
+                            &plugin_name,
+                            event_bus_arc.as_ref(),
+                        );
                     }
                     Err(e) => {
                         Self::record_hook(&metrics, "after_turn", 0, false);
@@ -2806,19 +3209,26 @@ impl ContextEngine for ScriptableContextEngine {
                     let key = format!("{}:after_turn", agent_id_str);
                     let (failures, opened_at_rfc3339, just_reset) = {
                         let mut guard = cb_breakers.lock().unwrap();
-                        let state = guard.entry(key.clone()).or_insert_with(CircuitBreakerState::new);
+                        let state = guard
+                            .entry(key.clone())
+                            .or_insert_with(CircuitBreakerState::new);
                         if success {
                             state.record_success();
                             (0u32, None::<String>, true)
                         } else {
                             state.record_failure(cfg.max_failures);
                             if state.consecutive_failures == cfg.max_failures {
-                                warn!(hook = "after_turn", cooldown_secs = cfg.reset_secs, "Hook circuit breaker opened");
+                                warn!(
+                                    hook = "after_turn",
+                                    cooldown_secs = cfg.reset_secs,
+                                    "Hook circuit breaker opened"
+                                );
                             }
                             let opened_str = state.opened_at.map(|instant| {
                                 let elapsed = instant.elapsed();
-                                (chrono::Utc::now() - chrono::Duration::from_std(elapsed).unwrap_or_default())
-                                    .to_rfc3339()
+                                (chrono::Utc::now()
+                                    - chrono::Duration::from_std(elapsed).unwrap_or_default())
+                                .to_rfc3339()
                             });
                             (state.consecutive_failures, opened_str, false)
                         }
@@ -2827,7 +3237,11 @@ impl ContextEngine for ScriptableContextEngine {
                         if just_reset {
                             let _ = store.delete_circuit_state(&key);
                         } else {
-                            let _ = store.save_circuit_state(&key, failures, opened_at_rfc3339.as_deref());
+                            let _ = store.save_circuit_state(
+                                &key,
+                                failures,
+                                opened_at_rfc3339.as_deref(),
+                            );
                         }
                     }
                 }
@@ -2852,7 +3266,16 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match self.call_hook_dispatch("prepare_subagent", script, input, self.hook_timeout_secs, None).await {
+            match self
+                .call_hook_dispatch(
+                    "prepare_subagent",
+                    script,
+                    input,
+                    self.hook_timeout_secs,
+                    None,
+                )
+                .await
+            {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "prepare_subagent", ms, true);
                     debug!("Prepare-subagent hook completed ({ms}ms)");
@@ -2882,7 +3305,16 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match self.call_hook_dispatch("merge_subagent", script, input, self.hook_timeout_secs, None).await {
+            match self
+                .call_hook_dispatch(
+                    "merge_subagent",
+                    script,
+                    input,
+                    self.hook_timeout_secs,
+                    None,
+                )
+                .await
+            {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "merge_subagent", ms, true);
                     debug!("Merge-subagent hook completed ({ms}ms)");
@@ -3073,6 +3505,7 @@ pub fn load_plugin(
             .as_ref()
             .map(|p| resolve_and_sandbox(p))
             .transpose()?,
+        allowed_secrets: manifest.hooks.allowed_secrets.clone(),
     };
 
     debug!(
@@ -3159,7 +3592,11 @@ impl StackedContextEngine {
             "StackedContextEngine requires at least one engine"
         );
         let layer_weights = vec![1.0f32; engines.len()];
-        Self { engines, layer_weights, event_bus: bus }
+        Self {
+            engines,
+            layer_weights,
+            event_bus: bus,
+        }
     }
 
     /// Override the default per-layer weights (all `1.0`) with caller-supplied
@@ -3194,12 +3631,30 @@ impl StackedContextEngine {
                 if let Some(ref m) = metrics_opt {
                     [
                         ("ingest", m.ingest.failures > 0 && m.ingest.successes == 0),
-                        ("after_turn", m.after_turn.failures > 0 && m.after_turn.successes == 0),
-                        ("bootstrap", m.bootstrap.failures > 0 && m.bootstrap.successes == 0),
-                        ("assemble", m.assemble.failures > 0 && m.assemble.successes == 0),
-                        ("compact", m.compact.failures > 0 && m.compact.successes == 0),
-                        ("prepare_subagent", m.prepare_subagent.failures > 0 && m.prepare_subagent.successes == 0),
-                        ("merge_subagent", m.merge_subagent.failures > 0 && m.merge_subagent.successes == 0),
+                        (
+                            "after_turn",
+                            m.after_turn.failures > 0 && m.after_turn.successes == 0,
+                        ),
+                        (
+                            "bootstrap",
+                            m.bootstrap.failures > 0 && m.bootstrap.successes == 0,
+                        ),
+                        (
+                            "assemble",
+                            m.assemble.failures > 0 && m.assemble.successes == 0,
+                        ),
+                        (
+                            "compact",
+                            m.compact.failures > 0 && m.compact.successes == 0,
+                        ),
+                        (
+                            "prepare_subagent",
+                            m.prepare_subagent.failures > 0 && m.prepare_subagent.successes == 0,
+                        ),
+                        (
+                            "merge_subagent",
+                            m.merge_subagent.failures > 0 && m.merge_subagent.successes == 0,
+                        ),
                     ]
                     .into_iter()
                     .map(|(k, v)| (k.to_string(), v))
@@ -3239,7 +3694,11 @@ impl StackedContextEngine {
             .filter(|l| l.circuit_open.values().any(|&open| open))
             .count();
         let total_layers = layers.len();
-        StackHealth { layers, total_layers, layers_with_open_circuit }
+        StackHealth {
+            layers,
+            total_layers,
+            layers_with_open_circuit,
+        }
     }
 }
 
@@ -3264,27 +3723,36 @@ impl ContextEngine for StackedContextEngine {
         // Each engine is guarded by a 30-second timeout so a single slow or
         // hung engine cannot block the entire stack indefinitely.
         let timeout_dur = std::time::Duration::from_secs(30);
-        let futs = self.engines.iter().enumerate().map(|(i, engine)| async move {
-            match tokio::time::timeout(timeout_dur, engine.ingest(agent_id, user_message, peer_id)).await {
-                Ok(Ok(r)) => Some(r.recalled_memories),
-                Ok(Err(e)) => {
-                    warn!(
-                        engine_index = i,
-                        error = %e,
-                        "StackedContextEngine: ingest engine failed (skipping)"
-                    );
-                    None
+        let futs = self
+            .engines
+            .iter()
+            .enumerate()
+            .map(|(i, engine)| async move {
+                match tokio::time::timeout(
+                    timeout_dur,
+                    engine.ingest(agent_id, user_message, peer_id),
+                )
+                .await
+                {
+                    Ok(Ok(r)) => Some(r.recalled_memories),
+                    Ok(Err(e)) => {
+                        warn!(
+                            engine_index = i,
+                            error = %e,
+                            "StackedContextEngine: ingest engine failed (skipping)"
+                        );
+                        None
+                    }
+                    Err(_elapsed) => {
+                        warn!(
+                            engine_index = i,
+                            timeout_secs = 30,
+                            "StackedContextEngine: ingest engine timed out (skipping)"
+                        );
+                        None
+                    }
                 }
-                Err(_elapsed) => {
-                    warn!(
-                        engine_index = i,
-                        timeout_secs = 30,
-                        "StackedContextEngine: ingest engine timed out (skipping)"
-                    );
-                    None
-                }
-            }
-        });
+            });
 
         let default_weight = 1.0f32;
         let mut succeeded: usize = 0;
@@ -3293,7 +3761,11 @@ impl ContextEngine for StackedContextEngine {
         // Collect (weight, memories) pairs, preserving layer index so we can
         // sort by weight without losing provenance.
         let mut weighted_results: Vec<(f32, Vec<MemoryFragment>)> = Vec::new();
-        for (i, memories) in futures::future::join_all(futs).await.into_iter().enumerate() {
+        for (i, memories) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
             match memories {
                 Some(m) => {
                     succeeded += 1;
@@ -3308,16 +3780,13 @@ impl ContextEngine for StackedContextEngine {
         if failed > 0 {
             warn!(
                 succeeded,
-                failed,
-                "StackedContextEngine: ingest completed with some engine failures"
+                failed, "StackedContextEngine: ingest completed with some engine failures"
             );
         }
 
         // Sort layers by weight descending so higher-priority layers' memories
         // appear first in the merged result.
-        weighted_results.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        weighted_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         let all_memories: Vec<MemoryFragment> =
             weighted_results.into_iter().flat_map(|(_, m)| m).collect();
@@ -3438,27 +3907,32 @@ impl ContextEngine for StackedContextEngine {
         // Each engine is guarded by a 30-second timeout so a single slow or hung
         // engine cannot stall the entire stack.
         let timeout_dur = std::time::Duration::from_secs(30);
-        let futs = self.engines.iter().enumerate().map(|(i, engine)| async move {
-            match tokio::time::timeout(timeout_dur, engine.after_turn(agent_id, messages)).await {
-                Ok(Ok(())) => true,
-                Ok(Err(e)) => {
-                    warn!(
-                        engine_index = i,
-                        error = %e,
-                        "StackedContextEngine: after_turn engine failed"
-                    );
-                    false
+        let futs = self
+            .engines
+            .iter()
+            .enumerate()
+            .map(|(i, engine)| async move {
+                match tokio::time::timeout(timeout_dur, engine.after_turn(agent_id, messages)).await
+                {
+                    Ok(Ok(())) => true,
+                    Ok(Err(e)) => {
+                        warn!(
+                            engine_index = i,
+                            error = %e,
+                            "StackedContextEngine: after_turn engine failed"
+                        );
+                        false
+                    }
+                    Err(_elapsed) => {
+                        warn!(
+                            engine_index = i,
+                            timeout_secs = 30,
+                            "StackedContextEngine: after_turn engine timed out"
+                        );
+                        false
+                    }
                 }
-                Err(_elapsed) => {
-                    warn!(
-                        engine_index = i,
-                        timeout_secs = 30,
-                        "StackedContextEngine: after_turn engine timed out"
-                    );
-                    false
-                }
-            }
-        });
+            });
 
         let outcomes = futures::future::join_all(futs).await;
         let succeeded = outcomes.iter().filter(|&&ok| ok).count();
@@ -3466,8 +3940,7 @@ impl ContextEngine for StackedContextEngine {
         if failed > 0 {
             warn!(
                 succeeded,
-                failed,
-                "StackedContextEngine: after_turn completed with some engine failures"
+                failed, "StackedContextEngine: after_turn completed with some engine failures"
             );
         }
         Ok(())
@@ -3538,11 +4011,16 @@ impl ContextEngine for StackedContextEngine {
                 add_stats!(merge_subagent);
             }
         }
-        if any { Some(aggregate) } else { None }
+        if any {
+            Some(aggregate)
+        } else {
+            None
+        }
     }
 
     fn per_agent_metrics(&self) -> std::collections::HashMap<String, HookStats> {
-        let mut merged: std::collections::HashMap<String, HookStats> = std::collections::HashMap::new();
+        let mut merged: std::collections::HashMap<String, HookStats> =
+            std::collections::HashMap::new();
         for engine in &self.engines {
             for (agent_id, stats) in engine.per_agent_metrics() {
                 let entry = merged.entry(agent_id).or_default();
@@ -3556,6 +4034,38 @@ impl ContextEngine for StackedContextEngine {
     }
 }
 
+/// Resolve `allowed_secrets` from a hooks config into `LIBREFANG_SECRET_<NAME>`
+/// environment variable pairs, using the provided vault lookup function.
+///
+/// Secret names are uppercased when forming the env var name. Secrets that are
+/// not found in the vault are skipped with a `warn!` log — no error is raised.
+/// Secret values are never logged.
+fn resolve_vault_env_vars(
+    hooks: &librefang_types::config::ContextEngineHooks,
+    vault_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    let mut vault_env = Vec::with_capacity(hooks.allowed_secrets.len());
+    for secret_name in &hooks.allowed_secrets {
+        debug!(
+            secret = secret_name.as_str(),
+            "Resolving vault secret for hook"
+        );
+        match vault_lookup(secret_name) {
+            Some(value) => {
+                let env_key = format!("LIBREFANG_SECRET_{}", secret_name.to_uppercase());
+                vault_env.push((env_key, value));
+            }
+            None => {
+                warn!(
+                    secret = secret_name.as_str(),
+                    "Secret listed in allowed_secrets not found in vault — skipping"
+                );
+            }
+        }
+    }
+    vault_env
+}
+
 /// Build a context engine from config.
 ///
 /// Resolution order:
@@ -3563,11 +4073,16 @@ impl ContextEngine for StackedContextEngine {
 /// 2. If `plugin` is set, load plugin manifest and use its hooks
 /// 3. If manual `hooks` are set, use them directly
 /// 4. Otherwise, return a plain `DefaultContextEngine`
+///
+/// The `vault_lookup` callback is called for each secret name listed in
+/// `hooks.allowed_secrets`. Return `Some(value)` for known secrets, `None`
+/// for secrets that don't exist. Passing `&|_| None` disables vault injection.
 pub fn build_context_engine(
     toml_config: &librefang_types::config::ContextEngineTomlConfig,
     runtime_config: ContextEngineConfig,
     memory: Arc<MemorySubstrate>,
     embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
+    vault_lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Box<dyn ContextEngine> {
     // Warn if an unknown engine name is configured
     if toml_config.engine != "default" {
@@ -3590,8 +4105,7 @@ pub fn build_context_engine(
             for plugin_name in stack {
                 let eng_memory = memory.clone();
                 let eng_emb = embedding_driver.clone();
-                let inner =
-                    DefaultContextEngine::new(runtime_config.clone(), eng_memory, eng_emb);
+                let inner = DefaultContextEngine::new(runtime_config.clone(), eng_memory, eng_emb);
                 match load_plugin(plugin_name) {
                     Ok((manifest, hooks)) => {
                         if hooks.ingest.is_some()
@@ -3602,12 +4116,15 @@ pub fn build_context_engine(
                             || hooks.prepare_subagent.is_some()
                             || hooks.merge_subagent.is_some()
                         {
-                            let env: Vec<(String, String)> =
-                                manifest.env.into_iter().collect();
+                            let config_schema = manifest.config.clone();
+                            let mut env: Vec<(String, String)> = manifest.env.into_iter().collect();
+                            let vault_env = resolve_vault_env_vars(&hooks, vault_lookup);
+                            env.extend(vault_env);
                             engines.push(Box::new(
                                 ScriptableContextEngine::new(inner, &hooks)
                                     .with_plugin_name(plugin_name)
                                     .with_plugin_env(env)
+                                    .with_plugin_config(config_schema)
                                     // Wire the shared bus: this engine will emit events to it
                                     // AND subscribe its on_event hook to receive events from
                                     // all other plugins in the stack.
@@ -3646,11 +4163,15 @@ pub fn build_context_engine(
         match load_plugin(plugin_name) {
             Ok((manifest, hooks)) => {
                 if hooks.ingest.is_some() || hooks.after_turn.is_some() {
-                    let env: Vec<(String, String)> = manifest.env.into_iter().collect();
+                    let config_schema = manifest.config.clone();
+                    let mut env: Vec<(String, String)> = manifest.env.into_iter().collect();
+                    let vault_env = resolve_vault_env_vars(&hooks, vault_lookup);
+                    env.extend(vault_env);
                     return Box::new(
                         ScriptableContextEngine::new(default, &hooks)
                             .with_plugin_name(plugin_name)
-                            .with_plugin_env(env),
+                            .with_plugin_env(env)
+                            .with_plugin_config(config_schema),
                     );
                 }
                 warn!(
@@ -3672,7 +4193,12 @@ pub fn build_context_engine(
 
     // Manual hooks
     if toml_config.hooks.ingest.is_some() || toml_config.hooks.after_turn.is_some() {
-        Box::new(ScriptableContextEngine::new(default, &toml_config.hooks))
+        let vault_env = resolve_vault_env_vars(&toml_config.hooks, vault_lookup);
+        let mut engine = ScriptableContextEngine::new(default, &toml_config.hooks);
+        if !vault_env.is_empty() {
+            engine = engine.with_plugin_env(vault_env);
+        }
+        Box::new(engine)
     } else {
         Box::new(default)
     }
@@ -3835,11 +4361,9 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
         )
         .unwrap();
 
-        let traces = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::VecDeque::new(),
-        ));
+        let traces = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let hook_schemas = std::collections::HashMap::new();
-        let output = ScriptableContextEngine::run_hook(
+        let (output, _duration_ms) = ScriptableContextEngine::run_hook(
             "ingest",
             script_path.to_str().unwrap(),
             crate::plugin_runtime::PluginRuntime::Python,
@@ -3859,6 +4383,8 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
             None,
             None,
             "",
+            "",
+            false,
         )
         .await
         .unwrap();
@@ -3936,7 +4462,8 @@ ingest = "hooks/ingest.py"
     fn test_build_context_engine_default() {
         let toml_config = librefang_types::config::ContextEngineTomlConfig::default();
         let runtime_config = ContextEngineConfig::default();
-        let engine = build_context_engine(&toml_config, runtime_config, make_memory(), None);
+        let engine =
+            build_context_engine(&toml_config, runtime_config, make_memory(), None, &|_| None);
         // Should not panic — returns DefaultContextEngine
         let _ = engine;
     }
@@ -3949,7 +4476,8 @@ ingest = "hooks/ingest.py"
         };
         let runtime_config = ContextEngineConfig::default();
         // Should fall back to default engine, not panic
-        let engine = build_context_engine(&toml_config, runtime_config, make_memory(), None);
+        let engine =
+            build_context_engine(&toml_config, runtime_config, make_memory(), None, &|_| None);
         let _ = engine;
     }
 }

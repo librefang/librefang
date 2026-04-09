@@ -56,14 +56,18 @@ pub async fn sync_catalog_to(
         tokio::task::spawn_blocking({
             let repo_dir = repo_dir.clone();
             move || {
-                std::process::Command::new("git")
-                    .args(["pull", "--ff-only", "-q"])
+                let mut cmd = std::process::Command::new("git");
+                cmd.args(["pull", "--ff-only", "-q"])
                     .current_dir(&repo_dir)
                     .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
+                    .stderr(std::process::Stdio::null());
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+                }
+                cmd.status().map(|s| s.success()).unwrap_or(false)
             }
         })
         .await
@@ -74,14 +78,18 @@ pub async fn sync_catalog_to(
             let repo_dir = repo_dir.clone();
             let repo_url = repo_url.clone();
             move || {
-                std::process::Command::new("git")
-                    .args(["clone", "--depth", "1", "-q", &repo_url])
+                let mut cmd = std::process::Command::new("git");
+                cmd.args(["clone", "--depth", "1", "-q", &repo_url])
                     .arg(&repo_dir)
                     .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
+                    .stderr(std::process::Stdio::null());
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+                }
+                cmd.status().map(|s| s.success()).unwrap_or(false)
             }
         })
         .await
