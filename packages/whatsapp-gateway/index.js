@@ -244,6 +244,61 @@ let cachedAgentId = null;
 let ownJid = null;
 
 // ---------------------------------------------------------------------------
+// Message store for Baileys retry mechanism
+// ---------------------------------------------------------------------------
+// Baileys needs getMessage() to re-decrypt messages on retry.  We keep a
+// bounded in-memory store of recently received raw messages.
+const MESSAGE_STORE_MAX = 500;
+const MESSAGE_STORE_TTL_MS = 10 * 60 * 1000; // 10 min
+const messageStore = new Map(); // key: msgId → { message, ts }
+
+function messageStoreSet(msgId, message) {
+  if (!msgId || !message) return;
+  messageStore.set(msgId, { message, ts: Date.now() });
+  // Evict oldest entries if over limit
+  if (messageStore.size > MESSAGE_STORE_MAX) {
+    const oldest = messageStore.keys().next().value;
+    messageStore.delete(oldest);
+  }
+}
+
+function messageStoreGet(msgId) {
+  const entry = messageStore.get(msgId);
+  if (!entry) return undefined;
+  if (Date.now() - entry.ts > MESSAGE_STORE_TTL_MS) {
+    messageStore.delete(msgId);
+    return undefined;
+  }
+  return entry.message;
+}
+
+// ---------------------------------------------------------------------------
+// Decryption retry tracking & fallback notification
+// ---------------------------------------------------------------------------
+const DECRYPT_RETRY_MAX = 3;
+const DECRYPT_RETRY_EXPIRE_MS = 5 * 60 * 1000; // 5 min
+const decryptRetryMap = new Map(); // key: "jid:msgId" → { count, expireTimer, firstSeen }
+
+function getDecryptRetryKey(jid, msgId) { return `${jid}:${msgId}`; }
+
+function cleanupDecryptRetry(key) {
+  const entry = decryptRetryMap.get(key);
+  if (entry?.expireTimer) clearTimeout(entry.expireTimer);
+  decryptRetryMap.delete(key);
+}
+
+// Single periodic cleanup for both stores
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of messageStore) {
+    if (now - entry.ts > MESSAGE_STORE_TTL_MS) messageStore.delete(id);
+  }
+  for (const [key, entry] of decryptRetryMap) {
+    if (now - entry.firstSeen > DECRYPT_RETRY_EXPIRE_MS) cleanupDecryptRetry(key);
+  }
+}, 60_000).unref();
+
+// ---------------------------------------------------------------------------
 // Markdown → WhatsApp formatting conversion
 // ---------------------------------------------------------------------------
 // LLM responses use standard Markdown but WhatsApp has its own formatting
@@ -471,7 +526,7 @@ function buildStrangerContext(pushName, phone, strangerJid) {
   return [
     '[WHATSAPP_STRANGER_CONTEXT]',
     `Incoming WhatsApp message from: ${pushName} (${phone})`,
-    'This person is NOT the owner. They are an external contact.',
+    `This person is NOT the owner. They are an external contact.`,
     `Active conversation: ${messageCount} messages, started ${firstMessageAt}`,
     '',
     'Available routing tags:',
@@ -677,8 +732,11 @@ async function startConnection() {
     version,
     auth: state,
     logger,
-    // printQRInTerminal removed (deprecated in Baileys v6+)
     browser: ['LibreFang', 'Desktop', '1.0.0'],
+    // getMessage enables Baileys' built-in retry mechanism for decryption failures.
+    // When a message cannot be decrypted, Baileys sends a retry receipt to the sender
+    // and needs getMessage() to return the raw message for re-decryption.
+    getMessage: async (key) => messageStoreGet(key.id),
   });
 
   // Save credentials whenever they update
@@ -775,6 +833,17 @@ async function startConnection() {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
+      // Store raw message for Baileys retry mechanism and resolve successful retries
+      if (msg.key?.id && msg.message) {
+        messageStoreSet(msg.key.id, msg.message);
+        const retryKey = getDecryptRetryKey(msg.key.remoteJid || '', msg.key.id);
+        if (decryptRetryMap.has(retryKey)) {
+          console.log(`[gateway][retry] Decryption retry succeeded for ${msg.key.id}`);
+          cleanupDecryptRetry(retryKey);
+          try { stmtMarkProcessed.run(1, msg.key.id); } catch (_) { /* best-effort */ }
+        }
+      }
+
       // Skip status broadcasts
       if (msg.key.remoteJid === 'status@broadcast') continue;
 
@@ -1031,7 +1100,18 @@ async function startConnection() {
         let streamMsgKey = null; // key of the initial WhatsApp message we'll edit
         const onProgress = async (partialText) => {
           if (!sock) return;
-          const formatted = markdownToWhatsApp(partialText);
+          // Strip internal tags before sending partial text to WhatsApp.
+          // Bail early if no brackets — most chunks won't contain tags.
+          let cleaned = partialText;
+          if (cleaned.includes('[NOTIFY_OWNER]') || cleaned.includes('[RELAY_TO_STRANGER]') || cleaned.includes('[no reply needed]')) {
+            cleaned = cleaned
+              .replace(NOTIFY_OWNER_RE, '')
+              .replace(RELAY_RE, '')
+              .replace(/\[no reply needed\]/gi, '');
+          }
+          cleaned = cleaned.trim();
+          if (!cleaned) return;
+          const formatted = markdownToWhatsApp(cleaned);
           if (!streamMsgKey) {
             const sent = await sock.sendMessage(sender, { text: formatted });
             streamMsgKey = sent?.key;
@@ -1041,7 +1121,7 @@ async function startConnection() {
         };
 
         const rawResponse = await forwardToLibreFangStreaming(
-          messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress,
+          messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress, sender, { isGroup, wasMentioned },
         );
         const response = markdownToWhatsApp(rawResponse);
 
@@ -1149,29 +1229,72 @@ async function startConnection() {
   // -------------------------------------------------------------------------
   sock.ev.on('messages.update', (updates) => {
     for (const update of updates) {
-      // Baileys emits update.message with error info for decryption failures
       const key = update.key;
       const updateData = update.update || {};
 
-      // Check for message retry / decryption error signals
-      if (updateData.messageStubType || updateData.status === 'ERROR' || updateData.status === 5) {
+      // stub 39 = CIPHERTEXT in Baileys' numeric enum (failed to decrypt)
+      const stub = updateData.messageStubType;
+      const isDecryptionError = stub === 39
+        || updateData.status === 'ERROR' || updateData.status === 5;
+
+      if (isDecryptionError) {
         const jid = key?.remoteJid || 'unknown';
         const msgId = key?.id || 'unknown';
-        console.warn(`[gateway][session-error] Possible decryption failure detected — jid: ${jid}, msgId: ${msgId}, stub: ${updateData.messageStubType || 'none'}, status: ${updateData.status || 'none'}`);
+        const retryKey = getDecryptRetryKey(jid, msgId);
 
-        // Save a placeholder in DB so the catch-up sweep can attempt recovery
-        dbSaveMessage({
-          id: msgId,
-          jid,
-          senderJid: key?.participant || null,
-          pushName: null,
-          phone: null,
-          text: '[DECRYPTION_FAILED — message could not be read]',
-          direction: 'inbound',
-          timestamp: Date.now(),
-          processed: 0,
-          rawType: 'decryption_error',
-        });
+        let entry = decryptRetryMap.get(retryKey);
+        if (!entry) {
+          entry = { count: 0, expireTimer: null, firstSeen: Date.now() };
+          decryptRetryMap.set(retryKey, entry);
+
+          // Save placeholder in DB on first occurrence
+          dbSaveMessage({
+            id: msgId,
+            jid,
+            senderJid: key?.participant || null,
+            pushName: null,
+            phone: null,
+            text: '[DECRYPTION_FAILED — message could not be read]',
+            direction: 'inbound',
+            timestamp: Date.now(),
+            processed: 0,
+            rawType: 'decryption_error',
+          });
+        }
+
+        entry.count += 1;
+        console.warn(`[gateway][decrypt-retry] Decryption failure #${entry.count}/${DECRYPT_RETRY_MAX} — jid: ${jid}, msgId: ${msgId}, stub: ${stub || 'none'}`);
+
+        if (entry.count >= DECRYPT_RETRY_MAX) {
+          console.error(`[gateway][decrypt-retry] All ${DECRYPT_RETRY_MAX} retries exhausted for ${msgId} from ${jid}`);
+          dbIncrRetryOrFail(msgId, DECRYPT_RETRY_MAX);
+
+          const contactName = jid.replace(/@.*/, '');
+          const timestamp = new Date().toISOString();
+          const notifyText = [
+            `⚠️ Unreadable message from ${contactName}`,
+            `Time: ${timestamp}`,
+            `ID: ${msgId}`,
+            ``,
+            `Message could not be decrypted after ${DECRYPT_RETRY_MAX} attempts.`,
+            `Hint: ask the contact to resend the message.`,
+          ].join('\n');
+
+          forwardToLibreFang(
+            notifyText,
+            '[SYSTEM:decryption_failure]',
+            contactName,
+            'System',
+            true,
+            [],
+          ).catch(err => console.error(`[gateway][decrypt-retry] Failed to send fallback notification:`, err.message));
+
+          cleanupDecryptRetry(retryKey);
+        } else {
+          // Reset expire timer — clean up if no further updates arrive
+          if (entry.expireTimer) clearTimeout(entry.expireTimer);
+          entry.expireTimer = setTimeout(() => cleanupDecryptRetry(retryKey), DECRYPT_RETRY_EXPIRE_MS);
+        }
       }
     }
   });
@@ -1461,7 +1584,7 @@ function buildRelaySystemInstruction() {
 // ---------------------------------------------------------------------------
 const MAX_FORWARD_RETRIES = 1;
 
-async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false } = {}, retryCount = 0) {
+async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false, chatJid = '' } = {}, retryCount = 0) {
   // Resolve agent UUID if not cached (or if invalidated on reconnect)
   if (!cachedAgentId) {
     try {
@@ -1474,9 +1597,12 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
 
   const fullMessage = systemPrefix ? systemPrefix + text : text;
 
+  // Per-conversation session isolation: include chat JID in channel_type
+  // so the kernel creates separate sessions for each WhatsApp conversation.
+  const channelType = chatJid ? `whatsapp:${chatJid}` : 'whatsapp';
   const payload = {
     message: fullMessage,
-    channel_type: 'whatsapp',
+    channel_type: channelType,
     sender_id: phone,
     sender_name: pushName,
     is_group: isGroup,
@@ -1515,7 +1641,7 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
               console.log('[gateway] Agent UUID stale (404), re-resolving...');
               cachedAgentId = null;
               resolveAgentId()
-                .then(() => forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned }, retryCount + 1))
+                .then(() => forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid }, retryCount + 1))
                 .then(resolve)
                 .catch(reject);
               return;
@@ -1586,7 +1712,7 @@ const STREAMING_EDIT_INTERVAL_MS = 2000;
  * @param {(text: string) => Promise<void>} onProgress
  * @returns {Promise<string>} complete response
  */
-async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress) {
+async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress, chatJid = '', { isGroup = false, wasMentioned = false } = {}) {
   // Resolve agent UUID if not cached
   if (!cachedAgentId) {
     try {
@@ -1599,9 +1725,10 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
 
   const fullMessage = systemPrefix ? systemPrefix + text : text;
 
+  const channelType = chatJid ? `whatsapp:${chatJid}` : 'whatsapp';
   const payload = {
     message: fullMessage,
-    channel_type: 'whatsapp',
+    channel_type: channelType,
     sender_id: phone,
     sender_name: pushName,
   };
@@ -1636,7 +1763,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
           res.on('data', (chunk) => (body += chunk));
           res.on('end', () => {
             console.warn(`[gateway] SSE endpoint returned ${res.statusCode}, falling back to non-streaming`);
-            forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments)
+            forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid })
               .then(resolve)
               .catch(reject);
           });
@@ -1670,6 +1797,9 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
               try {
                 const parsed = JSON.parse(dataStr);
                 if (parsed.phase === 'long_running' && onProgress) {
+                  // Don't send phase updates if accumulated text is NO_REPLY
+                  const accTrim = accumulated.trim();
+                  if (/(?:^|\n)\s*NO_REPLY\s*$/.test(accTrim) || accTrim === 'NO_REPLY') continue;
                   const status = parsed.detail || 'Still working...';
                   const display = accumulated ? accumulated + '\n\n[' + status + ']' : '[' + status + ']';
                   onProgress(display).catch(() => {});
@@ -1717,7 +1847,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
         res.on('error', (err) => {
           clearTimeout(pendingEdit);
           console.warn(`[gateway] SSE stream error: ${err.message}, falling back`);
-          forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments)
+          forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid })
             .then(resolve)
             .catch(reject);
         });
@@ -1726,7 +1856,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
 
     req.on('error', (err) => {
       console.warn(`[gateway] SSE request error: ${err.message}, falling back`);
-      forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments)
+      forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid })
         .then(resolve)
         .catch(reject);
     });
@@ -1770,10 +1900,19 @@ async function runCatchUpSweep() {
       const senderPnJid = msg.phone ? msg.phone.replace(/^\+/, '') + '@s.whatsapp.net' : '';
       const isOwner = OWNER_JIDS.size > 0 && (OWNER_JIDS.has(msg.jid) || (senderPnJid && OWNER_JIDS.has(senderPnJid)));
 
-      // Simple re-forward: send the stored text to the agent without full context rebuild
+      // Never re-forward group messages — we cannot tell if the bot was
+      // mentioned, so replaying them violates group_policy and can leak
+      // internal text (rate-limit errors, recovery prefixes) into groups.
       const isCatchupGroup = msg.jid && msg.jid.endsWith('@g.us');
+      if (isCatchupGroup) {
+        dbMarkProcessed(msg.id, 1);
+        console.log(`[gateway][catchup] Skipping group message ${msg.id} (${msg.jid}) — group catchup disabled`);
+        continue;
+      }
+
+      // Simple re-forward: send the stored text to the agent without full context rebuild
       const prefix = isOwner ? '' : `[CATCHUP_REDELIVERY from ${msg.push_name || msg.phone || msg.jid}]\n`;
-      const response = await forwardToLibreFang(prefix + (msg.text || ''), '', msg.phone || '', msg.push_name || '', isOwner, [], { isGroup: isCatchupGroup, wasMentioned: false });
+      const response = await forwardToLibreFang(prefix + (msg.text || ''), '', msg.phone || '', msg.push_name || '', isOwner, [], { isGroup: false, wasMentioned: false, chatJid: msg.jid || '' });
 
       // Mark as processed
       dbMarkProcessed(msg.id, 1);
@@ -1893,57 +2032,6 @@ async function sendImage(to, imageUrl, caption) {
     timestamp: Date.now(),
     processed: 1,
     rawType: 'image',
-  });
-}
-
-async function sendAudio(to, audioUrl, ptt = true) {
-  if (!sock || connStatus !== 'connected') {
-    throw new Error('WhatsApp not connected');
-  }
-
-  // Preserve group JIDs (@g.us) as-is; normalize phone → JID for individuals
-  const jid = to.includes('@g.us') ? to
-    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
-
-  // Fetch audio into buffer (Baileys needs buffer or local file)
-  const buffer = await new Promise((resolve, reject) => {
-    const MAX_REDIRECTS = 5;
-    const request = (url, redirectCount = 0) => {
-      if (redirectCount > MAX_REDIRECTS) {
-        return reject(new Error(`Too many redirects (max ${MAX_REDIRECTS})`));
-      }
-      const mod = url.startsWith('https') ? require('node:https') : require('node:http');
-      mod.get(url, (resp) => {
-        if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
-          return request(resp.headers.location, redirectCount + 1);
-        }
-        if (resp.statusCode !== 200) {
-          return reject(new Error(`Failed to fetch audio: HTTP ${resp.statusCode}`));
-        }
-        const chunks = [];
-        resp.on('data', (c) => chunks.push(c));
-        resp.on('end', () => resolve(Buffer.concat(chunks)));
-        resp.on('error', reject);
-      }).on('error', reject);
-    };
-    request(audioUrl);
-  });
-
-  // ptt: true sends as a voice note (push-to-talk bubble); false sends as audio file
-  const audioMsg = { audio: buffer, mimetype: 'audio/ogg; codecs=opus', ptt };
-
-  const sent = await sock.sendMessage(jid, audioMsg);
-  dbSaveMessage({
-    id: sent?.key?.id || randomUUID(),
-    jid,
-    senderJid: ownJid || null,
-    pushName: null,
-    phone: to,
-    text: ptt ? '[Voice message]' : '[Audio]',
-    direction: 'outbound',
-    timestamp: Date.now(),
-    processed: 1,
-    rawType: 'audio',
   });
 }
 
@@ -2075,20 +2163,6 @@ const server = http.createServer(async (req, res) => {
 
       await sendImage(to, image_url, caption || '');
       return jsonResponse(req, res, 200, { success: true, message: 'Image sent' });
-    }
-
-    // POST /message/send-audio — send audio file or voice note via URL
-    if (req.method === 'POST' && path === '/message/send-audio') {
-      const body = await parseBody(req);
-      const { to, audio_url, ptt } = body;
-
-      if (!to || !audio_url) {
-        return jsonResponse(req, res, 400, { error: 'Missing "to" or "audio_url" field' });
-      }
-
-      // ptt (push-to-talk) defaults to true — sends as voice note bubble
-      await sendAudio(to, audio_url, ptt !== false);
-      return jsonResponse(req, res, 200, { success: true, message: 'Audio sent' });
     }
 
     // GET /conversations — list active stranger conversations (Step B)
