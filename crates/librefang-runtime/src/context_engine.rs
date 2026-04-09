@@ -864,6 +864,12 @@ pub struct ScriptableContextEngine {
     /// Optional shared event bus. When set, events emitted by this plugin's
     /// hooks are published to all subscribers.
     event_bus: Option<std::sync::Arc<PluginEventBus>>,
+    /// Config schema declared in `[config]` of plugin.toml.
+    ///
+    /// Used to build the resolved config JSON file passed to hook subprocesses
+    /// via `LIBREFANG_PLUGIN_CONFIG`.
+    plugin_config_schema:
+        std::collections::HashMap<String, librefang_types::config::PluginConfigField>,
 }
 
 impl ScriptableContextEngine {
@@ -994,6 +1000,7 @@ impl ScriptableContextEngine {
             )),
             on_event_script: hooks.on_event.clone(),
             event_bus: None,
+            plugin_config_schema: std::collections::HashMap::new(), // populated via with_plugin_config()
         }
     }
 
@@ -1060,6 +1067,58 @@ impl ScriptableContextEngine {
     pub fn with_plugin_env(mut self, env: Vec<(String, String)>) -> Self {
         self.plugin_env = env;
         self
+    }
+
+    /// Set the config schema declared in `[config]` of plugin.toml.
+    ///
+    /// Before each hook invocation the resolved config (defaults only for now)
+    /// is written to a temporary JSON file and the path is exposed to the
+    /// subprocess as `LIBREFANG_PLUGIN_CONFIG`.
+    pub fn with_plugin_config(
+        mut self,
+        schema: std::collections::HashMap<String, librefang_types::config::PluginConfigField>,
+    ) -> Self {
+        self.plugin_config_schema = schema;
+        self
+    }
+
+    /// Write the resolved plugin config (defaults merged with user overrides) to a
+    /// temporary JSON file.
+    ///
+    /// Returns the file path, or `None` if the schema is empty.
+    ///
+    /// The file is written to the system temp directory as
+    /// `librefang-plugin-config-<plugin_name>.json` and is overwritten on each
+    /// hook invocation (no temp dir cleanup needed — the OS handles it).
+    fn write_plugin_config_file(
+        plugin_name: &str,
+        config_schema: &std::collections::HashMap<
+            String,
+            librefang_types::config::PluginConfigField,
+        >,
+        user_overrides: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Option<std::path::PathBuf> {
+        if config_schema.is_empty() {
+            return None;
+        }
+        let mut resolved: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        // Start with defaults from the schema.
+        for (key, field) in config_schema {
+            if let Some(ref default_val) = field.default {
+                resolved.insert(key.clone(), default_val.clone());
+            }
+        }
+        // Apply user overrides (only for keys declared in the schema).
+        for (key, val) in user_overrides {
+            if config_schema.contains_key(key.as_str()) {
+                resolved.insert(key.clone(), val.clone());
+            }
+        }
+        let json = serde_json::to_string_pretty(&resolved).ok()?;
+        let path = std::env::temp_dir().join(format!("librefang-plugin-config-{plugin_name}.json"));
+        std::fs::write(&path, json).ok()?;
+        Some(path)
     }
 
     /// Attach a shared event bus to this engine.
@@ -1420,6 +1479,7 @@ impl ScriptableContextEngine {
             if let Some(ref script) = script_opt {
                 let resolved = Self::resolve_script_path(script);
                 if std::path::Path::new(&resolved).exists() {
+                    let runtime = runtime.clone();
                     match self
                         .process_pool
                         .prewarm(&resolved, runtime.clone(), &self.plugin_env)
@@ -1950,7 +2010,7 @@ impl ScriptableContextEngine {
         agent_id: Option<&str>,
     ) -> Result<(serde_json::Value, u64), String> {
         // Compute effective env and network permission, merging bootstrap overrides.
-        let (effective_env, effective_allow_network) = {
+        let (mut effective_env, effective_allow_network) = {
             let guard = self
                 .bootstrap_applied_overrides
                 .lock()
@@ -1964,6 +2024,20 @@ impl ScriptableContextEngine {
             let allow_net = guard.allow_network.unwrap_or(self.allow_network);
             (env, allow_net)
         };
+
+        // Write the resolved plugin config JSON file and expose its path via
+        // LIBREFANG_PLUGIN_CONFIG so hook scripts can read typed settings.
+        let empty_overrides = std::collections::HashMap::new();
+        if let Some(config_path) = Self::write_plugin_config_file(
+            &self.plugin_name,
+            &self.plugin_config_schema,
+            &empty_overrides,
+        ) {
+            effective_env.push((
+                "LIBREFANG_PLUGIN_CONFIG".to_string(),
+                config_path.to_string_lossy().into_owned(),
+            ));
+        }
 
         // Scope state file to this agent when agent_id is known.
         let effective_state_path = self
@@ -4042,6 +4116,7 @@ pub fn build_context_engine(
                             || hooks.prepare_subagent.is_some()
                             || hooks.merge_subagent.is_some()
                         {
+                            let config_schema = manifest.config.clone();
                             let mut env: Vec<(String, String)> = manifest.env.into_iter().collect();
                             let vault_env = resolve_vault_env_vars(&hooks, vault_lookup);
                             env.extend(vault_env);
@@ -4049,6 +4124,7 @@ pub fn build_context_engine(
                                 ScriptableContextEngine::new(inner, &hooks)
                                     .with_plugin_name(plugin_name)
                                     .with_plugin_env(env)
+                                    .with_plugin_config(config_schema)
                                     // Wire the shared bus: this engine will emit events to it
                                     // AND subscribe its on_event hook to receive events from
                                     // all other plugins in the stack.
@@ -4087,13 +4163,15 @@ pub fn build_context_engine(
         match load_plugin(plugin_name) {
             Ok((manifest, hooks)) => {
                 if hooks.ingest.is_some() || hooks.after_turn.is_some() {
+                    let config_schema = manifest.config.clone();
                     let mut env: Vec<(String, String)> = manifest.env.into_iter().collect();
                     let vault_env = resolve_vault_env_vars(&hooks, vault_lookup);
                     env.extend(vault_env);
                     return Box::new(
                         ScriptableContextEngine::new(default, &hooks)
                             .with_plugin_name(plugin_name)
-                            .with_plugin_env(env),
+                            .with_plugin_env(env)
+                            .with_plugin_config(config_schema),
                     );
                 }
                 warn!(
