@@ -1559,8 +1559,9 @@ pub async fn get_hand(
                 })),
             )
         }
-        None => ApiErrorResponse::not_found(format!("Hand not found: {hand_id}")).into_json_tuple(),
-    }.into_response()
+        None => ApiErrorResponse::not_found("Hand not found").into_json_tuple(),
+    }
+    .into_response()
 }
 
 /// POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a hand.
@@ -1622,7 +1623,7 @@ pub async fn check_hand_deps(
                 })),
             )
         }
-        None => ApiErrorResponse::not_found(format!("Hand not found: {hand_id}")).into_json_tuple(),
+        None => ApiErrorResponse::not_found("Hand not found").into_json_tuple(),
     }
     .into_response()
 }
@@ -1955,7 +1956,13 @@ pub async fn activate_hand(
         Ok(instance) => {
             if let Err(e) = bind_hand_instance_to_account(&state, &instance, &account) {
                 let _ = state.kernel.deactivate_hand(instance.instance_id);
-                return ApiErrorResponse::internal(e).into_json_tuple().into_response();
+                tracing::warn!(
+                    "Failed to bind hand instance {} to account: {e}",
+                    instance.instance_id
+                );
+                return ApiErrorResponse::internal("Failed to activate hand")
+                    .into_json_tuple()
+                    .into_response();
             }
             // If the hand agent has a non-reactive schedule (autonomous hands),
             // start its background loop so it begins running immediately.
@@ -1991,8 +1998,12 @@ pub async fn activate_hand(
                 })),
             )
         }
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
-    }.into_response()
+        Err(e) => {
+            tracing::warn!("activate_hand failed for {hand_id}: {e}");
+            ApiErrorResponse::bad_request("Failed to activate hand").into_json_tuple()
+        }
+    }
+    .into_response()
 }
 
 /// POST /api/hands/instances/{id}/pause — Pause a hand instance.
@@ -2641,7 +2652,7 @@ pub async fn hand_send_message(
         }
         Err(e) => {
             tracing::warn!("hand_send_message failed for instance {id}: {e}");
-            ApiErrorResponse::internal(format!("Message delivery failed: {e}")).into_json_tuple()
+            ApiErrorResponse::internal("Message delivery failed").into_json_tuple()
         }
     }
     .into_response()
@@ -2754,9 +2765,14 @@ pub async fn hand_get_session(
         }
         Ok(None) => (StatusCode::OK, Json(serde_json::json!({ "messages": [] }))),
         Err(e) => {
-            ApiErrorResponse::internal(format!("Failed to load session: {e}")).into_json_tuple()
+            tracing::warn!("hand_get_session failed for instance {id}: {e}");
+            hand_get_session_error_response()
         }
     }
+}
+
+fn hand_get_session_error_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to load session").into_json_tuple()
 }
 
 /// GET /api/hands/instances/:id/status — Combined hand + agent status.
@@ -4014,7 +4030,8 @@ pub async fn remove_integration(
     };
 
     if let Some(e) = uninstall_err {
-        return ApiErrorResponse::not_found(e.to_string())
+        tracing::warn!("remove_integration failed for {id}: {e}");
+        return ApiErrorResponse::not_found("Integration not found")
             .into_json_tuple()
             .into_response();
     }
@@ -4453,4 +4470,184 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routes::AppState;
+    use axum::{extract::State, Json};
+    use librefang_types::{agent::AgentManifest, config::KernelConfig};
+    use std::{collections::HashMap, sync::Arc};
+
+    fn test_app_state() -> (tempfile::TempDir, Arc<AppState>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let config = KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            admin_accounts: vec!["tenant-a".to_string()],
+            ..Default::default()
+        };
+        let kernel =
+            Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"));
+        let state = Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+        (tmp, state)
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&body).expect("json")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hand_send_message_sanitizes_internal_errors() {
+        let (_tmp, state) = test_app_state();
+        let agent_id = state
+            .kernel
+            .spawn_agent_owned(
+                AgentManifest {
+                    name: "hand-agent".to_string(),
+                    ..Default::default()
+                },
+                "tenant-a",
+            )
+            .expect("spawn agent");
+        let instance = state
+            .kernel
+            .hands()
+            .activate("lead", HashMap::new())
+            .expect("activate hand");
+        state
+            .kernel
+            .hands()
+            .set_agent(instance.instance_id, agent_id)
+            .expect("bind agent");
+        state
+            .kernel
+            .hands()
+            .set_account_id(instance.instance_id, Some("tenant-a".to_string()))
+            .expect("bind account");
+        state
+            .kernel
+            .agent_registry()
+            .set_account_id(agent_id, Some("tenant-a".to_string()))
+            .expect("bind agent account");
+
+        let response = hand_send_message(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            Path(instance.instance_id),
+            Json(MessageRequest {
+                message: "hand message".to_string(),
+                attachments: vec![],
+                sender_id: None,
+                sender_name: None,
+                channel_type: None,
+                is_group: false,
+                was_mentioned: false,
+                ephemeral: false,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_json(response).await;
+        let err = body["error"].as_str().expect("error string");
+        assert!(
+            !err.contains("No provider configured"),
+            "raw backend error leaked: {err}"
+        );
+    }
+
+    #[test]
+    fn hand_get_session_error_response_is_generic() {
+        let response = hand_get_session_error_response();
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Failed to load session"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_hand_sanitizes_missing_hand_errors() {
+        let (_tmp, state) = test_app_state();
+
+        let response = get_hand(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            Path("missing-hand".to_string()),
+            axum::http::HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        let err = body["error"].as_str().expect("error string");
+        assert!(
+            !err.contains("missing-hand"),
+            "raw backend error leaked: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn activate_hand_sanitizes_missing_hand_errors() {
+        let (_tmp, state) = test_app_state();
+
+        let response = activate_hand(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            Path("missing-hand".to_string()),
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        let err = body["error"].as_str().expect("error string");
+        assert!(
+            !err.contains("missing-hand"),
+            "raw backend error leaked: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_integration_sanitizes_not_found_errors() {
+        let (_tmp, state) = test_app_state();
+
+        let response = remove_integration(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            Path("missing-integration".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        let err = body["error"].as_str().expect("error string");
+        assert!(
+            !err.contains("missing-integration"),
+            "raw internal error leaked: {err}"
+        );
+    }
 }

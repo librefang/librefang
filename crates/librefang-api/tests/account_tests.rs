@@ -14,6 +14,7 @@ use librefang_api::routes::AppState;
 use librefang_api::server;
 use librefang_kernel::workflow::{Workflow, WorkflowId, WorkflowRunId};
 use librefang_kernel::LibreFangKernel;
+use librefang_types::approval::{ApprovalRequest, RiskLevel};
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use librefang_types::workflow_template::{
     ParameterType, TemplateParameter, WorkflowTemplate, WorkflowTemplateStep,
@@ -3537,6 +3538,64 @@ async fn test_system_admin_passes_with_configured_admin_account() {
     assert_system_admin_allowed(&h, "GET", "/api/tools", "tenant-admin").await;
     assert_system_admin_allowed(&h, "GET", "/api/backups", "tenant-admin").await;
     assert_system_admin_allowed(&h, "GET", "/api/queue/status", "tenant-admin").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_approvals_admin_sees_global_agent_names() {
+    let h = start_mt_router_with_admin("tenant-admin").await;
+    let entry = make_agent_entry("tenant-a-approval-agent", Some("tenant-a"));
+    let agent_id = entry.id;
+    h.state.kernel.agent_registry().register(entry).unwrap();
+
+    let req = ApprovalRequest {
+        id: uuid::Uuid::new_v4(),
+        agent_id: agent_id.to_string(),
+        tool_name: "shell_exec".to_string(),
+        description: "run command".to_string(),
+        action_summary: "echo hi".to_string(),
+        risk_level: RiskLevel::High,
+        requested_at: chrono::Utc::now(),
+        timeout_secs: 60,
+        sender_id: None,
+        channel: None,
+        route_to: vec![],
+        escalation_count: 0,
+    };
+
+    let kernel = h.state.kernel.clone();
+    let approval_task = tokio::spawn(async move { kernel.approvals().request_approval(req).await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/approvals")
+        .header("x-account-id", "tenant-admin")
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.send(req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = read_json(resp).await;
+    let approvals = json["approvals"].as_array().expect("approvals array");
+    assert!(
+        approvals
+            .iter()
+            .any(|item| item["agent_name"] == "tenant-a-approval-agent"),
+        "global admin approvals view should resolve tenant-owned agent names: {json}"
+    );
+
+    let pending_id = json["approvals"][0]["id"]
+        .as_str()
+        .expect("approval id")
+        .to_string();
+    let resolve_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/approvals/{pending_id}/reject"))
+        .header("x-account-id", "tenant-admin")
+        .body(Body::empty())
+        .unwrap();
+    let resolve_resp = h.send(resolve_req).await;
+    assert_eq!(resolve_resp.status(), StatusCode::OK);
+    let _ = approval_task.await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

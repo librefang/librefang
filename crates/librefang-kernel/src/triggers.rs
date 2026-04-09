@@ -437,6 +437,18 @@ impl TriggerEngine {
                 continue;
             }
 
+            match (event.account_id.as_deref(), trigger.account_id.as_deref()) {
+                (Some(event_account_id), Some(trigger_account_id))
+                    if trigger_account_id != event_account_id =>
+                {
+                    continue;
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    continue;
+                }
+                _ => {}
+            }
+
             // Check max fires
             if trigger.max_fires > 0 && trigger.fire_count >= trigger.max_fires {
                 trigger.enabled = false;
@@ -1015,6 +1027,57 @@ mod tests {
             "With target_agent set, target should be woken"
         );
         assert!(matches[0].1.contains("Cross-wake"));
+    }
+
+    #[test]
+    fn test_unscoped_event_does_not_wake_tenant_trigger() {
+        let engine = TriggerEngine::new();
+        let tenant_agent = AgentId::new();
+        engine.register(
+            Some("tenant-a".to_string()),
+            tenant_agent,
+            TriggerPattern::All,
+            "Tenant wake: {{event}}".to_string(),
+            0,
+        );
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+
+        assert!(
+            engine.evaluate(&event).is_empty(),
+            "unscoped events must not wake tenant-owned triggers"
+        );
+    }
+
+    #[test]
+    fn test_unscoped_event_still_wakes_global_trigger() {
+        let engine = TriggerEngine::new();
+        let global_agent = AgentId::new();
+        engine.register(
+            None,
+            global_agent,
+            TriggerPattern::All,
+            "Global wake: {{event}}".to_string(),
+            0,
+        );
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+
+        let matches = engine.evaluate(&event);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, global_agent);
     }
 
     #[test]
