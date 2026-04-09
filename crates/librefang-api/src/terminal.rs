@@ -32,8 +32,24 @@ impl PtySession {
             })
             .map_err(std::io::Error::other)?;
 
-        let cmd = CommandBuilder::new(shell.clone());
+        let mut cmd = CommandBuilder::new(shell.clone());
         // No args — spawn an interactive shell
+
+        // Set CWD to the user's home directory so the shell does not inherit
+        // the daemon's working directory, which would expose server internals.
+        let home_dir = {
+            #[cfg(windows)]
+            {
+                std::env::var("USERPROFILE")
+                    .or_else(|_| std::env::var("HOME"))
+                    .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned())
+            }
+            #[cfg(not(windows))]
+            {
+                std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+            }
+        };
+        cmd.cwd(home_dir);
 
         let child = pair
             .slave
@@ -104,6 +120,11 @@ impl PtySession {
                 pixel_height: 0,
             })
             .map_err(std::io::Error::other)
+    }
+
+    /// Kill the child process. Errors are silently ignored (process may already be gone).
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
     }
 
     /// Wait for the child process to exit and return (exit_code, optional_signal).

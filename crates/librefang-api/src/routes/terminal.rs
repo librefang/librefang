@@ -51,10 +51,7 @@ pub enum ClientMessage {
 #[serde(tag = "type")]
 pub enum ServerMessage {
     #[serde(rename = "started")]
-    Started {
-        shell: String,
-        pid: u32,
-    },
+    Started { shell: String, pid: u32 },
     #[serde(rename = "output")]
     Output { data: String, binary: Option<bool> },
     #[serde(rename = "exit")]
@@ -219,15 +216,20 @@ async fn handle_terminal_ws(
         }
     };
 
-    let shell_path = pty.shell.clone();
-    let pid = pty.pid;
+    // Send only the shell basename (e.g. "zsh") instead of the full path
+    // (e.g. "/bin/zsh") to avoid leaking server filesystem layout.
+    let shell_name = std::path::Path::new(&pty.shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("shell")
+        .to_string();
 
     let _ = send_json(
         &sender,
         &serde_json::json!({
             "type": "started",
-            "shell": shell_path,
-            "pid": pid
+            "shell": shell_name,
+            "pid": pty.pid
         }),
     )
     .await;
@@ -267,7 +269,11 @@ async fn handle_terminal_ws(
     let mut input_times: Vec<std::time::Instant> = Vec::new();
     let input_window: Duration = Duration::from_secs(60);
 
-    enum ExitReason { ClientClose, Timeout, ProcessExited }
+    enum ExitReason {
+        ClientClose,
+        Timeout,
+        ProcessExited,
+    }
     let exit_reason: ExitReason;
 
     loop {
@@ -361,22 +367,12 @@ async fn handle_terminal_ws(
                                         }
                                     }
                                     ClientMessage::Close => {
-                                        let _ = send_json(&sender, &serde_json::json!({
-                                            "type": "exit",
-                                            "code": 0,
-                                            "signal": null
-                                        })).await;
                                         exit_reason = ExitReason::ClientClose;
                                         break;
                                     }
                                 }
                             }
                             Message::Close(_) => {
-                                let _ = send_json(&sender, &serde_json::json!({
-                                    "type": "exit",
-                                    "code": 0,
-                                    "signal": null
-                                })).await;
                                 exit_reason = ExitReason::ClientClose;
                                 break;
                             }
@@ -402,11 +398,6 @@ async fn handle_terminal_ws(
                 }
             }
             _ = tokio::time::sleep(ws_idle_timeout.saturating_sub(last_activity_shared.lock().map(|la| la.elapsed()).unwrap_or(Duration::ZERO))) => {
-                let _ = send_json(&sender, &serde_json::json!({
-                    "type": "exit",
-                    "code": 124,
-                    "signal": null
-                })).await;
                 exit_reason = ExitReason::Timeout;
                 break;
             }
@@ -421,24 +412,29 @@ async fn handle_terminal_ws(
         }
     }
 
-    // Determine the real exit code from the child process, but only
-    // when the loop exited because the PTY reader ended (child exited).
-    // When the client closed the connection or we timed out, the exit
-    // message has already been sent inside the loop.
-    if matches!(exit_reason, ExitReason::ProcessExited) {
-        let (code, signal) = match pty.wait_exit() {
-            Ok(pair) => pair,
-            Err(e) => {
-                warn!(error = %e, "Failed to wait for child exit");
-                (1, None)
-            }
-        };
-        let _ = send_json(&sender, &serde_json::json!({
+    // For ClientClose and Timeout the child may still be running — kill it first
+    // so that wait_exit() returns promptly with the real exit code.
+    if !matches!(exit_reason, ExitReason::ProcessExited) {
+        pty.kill();
+    }
+
+    // Always wait for the real exit code, regardless of why the loop ended.
+    let (code, signal) = match pty.wait_exit() {
+        Ok(pair) => pair,
+        Err(e) => {
+            warn!(error = %e, "Failed to wait for child exit");
+            (1, None)
+        }
+    };
+    let _ = send_json(
+        &sender,
+        &serde_json::json!({
             "type": "exit",
             "code": code,
             "signal": signal
-        })).await;
-    }
+        }),
+    )
+    .await;
 
     pty_read_handle.abort();
     info!("Terminal WebSocket disconnected");
