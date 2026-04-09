@@ -264,8 +264,9 @@ async fn handle_agent_ws(
         loop {
             interval.tick().await;
             // Tenant-scoped agent list: only broadcast agents belonging to
-            // the same account as the WebSocket owner. AccountId(None) =
-            // system/admin mode — sees everything (backward compat).
+            // the same account as the WebSocket owner. An unscoped account is
+            // legacy compatibility state and should not occur on normal
+            // tenant-facing WebSocket traffic.
             let mut entries = state_clone.kernel.agent_registry().list();
             if let Some(ref owner_id) = ws_account_id {
                 entries.retain(|e| e.account_id.as_deref() == Some(owner_id.as_str()));

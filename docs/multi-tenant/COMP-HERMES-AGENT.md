@@ -296,8 +296,10 @@ Qwntik needs system-wide resource boundaries.
 LibreFang implication:
 
 - avoid treating per-session separation as sufficient protection
-- continue auditing uploads, media tasks, workflow runs, inbox state, hand
-  instances, and channel bindings as resource-ownership problems
+- continue auditing uploads, media tasks, workflow runs, hand instances, and
+  channel bindings as resource-ownership problems
+- inbox is currently operator/admin infrastructure and should be treated as an
+  intentionally global surface unless the product model changes
 
 ---
 

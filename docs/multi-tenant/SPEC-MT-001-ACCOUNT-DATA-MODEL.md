@@ -40,8 +40,10 @@ Required examples:
 - channels
 - workflows
 - goals
-- inbox records
 - media tasks and media artifacts
+
+Admin/operator inbox intake state is intentionally not part of this tenant-owned
+resource set in the current architecture.
 
 ### Admin Accounts
 

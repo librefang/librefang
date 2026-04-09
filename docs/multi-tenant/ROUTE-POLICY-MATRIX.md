@@ -31,11 +31,11 @@ there is a deliberate documented decision to change the policy.
 |------|---------------|-------|
 | `agents.rs` | `tenant-owned` | Includes agent CRUD, sessions, files, uploads, messaging, traces, tools/skills assignment |
 | `memory.rs` | `tenant-owned` | Account-scoped memory and agent-owned memory operations |
-| `prompts.rs` | `tenant-owned` | Currently often proxied via agent ownership; store-level ownership still needs convergence |
+| `prompts.rs` | `tenant-owned` | Currently enforced through owned-agent access; standalone prompt-store ownership only matters if prompts become independent tenant assets |
 | `channels.rs` | `split-surface` | Channel config/read/write/test is tenant-owned; reload, QR/session bootstrap, and registry/debug endpoints remain admin/global |
 | `workflows.rs` | `split-surface` | Workflow CRUD, runs, schedules, and triggers are tenant-owned; workflow templates and raw cron infra remain explicitly global/admin-only |
 | `goals.rs` | `tenant-owned` | Goal lifecycle, prompt enrichment, and internal goal tooling are tenant-owned |
-| `inbox.rs` | `admin-only` | Current endpoint is daemon diagnostics, not a tenant-owned inbox surface |
+| `inbox.rs` | `admin-only` | Current inbox is daemon-level operator/admin intake infrastructure; `/api/inbox/status` is admin-only diagnostics |
 | `media.rs` | `split-surface` | Media generation/task/artifact paths are tenant-owned; provider registry/capability endpoints may remain admin-only or shared |
 | `config.rs` | `split-surface` | `status`/`health_detail` style scoped status views plus public health/version endpoints; global config ops are admin-only |
 | `budget.rs` | `split-surface` | Agent-owned budget/usage views are tenant-owned; global reporting and daemon-wide budget management are admin-only |
@@ -73,8 +73,8 @@ there is a deliberate documented decision to change the policy.
 - Target: `tenant-owned`
 - Notes:
   - current prompt access is enforced through owned agents
-  - direct prompt-store ownership remains follow-up work only if prompt data is
-    separated from agent ownership in the product model
+  - direct prompt-store ownership only matters if prompt data is separated from
+    agent ownership in the product model
 
 ### `channels.rs`
 
@@ -124,8 +124,13 @@ there is a deliberate documented decision to change the policy.
 
 - Target: `admin-only`
 - Notes:
-  - current `/api/inbox/status` endpoint is daemon diagnostics tied to global config/home-dir state
-  - do not model it as tenant-owned inbox behavior until a real tenant inbox product surface exists
+  - current `/api/inbox/status` endpoint is daemon-level operator diagnostics
+    tied to global config/home-dir state
+  - current inbox behavior should be treated as daemon-level operator/admin
+    intake infrastructure, not as a tenant-owned product surface in the current
+    architecture
+  - if a real tenant inbox is ever desired, it is a separate future product
+    model rather than part of the current refactor
 
 ### `media.rs`
 
@@ -269,11 +274,10 @@ there is a deliberate documented decision to change the policy.
 
 These are the main intentionally deferred items that still affect route policy interpretation:
 
-1. `inbox.rs` still exposes only daemon diagnostics; a real tenant inbox model remains open
-2. shared integration user/chat/thread binding beyond integration-instance ownership is still deferred
-3. QR/bootstrap/session ownership for channel adapters that need it is still deferred
-4. broader tenant-owned skill content beyond hands remains future product work if needed
-5. residual `AccountId(None)` compatibility branches/comments/tests still need cleanup outside explicitly documented legacy/admin paths
+1. shared integration user/chat/thread binding beyond integration-instance ownership is still deferred
+2. QR/bootstrap/session ownership for channel adapters that need it is still deferred
+3. broader tenant-owned skill content beyond hands remains future product work if needed
+4. residual `AccountId(None)` compatibility branches/comments/tests still need cleanup outside explicitly documented legacy/admin paths
 
 ---
 

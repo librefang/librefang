@@ -65,7 +65,6 @@ These resources belong to exactly one account. Reads and writes are scoped to th
 - channels
 - workflows
 - goals
-- inbox
 - media tasks and media artifacts
 
 Rules:
@@ -78,6 +77,7 @@ Rules:
 
 These endpoints operate on daemon-global infrastructure and are not modeled as tenant-owned.
 
+- inbox operator/admin intake infrastructure and diagnostics
 - most of `system`
 - most of `config`
 - most of `network`
@@ -88,6 +88,8 @@ Rules:
 - require concrete `account_id`
 - account must belong to configured admin accounts
 - unauthorized tenants receive `403`
+- if a tenant inbox product ever exists, it is a separate future model, not part
+  of the current multi-tenant convergence target
 
 ### Split-Surface Families
 
