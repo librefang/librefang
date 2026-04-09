@@ -1359,7 +1359,7 @@ pub async fn send_message(
             .send_message_ephemeral(agent_id, &effective_message)
             .await
     } else {
-        let sender_context = request_sender_context(&req);
+        let sender_context = request_sender_context(&req, &account);
         if let Some(sender) = sender_context.as_ref() {
             state
                 .kernel
@@ -1442,7 +1442,7 @@ pub async fn send_message(
     }
 }
 
-fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
+fn request_sender_context(req: &MessageRequest, account: &AccountId) -> Option<SenderContext> {
     let sender_id = req.sender_id.as_ref()?;
     Some(SenderContext {
         channel: req
@@ -1454,7 +1454,7 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
         is_group: req.is_group,
         was_mentioned: req.was_mentioned,
         thread_id: None,
-        account_id: None,
+        account_id: account.0.clone(),
     })
 }
 
@@ -5216,7 +5216,7 @@ mod tests {
             was_mentioned: false,
             ephemeral: false,
         };
-        assert!(request_sender_context(&req).is_none());
+        assert!(request_sender_context(&req, &AccountId(Some("tenant-a".to_string()))).is_none());
     }
 
     #[test]
@@ -5231,10 +5231,12 @@ mod tests {
             was_mentioned: false,
             ephemeral: false,
         };
-        let sender = request_sender_context(&req).expect("sender context");
+        let sender = request_sender_context(&req, &AccountId(Some("tenant-a".to_string())))
+            .expect("sender context");
         assert_eq!(sender.user_id, "u-123");
         assert_eq!(sender.display_name, "u-123");
         assert_eq!(sender.channel, "api");
+        assert_eq!(sender.account_id.as_deref(), Some("tenant-a"));
     }
 
     #[test]
@@ -5249,9 +5251,11 @@ mod tests {
             was_mentioned: true,
             ephemeral: false,
         };
-        let sender = request_sender_context(&req).expect("sender context");
+        let sender = request_sender_context(&req, &AccountId(Some("tenant-a".to_string())))
+            .expect("sender context");
         assert!(sender.is_group);
         assert!(sender.was_mentioned);
+        assert_eq!(sender.account_id.as_deref(), Some("tenant-a"));
     }
 
     #[test]

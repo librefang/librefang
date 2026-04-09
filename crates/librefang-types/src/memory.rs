@@ -1073,14 +1073,26 @@ pub trait Memory: Send + Sync {
     // -- Knowledge graph operations --
 
     /// Add an entity to the knowledge graph.
-    async fn add_entity(&self, entity: Entity) -> crate::error::LibreFangResult<String>;
+    async fn add_entity(
+        &self,
+        agent_id: AgentId,
+        account_id: &str,
+        entity: Entity,
+    ) -> crate::error::LibreFangResult<String>;
 
     /// Add a relation between entities.
-    async fn add_relation(&self, relation: Relation) -> crate::error::LibreFangResult<String>;
+    async fn add_relation(
+        &self,
+        agent_id: AgentId,
+        account_id: &str,
+        relation: Relation,
+    ) -> crate::error::LibreFangResult<String>;
 
     /// Query the knowledge graph.
     async fn query_graph(
         &self,
+        agent_id: AgentId,
+        account_id: &str,
         pattern: GraphPattern,
     ) -> crate::error::LibreFangResult<Vec<GraphMatch>>;
 

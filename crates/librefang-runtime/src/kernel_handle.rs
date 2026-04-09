@@ -43,26 +43,35 @@ pub trait KernelHandle: Send + Sync {
     fn kill_agent(&self, agent_id: &str) -> Result<(), String>;
 
     /// Store a value in shared memory (cross-agent accessible).
-    /// When `peer_id` is `Some`, the key is scoped to that peer so different
-    /// users of the same agent get isolated memory namespaces.
+    /// Shared memory is scoped to the caller's tenant. When `peer_id` is
+    /// `Some`, the key is further scoped to that peer so different end users
+    /// within the same tenant get isolated namespaces.
     fn memory_store(
         &self,
+        caller_agent_id: &str,
         key: &str,
         value: serde_json::Value,
         peer_id: Option<&str>,
     ) -> Result<(), String>;
 
     /// Recall a value from shared memory.
-    /// When `peer_id` is `Some`, only returns values stored under that peer's namespace.
+    /// When `peer_id` is `Some`, only returns values stored under that peer's
+    /// namespace within the caller's tenant.
     fn memory_recall(
         &self,
+        caller_agent_id: &str,
         key: &str,
         peer_id: Option<&str>,
     ) -> Result<Option<serde_json::Value>, String>;
 
     /// List all keys in shared memory.
-    /// When `peer_id` is `Some`, only returns keys within that peer's namespace.
-    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String>;
+    /// When `peer_id` is `Some`, only returns keys within that peer's
+    /// namespace within the caller's tenant.
+    fn memory_list(
+        &self,
+        caller_agent_id: &str,
+        peer_id: Option<&str>,
+    ) -> Result<Vec<String>, String>;
 
     /// Find agents by query (matches on name substring, tag, or tool name; case-insensitive).
     fn find_agents(&self, query: &str) -> Vec<AgentInfo>;
@@ -101,18 +110,21 @@ pub trait KernelHandle: Send + Sync {
     /// Add an entity to the knowledge graph.
     async fn knowledge_add_entity(
         &self,
+        caller_agent_id: &str,
         entity: librefang_types::memory::Entity,
     ) -> Result<String, String>;
 
     /// Add a relation to the knowledge graph.
     async fn knowledge_add_relation(
         &self,
+        caller_agent_id: &str,
         relation: librefang_types::memory::Relation,
     ) -> Result<String, String>;
 
     /// Query the knowledge graph with a pattern.
     async fn knowledge_query(
         &self,
+        caller_agent_id: &str,
         pattern: librefang_types::memory::GraphPattern,
     ) -> Result<Vec<librefang_types::memory::GraphMatch>, String>;
 

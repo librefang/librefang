@@ -1032,6 +1032,20 @@ pub async fn mcp_http(
             .into_response();
         }
 
+        if mcp_http_requires_caller_agent(tool_name) {
+            return Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request.get("id").cloned(),
+                "error": {
+                    "code": -32602,
+                    "message": format!(
+                        "Tool '{tool_name}' requires caller agent context and is not available over admin MCP HTTP"
+                    )
+                }
+            }))
+            .into_response();
+        }
+
         // Snapshot skill registry before async call (RwLockReadGuard is !Send)
         let skill_snapshot = state
             .kernel
@@ -1093,6 +1107,18 @@ pub async fn mcp_http(
     // For non-tools/call methods (initialize, tools/list, etc.), delegate to the handler
     let response = librefang_runtime::mcp_server::handle_mcp_request(&request, &tools).await;
     Json(response).into_response()
+}
+
+fn mcp_http_requires_caller_agent(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "memory_store"
+            | "memory_recall"
+            | "memory_list"
+            | "knowledge_add_entity"
+            | "knowledge_add_relation"
+            | "knowledge_query"
+    )
 }
 
 // ── Multi-Session Endpoints ─────────────────────────────────────────────
@@ -1335,6 +1361,38 @@ fn audit_to_comms_event(
         },
         detail,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mcp_http_requires_caller_agent;
+
+    #[test]
+    fn test_mcp_http_denies_tenant_scoped_memory_and_knowledge_tools_without_caller() {
+        for tool_name in [
+            "memory_store",
+            "memory_recall",
+            "memory_list",
+            "knowledge_add_entity",
+            "knowledge_add_relation",
+            "knowledge_query",
+        ] {
+            assert!(
+                mcp_http_requires_caller_agent(tool_name),
+                "expected {tool_name} to require caller agent context"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mcp_http_allows_non_tenant_scoped_tools_without_caller() {
+        for tool_name in ["web_search", "agent_find", "task_list", "tools/list"] {
+            assert!(
+                !mcp_http_requires_caller_agent(tool_name),
+                "did not expect {tool_name} to require caller agent context"
+            );
+        }
+    }
 }
 
 fn owned_agent_ids(agents: &[AgentEntry]) -> std::collections::HashSet<String> {

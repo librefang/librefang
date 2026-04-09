@@ -289,9 +289,9 @@ pub async fn execute_tool_raw(
         "agent_kill" => tool_agent_kill(input, *kernel),
 
         // Shared memory tools (peer-scoped when sender_id is present)
-        "memory_store" => tool_memory_store(input, *kernel, *sender_id),
-        "memory_recall" => tool_memory_recall(input, *kernel, *sender_id),
-        "memory_list" => tool_memory_list(*kernel, *sender_id),
+        "memory_store" => tool_memory_store(input, *kernel, *caller_agent_id, *sender_id),
+        "memory_recall" => tool_memory_recall(input, *kernel, *caller_agent_id, *sender_id),
+        "memory_list" => tool_memory_list(*kernel, *caller_agent_id, *sender_id),
 
         // Collaboration tools
         "agent_find" => tool_agent_find(input, *kernel),
@@ -307,9 +307,11 @@ pub async fn execute_tool_raw(
         "schedule_delete" => tool_schedule_delete(input, *kernel, *caller_agent_id).await,
 
         // Knowledge graph tools
-        "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel).await,
-        "knowledge_add_relation" => tool_knowledge_add_relation(input, *kernel).await,
-        "knowledge_query" => tool_knowledge_query(input, *kernel).await,
+        "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel, *caller_agent_id).await,
+        "knowledge_add_relation" => {
+            tool_knowledge_add_relation(input, *kernel, *caller_agent_id).await
+        }
+        "knowledge_query" => tool_knowledge_query(input, *kernel, *caller_agent_id).await,
 
         // Image analysis tool
         "image_analyze" => tool_image_analyze(input, *workspace_root).await,
@@ -901,7 +903,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Shared memory tools ---
         ToolDefinition {
             name: "memory_store".to_string(),
-            description: "Store a value in shared memory accessible by all agents. Use for cross-agent coordination and data sharing.".to_string(),
+            description: "Store a value in shared memory scoped to the caller's tenant and optional sender/peer context. Use for coordination and data sharing within that boundary.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -913,7 +915,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "memory_recall".to_string(),
-            description: "Recall a value from shared memory by key.".to_string(),
+            description: "Recall a value from tenant-scoped shared memory by key.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -924,7 +926,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "memory_list".to_string(),
-            description: "List all keys stored in shared memory.".to_string(),
+            description: "List keys stored in tenant-scoped shared memory for the current caller and optional sender/peer context.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -2093,23 +2095,29 @@ fn tool_agent_kill(
 fn tool_memory_store(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for memory_store".to_string())?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
     let value = input.get("value").ok_or("Missing 'value' parameter")?;
-    kh.memory_store(key, value.clone(), peer_id)?;
+    kh.memory_store(caller_agent_id, key, value.clone(), peer_id)?;
     Ok(format!("Stored value under key '{key}'."))
 }
 
 fn tool_memory_recall(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for memory_recall".to_string())?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    match kh.memory_recall(key, peer_id)? {
+    match kh.memory_recall(caller_agent_id, key, peer_id)? {
         Some(val) => Ok(serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())),
         None => Ok(format!("No value found for key '{key}'.")),
     }
@@ -2117,10 +2125,12 @@ fn tool_memory_recall(
 
 fn tool_memory_list(
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let keys = kh.memory_list(peer_id)?;
+    let caller_agent_id = caller_agent_id.ok_or("Agent ID required for memory_list".to_string())?;
+    let keys = kh.memory_list(caller_agent_id, peer_id)?;
     if keys.is_empty() {
         return Ok("No entries found in shared memory.".to_string());
     }
@@ -2307,8 +2317,11 @@ fn parse_relation_type(s: &str) -> librefang_types::memory::RelationType {
 async fn tool_knowledge_add_entity(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for knowledge_add_entity".to_string())?;
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
     let entity_type_str = input["entity_type"]
         .as_str()
@@ -2328,15 +2341,18 @@ async fn tool_knowledge_add_entity(
         updated_at: chrono::Utc::now(),
     };
 
-    let id = kh.knowledge_add_entity(entity).await?;
+    let id = kh.knowledge_add_entity(caller_agent_id, entity).await?;
     Ok(format!("Entity '{name}' added with ID: {id}"))
 }
 
 async fn tool_knowledge_add_relation(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for knowledge_add_relation".to_string())?;
     let source = input["source"]
         .as_str()
         .ok_or("Missing 'source' parameter")?;
@@ -2362,7 +2378,7 @@ async fn tool_knowledge_add_relation(
         created_at: chrono::Utc::now(),
     };
 
-    let id = kh.knowledge_add_relation(relation).await?;
+    let id = kh.knowledge_add_relation(caller_agent_id, relation).await?;
     Ok(format!(
         "Relation '{source}' --[{relation_str}]--> '{target}' added with ID: {id}"
     ))
@@ -2371,8 +2387,11 @@ async fn tool_knowledge_add_relation(
 async fn tool_knowledge_query(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for knowledge_query".to_string())?;
     let source = input["source"].as_str().map(|s| s.to_string());
     let target = input["target"].as_str().map(|s| s.to_string());
     let relation = input["relation"].as_str().map(parse_relation_type);
@@ -2392,7 +2411,7 @@ async fn tool_knowledge_query(
         max_depth,
     };
 
-    let matches = kh.knowledge_query(pattern).await?;
+    let matches = kh.knowledge_query(caller_agent_id, pattern).await?;
     if matches.is_empty() {
         return Ok("No matching knowledge graph entries found.".to_string());
     }
@@ -4155,6 +4174,7 @@ mod tests {
 
         fn memory_store(
             &self,
+            _caller_agent_id: &str,
             _key: &str,
             _value: serde_json::Value,
             _peer_id: Option<&str>,
@@ -4164,13 +4184,18 @@ mod tests {
 
         fn memory_recall(
             &self,
+            _caller_agent_id: &str,
             _key: &str,
             _peer_id: Option<&str>,
         ) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
 
-        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+        fn memory_list(
+            &self,
+            _caller_agent_id: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
 
@@ -4218,6 +4243,7 @@ mod tests {
 
         async fn knowledge_add_entity(
             &self,
+            _caller_agent_id: &str,
             _entity: librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
@@ -4225,6 +4251,7 @@ mod tests {
 
         async fn knowledge_add_relation(
             &self,
+            _caller_agent_id: &str,
             _relation: librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
@@ -4232,6 +4259,7 @@ mod tests {
 
         async fn knowledge_query(
             &self,
+            _caller_agent_id: &str,
             _pattern: librefang_types::memory::GraphPattern,
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
@@ -5349,6 +5377,15 @@ mod tests {
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: true,
             expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
         });
         let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
         let result = execute_tool(
@@ -5396,6 +5433,15 @@ mod tests {
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
             expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
         });
         let parent_allowed = vec![
             "file_read".to_string(),
@@ -5826,6 +5872,15 @@ mod tests {
     struct SpawnCheckKernel {
         should_fail_escalation: bool,
         expected_goal_update_caller: Option<String>,
+        expected_knowledge_entity_caller: Option<String>,
+        expected_knowledge_relation_caller: Option<String>,
+        expected_knowledge_query_caller: Option<String>,
+        expected_memory_store_caller: Option<String>,
+        expected_memory_store_peer: Option<String>,
+        expected_memory_recall_caller: Option<String>,
+        expected_memory_recall_peer: Option<String>,
+        expected_memory_list_caller: Option<String>,
+        expected_memory_list_peer: Option<String>,
     }
 
     #[async_trait]
@@ -5876,23 +5931,47 @@ mod tests {
 
         fn memory_store(
             &self,
+            caller_agent_id: &str,
             _key: &str,
             _value: serde_json::Value,
-            _peer_id: Option<&str>,
+            peer_id: Option<&str>,
         ) -> Result<(), String> {
-            Err("not used".to_string())
+            if let Some(expected) = &self.expected_memory_store_caller {
+                assert_eq!(caller_agent_id, expected);
+            }
+            if let Some(expected) = &self.expected_memory_store_peer {
+                assert_eq!(peer_id, Some(expected.as_str()));
+            }
+            Ok(())
         }
 
         fn memory_recall(
             &self,
+            caller_agent_id: &str,
             _key: &str,
-            _peer_id: Option<&str>,
+            peer_id: Option<&str>,
         ) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            if let Some(expected) = &self.expected_memory_recall_caller {
+                assert_eq!(caller_agent_id, expected);
+            }
+            if let Some(expected) = &self.expected_memory_recall_peer {
+                assert_eq!(peer_id, Some(expected.as_str()));
+            }
+            Ok(Some(serde_json::json!({"ok": true})))
         }
 
-        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
-            Err("not used".to_string())
+        fn memory_list(
+            &self,
+            caller_agent_id: &str,
+            peer_id: Option<&str>,
+        ) -> Result<Vec<String>, String> {
+            if let Some(expected) = &self.expected_memory_list_caller {
+                assert_eq!(caller_agent_id, expected);
+            }
+            if let Some(expected) = &self.expected_memory_list_peer {
+                assert_eq!(peer_id, Some(expected.as_str()));
+            }
+            Ok(vec!["user_name".to_string()])
         }
 
         fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
@@ -5939,23 +6018,41 @@ mod tests {
 
         async fn knowledge_add_entity(
             &self,
+            caller_agent_id: &str,
             _entity: librefang_types::memory::Entity,
         ) -> Result<String, String> {
-            Err("not used".to_string())
+            if let Some(expected) = &self.expected_knowledge_entity_caller {
+                assert_eq!(caller_agent_id, expected);
+                Ok("entity-123".to_string())
+            } else {
+                Err("not used".to_string())
+            }
         }
 
         async fn knowledge_add_relation(
             &self,
+            caller_agent_id: &str,
             _relation: librefang_types::memory::Relation,
         ) -> Result<String, String> {
-            Err("not used".to_string())
+            if let Some(expected) = &self.expected_knowledge_relation_caller {
+                assert_eq!(caller_agent_id, expected);
+                Ok("relation-123".to_string())
+            } else {
+                Err("not used".to_string())
+            }
         }
 
         async fn knowledge_query(
             &self,
+            caller_agent_id: &str,
             _pattern: librefang_types::memory::GraphPattern,
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
-            Err("not used".to_string())
+            if let Some(expected) = &self.expected_knowledge_query_caller {
+                assert_eq!(caller_agent_id, expected);
+                Ok(Vec::new())
+            } else {
+                Err("not used".to_string())
+            }
         }
 
         fn goal_update(
@@ -5991,9 +6088,232 @@ mod tests {
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
             expected_goal_update_caller: Some("agent-123".to_string()),
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
         });
         let result = tool_goal_update(&input, Some(&kernel), Some("agent-123"));
         assert!(result.is_ok());
         assert!(result.unwrap().contains("\"goal_id\": \"goal-123\""));
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_add_entity_requires_calling_agent_context() {
+        let input = serde_json::json!({
+            "name": "Alice",
+            "entity_type": "person"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_knowledge_add_entity(&input, Some(&kernel), None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Agent ID required"));
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_add_entity_passes_caller_agent_context() {
+        let input = serde_json::json!({
+            "name": "Alice",
+            "entity_type": "person"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: Some("agent-123".to_string()),
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_knowledge_add_entity(&input, Some(&kernel), Some("agent-123")).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("entity-123"));
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_query_requires_calling_agent_context() {
+        let input = serde_json::json!({
+            "source": "Alice",
+            "relation": "works_at"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_knowledge_query(&input, Some(&kernel), None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Agent ID required"));
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_add_relation_passes_caller_agent_context() {
+        let input = serde_json::json!({
+            "source": "Alice",
+            "relation": "works_at",
+            "target": "Acme"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: Some("agent-123".to_string()),
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_knowledge_add_relation(&input, Some(&kernel), Some("agent-123")).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("relation-123"));
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_query_passes_caller_agent_context() {
+        let input = serde_json::json!({
+            "source": "Alice",
+            "relation": "works_at"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: Some("agent-123".to_string()),
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_knowledge_query(&input, Some(&kernel), Some("agent-123")).await;
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            "No matching knowledge graph entries found."
+        );
+    }
+
+    #[test]
+    fn test_memory_store_requires_calling_agent_context() {
+        let input = serde_json::json!({
+            "key": "user_name",
+            "value": "Alice"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_memory_store(&input, Some(&kernel), None, Some("sender-1"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Agent ID required"));
+    }
+
+    #[test]
+    fn test_memory_store_passes_caller_agent_and_peer_context() {
+        let input = serde_json::json!({
+            "key": "user_name",
+            "value": "Alice"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: Some("agent-123".to_string()),
+            expected_memory_store_peer: Some("sender-1".to_string()),
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_memory_store(&input, Some(&kernel), Some("agent-123"), Some("sender-1"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_memory_recall_passes_caller_agent_and_peer_context() {
+        let input = serde_json::json!({
+            "key": "user_name"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: Some("agent-123".to_string()),
+            expected_memory_recall_peer: Some("sender-1".to_string()),
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_memory_recall(&input, Some(&kernel), Some("agent-123"), Some("sender-1"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "{\n  \"ok\": true\n}");
+    }
+
+    #[test]
+    fn test_memory_list_passes_caller_agent_and_peer_context() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: Some("agent-123".to_string()),
+            expected_memory_list_peer: Some("sender-1".to_string()),
+        });
+        let result = tool_memory_list(Some(&kernel), Some("agent-123"), Some("sender-1"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "[\n  \"user_name\"\n]");
     }
 }

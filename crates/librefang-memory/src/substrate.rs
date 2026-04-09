@@ -888,28 +888,50 @@ impl Memory for MemorySubstrate {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
-    async fn add_entity(&self, entity: Entity) -> LibreFangResult<String> {
-        let _ = entity;
-        Err(LibreFangError::Memory(
-            "unscoped knowledge graph writes are disabled; use agent-scoped proactive memory APIs"
-                .to_string(),
-        ))
+    async fn add_entity(
+        &self,
+        agent_id: AgentId,
+        account_id: &str,
+        entity: Entity,
+    ) -> LibreFangResult<String> {
+        let store = self.knowledge.clone();
+        let agent_id = agent_id.to_string();
+        let account_id = account_id.to_string();
+        tokio::task::spawn_blocking(move || store.add_entity(entity, &agent_id, Some(&account_id)))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
-    async fn add_relation(&self, relation: Relation) -> LibreFangResult<String> {
-        let _ = relation;
-        Err(LibreFangError::Memory(
-            "unscoped knowledge graph writes are disabled; use agent-scoped proactive memory APIs"
-                .to_string(),
-        ))
+    async fn add_relation(
+        &self,
+        agent_id: AgentId,
+        account_id: &str,
+        relation: Relation,
+    ) -> LibreFangResult<String> {
+        let store = self.knowledge.clone();
+        let agent_id = agent_id.to_string();
+        let account_id = account_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            store.add_relation(relation, &agent_id, Some(&account_id))
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
-    async fn query_graph(&self, pattern: GraphPattern) -> LibreFangResult<Vec<GraphMatch>> {
-        let _ = pattern;
-        Err(LibreFangError::Memory(
-            "unscoped knowledge graph queries are disabled; use agent-scoped proactive memory APIs"
-                .to_string(),
-        ))
+    async fn query_graph(
+        &self,
+        agent_id: AgentId,
+        account_id: &str,
+        pattern: GraphPattern,
+    ) -> LibreFangResult<Vec<GraphMatch>> {
+        let store = self.knowledge.clone();
+        let agent_id = agent_id.to_string();
+        let account_id = account_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            store.query_graph_scoped(pattern, Some(&agent_id), Some(&account_id))
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
     async fn consolidate(&self) -> LibreFangResult<ConsolidationReport> {

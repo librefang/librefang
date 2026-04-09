@@ -3208,12 +3208,15 @@ system_prompt = "You are a helpful assistant."
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
-            let user_name = self
-                .memory
-                .structured_get(shared_id, "user_name")
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(String::from));
+            let user_name =
+                tenant_shared_memory_lookup_key(entry.account_id.as_deref(), "user_name", None)
+                    .and_then(|scoped| {
+                        self.memory
+                            .structured_get(shared_id, &scoped)
+                            .ok()
+                            .flatten()
+                            .and_then(|v| v.as_str().map(String::from))
+                    });
 
             let peer_agents: Vec<(String, String, String)> = self
                 .registry
@@ -3795,12 +3798,18 @@ system_prompt = "You are a helpful assistant."
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
             let stable_prefix_mode = cfg.stable_prefix_mode;
-            let user_name = self
-                .memory
-                .structured_get(shared_id, "user_name")
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(String::from));
+            let user_name = tenant_shared_memory_lookup_key(
+                entry.account_id.as_deref(),
+                "user_name",
+                sender_context.map(|s| s.user_id.as_str()),
+            )
+            .and_then(|scoped| {
+                self.memory
+                    .structured_get(shared_id, &scoped)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_str().map(String::from))
+            });
 
             let peer_agents: Vec<(String, String, String)> = self
                 .registry
@@ -4775,12 +4784,18 @@ system_prompt = "You are a helpful assistant."
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
             let stable_prefix_mode = cfg.stable_prefix_mode;
-            let user_name = self
-                .memory
-                .structured_get(shared_id, "user_name")
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(String::from));
+            let user_name = tenant_shared_memory_lookup_key(
+                entry.account_id.as_deref(),
+                "user_name",
+                sender_context.map(|s| s.user_id.as_str()),
+            )
+            .and_then(|scoped| {
+                self.memory
+                    .structured_get(shared_id, &scoped)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_str().map(String::from))
+            });
 
             let peer_agents: Vec<(String, String, String)> = self
                 .registry
@@ -9885,8 +9900,8 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
     }
 }
 
-/// A well-known agent ID used for shared memory operations across agents.
-/// This is a fixed UUID so all agents read/write to the same namespace.
+/// A fixed backing agent ID used for shared memory persistence.
+/// Tenant and optional peer isolation are enforced in the key namespace.
 /// Parse an agent.toml string and return true if `enabled` is explicitly set
 /// to `false`. Uses proper TOML parsing to handle all valid whitespace variants
 /// and avoid false positives from commented-out lines.
@@ -9908,14 +9923,32 @@ pub fn shared_memory_agent_id() -> AgentId {
     ]))
 }
 
-/// Namespace a memory key by peer ID for per-user isolation.
-/// When `peer_id` is `Some`, returns `"peer:{peer_id}:{key}"`.
-/// When `None`, returns the key unchanged (global scope).
-fn peer_scoped_key(key: &str, peer_id: Option<&str>) -> String {
+/// Namespace shared memory by tenant, then optionally peer within that tenant.
+fn tenant_shared_memory_key(account_id: &str, key: &str, peer_id: Option<&str>) -> String {
     match peer_id {
-        Some(pid) => format!("peer:{pid}:{key}"),
-        None => key.to_string(),
+        Some(pid) => format!("acct:{account_id}:peer:{pid}:{key}"),
+        None => format!("acct:{account_id}:global:{key}"),
     }
+}
+
+fn tenant_shared_memory_lookup_key(
+    account_id: Option<&str>,
+    key: &str,
+    peer_id: Option<&str>,
+) -> Option<String> {
+    account_id.map(|account_id| tenant_shared_memory_key(account_id, key, peer_id))
+}
+
+fn strip_tenant_shared_memory_prefix(
+    key: &str,
+    account_id: &str,
+    peer_id: Option<&str>,
+) -> Option<String> {
+    let prefix = match peer_id {
+        Some(pid) => format!("acct:{account_id}:peer:{pid}:"),
+        None => format!("acct:{account_id}:global:"),
+    };
+    key.strip_prefix(&prefix).map(|s| s.to_string())
 }
 
 /// Deliver a cron job's agent response to the configured delivery target.
@@ -10225,6 +10258,20 @@ impl LibreFangKernel {
     /// On miss, the error lists every currently-registered agent so the
     /// caller (typically an LLM) can recover without an extra agent_list
     /// round trip.
+    fn caller_account_id_for_shared_memory(&self, caller_agent_id: &str) -> Result<String, String> {
+        let caller_agent_id = caller_agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let entry = self
+            .registry
+            .get(caller_agent_id)
+            .ok_or_else(|| format!("Agent not found: {caller_agent_id}"))?;
+        entry
+            .account_id
+            .clone()
+            .ok_or_else(|| "Shared memory requires a tenant-owned caller".to_string())
+    }
+
     fn resolve_agent_identifier(&self, agent_id: &str) -> Result<AgentId, String> {
         if let Ok(uid) = agent_id.parse::<AgentId>() {
             if self.registry.get(uid).is_some() {
@@ -10311,12 +10358,14 @@ impl KernelHandle for LibreFangKernel {
 
     fn memory_store(
         &self,
+        caller_agent_id: &str,
         key: &str,
         value: serde_json::Value,
         peer_id: Option<&str>,
     ) -> Result<(), String> {
+        let account_id = self.caller_account_id_for_shared_memory(caller_agent_id)?;
         let agent_id = shared_memory_agent_id();
-        let scoped = peer_scoped_key(key, peer_id);
+        let scoped = tenant_shared_memory_key(&account_id, key, peer_id);
         self.memory
             .structured_set(agent_id, &scoped, value)
             .map_err(|e| format!("Memory store failed: {e}"))
@@ -10324,38 +10373,33 @@ impl KernelHandle for LibreFangKernel {
 
     fn memory_recall(
         &self,
+        caller_agent_id: &str,
         key: &str,
         peer_id: Option<&str>,
     ) -> Result<Option<serde_json::Value>, String> {
+        let account_id = self.caller_account_id_for_shared_memory(caller_agent_id)?;
         let agent_id = shared_memory_agent_id();
-        let scoped = peer_scoped_key(key, peer_id);
+        let scoped = tenant_shared_memory_key(&account_id, key, peer_id);
         self.memory
             .structured_get(agent_id, &scoped)
             .map_err(|e| format!("Memory recall failed: {e}"))
     }
 
-    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String> {
+    fn memory_list(
+        &self,
+        caller_agent_id: &str,
+        peer_id: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let account_id = self.caller_account_id_for_shared_memory(caller_agent_id)?;
         let agent_id = shared_memory_agent_id();
         let all_keys = self
             .memory
             .list_keys(agent_id)
             .map_err(|e| format!("Memory list failed: {e}"))?;
-        match peer_id {
-            Some(pid) => {
-                let prefix = format!("peer:{pid}:");
-                Ok(all_keys
-                    .into_iter()
-                    .filter_map(|k| k.strip_prefix(&prefix).map(|s| s.to_string()))
-                    .collect())
-            }
-            None => {
-                // When no peer context, return only non-peer-scoped keys
-                Ok(all_keys
-                    .into_iter()
-                    .filter(|k| !k.starts_with("peer:"))
-                    .collect())
-            }
-        }
+        Ok(all_keys
+            .into_iter()
+            .filter_map(|k| strip_tenant_shared_memory_prefix(&k, &account_id, peer_id))
+            .collect())
     }
 
     fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {
@@ -10456,30 +10500,66 @@ impl KernelHandle for LibreFangKernel {
 
     async fn knowledge_add_entity(
         &self,
+        caller_agent_id: &str,
         entity: librefang_types::memory::Entity,
     ) -> Result<String, String> {
+        let caller_agent_id = caller_agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let entry = self
+            .registry
+            .get(caller_agent_id)
+            .ok_or_else(|| format!("Agent not found: {caller_agent_id}"))?;
+        let account_id = entry
+            .account_id
+            .clone()
+            .ok_or_else(|| "Knowledge graph requires a tenant-owned caller".to_string())?;
         self.memory
-            .add_entity(entity)
+            .add_entity(caller_agent_id, &account_id, entity)
             .await
             .map_err(|e| format!("Knowledge add entity failed: {e}"))
     }
 
     async fn knowledge_add_relation(
         &self,
+        caller_agent_id: &str,
         relation: librefang_types::memory::Relation,
     ) -> Result<String, String> {
+        let caller_agent_id = caller_agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let entry = self
+            .registry
+            .get(caller_agent_id)
+            .ok_or_else(|| format!("Agent not found: {caller_agent_id}"))?;
+        let account_id = entry
+            .account_id
+            .clone()
+            .ok_or_else(|| "Knowledge graph requires a tenant-owned caller".to_string())?;
         self.memory
-            .add_relation(relation)
+            .add_relation(caller_agent_id, &account_id, relation)
             .await
             .map_err(|e| format!("Knowledge add relation failed: {e}"))
     }
 
     async fn knowledge_query(
         &self,
+        caller_agent_id: &str,
         pattern: librefang_types::memory::GraphPattern,
     ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+        let caller_agent_id = caller_agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let entry = self
+            .registry
+            .get(caller_agent_id)
+            .ok_or_else(|| format!("Agent not found: {caller_agent_id}"))?;
+        let account_id = entry
+            .account_id
+            .clone()
+            .ok_or_else(|| "Knowledge graph requires a tenant-owned caller".to_string())?;
         self.memory
-            .query_graph(pattern)
+            .query_graph(caller_agent_id, &account_id, pattern)
             .await
             .map_err(|e| format!("Knowledge query failed: {e}"))
     }
@@ -12925,20 +13005,19 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_scoped_key() {
-        // With peer_id: key is namespaced
+    fn test_tenant_shared_memory_key() {
         assert_eq!(
-            peer_scoped_key("car", Some("user-123")),
-            "peer:user-123:car"
+            tenant_shared_memory_key("tenant-a", "car", Some("user-123")),
+            "acct:tenant-a:peer:user-123:car"
         );
         assert_eq!(
-            peer_scoped_key("prefs.color", Some("u:456")),
-            "peer:u:456:prefs.color"
+            tenant_shared_memory_key("tenant-a", "prefs.color", Some("u:456")),
+            "acct:tenant-a:peer:u:456:prefs.color"
         );
-
-        // Without peer_id: key is unchanged
-        assert_eq!(peer_scoped_key("car", None), "car");
-        assert_eq!(peer_scoped_key("global_setting", None), "global_setting");
+        assert_eq!(
+            tenant_shared_memory_key("tenant-a", "car", None),
+            "acct:tenant-a:global:car"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13047,6 +13126,299 @@ mod tests {
                 .all(|(title, _, _)| title.starts_with("Tenant A")),
             "prompt enrichment should only include tenant A goals"
         );
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_knowledge_query_rejects_invalid_caller_agent_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let err = KernelHandle::knowledge_query(
+            &kernel,
+            "not-a-uuid",
+            librefang_types::memory::GraphPattern {
+                source: Some("Alice".to_string()),
+                relation: None,
+                target: None,
+                max_depth: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Invalid agent ID"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_knowledge_query_rejects_unknown_caller_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let unknown = AgentId::new();
+        let err = KernelHandle::knowledge_query(
+            &kernel,
+            &unknown.to_string(),
+            librefang_types::memory::GraphPattern {
+                source: Some("Alice".to_string()),
+                relation: None,
+                target: None,
+                max_depth: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Agent not found"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_knowledge_query_rejects_unowned_caller_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let unowned = AgentEntry {
+            id: AgentId::new(),
+            account_id: None,
+            name: "unowned-agent".to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        };
+        let unowned_id = unowned.id;
+        kernel.registry.register(unowned).unwrap();
+
+        let err = KernelHandle::knowledge_query(
+            &kernel,
+            &unowned_id.to_string(),
+            librefang_types::memory::GraphPattern {
+                source: Some("Alice".to_string()),
+                relation: None,
+                target: None,
+                max_depth: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("tenant-owned caller"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_knowledge_graph_kernel_handle_stays_tenant_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_a_agent = test_agent_entry("tenant-a-agent", "tenant-a");
+        let tenant_b_agent = test_agent_entry("tenant-b-agent", "tenant-b");
+        let tenant_a_id = tenant_a_agent.id;
+        let tenant_b_id = tenant_b_agent.id;
+        kernel.registry.register(tenant_a_agent).unwrap();
+        kernel.registry.register(tenant_b_agent).unwrap();
+
+        let alice_a = KernelHandle::knowledge_add_entity(
+            &kernel,
+            &tenant_a_id.to_string(),
+            librefang_types::memory::Entity {
+                id: String::new(),
+                entity_type: librefang_types::memory::EntityType::Person,
+                name: "Alice".to_string(),
+                properties: std::collections::HashMap::new(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        let acme_a = KernelHandle::knowledge_add_entity(
+            &kernel,
+            &tenant_a_id.to_string(),
+            librefang_types::memory::Entity {
+                id: String::new(),
+                entity_type: librefang_types::memory::EntityType::Organization,
+                name: "Acme".to_string(),
+                properties: std::collections::HashMap::new(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        KernelHandle::knowledge_add_relation(
+            &kernel,
+            &tenant_a_id.to_string(),
+            librefang_types::memory::Relation {
+                source: alice_a,
+                relation: librefang_types::memory::RelationType::WorksAt,
+                target: acme_a,
+                properties: std::collections::HashMap::new(),
+                confidence: 1.0,
+                created_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let tenant_a_matches = KernelHandle::knowledge_query(
+            &kernel,
+            &tenant_a_id.to_string(),
+            librefang_types::memory::GraphPattern {
+                source: Some("Alice".to_string()),
+                relation: Some(librefang_types::memory::RelationType::WorksAt),
+                target: None,
+                max_depth: 1,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(tenant_a_matches.len(), 1);
+
+        let tenant_b_matches = KernelHandle::knowledge_query(
+            &kernel,
+            &tenant_b_id.to_string(),
+            librefang_types::memory::GraphPattern {
+                source: Some("Alice".to_string()),
+                relation: Some(librefang_types::memory::RelationType::WorksAt),
+                target: None,
+                max_depth: 1,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(tenant_b_matches.is_empty());
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_shared_memory_rejects_invalid_caller_agent_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let err = KernelHandle::memory_store(
+            &kernel,
+            "not-a-uuid",
+            "user_name",
+            serde_json::json!("Alice"),
+            Some("sender-1"),
+        )
+        .unwrap_err();
+        assert!(err.contains("Invalid agent ID"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_shared_memory_rejects_unowned_caller_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let unowned = AgentEntry {
+            id: AgentId::new(),
+            account_id: None,
+            name: "unowned-agent".to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        };
+        let unowned_id = unowned.id;
+        kernel.registry.register(unowned).unwrap();
+
+        let err = KernelHandle::memory_list(&kernel, &unowned_id.to_string(), Some("sender-1"))
+            .unwrap_err();
+        assert!(err.contains("tenant-owned caller"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_shared_memory_stays_tenant_scoped_even_with_same_sender_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_a_agent = test_agent_entry("tenant-a-agent", "tenant-a");
+        let tenant_b_agent = test_agent_entry("tenant-b-agent", "tenant-b");
+        let tenant_a_id = tenant_a_agent.id;
+        let tenant_b_id = tenant_b_agent.id;
+        kernel.registry.register(tenant_a_agent).unwrap();
+        kernel.registry.register(tenant_b_agent).unwrap();
+
+        KernelHandle::memory_store(
+            &kernel,
+            &tenant_a_id.to_string(),
+            "user_name",
+            serde_json::json!("Alice"),
+            Some("shared-user"),
+        )
+        .unwrap();
+
+        let tenant_a_value = KernelHandle::memory_recall(
+            &kernel,
+            &tenant_a_id.to_string(),
+            "user_name",
+            Some("shared-user"),
+        )
+        .unwrap();
+        assert_eq!(tenant_a_value, Some(serde_json::json!("Alice")));
+
+        let tenant_b_value = KernelHandle::memory_recall(
+            &kernel,
+            &tenant_b_id.to_string(),
+            "user_name",
+            Some("shared-user"),
+        )
+        .unwrap();
+        assert_eq!(tenant_b_value, None);
+
+        let tenant_a_keys =
+            KernelHandle::memory_list(&kernel, &tenant_a_id.to_string(), Some("shared-user"))
+                .unwrap();
+        assert_eq!(tenant_a_keys, vec!["user_name".to_string()]);
+
+        let tenant_b_keys =
+            KernelHandle::memory_list(&kernel, &tenant_b_id.to_string(), Some("shared-user"))
+                .unwrap();
+        assert!(tenant_b_keys.is_empty());
 
         kernel.shutdown();
     }
