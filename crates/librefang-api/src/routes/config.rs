@@ -9,10 +9,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/health", axum::routing::get(health))
         .route("/health/detail", axum::routing::get(health_detail))
         .route("/status", axum::routing::get(status))
-        .route(
-            "/dashboard/snapshot",
-            axum::routing::get(dashboard_snapshot),
-        )
+        .route("/dashboard/snapshot", axum::routing::get(dashboard_snapshot))
         .route("/version", axum::routing::get(version))
         .route("/config", axum::routing::get(get_config))
         .route("/config/export", axum::routing::get(export_config))
@@ -1975,7 +1972,7 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
         }
     };
 
-    // Workflows, providers, channels — all concurrent with a 5s timeout on
+    // Workflows, providers, channels — run concurrently with a 5s timeout on
     // providers/channels in case a local provider probe stalls.
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let (workflow_result, providers_result, channels_result) = tokio::join!(
