@@ -1922,7 +1922,7 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
         "session_count": session_count,
         "default_provider": cfg.default_model.provider,
         "default_model": cfg.default_model.model,
-        "config_exists": true,
+        "config_exists": state.kernel.home_dir().join("config.toml").exists(),
         "network_enabled": cfg.network_enabled,
     });
 
@@ -1956,7 +1956,7 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
     static SKILL_COUNT_CACHE: std::sync::Mutex<Option<(usize, std::time::Instant)>> =
         std::sync::Mutex::new(None);
     let skill_count = {
-        let cached = SKILL_COUNT_CACHE.lock().unwrap().as_ref().and_then(|(n, t)| {
+        let cached = SKILL_COUNT_CACHE.lock().unwrap_or_else(|p| p.into_inner()).as_ref().and_then(|(n, t)| {
             if t.elapsed() < std::time::Duration::from_secs(30) {
                 Some(*n)
             } else {
@@ -1970,7 +1970,7 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
                 let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
                 let _ = registry.load_all();
                 let n = registry.list().len();
-                *SKILL_COUNT_CACHE.lock().unwrap() = Some((n, std::time::Instant::now()));
+                *SKILL_COUNT_CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((n, std::time::Instant::now()));
                 n
             }
         }

@@ -25,7 +25,7 @@ import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pa
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
 
-const REFRESH_MS = 30000;
+const REFRESH_MS = 5000;
 
 export function AgentsPage() {
   const { t } = useTranslation();
@@ -642,7 +642,7 @@ export function AgentsPage() {
                       <span className="text-[9px]">{t("agents.suspend")}</span>
                     </Button>
                   )}
-                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await cloneAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); }}>
+                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await cloneAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.clone_failed", { defaultValue: "Failed to clone agent" }), "error"); } }}>
                     <Copy className="w-4 h-4" />
                     <span className="text-[9px]">{t("agents.clone")}</span>
                   </Button>
