@@ -22,16 +22,60 @@ PALACE_PATH = os.environ.get(
 )
 MIN_CONTENT_LENGTH = 80
 
+# Room classification: keywords → (wing, room).
+# Evaluated in order; first match wins. Falls back to ("default", "sessions").
+ROOM_RULES: list[tuple[re.Pattern, tuple[str, str]]] = [
+    (
+        re.compile(
+            r"\b(contact|phone|email|address|family|wife|husband"
+            r"|son|daughter|parent|colleague|coworker)\b",
+            re.IGNORECASE,
+        ),
+        ("people", "contacts"),
+    ),
+    (
+        re.compile(
+            r"\b(appointment|deadline|birthday|event|meeting|schedule"
+            r"|remind me|reminder|calendar|due date|due on)\b",
+            re.IGNORECASE,
+        ),
+        ("time", "calendar"),
+    ),
+    (
+        re.compile(
+            r"\b(budget|expense|transaction|payment|bill|salary|invoice"
+            r"|cost|price|paid|spending|refund)\b",
+            re.IGNORECASE,
+        ),
+        ("finance", "transactions"),
+    ),
+    (
+        re.compile(
+            r"\b(package|order|shipment|delivery|tracking|shipped|arrived)\b",
+            re.IGNORECASE,
+        ),
+        ("logistics", "orders"),
+    ),
+    (
+        re.compile(
+            r"\b(decision|decided|prefer|from now on|going forward"
+            r"|we.ll use|i.ll use|switching to|chosen|agreed)\b",
+            re.IGNORECASE,
+        ),
+        ("knowledge", "decisions"),
+    ),
+]
+
 RELEVANCE_RE = re.compile(
-    r"\b(decision|decided|prefer|from now on|remember that"
-    r"|appointment|deadline|birthday|event|meeting"
-    r"|budget|expense|transaction|payment|bill|salary"
+    r"\b(decision|decided|prefer|from now on|going forward|remember that|note that"
+    r"|remind me|don.t forget|important|urgent|critical|keep in mind"
+    r"|appointment|deadline|birthday|event|meeting|schedule|due date"
+    r"|budget|expense|transaction|payment|bill|salary|invoice|cost|price"
     r"|package|order|shipment|delivery|tracking"
     r"|contact|phone|email|address"
-    r"|important|urgent|critical|don.t forget"
     r"|like|dislike|preference|habit|allergy"
-    r"|family|wife|husband|son|daughter|parent"
-    r"|work|client|project|invoice)\b",
+    r"|family|wife|husband|son|daughter|parent|colleague"
+    r"|work|client|project|we.ll use|i.ll use|switching to)\b",
     re.IGNORECASE,
 )
 
@@ -45,6 +89,14 @@ def emit(obj):
     """Write JSON response to stdout with trailing newline."""
     json.dump(obj, sys.stdout)
     sys.stdout.write("\n")
+
+
+def _classify_room(text: str) -> tuple[str, str]:
+    """Return (wing, room) for the given text based on ROOM_RULES."""
+    for pattern, destination in ROOM_RULES:
+        if pattern.search(text):
+            return destination
+    return ("default", "sessions")
 
 
 def extract_text(messages):
@@ -111,17 +163,19 @@ def main():
         collection = get_collection(PALACE_PATH)
         source = f"auto-{agent_id}-{datetime.now().strftime('%Y%m%d-%H%M%S%f')}"
 
+        wing, room = _classify_room(text)
+
         add_drawer(
             collection=collection,
-            wing="default",
-            room="sessions",
+            wing=wing,
+            room=room,
             content=text,
             source_file=source,
             chunk_index=0,
             agent="mempalace-indexer",
         )
 
-        emit({"status": "indexed", "chars": len(text)})
+        emit({"status": "indexed", "chars": len(text), "wing": wing, "room": room})
     except Exception as e:
         emit({"status": "error", "error": str(e)})
 

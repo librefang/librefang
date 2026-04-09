@@ -19,6 +19,11 @@ PALACE_PATH = os.environ.get(
 )
 MAX_MEMORY_CHARS = int(os.environ.get("MEMPALACE_MAX_CHARS", "300"))
 
+# ChromaDB returns L2 distance: lower = more similar.
+# Results with distance above this threshold are too dissimilar to be useful.
+# Set MEMPALACE_MAX_DISTANCE=0 to disable filtering.
+MAX_DISTANCE = float(os.environ.get("MEMPALACE_MAX_DISTANCE", "1.2"))
+
 
 def emit(obj):
     """Write JSON response to stdout with trailing newline."""
@@ -59,9 +64,18 @@ def main():
             text = r.get("text", "")
             source = r.get("source_file", "")
             wing = r.get("wing", "")
-            if text:
-                snippet = truncate_at_word(text, MAX_MEMORY_CHARS)
-                memories.append({"content": f"[{wing}/{source}] {snippet}"})
+            distance = r.get("distance")
+
+            if not text:
+                continue
+
+            # Filter out low-relevance results when the backend provides a score.
+            # distance=None means the backend didn't return one — allow through.
+            if distance is not None and MAX_DISTANCE > 0 and distance > MAX_DISTANCE:
+                continue
+
+            snippet = truncate_at_word(text, MAX_MEMORY_CHARS)
+            memories.append({"content": f"[{wing}/{source}] {snippet}"})
 
         emit({"memories": memories})
     except Exception as e:
