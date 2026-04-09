@@ -275,7 +275,7 @@ async fn resolve_manifest(
     }
 
     // Parse TOML
-    let manifest: AgentManifest = match toml::from_str(&manifest_toml) {
+    let mut manifest: AgentManifest = match toml::from_str(&manifest_toml) {
         Ok(m) => m,
         Err(e) => {
             let _ = e;
