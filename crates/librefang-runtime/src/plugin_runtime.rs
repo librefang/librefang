@@ -1093,7 +1093,7 @@ pub async fn run_hook_json(
     cmd.env_clear();
     cmd.env("LIBREFANG_AGENT_ID", agent_id);
     cmd.env("LIBREFANG_MESSAGE", message);
-    cmd.env("LIBREFANG_RUNTIME", runtime.label());
+    cmd.env("LIBREFANG_RUNTIME", runtime.label().as_ref());
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", path);
     }
