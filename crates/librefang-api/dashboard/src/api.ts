@@ -717,24 +717,24 @@ export async function postQuickInit(): Promise<{ status: string; provider?: stri
 }
 
 export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
-  const [health, status, providersRaw, channelsRaw, skillsRaw, agents, workflows] = await Promise.all([
-    get<HealthResponse>("/api/health"),
-    get<StatusResponse>("/api/status"),
-    get<ProvidersResponse>("/api/providers"),
-    get<ChannelsResponse>("/api/channels"),
-    get<SkillsResponse>("/api/skills"),
-    listAgents(),
-    get<{ workflows?: any[] }>("/api/workflows")
-  ]);
+  const snap = await get<{
+    health: HealthResponse;
+    status: StatusResponse;
+    agents: AgentItem[];
+    providers: ProviderItem[];
+    channels: ChannelItem[];
+    skillCount: number;
+    workflowCount: number;
+  }>("/api/dashboard/snapshot");
 
   return {
-    health,
-    status,
-    providers: providersRaw.providers ?? [],
-    channels: channelsRaw.channels ?? [],
-    agents: agents ?? [],
-    skillCount: skillsRaw.skills?.length ?? 0,
-    workflowCount: workflows.workflows?.length ?? 0
+    health: snap.health,
+    status: snap.status,
+    agents: snap.agents ?? [],
+    providers: snap.providers ?? [],
+    channels: snap.channels ?? [],
+    skillCount: snap.skillCount ?? 0,
+    workflowCount: snap.workflowCount ?? 0,
   };
 }
 

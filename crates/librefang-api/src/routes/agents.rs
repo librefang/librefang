@@ -681,7 +681,7 @@ pub async fn bulk_stop_agents(
 }
 
 /// Enrich an `AgentEntry` into a JSON value with catalog data.
-fn enrich_agent_json(
+pub(crate) fn enrich_agent_json(
     e: &librefang_types::agent::AgentEntry,
     dm: &librefang_types::config::DefaultModelConfig,
     catalog: &Option<

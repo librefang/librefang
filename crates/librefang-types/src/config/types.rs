@@ -2593,6 +2593,30 @@ pub enum HookFailurePolicy {
 
 /// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.
 ///
+/// Type of a plugin config field.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginConfigFieldType {
+    #[default]
+    String,
+    Number,
+    Boolean,
+}
+
+/// A single user-configurable field declared in `[config]` of plugin.toml.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginConfigField {
+    /// Field value type.
+    #[serde(rename = "type", default)]
+    pub field_type: PluginConfigFieldType,
+    /// Default value (always a JSON-compatible value).
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    /// Human-readable description of what this field controls.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// # Example `plugin.toml`
 ///
 /// ```toml
@@ -2674,6 +2698,18 @@ pub struct PluginManifest {
     /// ```
     #[serde(default)]
     pub plugin_depends: Vec<String>,
+    /// User-configurable plugin settings declared in `[config]`.
+    ///
+    /// ```toml
+    /// [config]
+    /// model = { type = "string", default = "small", description = "Whisper model size" }
+    /// max_file_size_mb = { type = "number", default = 10 }
+    /// ```
+    ///
+    /// The resolved config (defaults merged with user overrides) is written as JSON to
+    /// the path in `LIBREFANG_PLUGIN_CONFIG` before each hook subprocess runs.
+    #[serde(default)]
+    pub config: std::collections::HashMap<String, PluginConfigField>,
 }
 
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"

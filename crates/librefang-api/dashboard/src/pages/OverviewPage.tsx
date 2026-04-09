@@ -13,7 +13,7 @@ import { isProviderAvailable } from "../lib/status";
 import { getStatusVariant } from "../lib/status";
 import { formatRelativeTime } from "../lib/datetime";
 
-const REFRESH_MS = 30000;
+const REFRESH_MS = 5000;
 
 export function OverviewPage() {
   const { t } = useTranslation();

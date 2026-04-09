@@ -3,7 +3,7 @@ import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { listAgents, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
+import { loadDashboardSnapshot, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics,
   listModels, listProviders, listAgentTemplates, getAgentTemplateToml, deleteAgent, cloneAgent, resetAgentSession } from "../api";
@@ -25,7 +25,7 @@ import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pa
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
 
-const REFRESH_MS = 30000;
+const REFRESH_MS = 5000;
 
 export function AgentsPage() {
   const { t } = useTranslation();
@@ -143,10 +143,13 @@ export function AgentsPage() {
     patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: patch });
   }
 
+  // Share the snapshot query with OverviewPage — same cache key means React Query
+  // deduplicates the poll when both pages are mounted, and agent counts on the
+  // Overview tab stay in sync with this list automatically.
   const agentsQuery = useQuery({
-    queryKey: ["agents", "list"],
-    queryFn: listAgents,
-    refetchInterval: REFRESH_MS
+    queryKey: ["dashboard", "snapshot"],
+    queryFn: loadDashboardSnapshot,
+    refetchInterval: REFRESH_MS,
   });
 
   const modelsQuery = useQuery({
@@ -175,7 +178,7 @@ export function AgentsPage() {
     [modelsQuery.data?.models, hiddenSet],
   );
 
-  const agents = agentsQuery.data ?? [];
+  const agents = agentsQuery.data?.agents ?? [];
   // Counts for the filter chips so operators can see "5 running / 2
   // suspended" without running through the filter first.
   const agentCounts = useMemo(() => {
@@ -255,11 +258,11 @@ export function AgentsPage() {
         </div>
         <div className="pt-4 border-t border-border-subtle/30 flex gap-2">
           {isSuspended ? (
-            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); await resumeAgent(agent.id); agentsQuery.refetch(); }}>
+            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); try { await resumeAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
               <Play className="h-3.5 w-3.5 mr-1" /> {t("agents.resume")}
             </Button>
           ) : (
-            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); await suspendAgent(agent.id); agentsQuery.refetch(); }}>
+            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); try { await suspendAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
               <Pause className="h-3.5 w-3.5 mr-1" /> {t("agents.suspend")}
             </Button>
           )}
@@ -629,17 +632,17 @@ export function AgentsPage() {
                 {/* Management actions */}
                 <div className="grid grid-cols-4 gap-2">
                   {isDetailSuspended ? (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await resumeAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await resumeAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
                       <Play className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.resume")}</span>
                     </Button>
                   ) : (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await suspendAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await suspendAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
                       <Pause className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.suspend")}</span>
                     </Button>
                   )}
-                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await cloneAgent(detailAgent.id); agentsQuery.refetch(); }}>
+                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await cloneAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.clone_failed", { defaultValue: "Failed to clone agent" }), "error"); } }}>
                     <Copy className="w-4 h-4" />
                     <span className="text-[9px]">{t("agents.clone")}</span>
                   </Button>
