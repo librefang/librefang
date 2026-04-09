@@ -1654,6 +1654,30 @@ pub async fn get_agent(
         }
     };
 
+    let dm = {
+        let dm_override = state
+            .kernel
+            .default_model_override_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        effective_default_model(
+            &state.kernel.config_ref().default_model,
+            dm_override.as_ref(),
+        )
+    };
+    let resolved_provider =
+        if entry.manifest.model.provider.is_empty() || entry.manifest.model.provider == "default" {
+            dm.provider.as_str()
+        } else {
+            entry.manifest.model.provider.as_str()
+        };
+    let resolved_model =
+        if entry.manifest.model.model.is_empty() || entry.manifest.model.model == "default" {
+            dm.model.as_str()
+        } else {
+            entry.manifest.model.model.as_str()
+        };
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -1666,8 +1690,8 @@ pub async fn get_agent(
             "last_active": entry.last_active.to_rfc3339(),
             "session_id": entry.session_id.0.to_string(),
             "model": {
-                "provider": entry.manifest.model.provider,
-                "model": entry.manifest.model.model,
+                "provider": resolved_provider,
+                "model": resolved_model,
                 "max_tokens": entry.manifest.model.max_tokens,
                 "temperature": entry.manifest.model.temperature,
             },

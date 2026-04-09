@@ -10,7 +10,7 @@
 //! - **Local path**: copy from a local directory
 //! - **Git URL**: clone a git repo into the plugins directory
 
-use librefang_types::config::PluginManifest;
+use librefang_types::config::{PluginManifest, PluginSystemRequirement};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
@@ -690,6 +690,16 @@ pub async fn install_plugin(source: &PluginSource) -> Result<PluginInfo, String>
         // Don't remove the partially-installed plugin — let the user decide.
         // Just warn so they know what to install next.
         warn!("{e}");
+    }
+
+    // Warn about missing system binaries declared in [[requires]].
+    let missing_bins = check_system_requires(&info.manifest.requires);
+    for (bin, hint) in &missing_bins {
+        let hint_str = hint.as_deref().unwrap_or("(no install hint provided)");
+        warn!(
+            "Plugin '{}' requires system binary '{}' which was not found on PATH. {}",
+            info.manifest.name, bin, hint_str
+        );
     }
 
     Ok(info)
@@ -3292,6 +3302,43 @@ fn extract_needs(raw_toml: &str) -> Vec<String> {
         .collect()
 }
 
+/// Return `true` if `name` resolves to an executable on `PATH`.
+///
+/// Walks each directory in `PATH` and checks whether `name` (or `name.exe`
+/// on Windows) exists as a file in that directory.  No shell quoting or
+/// tilde-expansion is performed — the binary name should be a plain
+/// filename without path separators.
+fn binary_on_path(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            if dir.join(name).exists() {
+                return true;
+            }
+            // Windows: also check with .exe extension
+            #[cfg(target_os = "windows")]
+            if dir.join(format!("{name}.exe")).exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check whether each `[[requires]]` binary is available on PATH.
+///
+/// Returns a list of `(binary, install_hint)` pairs for each missing binary.
+/// An empty list means all required binaries are present.
+fn check_system_requires(requires: &[PluginSystemRequirement]) -> Vec<(String, Option<String>)> {
+    requires
+        .iter()
+        .filter(|req| !req.binary.is_empty() && !binary_on_path(&req.binary))
+        .map(|req| (req.binary.clone(), req.install_hint.clone()))
+        .collect()
+}
+
 /// Check whether all plugins listed in `needs` are already installed and
 /// satisfy any declared version constraints.
 ///
@@ -3572,6 +3619,16 @@ pub fn lint_plugin(name: &str) -> Result<PluginLintReport, String> {
                 ));
             }
         }
+    }
+
+    // 8. Warn about missing system binaries declared in [[requires]]
+    let missing_bins = check_system_requires(&manifest.requires);
+    for (bin, hint) in &missing_bins {
+        let hint_str = hint.as_deref().unwrap_or("(no install hint provided)");
+        warnings.push(format!(
+            "Required binary '{}' not found on PATH — {}",
+            bin, hint_str
+        ));
     }
 
     let ok = errors.is_empty();

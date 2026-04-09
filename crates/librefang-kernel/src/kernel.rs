@@ -8599,7 +8599,6 @@ system_prompt = "You are a helpful assistant."
 
     fn resolve_driver(&self, manifest: &AgentManifest) -> KernelResult<Arc<dyn LlmDriver>> {
         let cfg = self.config.load();
-        let agent_provider = &manifest.model.provider;
 
         // Use the effective default model: hot-reloaded override takes priority
         // over the boot-time config. This ensures that when a user saves a new
@@ -8611,6 +8610,18 @@ system_prompt = "You are a helpful assistant."
             .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
         let effective_default = override_guard.as_ref().unwrap_or(&cfg.default_model);
         let default_provider = &effective_default.provider;
+
+        // Resolve "default" or empty provider to the effective default provider.
+        // Without this, agents configured with provider = "default" would pass
+        // the literal string "default" to create_driver(), which fails with
+        // "Unknown provider 'default'" (issue #2196).
+        let resolved_provider_str =
+            if manifest.model.provider.is_empty() || manifest.model.provider == "default" {
+                default_provider.clone()
+            } else {
+                manifest.model.provider.clone()
+            };
+        let agent_provider = &resolved_provider_str;
 
         let has_custom_key = manifest.model.api_key_env.is_some();
         let has_custom_url = manifest.model.base_url.is_some();
