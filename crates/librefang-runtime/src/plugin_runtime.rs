@@ -690,9 +690,7 @@ fn build_command(
         // Custom launcher: use the full path verbatim, pass the script as the
         // sole argument.  This is the fix for hooks whose `runtime` is set to
         // a full binary path such as `/opt/homebrew/bin/python3`.
-        PluginRuntime::Custom(launcher) => {
-            Ok((launcher.clone(), vec![script_path.to_string()]))
-        }
+        PluginRuntime::Custom(launcher) => Ok((launcher.clone(), vec![script_path.to_string()])),
     }
 }
 
@@ -1095,7 +1093,7 @@ pub async fn run_hook_json(
     cmd.env_clear();
     cmd.env("LIBREFANG_AGENT_ID", agent_id);
     cmd.env("LIBREFANG_MESSAGE", message);
-    cmd.env("LIBREFANG_RUNTIME", runtime.label());
+    cmd.env("LIBREFANG_RUNTIME", runtime.label().as_ref());
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", path);
     }
