@@ -41,9 +41,8 @@ COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/packages /opt/librefang/packages
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-RUN mkdir -p /data && chown node:node /data
-EXPOSE 4545
 ENV LIBREFANG_HOME=/data
-USER node
+RUN mkdir -p $LIBREFANG_HOME && chown node:node $LIBREFANG_HOME
+EXPOSE 4545
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["librefang", "start", "--foreground"]

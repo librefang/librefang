@@ -1,6 +1,8 @@
 #!/bin/sh
 set -e
 
+mkdir -p "${LIBREFANG_HOME:-/data}"
+
 CONFIG="${LIBREFANG_HOME:-/data}/config.toml"
 
 # Auto-generate config.toml on first boot if missing
@@ -67,4 +69,8 @@ fi
 # Uses HTTP tarball download if git is unavailable
 librefang init 2>/dev/null || true
 
-exec "$@"
+# Fix permissions on the data directory (in case the volume is root-owned)
+chown -R node:node "${LIBREFANG_HOME:-/data}"
+
+echo "Starting LibreFang as user 'node'..."
+exec gosu node "$@"
