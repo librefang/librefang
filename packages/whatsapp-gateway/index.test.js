@@ -18,6 +18,18 @@ const {
   isAllowedOrigin,
   parseBody,
   MAX_BODY_SIZE,
+  encodeInstanceKey,
+  decodeInstanceKey,
+  authStorePathForInstance,
+  parseSessionScopedRequest,
+  createSessionState,
+  getOrCreateSession,
+  getSessionStatusView,
+  dbSaveMessage,
+  dbGetMessagesByJid,
+  dbGetUnprocessed,
+  dbUpdateLastSeen,
+  dbGetLastSeen,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -205,7 +217,124 @@ describe('extractRelayCommands', () => {
 // ---------------------------------------------------------------------------
 describe('buildConversationsContext', () => {
   it('returns empty string when no active conversations', () => {
-    assert.equal(buildConversationsContext(), '');
+    assert.equal(buildConversationsContext(createSessionState('whatsapp:test')), '');
+  });
+});
+
+describe('session partitioning helpers', () => {
+  it('round-trips encoded instance keys for auth-store directories', () => {
+    const instanceKey = 'whatsapp:acct-a/primary';
+    assert.equal(decodeInstanceKey(encodeInstanceKey(instanceKey)), instanceKey);
+  });
+
+  it('creates isolated session state per instance', () => {
+    const first = createSessionState('whatsapp:acct-a');
+    const second = createSessionState('whatsapp:acct-b');
+
+    first.activeConversations.set('a@s.whatsapp.net', { messageCount: 1 });
+    first.rateLimitMap.set('a@s.whatsapp.net', { timestamps: [Date.now()] });
+
+    assert.equal(first.instanceKey, 'whatsapp:acct-a');
+    assert.equal(second.instanceKey, 'whatsapp:acct-b');
+    assert.equal(second.activeConversations.size, 0);
+    assert.equal(second.rateLimitMap.size, 0);
+    assert.notEqual(first.activeConversations, second.activeConversations);
+    assert.notEqual(first.rateLimitMap, second.rateLimitMap);
+  });
+
+  it('reuses the same session record for the same instance key', () => {
+    const sessions = new Map();
+
+    const first = getOrCreateSession(sessions, 'whatsapp:acct-a');
+    const second = getOrCreateSession(sessions, 'whatsapp:acct-a');
+    const third = getOrCreateSession(sessions, 'whatsapp:acct-b');
+
+    assert.equal(first, second);
+    assert.notEqual(first, third);
+    assert.equal(sessions.size, 2);
+  });
+
+  it('builds status from the owning session record', () => {
+    const session = createSessionState('whatsapp:acct-a');
+    session.sessionId = 'sess-123';
+    session.connStatus = 'qr_ready';
+    session.statusMessage = 'Scan QR';
+    session.qrExpired = false;
+    session.qrDataUrl = 'data:image/png;base64,abc';
+
+    assert.deepEqual(getSessionStatusView(session), {
+      instance_key: 'whatsapp:acct-a',
+      connected: false,
+      message: 'Scan QR',
+      expired: false,
+      session_id: 'sess-123',
+      qr_data_url: 'data:image/png;base64,abc',
+    });
+  });
+
+  it('persists and scopes sqlite messages by instance key', () => {
+    const instanceA = 'whatsapp:acct-a';
+    const instanceB = 'whatsapp:acct-b';
+    const jid = `store-${Date.now()}@s.whatsapp.net`;
+    const idA = `msg-a-${Date.now()}`;
+    const idB = `msg-b-${Date.now()}`;
+
+    dbSaveMessage({
+      instanceKey: instanceA,
+      id: idA,
+      jid,
+      senderJid: 'sender-a',
+      pushName: 'A',
+      phone: '+100',
+      text: 'one',
+      direction: 'inbound',
+      timestamp: Date.now() - 2000,
+      processed: 0,
+      rawType: 'text',
+    });
+    dbSaveMessage({
+      instanceKey: instanceB,
+      id: idB,
+      jid,
+      senderJid: 'sender-b',
+      pushName: 'B',
+      phone: '+200',
+      text: 'two',
+      direction: 'inbound',
+      timestamp: Date.now() - 1000,
+      processed: 0,
+      rawType: 'text',
+    });
+
+    const rowsA = dbGetMessagesByJid(instanceA, jid, 20, 0);
+    const rowsB = dbGetMessagesByJid(instanceB, jid, 20, 0);
+    assert.equal(rowsA.length, 1);
+    assert.equal(rowsB.length, 1);
+    assert.equal(rowsA[0].instance_key, instanceA);
+    assert.equal(rowsB[0].instance_key, instanceB);
+
+    const unprocessedA = dbGetUnprocessed(instanceA, Date.now() + 1);
+    const unprocessedB = dbGetUnprocessed(instanceB, Date.now() + 1);
+    assert.equal(unprocessedA.some((row) => row.id === idA), true);
+    assert.equal(unprocessedA.some((row) => row.id === idB), false);
+    assert.equal(unprocessedB.some((row) => row.id === idB), true);
+    assert.equal(unprocessedB.some((row) => row.id === idA), false);
+  });
+
+  it('stores last-seen rows per instance key', () => {
+    const instanceA = 'whatsapp:lastseen-a';
+    const instanceB = 'whatsapp:lastseen-b';
+    const jid = `seen-${Date.now()}@s.whatsapp.net`;
+    const tsA = Date.now() - 5000;
+    const tsB = Date.now() - 1000;
+
+    dbUpdateLastSeen(instanceA, jid, tsA);
+    dbUpdateLastSeen(instanceB, jid, tsB);
+
+    const rowsA = dbGetLastSeen(instanceA);
+    const rowsB = dbGetLastSeen(instanceB);
+    assert.equal(rowsA.some((row) => row.jid === jid && row.last_timestamp === tsA), true);
+    assert.equal(rowsB.some((row) => row.jid === jid && row.last_timestamp === tsB), true);
   });
 });
 
@@ -215,32 +344,36 @@ describe('buildConversationsContext', () => {
 describe('isRateLimited', () => {
   it('allows first message', () => {
     const jid = 'test-rate-' + Date.now() + '@s.whatsapp.net';
-    assert.equal(isRateLimited(jid), false);
+    const session = createSessionState('whatsapp:rate-1');
+    assert.equal(isRateLimited(session, jid), false);
   });
 
   it('allows up to 3 messages within window', () => {
     const jid = 'test-rate-3-' + Date.now() + '@s.whatsapp.net';
-    assert.equal(isRateLimited(jid), false); // 1
-    assert.equal(isRateLimited(jid), false); // 2
-    assert.equal(isRateLimited(jid), false); // 3
+    const session = createSessionState('whatsapp:rate-3');
+    assert.equal(isRateLimited(session, jid), false); // 1
+    assert.equal(isRateLimited(session, jid), false); // 2
+    assert.equal(isRateLimited(session, jid), false); // 3
   });
 
   it('blocks the 4th message within window', () => {
     const jid = 'test-rate-4-' + Date.now() + '@s.whatsapp.net';
-    isRateLimited(jid); // 1
-    isRateLimited(jid); // 2
-    isRateLimited(jid); // 3
-    assert.equal(isRateLimited(jid), true); // 4 → blocked
+    const session = createSessionState('whatsapp:rate-4');
+    isRateLimited(session, jid); // 1
+    isRateLimited(session, jid); // 2
+    isRateLimited(session, jid); // 3
+    assert.equal(isRateLimited(session, jid), true); // 4 → blocked
   });
 
   it('different JIDs have independent limits', () => {
     const jid1 = 'test-rate-ind1-' + Date.now() + '@s.whatsapp.net';
     const jid2 = 'test-rate-ind2-' + Date.now() + '@s.whatsapp.net';
-    isRateLimited(jid1);
-    isRateLimited(jid1);
-    isRateLimited(jid1);
-    assert.equal(isRateLimited(jid1), true);
-    assert.equal(isRateLimited(jid2), false);
+    const session = createSessionState('whatsapp:rate-ind');
+    isRateLimited(session, jid1);
+    isRateLimited(session, jid1);
+    isRateLimited(session, jid1);
+    assert.equal(isRateLimited(session, jid1), true);
+    assert.equal(isRateLimited(session, jid2), false);
   });
 });
 
@@ -338,6 +471,40 @@ describe('parseBody', () => {
 describe('MAX_BODY_SIZE', () => {
   it('is 64KB', () => {
     assert.equal(MAX_BODY_SIZE, 64 * 1024);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session partitioning helpers
+// ---------------------------------------------------------------------------
+describe('session partitioning helpers', () => {
+  it('encodes instance keys into filesystem-safe auth store names', () => {
+    assert.equal(
+      encodeInstanceKey('whatsapp:tenant-a/us-east-1'),
+      'whatsapp_3Atenant_2Da_2Fus_2Deast_2D1'
+    );
+  });
+
+  it('derives distinct auth store paths per instance key', () => {
+    const a = authStorePathForInstance('/tmp/wa-gateway', 'whatsapp:tenant-a');
+    const b = authStorePathForInstance('/tmp/wa-gateway', 'whatsapp:tenant-b');
+    assert.match(a, /auth_store[\\/]/);
+    assert.notEqual(a, b);
+    assert.match(a, /tenant/);
+  });
+
+  it('requires instance_key on session-scoped requests', () => {
+    assert.throws(
+      () => parseSessionScopedRequest({}),
+      /Missing "instance_key"/
+    );
+  });
+
+  it('returns the requested instance_key for session-scoped requests', () => {
+    assert.deepEqual(
+      parseSessionScopedRequest({ instance_key: 'whatsapp:tenant-a' }),
+      { instanceKey: 'whatsapp:tenant-a' }
+    );
   });
 });
 

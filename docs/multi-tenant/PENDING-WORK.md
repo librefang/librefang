@@ -1,7 +1,7 @@
 # PENDING-WORK: Multi-Tenant Remaining Work
 
 **Status:** Current
-**Date:** 2026-04-08
+**Date:** 2026-04-09
 **Related:** `TENANT-INVARIANTS.md`, `CURRENT-CODE-AUDIT.md`, `ROUTE-POLICY-MATRIX.md`
 
 ---
@@ -16,13 +16,7 @@ If a module is already converged, it should not stay here as generic â€œdrift.â€
 
 ## Real Open Items
 
-### 1. Channel QR / session ownership modeling
-
-- channel config/secrets/runtime ownership is converged
-- ingress binding v1 is converged at integration-instance scope
-- QR/bootstrap/session ownership still needs explicit product and storage rules
-
-### 2. Shared integration binding beyond integration-instance scope
+### 1. Shared integration binding beyond integration-instance scope
 
 - current model is `integration instance -> account_id`
 - future work, only if product requires it:
@@ -30,13 +24,13 @@ If a module is already converged, it should not stay here as generic â€œdrift.â€
   - rebinding rules
   - conflict and support workflows
 
-### 3. Broader tenant-owned skill content model
+### 2. Broader tenant-owned skill content model
 
 - hands are tenant-owned at the instance/settings layer
 - global catalog and install/reload lifecycle are intentionally split
 - tenant-authored skill content/overlays beyond hands remain future product work if needed
 
-### 4. Residual `AccountId(None)` migration debt
+### 3. Residual `AccountId(None)` migration debt
 
 - active target behavior is explicit concrete account scope
 - admin-only route guards now require concrete configured admin accounts
@@ -49,7 +43,7 @@ If a module is already converged, it should not stay here as generic â€œdrift.â€
   - legacy storage round-trip helpers such as `"system"`
   - stale comments/tests that still describe compatibility behavior too casually
 
-### 5. Knowledge-graph caller-context wiring
+### 4. Knowledge-graph caller-context wiring
 
 - tenant-facing memory relations routes are now account-scoped and the knowledge
   graph schema persists `account_id`
@@ -62,6 +56,13 @@ If a module is already converged, it should not stay here as generic â€œdrift.â€
 
 ## Intentionally Not Pending
 
+- channel QR/bootstrap/session ownership at integration-instance scope
+  - implementation now exists in code for the ownership-record foundation
+  - WeChat bootstrap/API wiring is owned and instance-targeted
+  - WhatsApp gateway/bootstrap/API wiring is owned and instance-targeted
+  - see `ADR-MT-006-CHANNEL-BOOTSTRAP-OWNERSHIP.md`,
+    `SPEC-MT-005-CHANNEL-BOOTSTRAP-SESSION-OWNERSHIP.md`, and
+    `PLAN-MT-003-CHANNEL-BOOTSTRAP-HARDENING.md`
 - inbox operator/admin intake infrastructure, including `/api/inbox/status`
   admin-only diagnostics
 - channels config/secrets tenant ownership

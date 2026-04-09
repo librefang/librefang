@@ -172,10 +172,12 @@ use crate::types;
         routes::remove_channel,
         routes::test_channel,
         routes::reload_channels,
-        routes::whatsapp_qr_start,
-        routes::whatsapp_qr_status,
-        routes::wechat_qr_start,
-        routes::wechat_qr_status,
+        routes::whatsapp_bootstrap_start,
+        routes::whatsapp_bootstrap_status,
+        routes::whatsapp_bootstrap_cancel,
+        routes::wechat_bootstrap_start,
+        routes::wechat_bootstrap_status,
+        routes::wechat_bootstrap_cancel,
 
         // ── Workflows / Triggers / Schedules / Cron ──
         routes::list_workflows,

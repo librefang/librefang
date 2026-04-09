@@ -12,20 +12,28 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/channels/{name}/test", axum::routing::post(test_channel))
         .route("/channels/reload", axum::routing::post(reload_channels))
         .route(
-            "/channels/whatsapp/qr/start",
-            axum::routing::post(whatsapp_qr_start),
+            "/channels/whatsapp/{instance_key}/bootstrap/start",
+            axum::routing::post(whatsapp_bootstrap_start),
         )
         .route(
-            "/channels/whatsapp/qr/status",
-            axum::routing::get(whatsapp_qr_status),
+            "/channels/whatsapp/{instance_key}/bootstrap/status",
+            axum::routing::get(whatsapp_bootstrap_status),
         )
         .route(
-            "/channels/wechat/qr/start",
-            axum::routing::post(wechat_qr_start),
+            "/channels/whatsapp/{instance_key}/bootstrap/cancel",
+            axum::routing::post(whatsapp_bootstrap_cancel),
         )
         .route(
-            "/channels/wechat/qr/status",
-            axum::routing::get(wechat_qr_status),
+            "/channels/wechat/{instance_key}/bootstrap/start",
+            axum::routing::post(wechat_bootstrap_start),
+        )
+        .route(
+            "/channels/wechat/{instance_key}/bootstrap/status",
+            axum::routing::get(wechat_bootstrap_status),
+        )
+        .route(
+            "/channels/wechat/{instance_key}/bootstrap/cancel",
+            axum::routing::post(wechat_bootstrap_cancel),
         )
         .route(
             "/channels/registry",
@@ -2143,10 +2151,22 @@ async fn send_channel_test_message(
 #[cfg(test)]
 mod tests {
     use super::{
-        merged_channel_config_fields, remove_account_channel_config, scoped_secret_env_var,
+        merged_channel_config_fields, remove_account_channel_config, router, scoped_secret_env_var,
         stored_secret_env_name_for_field, upsert_account_channel_config, ChannelField, FieldType,
     };
+    use crate::routes::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use librefang_kernel::LibreFangKernel;
+    use librefang_types::config::{
+        ChannelsConfig, DefaultModelConfig, KernelConfig, WeChatConfig, WhatsAppConfig,
+    };
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    use tower::ServiceExt;
 
     #[test]
     fn scoped_secret_env_var_encodes_account_id_without_collisions() {
@@ -2266,6 +2286,635 @@ mod tests {
             Some("ops")
         );
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wechat_bootstrap_start_persists_owned_session_for_target_instance() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let ilink = spawn_wechat_ilink_stub(vec![(
+            "/ilink/bot/get_bot_qrcode?bot_type=3".to_string(),
+            StatusCode::OK,
+            serde_json::json!({
+                "qrcode": "provider-qr-handle",
+                "qrcode_img_content": "https://stub.example/qr.png"
+            }),
+        )])
+        .await;
+        // SAFETY: test-scoped environment mutation.
+        unsafe {
+            std::env::set_var("LIBREFANG_WECHAT_ILINK_BASE", &ilink);
+        }
+        let state = build_wechat_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/wechat/wechat:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+
+        assert_eq!(body["instance_key"].as_str(), Some("wechat:tenant-a"));
+        assert_eq!(body["account_id"].as_str(), Some("tenant-a"));
+        assert_eq!(body["status"].as_str(), Some("pending"));
+        assert_eq!(body["qr_url"].as_str(), Some("https://stub.example/qr.png"));
+        assert!(body.get("qr_code").is_none());
+
+        let store = crate::channel_bootstrap::ChannelBootstrapStore::new(temp.path());
+        store.load().unwrap();
+        let session = store
+            .get_pending_by_instance("wechat", "wechat:tenant-a")
+            .await
+            .unwrap();
+        assert_eq!(session.account_id, "tenant-a");
+        assert_eq!(
+            session.provider_handle.as_deref(),
+            Some("provider-qr-handle")
+        );
+
+        // SAFETY: test cleanup for process-global environment.
+        unsafe {
+            std::env::remove_var("LIBREFANG_WECHAT_ILINK_BASE");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wechat_bootstrap_status_confirms_owned_session_and_persists_token_to_owner_slot() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let ilink = spawn_wechat_ilink_stub(vec![
+            (
+                "/ilink/bot/get_bot_qrcode?bot_type=3".to_string(),
+                StatusCode::OK,
+                serde_json::json!({
+                    "qrcode": "provider-qr-handle",
+                    "qrcode_img_content": "https://stub.example/qr.png"
+                }),
+            ),
+            (
+                "/ilink/bot/get_qrcode_status?qrcode=provider-qr-handle".to_string(),
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "confirmed",
+                    "bot_token": "ilink_bot_token_123"
+                }),
+            ),
+        ])
+        .await;
+        // SAFETY: test-scoped environment mutation.
+        unsafe {
+            std::env::set_var("LIBREFANG_WECHAT_ILINK_BASE", &ilink);
+        }
+        let state = build_wechat_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/wechat/wechat:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/channels/wechat/wechat:tenant-a/bootstrap/status")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+
+        assert_eq!(body["connected"].as_bool(), Some(true));
+        assert_eq!(body["status"].as_str(), Some("confirmed"));
+        assert!(body.get("bot_token").is_none());
+
+        let store = crate::channel_bootstrap::ChannelBootstrapStore::new(temp.path());
+        store.load().unwrap();
+        let session = store
+            .get_by_bootstrap_id(body["bootstrap_id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            session.status,
+            crate::channel_bootstrap::BootstrapStatus::Confirmed
+        );
+
+        let token_env = scoped_secret_env_var("WECHAT_BOT_TOKEN", "tenant-a");
+        let secrets = std::fs::read_to_string(temp.path().join("secrets.env")).unwrap();
+        assert!(secrets.contains(&token_env));
+        assert!(secrets.contains("ilink_bot_token_123"));
+        assert_eq!(
+            std::env::var(&token_env).ok().as_deref(),
+            Some("ilink_bot_token_123")
+        );
+
+        // SAFETY: test cleanup for process-global environment.
+        unsafe {
+            std::env::remove_var("LIBREFANG_WECHAT_ILINK_BASE");
+            std::env::remove_var(&token_env);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wechat_bootstrap_cancel_marks_owned_session_cancelled() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let ilink = spawn_wechat_ilink_stub(vec![(
+            "/ilink/bot/get_bot_qrcode?bot_type=3".to_string(),
+            StatusCode::OK,
+            serde_json::json!({
+                "qrcode": "provider-qr-handle",
+                "qrcode_img_content": "https://stub.example/qr.png"
+            }),
+        )])
+        .await;
+        // SAFETY: test-scoped environment mutation.
+        unsafe {
+            std::env::set_var("LIBREFANG_WECHAT_ILINK_BASE", &ilink);
+        }
+        let state = build_wechat_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/wechat/wechat:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/wechat/wechat:tenant-a/bootstrap/cancel")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["status"].as_str(), Some("cancelled"));
+
+        let store = crate::channel_bootstrap::ChannelBootstrapStore::new(temp.path());
+        store.load().unwrap();
+        let session = store
+            .get_by_bootstrap_id(body["bootstrap_id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            session.status,
+            crate::channel_bootstrap::BootstrapStatus::Cancelled
+        );
+
+        // SAFETY: test cleanup for process-global environment.
+        unsafe {
+            std::env::remove_var("LIBREFANG_WECHAT_ILINK_BASE");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn whatsapp_bootstrap_start_persists_owned_session_for_target_instance() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let gateway = spawn_gateway_stub(vec![(
+            "POST".to_string(),
+            "/login/start".to_string(),
+            StatusCode::OK,
+            serde_json::json!({
+                "session_id": "wa-session-1",
+                "qr_data_url": "data:image/png;base64,abc",
+                "message": "Scan with WhatsApp",
+                "connected": false
+            }),
+        )])
+        .await;
+        unsafe {
+            std::env::set_var(
+                "WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61",
+                &gateway,
+            );
+        }
+        let state = build_whatsapp_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/whatsapp/whatsapp:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["instance_key"].as_str(), Some("whatsapp:tenant-a"));
+        assert_eq!(body["account_id"].as_str(), Some("tenant-a"));
+        assert_eq!(body["status"].as_str(), Some("pending"));
+        assert_eq!(body["qr_url"].as_str(), Some("data:image/png;base64,abc"));
+
+        let store = crate::channel_bootstrap::ChannelBootstrapStore::new(temp.path());
+        store.load().unwrap();
+        let session = store
+            .get_pending_by_instance("whatsapp", "whatsapp:tenant-a")
+            .await
+            .unwrap();
+        assert_eq!(session.account_id, "tenant-a");
+        assert_eq!(session.provider_handle.as_deref(), Some("wa-session-1"));
+
+        unsafe {
+            std::env::remove_var("WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn whatsapp_bootstrap_status_confirms_owned_session() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let gateway = spawn_gateway_stub(vec![
+            (
+                "POST".to_string(),
+                "/login/start".to_string(),
+                StatusCode::OK,
+                serde_json::json!({
+                    "session_id": "wa-session-2",
+                    "qr_data_url": "data:image/png;base64,def",
+                    "message": "Scan with WhatsApp",
+                    "connected": false
+                }),
+            ),
+            (
+                "GET".to_string(),
+                "/login/status?instance_key=whatsapp%3Atenant-a".to_string(),
+                StatusCode::OK,
+                serde_json::json!({
+                    "instance_key": "whatsapp:tenant-a",
+                    "connected": true,
+                    "message": "Connected to WhatsApp",
+                    "session_id": "wa-session-2",
+                    "expired": false
+                }),
+            ),
+        ])
+        .await;
+        unsafe {
+            std::env::set_var(
+                "WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61",
+                &gateway,
+            );
+        }
+        let state = build_whatsapp_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/whatsapp/whatsapp:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/channels/whatsapp/whatsapp:tenant-a/bootstrap/status")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["status"].as_str(), Some("confirmed"));
+        assert_eq!(body["connected"].as_bool(), Some(true));
+
+        let store = crate::channel_bootstrap::ChannelBootstrapStore::new(temp.path());
+        store.load().unwrap();
+        let session = store
+            .get_latest_by_instance("whatsapp", "whatsapp:tenant-a")
+            .await
+            .unwrap();
+        assert_eq!(
+            session.status,
+            crate::channel_bootstrap::BootstrapStatus::Confirmed
+        );
+
+        unsafe {
+            std::env::remove_var("WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn whatsapp_bootstrap_cancel_marks_owned_session_cancelled() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let gateway = spawn_gateway_stub(vec![(
+            "POST".to_string(),
+            "/login/start".to_string(),
+            StatusCode::OK,
+            serde_json::json!({
+                "session_id": "wa-session-3",
+                "qr_data_url": "data:image/png;base64,ghi",
+                "message": "Scan with WhatsApp",
+                "connected": false
+            }),
+        )])
+        .await;
+        unsafe {
+            std::env::set_var(
+                "WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61",
+                &gateway,
+            );
+        }
+        let state = build_whatsapp_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/whatsapp/whatsapp:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/whatsapp/whatsapp:tenant-a/bootstrap/cancel")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["status"].as_str(), Some("cancelled"));
+        assert_eq!(body["connected"].as_bool(), Some(false));
+
+        unsafe {
+            std::env::remove_var("WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61");
+        }
+    }
+
+    async fn read_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn wechat_test_guard() -> &'static Mutex<()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD.get_or_init(|| Mutex::new(()))
+    }
+
+    async fn build_wechat_test_state(
+        home_dir: &std::path::Path,
+        admin_account_id: &str,
+        wechat_account_id: &str,
+    ) -> Arc<AppState> {
+        librefang_runtime::registry_sync::sync_registry(
+            home_dir,
+            librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+            "",
+        );
+
+        let mut config = KernelConfig {
+            home_dir: home_dir.to_path_buf(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig {
+                provider: "ollama".to_string(),
+                model: "test-model".to_string(),
+                api_key_env: "OLLAMA_API_KEY".to_string(),
+                base_url: None,
+                message_timeout_secs: 300,
+            },
+            ..KernelConfig::default()
+        };
+        config.admin_accounts = vec![admin_account_id.to_string()];
+        std::fs::write(
+            home_dir.join("config.toml"),
+            toml::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).unwrap());
+        kernel.set_self_handle();
+
+        let wechat_config = WeChatConfig {
+            bot_token_env: scoped_secret_env_var("WECHAT_BOT_TOKEN", wechat_account_id),
+            account_id: Some(wechat_account_id.to_string()),
+            default_agent: Some("assistant".to_string()),
+            ..WeChatConfig::default()
+        };
+        let mut channels = ChannelsConfig::default();
+        channels.wechat.0.push(wechat_config);
+
+        Arc::new(AppState {
+            kernel,
+            started_at: Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(channels),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(
+                home_dir.join("test-webhooks.json"),
+            ),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        })
+    }
+
+    async fn build_whatsapp_test_state(
+        home_dir: &std::path::Path,
+        admin_account_id: &str,
+        whatsapp_account_id: &str,
+    ) -> Arc<AppState> {
+        librefang_runtime::registry_sync::sync_registry(
+            home_dir,
+            librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+            "",
+        );
+
+        let mut config = KernelConfig {
+            home_dir: home_dir.to_path_buf(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig {
+                provider: "ollama".to_string(),
+                model: "test-model".to_string(),
+                api_key_env: "OLLAMA_API_KEY".to_string(),
+                base_url: None,
+                message_timeout_secs: 300,
+            },
+            ..KernelConfig::default()
+        };
+        config.admin_accounts = vec![admin_account_id.to_string()];
+        std::fs::write(
+            home_dir.join("config.toml"),
+            toml::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).unwrap());
+        kernel.set_self_handle();
+
+        let whatsapp_config = WhatsAppConfig {
+            gateway_url_env: scoped_secret_env_var("WHATSAPP_GATEWAY_URL", whatsapp_account_id),
+            account_id: Some(whatsapp_account_id.to_string()),
+            default_agent: Some("assistant".to_string()),
+            ..WhatsAppConfig::default()
+        };
+        let mut channels = ChannelsConfig::default();
+        channels.whatsapp.0.push(whatsapp_config);
+
+        Arc::new(AppState {
+            kernel,
+            started_at: Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(channels),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(
+                home_dir.join("test-webhooks.json"),
+            ),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        })
+    }
+
+    async fn spawn_wechat_ilink_stub(
+        routes: Vec<(String, StatusCode, serde_json::Value)>,
+    ) -> String {
+        let routes = Arc::new(routes);
+        let app = axum::Router::new().fallback({
+            let routes = routes.clone();
+            axum::routing::any(move |uri: axum::http::Uri| {
+                let routes = routes.clone();
+                async move {
+                    let path = uri
+                        .path_and_query()
+                        .map(|value| value.as_str())
+                        .unwrap_or(uri.path());
+                    let (status, body) = routes
+                        .iter()
+                        .find(|(expected, _, _)| expected == path)
+                        .map(|(_, status, body)| (*status, body.clone()))
+                        .unwrap_or_else(|| {
+                            (
+                                StatusCode::NOT_FOUND,
+                                serde_json::json!({ "message": format!("unexpected path: {path}") }),
+                            )
+                        });
+                    (status, axum::Json(body))
+                }
+            })
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{}", addr)
+    }
+
+    async fn spawn_gateway_stub(
+        routes: Vec<(String, String, StatusCode, serde_json::Value)>,
+    ) -> String {
+        let routes = Arc::new(routes);
+        let app = axum::Router::new().fallback({
+            let routes = routes.clone();
+            axum::routing::any(move |method: axum::http::Method, uri: axum::http::Uri| {
+                let routes = routes.clone();
+                async move {
+                    let path = uri
+                        .path_and_query()
+                        .map(|value| value.as_str())
+                        .unwrap_or(uri.path());
+                    let (status, body) = routes
+                        .iter()
+                        .find(|(expected_method, expected_path, _, _)| {
+                            expected_method == method.as_str() && expected_path == path
+                        })
+                        .map(|(_, _, status, body)| (*status, body.clone()))
+                        .unwrap_or_else(|| {
+                            (
+                                StatusCode::NOT_FOUND,
+                                serde_json::json!({
+                                    "message": format!("unexpected route: {} {}", method, path)
+                                }),
+                            )
+                        });
+                    (status, axum::Json(body))
+                }
+            })
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{}", addr)
+    }
 }
 #[utoipa::path(
     post,
@@ -2305,145 +2954,377 @@ pub async fn reload_channels(
 }
 
 // ---------------------------------------------------------------------------
-// WhatsApp QR login flow (OpenClaw-style)
+// WhatsApp QR login flow (owned bootstrap)
 // ---------------------------------------------------------------------------
 #[utoipa::path(
     post,
-    path = "/api/channels/whatsapp/qr/start",
-    tag = "channels",
-    responses(
-        (status = 200, description = "WhatsApp QR session started", body = serde_json::Value)
-    )
-)]
-/// POST /api/channels/whatsapp/qr/start — Start a WhatsApp Web QR login session.
-///
-/// If a WhatsApp Web gateway is available (e.g. a Baileys-based bridge process),
-/// this proxies the request and returns a base64 QR code data URL. If no gateway
-/// is running, it returns instructions to set one up.
-pub async fn whatsapp_qr_start(
-    account: AccountId,
-    State(state): State<Arc<AppState>>,
-) -> axum::response::Response {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json).into_response();
-    }
-    // Check for WhatsApp Web gateway URL in config or env
-    let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
-
-    if gateway_url.is_empty() {
-        return Json(serde_json::json!({
-            "available": false,
-            "message": "WhatsApp Web gateway not running. Start the gateway or use Business API mode.",
-            "help": "The WhatsApp Web gateway auto-starts with the daemon when configured. Ensure Node.js >= 18 is installed and WhatsApp is configured in config.toml. Set WHATSAPP_WEB_GATEWAY_URL to use an external gateway."
-        })).into_response();
-    }
-
-    // Try to reach the gateway and start a QR session.
-    // Uses a raw HTTP request via tokio TcpStream to avoid adding reqwest as a runtime dep.
-    let start_url = format!("{}/login/start", gateway_url.trim_end_matches('/'));
-    match gateway_http_post(&start_url).await {
-        Ok(body) => {
-            let qr_url = body
-                .get("qr_data_url")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let sid = body
-                .get("session_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let msg = body
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Scan this QR code with WhatsApp → Linked Devices");
-            let connected = body
-                .get("connected")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            Json(serde_json::json!({
-                "available": true,
-                "qr_data_url": qr_url,
-                "session_id": sid,
-                "message": msg,
-                "connected": connected,
-            }))
-            .into_response()
-        }
-        Err(e) => Json(serde_json::json!({
-            "available": false,
-            "message": format!("Could not reach WhatsApp Web gateway: {e}"),
-            "help": "Make sure the gateway is running at the configured URL"
-        }))
-        .into_response(),
-    }
-}
-#[utoipa::path(
-    get,
-    path = "/api/channels/whatsapp/qr/status",
+    path = "/api/channels/whatsapp/{instance_key}/bootstrap/start",
     tag = "channels",
     params(
-        ("session_id" = Option<String>, Query, description = "WhatsApp login session ID")
+        ("instance_key" = String, Path, description = "Owned WhatsApp instance key, e.g. whatsapp:tenant-a")
     ),
     responses(
-        (status = 200, description = "WhatsApp QR scan status", body = serde_json::Value)
+        (status = 200, description = "WhatsApp bootstrap session created", body = serde_json::Value),
+        (status = 404, description = "Owned WhatsApp instance not found", body = serde_json::Value)
     )
 )]
-/// GET /api/channels/whatsapp/qr/status — Poll for QR scan completion.
-///
-/// After calling `/qr/start`, the frontend polls this to check if the user
-/// has scanned the QR code and the WhatsApp Web session is connected.
-pub async fn whatsapp_qr_status(
+pub async fn whatsapp_bootstrap_start(
     account: AccountId,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    Path(instance_key): Path<String>,
 ) -> axum::response::Response {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json).into_response();
-    }
-    let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
-
-    if gateway_url.is_empty() {
-        return Json(serde_json::json!({
-            "connected": false,
-            "message": "Gateway not available"
-        }))
-        .into_response();
-    }
-
-    let session_id = params.get("session_id").cloned().unwrap_or_default();
-    let status_url = format!(
-        "{}/login/status?session_id={}",
-        gateway_url.trim_end_matches('/'),
-        session_id
-    );
-
-    match gateway_http_get(&status_url).await {
-        Ok(body) => {
-            let connected = body
-                .get("connected")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let msg = body
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Waiting for scan...");
-            let expired = body
-                .get("expired")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            Json(serde_json::json!({
-                "connected": connected,
-                "message": msg,
-                "expired": expired,
-            }))
-            .into_response()
+    let created_by =
+        match require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts) {
+            Ok(account_id) => account_id,
+            Err(response) => return response,
+        };
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_whatsapp_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WhatsApp instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
         }
-        Err(_) => Json(serde_json::json!({ "connected": false, "message": "Gateway unreachable" }))
-            .into_response(),
+    };
+
+    let start_url = format!("{}/login/start", target.gateway_url.trim_end_matches('/'));
+    let body = match gateway_http_post_json(
+        &start_url,
+        &serde_json::json!({ "instance_key": target.instance_key }),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("Could not reach WhatsApp gateway: {e}"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+
+    let provider_handle = body
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if provider_handle.is_empty() {
+        return ApiErrorResponse::internal("WhatsApp gateway returned empty session_id")
+            .into_json_tuple()
+            .into_response();
     }
+
+    let now = chrono::Utc::now();
+    let session = crate::channel_bootstrap::ChannelBootstrapSession {
+        bootstrap_id: uuid::Uuid::new_v4().to_string(),
+        channel_type: "whatsapp".to_string(),
+        instance_key: target.instance_key.clone(),
+        account_id: target.account_id.clone(),
+        bootstrap_kind: crate::channel_bootstrap::BootstrapKind::QrLogin,
+        provider_handle: Some(provider_handle.to_string()),
+        provider_qr_payload: body
+            .get("qr_data_url")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        provider_qr_url: body
+            .get("qr_data_url")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        provider_pairing_code: None,
+        status: crate::channel_bootstrap::BootstrapStatus::Pending,
+        created_at: now,
+        updated_at: now,
+        expires_at: Some(now + chrono::Duration::minutes(5)),
+        created_by,
+        last_error: None,
+    };
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    if let Err(e) = store.create(session.clone()).await {
+        return ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(bootstrap_session_view(
+            &session,
+            body.get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Scan this QR code with WhatsApp → Linked Devices"),
+            body.get("connected")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        )),
+    )
+        .into_response()
 }
 
-/// Lightweight HTTP POST to a gateway URL. Returns parsed JSON body.
-async fn gateway_http_post(url_with_path: &str) -> Result<serde_json::Value, String> {
+#[utoipa::path(
+    get,
+    path = "/api/channels/whatsapp/{instance_key}/bootstrap/status",
+    tag = "channels",
+    params(
+        ("instance_key" = String, Path, description = "Owned WhatsApp instance key, e.g. whatsapp:tenant-a")
+    ),
+    responses(
+        (status = 200, description = "WhatsApp bootstrap status", body = serde_json::Value),
+        (status = 404, description = "Owned WhatsApp bootstrap session not found", body = serde_json::Value)
+    )
+)]
+pub async fn whatsapp_bootstrap_status(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(instance_key): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) =
+        require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
+    {
+        return response;
+    }
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_whatsapp_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WhatsApp instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
+        }
+    };
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    let session = match store
+        .get_latest_by_instance("whatsapp", &target.instance_key)
+        .await
+    {
+        Some(session) => session,
+        None => {
+            return ApiErrorResponse::not_found("Owned WhatsApp bootstrap session not found")
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+
+    if session.status != crate::channel_bootstrap::BootstrapStatus::Pending {
+        let connected = session.status == crate::channel_bootstrap::BootstrapStatus::Confirmed;
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &session,
+                "Owned bootstrap status loaded",
+                connected,
+            )),
+        )
+            .into_response();
+    }
+
+    if session
+        .expires_at
+        .map(|expires_at| chrono::Utc::now() >= expires_at)
+        .unwrap_or(false)
+    {
+        let expired = match store
+            .expire(&session.bootstrap_id, chrono::Utc::now())
+            .await
+        {
+            Ok(expired) => expired,
+            Err(e) => {
+                return ApiErrorResponse::internal(e)
+                    .into_json_tuple()
+                    .into_response()
+            }
+        };
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &expired,
+                "QR code expired — click Start to get a new one",
+                false,
+            )),
+        )
+            .into_response();
+    }
+
+    let status_url = format!(
+        "{}/login/status?instance_key={}",
+        target.gateway_url.trim_end_matches('/'),
+        url::form_urlencoded::byte_serialize(target.instance_key.as_bytes()).collect::<String>()
+    );
+    let body = match gateway_http_get(&status_url).await {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::OK,
+                Json(bootstrap_session_view(
+                    &session,
+                    "Waiting for scan...",
+                    false,
+                )),
+            )
+                .into_response()
+        }
+    };
+
+    let connected = body
+        .get("connected")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if connected {
+        let confirmed = match store
+            .confirm(&session.bootstrap_id, chrono::Utc::now())
+            .await
+        {
+            Ok(confirmed) => confirmed,
+            Err(e) => {
+                return ApiErrorResponse::internal(e)
+                    .into_json_tuple()
+                    .into_response()
+            }
+        };
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &confirmed,
+                body.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("WhatsApp login successful"),
+                true,
+            )),
+        )
+            .into_response();
+    }
+
+    let expired = body
+        .get("expired")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if expired {
+        let expired = match store
+            .expire(&session.bootstrap_id, chrono::Utc::now())
+            .await
+        {
+            Ok(expired) => expired,
+            Err(e) => {
+                return ApiErrorResponse::internal(e)
+                    .into_json_tuple()
+                    .into_response()
+            }
+        };
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &expired,
+                body.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("QR code expired — click Start to get a new one"),
+                false,
+            )),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(bootstrap_session_view(
+            &session,
+            body.get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Waiting for scan..."),
+            false,
+        )),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/channels/whatsapp/{instance_key}/bootstrap/cancel",
+    tag = "channels",
+    params(
+        ("instance_key" = String, Path, description = "Owned WhatsApp instance key, e.g. whatsapp:tenant-a")
+    ),
+    responses(
+        (status = 200, description = "WhatsApp bootstrap session cancelled", body = serde_json::Value),
+        (status = 404, description = "Owned WhatsApp bootstrap session not found", body = serde_json::Value)
+    )
+)]
+pub async fn whatsapp_bootstrap_cancel(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(instance_key): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) =
+        require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
+    {
+        return response;
+    }
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_whatsapp_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WhatsApp instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
+        }
+    };
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    let session = match store
+        .get_pending_by_instance("whatsapp", &target.instance_key)
+        .await
+    {
+        Some(session) => session,
+        None => {
+            return ApiErrorResponse::not_found("Owned WhatsApp bootstrap session not found")
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    let cancelled = match store
+        .cancel(&session.bootstrap_id, chrono::Utc::now())
+        .await
+    {
+        Ok(cancelled) => cancelled,
+        Err(e) => {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(bootstrap_session_view(
+            &cancelled,
+            "WhatsApp bootstrap session cancelled",
+            false,
+        )),
+    )
+        .into_response()
+}
+
+async fn gateway_http_post_json(
+    url_with_path: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Split into base URL + path from the full URL like "http://127.0.0.1:3009/login/start"
@@ -2466,8 +3347,11 @@ async fn gateway_http_post(url_with_path: &str) -> Result<serde_json::Value, Str
         .await
         .map_err(|e| format!("Connect failed: {e}"))?;
 
+    let body_str = serde_json::to_string(body).map_err(|e| format!("Encode failed: {e}"))?;
     let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body_str.len(),
+        body_str
     );
     stream
         .write_all(req.as_bytes())
@@ -2540,6 +3424,601 @@ async fn gateway_http_get(url_with_path: &str) -> Result<serde_json::Value, Stri
 
 /// iLink API base URL used by the WeChat adapter.
 const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
+
+struct WhatsAppBootstrapTarget {
+    account_id: String,
+    instance_key: String,
+    gateway_url: String,
+}
+
+struct WeChatBootstrapTarget {
+    account_id: String,
+    instance_key: String,
+    bot_token_env: String,
+}
+
+fn require_admin_account_id(
+    account: &AccountId,
+    admin_accounts: &[String],
+) -> Result<String, axum::response::Response> {
+    let account_id = require_tenant_account_id(account)?.to_string();
+    if let Err((code, json)) = require_admin(account, admin_accounts) {
+        return Err((code, json).into_response());
+    }
+    Ok(account_id)
+}
+
+fn wechat_ilink_base() -> String {
+    std::env::var("LIBREFANG_WECHAT_ILINK_BASE").unwrap_or_else(|_| WECHAT_ILINK_BASE.to_string())
+}
+
+fn wechat_instance_key(account_id: &str) -> String {
+    format!("wechat:{account_id}")
+}
+
+fn channel_bootstrap_store(
+    home_dir: &std::path::Path,
+) -> crate::channel_bootstrap::ChannelBootstrapStore {
+    crate::channel_bootstrap::ChannelBootstrapStore::new(home_dir)
+}
+
+fn whatsapp_instance_key(account_id: &str) -> String {
+    format!("whatsapp:{account_id}")
+}
+
+fn resolve_whatsapp_bootstrap_target(
+    channels: &librefang_types::config::ChannelsConfig,
+    instance_key: &str,
+) -> Option<WhatsAppBootstrapTarget> {
+    channels.whatsapp.iter().find_map(|entry| {
+        let account_id = entry.account_id.as_deref()?.trim();
+        if account_id.is_empty() {
+            return None;
+        }
+        let derived_instance_key = whatsapp_instance_key(account_id);
+        if derived_instance_key != instance_key {
+            return None;
+        }
+        let gateway_url = std::env::var(&entry.gateway_url_env)
+            .ok()?
+            .trim()
+            .to_string();
+        if gateway_url.is_empty() {
+            return None;
+        }
+        Some(WhatsAppBootstrapTarget {
+            account_id: account_id.to_string(),
+            instance_key: derived_instance_key,
+            gateway_url,
+        })
+    })
+}
+
+fn resolve_wechat_bootstrap_target(
+    config: &librefang_types::config::ChannelsConfig,
+    instance_key: &str,
+) -> Option<WeChatBootstrapTarget> {
+    config.wechat.iter().find_map(|entry| {
+        let account_id = entry.account_id.as_deref()?.trim();
+        if account_id.is_empty() {
+            return None;
+        }
+        let derived_instance_key = wechat_instance_key(account_id);
+        if derived_instance_key != instance_key {
+            return None;
+        }
+        let bot_token_env = entry.bot_token_env.trim();
+        if bot_token_env.is_empty() {
+            return None;
+        }
+        Some(WeChatBootstrapTarget {
+            account_id: account_id.to_string(),
+            instance_key: derived_instance_key,
+            bot_token_env: bot_token_env.to_string(),
+        })
+    })
+}
+
+async fn persist_wechat_owned_bot_token(
+    home_dir: &std::path::Path,
+    token_env_name: &str,
+    bot_token: &str,
+) -> Result<(), String> {
+    validate_env_var(token_env_name, bot_token)?;
+    write_secret_env(&home_dir.join("secrets.env"), token_env_name, bot_token)
+        .map_err(|e| format!("Failed to persist WeChat bot token: {e}"))?;
+    // SAFETY: configuration mutation during explicit admin bootstrap flow.
+    unsafe {
+        std::env::set_var(token_env_name, bot_token);
+    }
+    Ok(())
+}
+
+fn bootstrap_session_view(
+    session: &crate::channel_bootstrap::ChannelBootstrapSession,
+    message: &str,
+    connected: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "bootstrap_id": session.bootstrap_id,
+        "channel_type": session.channel_type,
+        "instance_key": session.instance_key,
+        "account_id": session.account_id,
+        "status": serde_json::to_value(session.status).unwrap_or(serde_json::Value::Null),
+        "qr_url": session.provider_qr_url,
+        "qr_payload": session.provider_qr_payload,
+        "expires_at": session.expires_at,
+        "connected": connected,
+        "message": message,
+        "last_error": session.last_error,
+    })
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/channels/wechat/{instance_key}/bootstrap/start",
+    tag = "channels",
+    params(
+        ("instance_key" = String, Path, description = "Owned WeChat instance key, e.g. wechat:tenant-a")
+    ),
+    responses(
+        (status = 200, description = "WeChat bootstrap session created", body = serde_json::Value),
+        (status = 404, description = "Owned WeChat instance not found", body = serde_json::Value)
+    )
+)]
+pub async fn wechat_bootstrap_start(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(instance_key): Path<String>,
+) -> axum::response::Response {
+    let created_by =
+        match require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts) {
+            Ok(account_id) => account_id,
+            Err(response) => return response,
+        };
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_wechat_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WeChat instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
+        }
+    };
+
+    let client = match librefang_runtime::http_client::client_builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("HTTP client error: {e}"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+
+    let url = format!(
+        "{}/ilink/bot/get_bot_qrcode?bot_type=3",
+        wechat_ilink_base()
+    );
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("Could not reach iLink API: {e}"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return ApiErrorResponse::internal(format!("iLink QR request failed ({status}): {body}"))
+            .into_json_tuple()
+            .into_response();
+    }
+    let body = match response.json::<serde_json::Value>().await {
+        Ok(body) => body,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("Failed to parse iLink response: {e}"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    let provider_handle = body
+        .get("qrcode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    if provider_handle.is_empty() {
+        return ApiErrorResponse::internal("iLink returned empty qrcode")
+            .into_json_tuple()
+            .into_response();
+    }
+
+    let now = chrono::Utc::now();
+    let session = crate::channel_bootstrap::ChannelBootstrapSession {
+        bootstrap_id: uuid::Uuid::new_v4().to_string(),
+        channel_type: "wechat".to_string(),
+        instance_key: target.instance_key.clone(),
+        account_id: target.account_id.clone(),
+        bootstrap_kind: crate::channel_bootstrap::BootstrapKind::QrLogin,
+        provider_handle: Some(provider_handle.to_string()),
+        provider_qr_payload: body
+            .get("qrcode_img_content")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        provider_qr_url: body
+            .get("qrcode_img_content")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        provider_pairing_code: None,
+        status: crate::channel_bootstrap::BootstrapStatus::Pending,
+        created_at: now,
+        updated_at: now,
+        expires_at: Some(now + chrono::Duration::minutes(5)),
+        created_by,
+        last_error: None,
+    };
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    if let Err(e) = store.create(session.clone()).await {
+        return ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(bootstrap_session_view(
+            &session,
+            "Scan this QR code with your WeChat app to log in",
+            false,
+        )),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/channels/wechat/{instance_key}/bootstrap/status",
+    tag = "channels",
+    params(
+        ("instance_key" = String, Path, description = "Owned WeChat instance key, e.g. wechat:tenant-a")
+    ),
+    responses(
+        (status = 200, description = "WeChat bootstrap status", body = serde_json::Value),
+        (status = 404, description = "Owned WeChat bootstrap session not found", body = serde_json::Value)
+    )
+)]
+pub async fn wechat_bootstrap_status(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(instance_key): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) =
+        require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
+    {
+        return response;
+    }
+
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_wechat_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WeChat instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
+        }
+    };
+
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    let session = match store
+        .get_latest_by_instance("wechat", &target.instance_key)
+        .await
+    {
+        Some(session) => session,
+        None => {
+            return ApiErrorResponse::not_found("Owned WeChat bootstrap session not found")
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+
+    if session.status != crate::channel_bootstrap::BootstrapStatus::Pending {
+        let connected = session.status == crate::channel_bootstrap::BootstrapStatus::Confirmed;
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &session,
+                "Owned bootstrap status loaded",
+                connected,
+            )),
+        )
+            .into_response();
+    }
+
+    if session
+        .expires_at
+        .map(|expires_at| chrono::Utc::now() >= expires_at)
+        .unwrap_or(false)
+    {
+        let expired = match store
+            .expire(&session.bootstrap_id, chrono::Utc::now())
+            .await
+        {
+            Ok(expired) => expired,
+            Err(e) => {
+                return ApiErrorResponse::internal(e)
+                    .into_json_tuple()
+                    .into_response()
+            }
+        };
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &expired,
+                "QR code expired — click Start to get a new one",
+                false,
+            )),
+        )
+            .into_response();
+    }
+
+    let provider_handle = match session.provider_handle.as_deref() {
+        Some(handle) if !handle.is_empty() => handle,
+        _ => {
+            return ApiErrorResponse::internal(
+                "Owned WeChat bootstrap session is missing provider handle",
+            )
+            .into_json_tuple()
+            .into_response()
+        }
+    };
+
+    let client = match librefang_runtime::http_client::client_builder()
+        .timeout(std::time::Duration::from_secs(35))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("HTTP client error: {e}"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    let encoded: String =
+        url::form_urlencoded::byte_serialize(provider_handle.as_bytes()).collect();
+    let url = format!(
+        "{}/ilink/bot/get_qrcode_status?qrcode={encoded}",
+        wechat_ilink_base()
+    );
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(_) => {
+            return (
+                StatusCode::OK,
+                Json(bootstrap_session_view(
+                    &session,
+                    "Waiting for scan...",
+                    false,
+                )),
+            )
+                .into_response()
+        }
+    };
+    if !response.status().is_success() {
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &session,
+                "Waiting for scan...",
+                false,
+            )),
+        )
+            .into_response();
+    }
+    let body = match response.json::<serde_json::Value>().await {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::OK,
+                Json(bootstrap_session_view(
+                    &session,
+                    "Failed to parse status response",
+                    false,
+                )),
+            )
+                .into_response()
+        }
+    };
+
+    match body
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("pending")
+    {
+        "confirmed" => {
+            let bot_token = body
+                .get("bot_token")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if bot_token.is_empty() {
+                let failed = match store
+                    .fail(
+                        &session.bootstrap_id,
+                        chrono::Utc::now(),
+                        "WeChat confirmation response did not include bot_token".to_string(),
+                    )
+                    .await
+                {
+                    Ok(failed) => failed,
+                    Err(e) => {
+                        return ApiErrorResponse::internal(e)
+                            .into_json_tuple()
+                            .into_response()
+                    }
+                };
+                return (
+                    StatusCode::OK,
+                    Json(bootstrap_session_view(
+                        &failed,
+                        "WeChat confirmation failed",
+                        false,
+                    )),
+                )
+                    .into_response();
+            }
+            if let Err(e) = persist_wechat_owned_bot_token(
+                state.kernel.home_dir(),
+                &target.bot_token_env,
+                bot_token,
+            )
+            .await
+            {
+                return ApiErrorResponse::internal(e)
+                    .into_json_tuple()
+                    .into_response();
+            }
+            let confirmed = match store
+                .confirm(&session.bootstrap_id, chrono::Utc::now())
+                .await
+            {
+                Ok(confirmed) => confirmed,
+                Err(e) => {
+                    return ApiErrorResponse::internal(e)
+                        .into_json_tuple()
+                        .into_response()
+                }
+            };
+            (
+                StatusCode::OK,
+                Json(bootstrap_session_view(
+                    &confirmed,
+                    "WeChat login successful",
+                    true,
+                )),
+            )
+                .into_response()
+        }
+        "expired" => {
+            let expired = match store
+                .expire(&session.bootstrap_id, chrono::Utc::now())
+                .await
+            {
+                Ok(expired) => expired,
+                Err(e) => {
+                    return ApiErrorResponse::internal(e)
+                        .into_json_tuple()
+                        .into_response()
+                }
+            };
+            (
+                StatusCode::OK,
+                Json(bootstrap_session_view(
+                    &expired,
+                    "QR code expired — click Start to get a new one",
+                    false,
+                )),
+            )
+                .into_response()
+        }
+        _ => (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &session,
+                "Waiting for scan...",
+                false,
+            )),
+        )
+            .into_response(),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/channels/wechat/{instance_key}/bootstrap/cancel",
+    tag = "channels",
+    params(
+        ("instance_key" = String, Path, description = "Owned WeChat instance key, e.g. wechat:tenant-a")
+    ),
+    responses(
+        (status = 200, description = "WeChat bootstrap session cancelled", body = serde_json::Value),
+        (status = 404, description = "Owned WeChat bootstrap session not found", body = serde_json::Value)
+    )
+)]
+pub async fn wechat_bootstrap_cancel(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(instance_key): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) =
+        require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
+    {
+        return response;
+    }
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_wechat_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WeChat instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
+        }
+    };
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    let session = match store
+        .get_pending_by_instance("wechat", &target.instance_key)
+        .await
+    {
+        Some(session) => session,
+        None => {
+            return ApiErrorResponse::not_found("Owned WeChat bootstrap session not found")
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    let cancelled = match store
+        .cancel(&session.bootstrap_id, chrono::Utc::now())
+        .await
+    {
+        Ok(cancelled) => cancelled,
+        Err(e) => {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(bootstrap_session_view(
+            &cancelled,
+            "WeChat bootstrap session cancelled",
+            false,
+        )),
+    )
+        .into_response()
+}
 
 #[utoipa::path(
     post,

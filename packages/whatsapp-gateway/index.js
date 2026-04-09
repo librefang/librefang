@@ -21,10 +21,16 @@ db.pragma('busy_timeout = 5000');
 // Set file permissions to 600 (owner read/write only)
 fs.chmodSync(DB_PATH, 0o600);
 
+function tableHasColumn(tableName, columnName) {
+  const rows = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  return rows.some((row) => row.name === columnName);
+}
+
 // Schema
 db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
+    instance_key TEXT NOT NULL DEFAULT 'default',
     jid TEXT NOT NULL,
     sender_jid TEXT,
     push_name TEXT,
@@ -37,47 +43,64 @@ db.exec(`
     raw_type TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   );
-  CREATE INDEX IF NOT EXISTS idx_messages_jid_ts ON messages(jid, timestamp);
-  CREATE INDEX IF NOT EXISTS idx_messages_processed ON messages(processed);
+  CREATE INDEX IF NOT EXISTS idx_messages_instance_jid_ts ON messages(instance_key, jid, timestamp);
+  CREATE INDEX IF NOT EXISTS idx_messages_instance_processed ON messages(instance_key, processed);
 `);
 
-// Track last-seen timestamp per JID (for gap detection — Fase 3.2 Option C)
+if (!tableHasColumn('messages', 'instance_key')) {
+  db.exec(`ALTER TABLE messages ADD COLUMN instance_key TEXT NOT NULL DEFAULT 'default'`);
+}
+
+// Track last-seen timestamp per JID and instance (for gap detection — Fase 3.2 Option C)
 db.exec(`
-  CREATE TABLE IF NOT EXISTS jid_last_seen (
-    jid TEXT PRIMARY KEY,
+  CREATE TABLE IF NOT EXISTS jid_last_seen_v2 (
+    instance_key TEXT NOT NULL,
+    jid TEXT NOT NULL,
     last_timestamp INTEGER NOT NULL,
-    updated_at TEXT DEFAULT (datetime('now'))
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (instance_key, jid)
   );
 `);
+
+if (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'jid_last_seen'`).get()) {
+  try {
+    db.exec(`
+      INSERT OR IGNORE INTO jid_last_seen_v2 (instance_key, jid, last_timestamp, updated_at)
+      SELECT COALESCE(instance_key, 'default'), jid, last_timestamp, updated_at FROM jid_last_seen;
+    `);
+  } catch (err) {
+    console.warn(`[gateway][db] Failed to migrate legacy jid_last_seen rows: ${err.message}`);
+  }
+}
 
 console.log(`[gateway] SQLite message store initialized: ${DB_PATH}`);
 
 // --- Prepared statements (reusable, faster) ---
 const stmtInsertMsg = db.prepare(`
-  INSERT OR IGNORE INTO messages (id, jid, sender_jid, push_name, phone, text, direction, timestamp, processed, raw_type)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT OR IGNORE INTO messages (id, instance_key, jid, sender_jid, push_name, phone, text, direction, timestamp, processed, raw_type)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const stmtMarkProcessed = db.prepare(`
-  UPDATE messages SET processed = ? WHERE id = ?
+  UPDATE messages SET processed = ? WHERE instance_key = ? AND id = ?
 `);
 
 const stmtIncrRetry = db.prepare(`
-  UPDATE messages SET retry_count = retry_count + 1 WHERE id = ?
+  UPDATE messages SET retry_count = retry_count + 1 WHERE instance_key = ? AND id = ?
 `);
 
 const stmtMarkFailed = db.prepare(`
-  UPDATE messages SET processed = -1 WHERE id = ?
+  UPDATE messages SET processed = -1 WHERE instance_key = ? AND id = ?
 `);
 
 const stmtGetByJid = db.prepare(`
-  SELECT id, jid, sender_jid, push_name, phone, text, direction, timestamp, processed, raw_type
-  FROM messages WHERE jid = ? AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?
+  SELECT id, instance_key, jid, sender_jid, push_name, phone, text, direction, timestamp, processed, raw_type
+  FROM messages WHERE instance_key = ? AND jid = ? AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?
 `);
 
 const stmtGetUnprocessed = db.prepare(`
-  SELECT id, jid, sender_jid, push_name, phone, text, direction, timestamp, retry_count, raw_type
-  FROM messages WHERE processed = 0 AND timestamp < ? ORDER BY timestamp ASC
+  SELECT id, instance_key, jid, sender_jid, push_name, phone, text, direction, timestamp, retry_count, raw_type
+  FROM messages WHERE instance_key = ? AND processed = 0 AND timestamp < ? ORDER BY timestamp ASC
 `);
 
 const stmtCleanupOld = db.prepare(`
@@ -85,21 +108,21 @@ const stmtCleanupOld = db.prepare(`
 `);
 
 const stmtUpsertLastSeen = db.prepare(`
-  INSERT INTO jid_last_seen (jid, last_timestamp, updated_at)
-  VALUES (?, ?, datetime('now'))
-  ON CONFLICT(jid) DO UPDATE SET last_timestamp = excluded.last_timestamp, updated_at = datetime('now')
+  INSERT INTO jid_last_seen_v2 (instance_key, jid, last_timestamp, updated_at)
+  VALUES (?, ?, ?, datetime('now'))
+  ON CONFLICT(instance_key, jid) DO UPDATE SET last_timestamp = excluded.last_timestamp, updated_at = datetime('now')
 `);
 
 const stmtGetLastSeen = db.prepare(`
-  SELECT jid, last_timestamp FROM jid_last_seen
+  SELECT instance_key, jid, last_timestamp FROM jid_last_seen_v2 WHERE instance_key = ?
 `);
 
 /**
  * Save a message to the SQLite store.
  */
-function dbSaveMessage({ id, jid, senderJid, pushName, phone, text, direction, timestamp, processed, rawType }) {
+function dbSaveMessage({ instanceKey = 'default', id, jid, senderJid, pushName, phone, text, direction, timestamp, processed, rawType }) {
   try {
-    stmtInsertMsg.run(id, jid, senderJid || null, pushName || null, phone || null, text || null, direction, timestamp, processed || 0, rawType || null);
+    stmtInsertMsg.run(id, instanceKey, jid, senderJid || null, pushName || null, phone || null, text || null, direction, timestamp, processed || 0, rawType || null);
   } catch (err) {
     console.error(`[gateway][db] Failed to save message ${id}: ${err.message}`);
   }
@@ -108,9 +131,9 @@ function dbSaveMessage({ id, jid, senderJid, pushName, phone, text, direction, t
 /**
  * Mark a message as processed (1) or failed (-1).
  */
-function dbMarkProcessed(msgId, status) {
+function dbMarkProcessed(instanceKey, msgId, status) {
   try {
-    stmtMarkProcessed.run(status, msgId);
+    stmtMarkProcessed.run(status, instanceKey, msgId);
   } catch (err) {
     console.error(`[gateway][db] Failed to mark message ${msgId}: ${err.message}`);
   }
@@ -119,28 +142,28 @@ function dbMarkProcessed(msgId, status) {
 /**
  * Get messages for a JID, optionally filtered by since timestamp.
  */
-function dbGetMessagesByJid(jid, limit = 20, since = 0) {
-  return stmtGetByJid.all(jid, since, limit);
+function dbGetMessagesByJid(instanceKey, jid, limit = 20, since = 0) {
+  return stmtGetByJid.all(instanceKey, jid, since, limit);
 }
 
 /**
  * Get all unprocessed messages older than a threshold (epoch ms).
  */
-function dbGetUnprocessed(olderThan) {
-  return stmtGetUnprocessed.all(olderThan);
+function dbGetUnprocessed(instanceKey, olderThan) {
+  return stmtGetUnprocessed.all(instanceKey, olderThan);
 }
 
 /**
  * Increment retry count for a message. If retry_count >= maxRetries, mark as permanently failed.
  */
-function dbIncrRetryOrFail(msgId, maxRetries = 3) {
-  const msg = db.prepare('SELECT retry_count FROM messages WHERE id = ?').get(msgId);
+function dbIncrRetryOrFail(instanceKey, msgId, maxRetries = 3) {
+  const msg = db.prepare('SELECT retry_count FROM messages WHERE instance_key = ? AND id = ?').get(instanceKey, msgId);
   if (!msg) return;
   if (msg.retry_count + 1 >= maxRetries) {
-    stmtMarkFailed.run(msgId);
+    stmtMarkFailed.run(instanceKey, msgId);
     console.warn(`[gateway][db] Message ${msgId} permanently failed after ${maxRetries} retries`);
   } else {
-    stmtIncrRetry.run(msgId);
+    stmtIncrRetry.run(instanceKey, msgId);
   }
 }
 
@@ -155,12 +178,16 @@ function dbCleanupOld(olderThanMs) {
 /**
  * Update last-seen timestamp for a JID.
  */
-function dbUpdateLastSeen(jid, timestamp) {
+function dbUpdateLastSeen(instanceKey, jid, timestamp) {
   try {
-    stmtUpsertLastSeen.run(jid, timestamp);
+    stmtUpsertLastSeen.run(instanceKey, jid, timestamp);
   } catch (err) {
     console.error(`[gateway][db] Failed to update last_seen for ${jid}: ${err.message}`);
   }
+}
+
+function dbGetLastSeen(instanceKey) {
+  return stmtGetLastSeen.all(instanceKey);
 }
 
 // ---------------------------------------------------------------------------
@@ -236,12 +263,121 @@ let reconnectAttempts = 0;
 let isConnecting = false;
 const MAX_RECONNECT_DELAY = 60_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
+const AUTH_STORE_ROOT = path.join(__dirname, 'auth_store');
+const sessions = new Map();
 
-// Cached agent UUID — resolved from DEFAULT_AGENT name on first use
-let cachedAgentId = null;
+function createSessionState(instanceKey) {
+  return {
+    instanceKey,
+    sock: null,
+    sessionId: '',
+    qrDataUrl: '',
+    connStatus: 'disconnected',
+    qrExpired: false,
+    statusMessage: 'Not started',
+    reconnectAttempts: 0,
+    isConnecting: false,
+    cachedAgentId: null,
+    ownJid: null,
+    activeConversations: new Map(),
+    rateLimitMap: new Map(),
+    recentMessageIds: new Map(),
+    lastEscalationTime: new Map(),
+  };
+}
 
-// The user's own JID (set after connection opens) for self-chat detection
-let ownJid = null;
+function getOrCreateSession(sessionMap, instanceKey) {
+  let session = sessionMap.get(instanceKey);
+  if (!session) {
+    session = createSessionState(instanceKey);
+    sessionMap.set(instanceKey, session);
+  }
+  return session;
+}
+
+function getSessionStatusView(session) {
+  return {
+    instance_key: session.instanceKey,
+    connected: session.connStatus === 'connected',
+    message: session.statusMessage,
+    expired: session.qrExpired,
+    session_id: session.sessionId || null,
+    qr_data_url: session.qrDataUrl || '',
+  };
+}
+
+function encodeInstanceKey(instanceKey) {
+  let out = '';
+  for (const ch of String(instanceKey || '')) {
+    if (/^[A-Za-z0-9]$/.test(ch)) {
+      out += ch;
+    } else {
+      const code = ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0');
+      out += '_' + code;
+    }
+  }
+  return out;
+}
+
+function decodeInstanceKey(encoded) {
+  return String(encoded || '').replace(/_([0-9A-F]{2})/g, (_match, hex) =>
+    String.fromCharCode(parseInt(hex, 16))
+  );
+}
+
+function authStorePathForInstance(baseDir, instanceKey) {
+  return path.join(baseDir, 'auth_store', encodeInstanceKey(instanceKey));
+}
+
+function parseSessionScopedRequest(input) {
+  const instanceKey = typeof input?.instance_key === 'string' ? input.instance_key.trim() : '';
+  if (!instanceKey) {
+    throw new Error('Missing "instance_key"');
+  }
+  return { instanceKey };
+}
+
+function getSessionStatusFromQuery(searchParams) {
+  const instanceKey = (searchParams.get('instance_key') || '').trim();
+  if (!instanceKey) {
+    throw new Error('Missing "instance_key"');
+  }
+  const session = sessions.get(instanceKey);
+  return session || createSessionState(instanceKey);
+}
+
+function authStorePathForSession(session) {
+  return authStorePathForInstance(__dirname, session.instanceKey);
+}
+
+function syncLegacyGlobalsFromSession(session) {
+  sock = session.sock;
+  sessionId = session.sessionId;
+  qrDataUrl = session.qrDataUrl;
+  connStatus = session.connStatus;
+  qrExpired = session.qrExpired;
+  statusMessage = session.statusMessage;
+  reconnectAttempts = session.reconnectAttempts;
+  isConnecting = session.isConnecting;
+  cachedAgentId = session.cachedAgentId;
+  ownJid = session.ownJid;
+}
+
+function normalizeRecipientJid(to) {
+  return to.includes('@g.us')
+    ? to
+    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+}
+
+function listPersistedSessionKeys() {
+  if (!fs.existsSync(AUTH_STORE_ROOT)) {
+    return [];
+  }
+
+  return fs.readdirSync(AUTH_STORE_ROOT, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(AUTH_STORE_ROOT, entry.name, 'creds.json')))
+    .map((entry) => decodeInstanceKey(entry.name));
+}
 
 // ---------------------------------------------------------------------------
 // Markdown → WhatsApp formatting conversion
@@ -298,8 +434,6 @@ function markdownToWhatsApp(text) {
 // Step B: Conversation Tracker — in-memory Map with TTL
 // ---------------------------------------------------------------------------
 // Map<stranger_jid, ConversationState>
-const activeConversations = new Map();
-
 // Max messages to keep per conversation
 const MAX_CONVERSATION_MESSAGES = 20;
 
@@ -307,8 +441,8 @@ const MAX_CONVERSATION_MESSAGES = 20;
  * Record an inbound or outbound message in the conversation tracker.
  * Creates the conversation entry if it doesn't exist.
  */
-function trackMessage(strangerJid, pushName, phone, text, direction) {
-  let convo = activeConversations.get(strangerJid);
+function trackMessage(session, strangerJid, pushName, phone, text, direction) {
+  let convo = session.activeConversations.get(strangerJid);
   if (!convo) {
     convo = {
       pushName,
@@ -318,7 +452,7 @@ function trackMessage(strangerJid, pushName, phone, text, direction) {
       messageCount: 0,
       escalated: false,
     };
-    activeConversations.set(strangerJid, convo);
+    session.activeConversations.set(strangerJid, convo);
   }
   convo.pushName = pushName || convo.pushName;
   convo.lastActivity = Date.now();
@@ -337,32 +471,35 @@ function trackMessage(strangerJid, pushName, phone, text, direction) {
 /**
  * Evict expired conversations based on TTL.
  */
-function evictExpiredConversations() {
+function evictExpiredConversationsForSession(session) {
   const now = Date.now();
-  for (const [jid, convo] of activeConversations) {
+  for (const [jid, convo] of session.activeConversations) {
     if (now - convo.lastActivity > CONVERSATION_TTL_MS) {
-      console.log(`[gateway] Evicting expired conversation: ${convo.pushName} (${convo.phone})`);
-      activeConversations.delete(jid);
+      console.log(`[gateway] Evicting expired conversation for ${session.instanceKey}: ${convo.pushName} (${convo.phone})`);
+      session.activeConversations.delete(jid);
     }
   }
 }
 
 // Periodic sweep every 15 minutes
-setInterval(evictExpiredConversations, 15 * 60 * 1000);
+setInterval(() => {
+  for (const session of sessions.values()) {
+    evictExpiredConversationsForSession(session);
+  }
+}, 15 * 60 * 1000);
 
 // ---------------------------------------------------------------------------
 // Step F: Rate limiting — per-JID for strangers
 // ---------------------------------------------------------------------------
-const rateLimitMap = new Map(); // Map<jid, { timestamps: number[] }>
 const RATE_LIMIT_MAX = 3;       // max messages per window
 const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute window
 
-function isRateLimited(jid) {
+function isRateLimited(session, jid) {
   const now = Date.now();
-  let entry = rateLimitMap.get(jid);
+  let entry = session.rateLimitMap.get(jid);
   if (!entry) {
     entry = { timestamps: [] };
-    rateLimitMap.set(jid, entry);
+    session.rateLimitMap.set(jid, entry);
   }
   // Remove timestamps outside the window
   entry.timestamps = entry.timestamps.filter(t => now - t < RATE_LIMIT_WINDOW_MS);
@@ -376,65 +513,69 @@ function isRateLimited(jid) {
 // Cleanup rate limit entries every 5 minutes
 setInterval(() => {
   const now = Date.now();
-  for (const [jid, entry] of rateLimitMap) {
-    entry.timestamps = entry.timestamps.filter(t => now - t < RATE_LIMIT_WINDOW_MS);
-    if (entry.timestamps.length === 0) rateLimitMap.delete(jid);
+  for (const session of sessions.values()) {
+    for (const [jid, entry] of session.rateLimitMap) {
+      entry.timestamps = entry.timestamps.filter(t => now - t < RATE_LIMIT_WINDOW_MS);
+      if (entry.timestamps.length === 0) session.rateLimitMap.delete(jid);
+    }
   }
 }, 5 * 60 * 1000);
 
 // ---------------------------------------------------------------------------
 // Message deduplication — Baileys can deliver the same message multiple times
 // ---------------------------------------------------------------------------
-const recentMessageIds = new Map(); // Map<msgId, timestamp>
 const DEDUP_WINDOW_MS = 60_000; // 1 minute
 
-function isDuplicate(msgId) {
+function isDuplicate(session, msgId) {
   if (!msgId) return false;
-  if (recentMessageIds.has(msgId)) return true;
-  recentMessageIds.set(msgId, Date.now());
+  if (session.recentMessageIds.has(msgId)) return true;
+  session.recentMessageIds.set(msgId, Date.now());
   return false;
 }
 
 // Cleanup dedup cache every 2 minutes
 setInterval(() => {
   const now = Date.now();
-  for (const [id, ts] of recentMessageIds) {
-    if (now - ts > DEDUP_WINDOW_MS) recentMessageIds.delete(id);
+  for (const session of sessions.values()) {
+    for (const [id, ts] of session.recentMessageIds) {
+      if (now - ts > DEDUP_WINDOW_MS) session.recentMessageIds.delete(id);
+    }
   }
 }, 2 * 60 * 1000);
 
 // ---------------------------------------------------------------------------
 // Step F: Escalation deduplication — debounce NOTIFY_OWNER per stranger
 // ---------------------------------------------------------------------------
-const lastEscalationTime = new Map(); // Map<stranger_jid, timestamp>
 const ESCALATION_DEBOUNCE_MS = 5 * 60 * 1000; // 5 minutes
 
-function shouldDebounceEscalation(strangerJid) {
-  const last = lastEscalationTime.get(strangerJid);
+function shouldDebounceEscalation(session, strangerJid) {
+  const last = session.lastEscalationTime.get(strangerJid);
   if (last && Date.now() - last < ESCALATION_DEBOUNCE_MS) {
     return true;
   }
-  lastEscalationTime.set(strangerJid, Date.now());
+  session.lastEscalationTime.set(strangerJid, Date.now());
   return false;
 }
 
 // Cleanup stale escalation entries every 10 minutes
 setInterval(() => {
   const now = Date.now();
-  for (const [jid, ts] of lastEscalationTime) {
-    if (now - ts > ESCALATION_DEBOUNCE_MS) lastEscalationTime.delete(jid);
+  for (const session of sessions.values()) {
+    for (const [jid, ts] of session.lastEscalationTime) {
+      if (now - ts > ESCALATION_DEBOUNCE_MS) session.lastEscalationTime.delete(jid);
+    }
   }
 }, 10 * 60 * 1000);
 
 // ---------------------------------------------------------------------------
 // Step D: Build active conversations context block for owner messages
 // ---------------------------------------------------------------------------
-function buildConversationsContext() {
-  if (activeConversations.size === 0) return '';
+function buildConversationsContext(session) {
+  if (session.activeConversations.size === 0) return '';
 
   const lines = ['[ACTIVE_STRANGER_CONVERSATIONS]'];
   let idx = 1;
-  for (const [jid, convo] of activeConversations) {
+  for (const [jid, convo] of session.activeConversations) {
     const lastMsg = convo.messages[convo.messages.length - 1];
     const agoMs = Date.now() - (lastMsg?.timestamp || convo.lastActivity);
     const agoStr = formatTimeAgo(agoMs);
@@ -461,8 +602,8 @@ function formatTimeAgo(ms) {
 // ---------------------------------------------------------------------------
 // Step C: Build stranger context prefix (factual only, no personality)
 // ---------------------------------------------------------------------------
-function buildStrangerContext(pushName, phone, strangerJid) {
-  const convo = activeConversations.get(strangerJid);
+function buildStrangerContext(session, pushName, phone, strangerJid) {
+  const convo = session.activeConversations.get(strangerJid);
   const messageCount = convo ? convo.messageCount : 1;
   const firstMessageAt = convo && convo.messages.length > 0
     ? new Date(convo.messages[0].timestamp).toISOString()
@@ -535,11 +676,11 @@ function extractRelayCommands(responseText) {
  * Validate and execute a relay to a stranger.
  * Returns a status string for the owner confirmation.
  */
-async function executeRelay(relay) {
+async function executeRelay(session, relay) {
   const { jid, message } = relay;
 
   // F1: JID must exist in active conversations
-  const convo = activeConversations.get(jid);
+  const convo = session.activeConversations.get(jid);
   if (!convo) {
     const errorMsg = `Relay rejected: no active conversation for JID ${jid}. The conversation may have expired.`;
     console.warn(`[gateway] ${errorMsg}`);
@@ -547,20 +688,20 @@ async function executeRelay(relay) {
   }
 
   // F2: Socket must be connected
-  if (!sock || connStatus !== 'connected') {
+  if (!session.sock || session.connStatus !== 'connected') {
     return { success: false, error: 'WhatsApp not connected' };
   }
 
   try {
-    const sentRelay = await sock.sendMessage(jid, { text: markdownToWhatsApp(message) });
+    const sentRelay = await session.sock.sendMessage(jid, { text: markdownToWhatsApp(message) });
 
     // F4: Audit log
     console.log(`[gateway] RELAY SENT | to: ${convo.pushName} (${convo.phone}) [${jid}] | message: "${message.substring(0, 100)}" | timestamp: ${new Date().toISOString()}`);
 
     // Update conversation tracker with outbound message
-    trackMessage(jid, convo.pushName, convo.phone, message, 'outbound');
+    trackMessage(session, jid, convo.pushName, convo.phone, message, 'outbound');
     // Save relay outbound to DB
-    dbSaveMessage({ id: sentRelay?.key?.id || randomUUID(), jid, senderJid: ownJid, pushName: null, phone: convo.phone, text: message, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
+    dbSaveMessage({ instanceKey: session.instanceKey, id: sentRelay?.key?.id || randomUUID(), jid, senderJid: session.ownJid, pushName: null, phone: convo.phone, text: message, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
 
     return { success: true, recipient: convo.pushName, phone: convo.phone };
   } catch (err) {
@@ -572,11 +713,13 @@ async function executeRelay(relay) {
 // ---------------------------------------------------------------------------
 // Resolve agent name → UUID via LibreFang API
 // ---------------------------------------------------------------------------
-function resolveAgentId() {
+function resolveAgentId(session = null) {
+  const target = session || getOrCreateSession(sessions, 'default');
   return new Promise((resolve, reject) => {
     // If DEFAULT_AGENT is already a UUID, use it directly
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(DEFAULT_AGENT)) {
-      cachedAgentId = DEFAULT_AGENT;
+      target.cachedAgentId = DEFAULT_AGENT;
+      syncLegacyGlobalsFromSession(target);
       return resolve(DEFAULT_AGENT);
     }
 
@@ -606,14 +749,16 @@ function resolveAgentId() {
               (a) => (a.name || '').toLowerCase() === DEFAULT_AGENT.toLowerCase()
             );
             if (match && match.id) {
-              cachedAgentId = match.id;
-              console.log(`[gateway] Resolved agent "${DEFAULT_AGENT}" → ${cachedAgentId}`);
-              resolve(cachedAgentId);
+              target.cachedAgentId = match.id;
+              syncLegacyGlobalsFromSession(target);
+              console.log(`[gateway] Resolved agent "${DEFAULT_AGENT}" for ${target.instanceKey} → ${target.cachedAgentId}`);
+              resolve(target.cachedAgentId);
             } else if (agents.length > 0) {
               // Fallback: use first available agent
-              cachedAgentId = agents[0].id;
-              console.log(`[gateway] Agent "${DEFAULT_AGENT}" not found, using first agent: ${cachedAgentId}`);
-              resolve(cachedAgentId);
+              target.cachedAgentId = agents[0].id;
+              syncLegacyGlobalsFromSession(target);
+              console.log(`[gateway] Agent "${DEFAULT_AGENT}" not found for ${target.instanceKey}, using first agent: ${target.cachedAgentId}`);
+              resolve(target.cachedAgentId);
             } else {
               reject(new Error('No agents available on LibreFang'));
             }
@@ -636,22 +781,31 @@ function resolveAgentId() {
 // ---------------------------------------------------------------------------
 // Baileys connection
 // ---------------------------------------------------------------------------
-async function cleanupSocket() {
-  if (!sock) return;
-  const previousSock = sock;
-  sock = null;
-  ownJid = null;
+async function cleanupSocket(session = null) {
+  const target = session || { sock, ownJid };
+  if (!target.sock) return;
+  const previousSock = target.sock;
+  target.sock = null;
+  target.ownJid = null;
+  if (session) {
+    syncLegacyGlobalsFromSession(session);
+  } else {
+    sock = null;
+    ownJid = null;
+  }
   try { previousSock.ev?.removeAllListeners?.(); } catch {}
   try { previousSock.ws?.close?.(); } catch {}
   try { previousSock.end?.(); } catch {}
 }
 
-async function startConnection() {
-  if (isConnecting) {
-    console.log('[gateway] Connection attempt already in progress, skipping');
+async function startConnection(session = null) {
+  const target = session || getOrCreateSession(sessions, 'default');
+  if (target.isConnecting) {
+    console.log(`[gateway] Connection attempt already in progress for ${target.instanceKey}, skipping`);
     return;
   }
-  isConnecting = true;
+  target.isConnecting = true;
+  syncLegacyGlobalsFromSession(target);
   try {
 
   // Dynamic imports — Baileys is ESM-only in v6+
@@ -663,39 +817,42 @@ async function startConnection() {
   const logger = pino({ level: 'warn' });
 
   const { state, saveCreds } = await useMultiFileAuthState(
-    require('node:path').join(__dirname, 'auth_store')
+    authStorePathForSession(target)
   );
   const { version } = await fetchLatestBaileysVersion();
 
-  sessionId = randomUUID();
-  qrDataUrl = '';
-  qrExpired = false;
-  connStatus = 'disconnected';
-  statusMessage = 'Connecting...';
+  target.sessionId = randomUUID();
+  target.qrDataUrl = '';
+  target.qrExpired = false;
+  target.connStatus = 'disconnected';
+  target.statusMessage = 'Connecting...';
+  syncLegacyGlobalsFromSession(target);
 
-  sock = makeWASocket({
+  target.sock = makeWASocket({
     version,
     auth: state,
     logger,
     // printQRInTerminal removed (deprecated in Baileys v6+)
     browser: ['LibreFang', 'Desktop', '1.0.0'],
   });
+  syncLegacyGlobalsFromSession(target);
 
   // Save credentials whenever they update
-  sock.ev.on('creds.update', saveCreds);
+  target.sock.ev.on('creds.update', saveCreds);
 
   // Connection state changes (QR code, connected, disconnected)
-  sock.ev.on('connection.update', async (update) => {
+  target.sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
       // New QR code generated — convert to data URL
       try {
-        qrDataUrl = await QRCode.toDataURL(qr, { width: 256, margin: 2 });
-        connStatus = 'qr_ready';
-        qrExpired = false;
-        statusMessage = 'Scan this QR code with WhatsApp → Linked Devices';
-        console.log('[gateway] QR code ready — waiting for scan');
+        target.qrDataUrl = await QRCode.toDataURL(qr, { width: 256, margin: 2 });
+        target.connStatus = 'qr_ready';
+        target.qrExpired = false;
+        target.statusMessage = 'Scan this QR code with WhatsApp → Linked Devices';
+        syncLegacyGlobalsFromSession(target);
+        console.log(`[gateway] QR code ready for ${target.instanceKey} — waiting for scan`);
       } catch (err) {
         console.error('[gateway] QR generation failed:', err.message);
       }
@@ -708,70 +865,72 @@ async function startConnection() {
 
       if (statusCode === DisconnectReason.loggedOut) {
         // User logged out from phone — clear auth and stop
-        connStatus = 'disconnected';
-        statusMessage = 'Logged out. Generate a new QR code to reconnect.';
-        qrDataUrl = '';
-        await cleanupSocket();
-        reconnectAttempts = 0;
-        cachedAgentId = null;
+        target.connStatus = 'disconnected';
+        target.statusMessage = 'Logged out. Generate a new QR code to reconnect.';
+        target.qrDataUrl = '';
+        await cleanupSocket(target);
+        target.reconnectAttempts = 0;
+        target.cachedAgentId = null;
         // Remove auth store so next connect gets a fresh QR
-        const fs = require('node:fs');
-        const path = require('node:path');
-        const authPath = path.join(__dirname, 'auth_store');
+        const authPath = authStorePathForSession(target);
         if (fs.existsSync(authPath)) {
           fs.rmSync(authPath, { recursive: true, force: true });
         }
+        syncLegacyGlobalsFromSession(target);
       } else if (statusCode === DisconnectReason.forbidden) {
         // Non-recoverable — don't auto-reconnect
-        connStatus = 'disconnected';
-        statusMessage = `Disconnected: ${reason}. Use POST /login/start to reconnect.`;
-        qrDataUrl = '';
-        await cleanupSocket();
+        target.connStatus = 'disconnected';
+        target.statusMessage = `Disconnected: ${reason}. Use POST /login/start to reconnect.`;
+        target.qrDataUrl = '';
+        await cleanupSocket(target);
+        syncLegacyGlobalsFromSession(target);
       } else {
         // All other disconnect reasons are treated as recoverable
-        reconnectAttempts += 1;
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        target.reconnectAttempts += 1;
+        if (target.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
           console.error(`[gateway] Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`);
-          connStatus = 'disconnected';
-          statusMessage = `Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`;
+          target.connStatus = 'disconnected';
+          target.statusMessage = `Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`;
         } else {
           const delay = Math.min(
-            2000 * Math.pow(1.5, reconnectAttempts - 1),
+            2000 * Math.pow(1.5, target.reconnectAttempts - 1),
             MAX_RECONNECT_DELAY,
           );
           console.log(
-            `[gateway] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`,
+            `[gateway] Reconnecting ${target.instanceKey} in ${Math.round(delay / 1000)}s (attempt ${target.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`,
           );
-          connStatus = 'disconnected';
-          statusMessage = `Reconnecting (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
-          setTimeout(() => startConnection(), delay);
+          target.connStatus = 'disconnected';
+          target.statusMessage = `Reconnecting (attempt ${target.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
+          syncLegacyGlobalsFromSession(target);
+          setTimeout(() => startConnection(target), delay);
         }
       }
     }
 
     if (connection === 'open') {
-      connStatus = 'connected';
-      qrExpired = false;
-      qrDataUrl = '';
-      reconnectAttempts = 0;
-      statusMessage = 'Connected to WhatsApp';
-      console.log('[gateway] Connected to WhatsApp!');
+      target.connStatus = 'connected';
+      target.qrExpired = false;
+      target.qrDataUrl = '';
+      target.reconnectAttempts = 0;
+      target.statusMessage = 'Connected to WhatsApp';
+      console.log(`[gateway] Connected to WhatsApp for ${target.instanceKey}!`);
 
       // Capture own JID for self-chat detection
-      if (sock?.user?.id) {
+      if (target.sock?.user?.id) {
         // Baileys user.id is like "1234567890:42@s.whatsapp.net" — normalize
-        ownJid = sock.user.id.replace(/:.*@/, '@');
-        console.log(`[gateway] Own JID: ${ownJid}`);
+        target.ownJid = target.sock.user.id.replace(/:.*@/, '@');
+        console.log(`[gateway] Own JID for ${target.instanceKey}: ${target.ownJid}`);
       }
 
       // Invalidate cached agent UUID on reconnect — the daemon may have
       // restarted and agents may have new UUIDs.
-      cachedAgentId = null;
+      target.cachedAgentId = null;
+      syncLegacyGlobalsFromSession(target);
     }
   });
 
   // Incoming messages → forward to LibreFang
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+  target.sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
@@ -779,14 +938,14 @@ async function startConnection() {
       if (msg.key.remoteJid === 'status@broadcast') continue;
 
       // Deduplication: skip if we've already processed this message ID
-      if (isDuplicate(msg.key.id)) {
+      if (isDuplicate(target, msg.key.id)) {
         console.log(`[gateway] Skipping duplicate message: ${msg.key.id}`);
         continue;
       }
 
       // Handle self-chat ("Notes to Self"): fromMe messages to own JID.
       if (msg.key.fromMe) {
-        const isSelfChat = ownJid && msg.key.remoteJid === ownJid;
+        const isSelfChat = target.ownJid && msg.key.remoteJid === target.ownJid;
         if (!isSelfChat) continue; // Skip regular outgoing messages
       }
 
@@ -877,26 +1036,26 @@ async function startConnection() {
 
       // Detect @mention: check if our JID is in the mentionedJid list
       let wasMentioned = false;
-      if (isGroup && ownJid) {
+      if (isGroup && target.ownJid) {
         const mentionedJids = innerMsg.extendedTextMessage?.contextInfo?.mentionedJid
           || innerMsg.imageMessage?.contextInfo?.mentionedJid
           || innerMsg.videoMessage?.contextInfo?.mentionedJid
           || [];
         // ownJid is normalized like "1234567890@s.whatsapp.net"
-        const ownNumber = ownJid.replace(/@.*$/, '');
+        const ownNumber = target.ownJid.replace(/@.*$/, '');
         wasMentioned = mentionedJids.some(jid => jid.replace(/@.*$/, '') === ownNumber);
       }
 
       // Rate limiting for strangers and group messages
-      if ((isStranger || isGroup) && isRateLimited(sender)) {
+      if ((isStranger || isGroup) && isRateLimited(target, sender)) {
         console.log(`[gateway] Rate limited: ${pushName} (${phone}) — dropping message`);
         continue;
       }
 
       // --- Resolve agent ID early (needed for media upload) ---
-      if (!cachedAgentId) {
+      if (!target.cachedAgentId) {
         try {
-          await resolveAgentId();
+          await resolveAgentId(target);
         } catch (err) {
           console.error(`[gateway] Agent resolution failed: ${err.message}`);
           continue;
@@ -909,7 +1068,7 @@ async function startConnection() {
       let transcriptionText = '';
 
       if (downloadableMedia) {
-        const result = await processMediaMessage(msg, innerMsg, cachedAgentId);
+        const result = await processMediaMessage(msg, innerMsg, target.cachedAgentId);
         if (result && result.attachment) {
           attachments.push(result.attachment);
           if (result.transcription) {
@@ -986,6 +1145,7 @@ async function startConnection() {
         ? (typeof msg.messageTimestamp === 'number' ? msg.messageTimestamp * 1000 : Number(msg.messageTimestamp) * 1000)
         : Date.now());
       dbSaveMessage({
+        instanceKey: target.instanceKey,
         id: msg.key.id,
         jid: sender,
         senderJid: msg.key.participant || sender,
@@ -997,16 +1157,16 @@ async function startConnection() {
         processed: 0,
         rawType,
       });
-      dbUpdateLastSeen(sender, msgTimestamp);
+      dbUpdateLastSeen(target.instanceKey, sender, msgTimestamp);
 
       // Send read receipt (blue ticks) immediately
-      await sock.readMessages([msg.key]);
+      await target.sock.readMessages([msg.key]);
 
       // Forward to LibreFang agent
       try {
         // Track stranger messages
         if (isStranger) {
-          trackMessage(sender, pushName, phone, messageText, 'inbound');
+          trackMessage(target, sender, pushName, phone, messageText, 'inbound');
         }
 
         // Build the message to send to the agent
@@ -1017,10 +1177,10 @@ async function startConnection() {
           // Include sender identity so the LLM knows who is talking in the group
           messageToSend = `[Group message from ${pushName || phone}]\n${messageText}`;
         } else if (isStranger) {
-          const strangerContext = buildStrangerContext(pushName, phone, sender);
+          const strangerContext = buildStrangerContext(target, pushName, phone, sender);
           messageToSend = strangerContext + messageText;
-        } else if (isOwner && activeConversations.size > 0) {
-          const context = buildConversationsContext();
+        } else if (isOwner && target.activeConversations.size > 0) {
+          const context = buildConversationsContext(target);
           systemPrefix = buildRelaySystemInstruction();
           messageToSend = context + '\n\n[OWNER_MESSAGE]\n' + messageText;
         } else {
@@ -1030,18 +1190,18 @@ async function startConnection() {
         // --- Streaming: progressive message edits while LLM generates ---
         let streamMsgKey = null; // key of the initial WhatsApp message we'll edit
         const onProgress = async (partialText) => {
-          if (!sock) return;
+          if (!target.sock) return;
           const formatted = markdownToWhatsApp(partialText);
           if (!streamMsgKey) {
-            const sent = await sock.sendMessage(sender, { text: formatted });
+            const sent = await target.sock.sendMessage(sender, { text: formatted });
             streamMsgKey = sent?.key;
           } else {
-            await sock.sendMessage(sender, { text: formatted, edit: streamMsgKey });
+            await target.sock.sendMessage(sender, { text: formatted, edit: streamMsgKey });
           }
         };
 
         const rawResponse = await forwardToLibreFangStreaming(
-          messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress,
+          messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress, target,
         );
         const response = markdownToWhatsApp(rawResponse);
 
@@ -1049,14 +1209,14 @@ async function startConnection() {
         const sendOrEdit = async (jid, finalText) => {
           if (streamMsgKey && jid === sender) {
             // Edit the message we've been streaming
-            await sock.sendMessage(jid, { text: finalText, edit: streamMsgKey });
+            await target.sock.sendMessage(jid, { text: finalText, edit: streamMsgKey });
             return streamMsgKey;
           }
           // No streaming happened (fallback path) — send new message
-          return (await sock.sendMessage(jid, { text: finalText }))?.key;
+          return (await target.sock.sendMessage(jid, { text: finalText }))?.key;
         };
 
-        if (response && sock) {
+        if (response && target.sock) {
           if (isStranger) {
             // Step C: Agent response goes to STRANGER, not owner
             const { notifications, cleanedText } = extractNotifyOwner(response);
@@ -1068,16 +1228,16 @@ async function startConnection() {
               console.log(`[gateway] Replied to stranger ${pushName} (${phone})${streamMsgKey ? ' (streamed)' : ''}`);
 
               // Track outbound message
-              trackMessage(sender, pushName, phone, cleanedText, 'outbound');
+              trackMessage(target, sender, pushName, phone, cleanedText, 'outbound');
               // Save outbound to DB
-              dbSaveMessage({ id: sentKey?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: cleanedText, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
+              dbSaveMessage({ instanceKey: target.instanceKey, id: sentKey?.id || randomUUID(), jid: sender, senderJid: target.ownJid, pushName: null, phone, text: cleanedText, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
             }
 
             // Step C + F: If NOTIFY_OWNER tags found, send notification to owner
             for (const notif of notifications) {
-              const convo = activeConversations.get(sender);
+              const convo = target.activeConversations.get(sender);
               // F: Escalation deduplication
-              if (shouldDebounceEscalation(sender)) {
+              if (shouldDebounceEscalation(target, sender)) {
                 console.log(`[gateway] Debounced escalation for ${pushName} — skipping duplicate notification`);
                 continue;
               }
@@ -1088,7 +1248,7 @@ async function startConnection() {
               const ownerNotif = notif.summary || `[${pushName}] ${notif.reason}`;
 
               // Send notification to primary owner
-              await sock.sendMessage(OWNER_JID, { text: ownerNotif });
+              await target.sock.sendMessage(OWNER_JID, { text: ownerNotif });
               console.log(`[gateway] NOTIFY_OWNER sent for ${pushName}: ${notif.reason}`);
             }
 
@@ -1099,7 +1259,7 @@ async function startConnection() {
             // Execute any relay commands
             const relayResults = [];
             for (const relay of relays) {
-              const result = await executeRelay(relay);
+              const result = await executeRelay(target, relay);
               relayResults.push(result);
             }
 
@@ -1122,7 +1282,7 @@ async function startConnection() {
               ownerReply = markdownToWhatsApp(ownerReply);
               const sentKey = await sendOrEdit(sender, ownerReply);
               console.log(`[gateway] Replied to owner (${sender})${streamMsgKey ? ' (streamed)' : ''}`);
-              dbSaveMessage({ id: sentKey?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: ownerReply, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
+              dbSaveMessage({ instanceKey: target.instanceKey, id: sentKey?.id || randomUUID(), jid: sender, senderJid: target.ownJid, pushName: null, phone, text: ownerReply, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
             }
 
           } else {
@@ -1130,12 +1290,12 @@ async function startConnection() {
             const finalText = markdownToWhatsApp(response);
             const sentKey = await sendOrEdit(sender, finalText);
             console.log(`[gateway] Replied to ${pushName}`);
-            dbSaveMessage({ id: sentKey?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
+            dbSaveMessage({ instanceKey: target.instanceKey, id: sentKey?.id || randomUUID(), jid: sender, senderJid: target.ownJid, pushName: null, phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
           }
         }
 
         // --- Message Store: mark inbound message as processed ---
-        dbMarkProcessed(msg.key.id, 1);
+        dbMarkProcessed(target.instanceKey, msg.key.id, 1);
 
       } catch (err) {
         console.error(`[gateway] Forward/reply failed:`, err.message);
@@ -1147,7 +1307,7 @@ async function startConnection() {
   // -------------------------------------------------------------------------
   // Fase 3.2 — Option A: Hook messages.update for failed decryptions
   // -------------------------------------------------------------------------
-  sock.ev.on('messages.update', (updates) => {
+  target.sock.ev.on('messages.update', (updates) => {
     for (const update of updates) {
       // Baileys emits update.message with error info for decryption failures
       const key = update.key;
@@ -1161,6 +1321,7 @@ async function startConnection() {
 
         // Save a placeholder in DB so the catch-up sweep can attempt recovery
         dbSaveMessage({
+          instanceKey: target.instanceKey,
           id: msgId,
           jid,
           senderJid: key?.participant || null,
@@ -1183,8 +1344,8 @@ async function startConnection() {
   const GAP_THRESHOLD_MS = 30 * 60 * 1000;            // 30 min silence = warning
 
   const gapDetectionTimer = setInterval(() => {
-    if (connStatus !== 'connected') return;
-    const allLastSeen = stmtGetLastSeen.all();
+    if (target.connStatus !== 'connected') return;
+    const allLastSeen = stmtGetLastSeen.all(target.instanceKey);
     const now = Date.now();
     for (const row of allLastSeen) {
       // Only check JIDs that had recent activity (within last 2 hours)
@@ -1192,22 +1353,23 @@ async function startConnection() {
       const gap = now - row.last_timestamp;
       if (gap > GAP_THRESHOLD_MS) {
         // Check if there's an active conversation for this JID (only warn for active ones)
-        if (activeConversations.has(row.jid)) {
-          console.warn(`[gateway][gap-detect] No messages from ${row.jid} for ${Math.round(gap / 60000)}min — possible message loss`);
+        if (target.activeConversations.has(row.jid)) {
+          console.warn(`[gateway][gap-detect] No messages from ${row.jid} for ${Math.round(gap / 60000)}min on ${target.instanceKey} — possible message loss`);
         }
       }
     }
   }, GAP_DETECTION_INTERVAL_MS);
 
   // Clean up interval on socket close to prevent leaks on reconnect
-  sock.ev.on('connection.update', (update) => {
+  target.sock.ev.on('connection.update', (update) => {
     if (update.connection === 'close') {
       clearInterval(gapDetectionTimer);
     }
   });
 
   } finally {
-    isConnecting = false;
+    target.isConnecting = false;
+    syncLegacyGlobalsFromSession(target);
   }
 }
 
@@ -1461,11 +1623,12 @@ function buildRelaySystemInstruction() {
 // ---------------------------------------------------------------------------
 const MAX_FORWARD_RETRIES = 1;
 
-async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false } = {}, retryCount = 0) {
+async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false } = {}, retryCount = 0, session = null) {
+  const target = session || getOrCreateSession(sessions, 'default');
   // Resolve agent UUID if not cached (or if invalidated on reconnect)
-  if (!cachedAgentId) {
+  if (!target.cachedAgentId) {
     try {
-      await resolveAgentId();
+      await resolveAgentId(target);
     } catch (err) {
       console.error(`[gateway] Agent resolution failed: ${err.message}`);
       throw err;
@@ -1491,7 +1654,7 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
   const payloadStr = JSON.stringify(payload);
 
   return new Promise((resolve, reject) => {
-    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(cachedAgentId)}/message`);
+    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(target.cachedAgentId)}/message`);
 
     const req = http.request(
       {
@@ -1512,10 +1675,11 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
           // If the agent UUID became stale (404), invalidate cache and retry once
           if (res.statusCode === 404) {
             if (retryCount < MAX_FORWARD_RETRIES) {
-              console.log('[gateway] Agent UUID stale (404), re-resolving...');
-              cachedAgentId = null;
-              resolveAgentId()
-                .then(() => forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned }, retryCount + 1))
+              console.log(`[gateway] Agent UUID stale for ${target.instanceKey} (404), re-resolving...`);
+              target.cachedAgentId = null;
+              syncLegacyGlobalsFromSession(target);
+              resolveAgentId(target)
+                .then(() => forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned }, retryCount + 1, target))
                 .then(resolve)
                 .catch(reject);
               return;
@@ -1586,11 +1750,12 @@ const STREAMING_EDIT_INTERVAL_MS = 2000;
  * @param {(text: string) => Promise<void>} onProgress
  * @returns {Promise<string>} complete response
  */
-async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress) {
+async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress, session = null) {
+  const target = session || getOrCreateSession(sessions, 'default');
   // Resolve agent UUID if not cached
-  if (!cachedAgentId) {
+  if (!target.cachedAgentId) {
     try {
-      await resolveAgentId();
+      await resolveAgentId(target);
     } catch (err) {
       console.error(`[gateway] Agent resolution failed: ${err.message}`);
       throw err;
@@ -1613,7 +1778,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
   const payloadStr = JSON.stringify(payload);
 
   return new Promise((resolve, reject) => {
-    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(cachedAgentId)}/message/stream`);
+    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(target.cachedAgentId)}/message/stream`);
 
     const req = http.request(
       {
@@ -1636,7 +1801,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
           res.on('data', (chunk) => (body += chunk));
           res.on('end', () => {
             console.warn(`[gateway] SSE endpoint returned ${res.statusCode}, falling back to non-streaming`);
-            forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments)
+            forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned }, 0, target)
               .then(resolve)
               .catch(reject);
           });
@@ -1717,7 +1882,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
         res.on('error', (err) => {
           clearTimeout(pendingEdit);
           console.warn(`[gateway] SSE stream error: ${err.message}, falling back`);
-          forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments)
+          forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned }, 0, target)
             .then(resolve)
             .catch(reject);
         });
@@ -1726,7 +1891,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
 
     req.on('error', (err) => {
       console.warn(`[gateway] SSE request error: ${err.message}, falling back`);
-      forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments)
+      forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned }, 0, target)
         .then(resolve)
         .catch(reject);
     });
@@ -1747,51 +1912,47 @@ const CATCHUP_AGE_MS = 30_000;               // only messages older than 30s
 const CATCHUP_MAX_RETRIES = 3;
 
 async function runCatchUpSweep() {
-  if (connStatus !== 'connected' || !sock) return;
-
   const cutoff = Date.now() - CATCHUP_AGE_MS;
-  const unprocessed = dbGetUnprocessed(cutoff);
-  if (unprocessed.length === 0) return;
+  for (const session of sessions.values()) {
+    if (session.connStatus !== 'connected' || !session.sock) continue;
 
-  console.log(`[gateway][catchup] Found ${unprocessed.length} unprocessed message(s), attempting re-forward...`);
+    const unprocessed = dbGetUnprocessed(session.instanceKey, cutoff);
+    if (unprocessed.length === 0) continue;
 
-  for (const msg of unprocessed) {
-    // Skip messages already at max retries (they'll be marked failed by dbIncrRetryOrFail)
-    if (msg.retry_count >= CATCHUP_MAX_RETRIES) {
-      dbIncrRetryOrFail(msg.id, CATCHUP_MAX_RETRIES);
-      continue;
-    }
+    console.log(`[gateway][catchup] Checking ${unprocessed.length} queued message(s) for ${session.instanceKey}...`);
 
-    try {
-      // Ensure agent ID is resolved
-      if (!cachedAgentId) await resolveAgentId();
-
-      // Determine if sender is owner or stranger
-      const senderPnJid = msg.phone ? msg.phone.replace(/^\+/, '') + '@s.whatsapp.net' : '';
-      const isOwner = OWNER_JIDS.size > 0 && (OWNER_JIDS.has(msg.jid) || (senderPnJid && OWNER_JIDS.has(senderPnJid)));
-
-      // Simple re-forward: send the stored text to the agent without full context rebuild
-      const isCatchupGroup = msg.jid && msg.jid.endsWith('@g.us');
-      const prefix = isOwner ? '' : `[CATCHUP_REDELIVERY from ${msg.push_name || msg.phone || msg.jid}]\n`;
-      const response = await forwardToLibreFang(prefix + (msg.text || ''), '', msg.phone || '', msg.push_name || '', isOwner, [], { isGroup: isCatchupGroup, wasMentioned: false });
-
-      // Mark as processed
-      dbMarkProcessed(msg.id, 1);
-      console.log(`[gateway][catchup] Re-forwarded message ${msg.id} from ${msg.push_name || msg.jid}`);
-
-      // If there's a response, try to send it back (strangers and groups)
-      if (response && !isOwner && msg.jid) {
-        try {
-          const formatted = markdownToWhatsApp(response);
-          await sock.sendMessage(msg.jid, { text: formatted });
-          dbSaveMessage({ id: randomUUID(), jid: msg.jid, senderJid: ownJid, pushName: null, phone: msg.phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
-        } catch (sendErr) {
-          console.warn(`[gateway][catchup] Could not send catch-up reply to ${msg.jid}: ${sendErr.message}`);
-        }
+    for (const msg of unprocessed) {
+      if (msg.retry_count >= CATCHUP_MAX_RETRIES) {
+        dbIncrRetryOrFail(session.instanceKey, msg.id, CATCHUP_MAX_RETRIES);
+        continue;
       }
-    } catch (err) {
-      console.warn(`[gateway][catchup] Failed to re-forward message ${msg.id}: ${err.message}`);
-      dbIncrRetryOrFail(msg.id, CATCHUP_MAX_RETRIES);
+
+      try {
+        if (!session.cachedAgentId) await resolveAgentId(session);
+
+        const senderPnJid = msg.phone ? msg.phone.replace(/^\+/, '') + '@s.whatsapp.net' : '';
+        const isOwner = OWNER_JIDS.size > 0 && (OWNER_JIDS.has(msg.jid) || (senderPnJid && OWNER_JIDS.has(senderPnJid)));
+
+        const isCatchupGroup = msg.jid && msg.jid.endsWith('@g.us');
+        const prefix = isOwner ? '' : `[CATCHUP_REDELIVERY from ${msg.push_name || msg.phone || msg.jid}]\n`;
+        const response = await forwardToLibreFang(prefix + (msg.text || ''), '', msg.phone || '', msg.push_name || '', isOwner, [], { isGroup: isCatchupGroup, wasMentioned: false }, 0, session);
+
+        dbMarkProcessed(session.instanceKey, msg.id, 1);
+        console.log(`[gateway][catchup] Re-forwarded message ${msg.id} from ${msg.push_name || msg.jid} for ${session.instanceKey}`);
+
+        if (response && !isOwner && msg.jid) {
+          try {
+            const formatted = markdownToWhatsApp(response);
+            await session.sock.sendMessage(msg.jid, { text: formatted });
+            dbSaveMessage({ instanceKey: session.instanceKey, id: randomUUID(), jid: msg.jid, senderJid: session.ownJid, pushName: null, phone: msg.phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
+          } catch (sendErr) {
+            console.warn(`[gateway][catchup] Could not send catch-up reply to ${msg.jid} for ${session.instanceKey}: ${sendErr.message}`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[gateway][catchup] Failed to re-forward message ${msg.id} for ${session.instanceKey}: ${err.message}`);
+        dbIncrRetryOrFail(session.instanceKey, msg.id, CATCHUP_MAX_RETRIES);
+      }
     }
   }
 }
@@ -1819,22 +1980,22 @@ setInterval(runDbCleanup, CLEANUP_INTERVAL_MS);
 // ---------------------------------------------------------------------------
 // Send a message via Baileys (called by LibreFang for outgoing)
 // ---------------------------------------------------------------------------
-async function sendMessage(to, text) {
-  if (!sock || connStatus !== 'connected') {
+async function sendMessage(to, text, session = null) {
+  const target = session || { sock, connStatus, ownJid };
+  if (!target.sock || target.connStatus !== 'connected') {
     throw new Error('WhatsApp not connected');
   }
 
-  // Preserve group JIDs (@g.us) as-is; normalize phone → JID for individuals
-  const jid = to.includes('@g.us') ? to
-    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  const jid = normalizeRecipientJid(to);
 
   const formatted = markdownToWhatsApp(text);
-  const sent = await sock.sendMessage(jid, { text: formatted });
+  const sent = await target.sock.sendMessage(jid, { text: formatted });
   // Save outbound message to DB (store formatted text to match what was delivered)
   dbSaveMessage({
+    instanceKey: target.instanceKey,
     id: sent?.key?.id || randomUUID(),
     jid,
-    senderJid: ownJid || null,
+    senderJid: target.ownJid || null,
     pushName: null,
     phone: to,
     text: formatted,
@@ -1845,14 +2006,13 @@ async function sendMessage(to, text) {
   });
 }
 
-async function sendImage(to, imageUrl, caption) {
-  if (!sock || connStatus !== 'connected') {
+async function sendImage(to, imageUrl, caption, session = null) {
+  const target = session || { sock, connStatus, ownJid };
+  if (!target.sock || target.connStatus !== 'connected') {
     throw new Error('WhatsApp not connected');
   }
 
-  // Preserve group JIDs (@g.us) as-is; normalize phone → JID for individuals
-  const jid = to.includes('@g.us') ? to
-    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  const jid = normalizeRecipientJid(to);
 
   // Fetch image into buffer (Baileys needs buffer or local file)
   const buffer = await new Promise((resolve, reject) => {
@@ -1881,11 +2041,12 @@ async function sendImage(to, imageUrl, caption) {
   const imgMsg = { image: buffer };
   if (caption) imgMsg.caption = caption;
 
-  const sent = await sock.sendMessage(jid, imgMsg);
+  const sent = await target.sock.sendMessage(jid, imgMsg);
   dbSaveMessage({
+    instanceKey: target.instanceKey,
     id: sent?.key?.id || randomUUID(),
     jid,
-    senderJid: ownJid || null,
+    senderJid: target.ownJid || null,
     pushName: null,
     phone: to,
     text: caption || '[Image]',
@@ -1896,14 +2057,13 @@ async function sendImage(to, imageUrl, caption) {
   });
 }
 
-async function sendAudio(to, audioUrl, ptt = true) {
-  if (!sock || connStatus !== 'connected') {
+async function sendAudio(to, audioUrl, ptt = true, session = null) {
+  const target = session || { sock, connStatus, ownJid };
+  if (!target.sock || target.connStatus !== 'connected') {
     throw new Error('WhatsApp not connected');
   }
 
-  // Preserve group JIDs (@g.us) as-is; normalize phone → JID for individuals
-  const jid = to.includes('@g.us') ? to
-    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  const jid = normalizeRecipientJid(to);
 
   // Fetch audio into buffer (Baileys needs buffer or local file)
   const buffer = await new Promise((resolve, reject) => {
@@ -1932,11 +2092,12 @@ async function sendAudio(to, audioUrl, ptt = true) {
   // ptt: true sends as a voice note (push-to-talk bubble); false sends as audio file
   const audioMsg = { audio: buffer, mimetype: 'audio/ogg; codecs=opus', ptt };
 
-  const sent = await sock.sendMessage(jid, audioMsg);
+  const sent = await target.sock.sendMessage(jid, audioMsg);
   dbSaveMessage({
+    instanceKey: target.instanceKey,
     id: sent?.key?.id || randomUUID(),
     jid,
-    senderJid: ownJid || null,
+    senderJid: target.ownJid || null,
     pushName: null,
     phone: to,
     text: ptt ? '[Voice message]' : '[Audio]',
@@ -2014,87 +2175,99 @@ const server = http.createServer(async (req, res) => {
   try {
     // POST /login/start — start Baileys connection, return QR
     if (req.method === 'POST' && path === '/login/start') {
+      const body = await parseBody(req);
+      const { instanceKey } = parseSessionScopedRequest(body);
+      const session = getOrCreateSession(sessions, instanceKey);
+
       // If already connected, just return success
-      if (connStatus === 'connected') {
-        return jsonResponse(req, res, 200, {
-          qr_data_url: '',
-          session_id: sessionId,
-          message: 'Already connected to WhatsApp',
-          connected: true,
-        });
+      if (session.connStatus === 'connected') {
+        return jsonResponse(req, res, 200, getSessionStatusView(session));
       }
 
-      // Start a new connection (resets any existing)
-      await startConnection();
+      // Start a new connection for this instance (full runtime partitioning still
+      // in progress, but the public bootstrap surface is already instance-scoped).
+      if (instanceKey !== 'default') {
+        session.sessionId = session.sessionId || randomUUID();
+        session.statusMessage = 'Instance-scoped bootstrap reserved';
+      }
+      await startConnection(session);
 
       // Wait briefly for QR to generate (Baileys emits it quickly)
       let waited = 0;
-      while (!qrDataUrl && connStatus !== 'connected' && waited < 15_000) {
+      while (!session.qrDataUrl && session.connStatus !== 'connected' && waited < 15_000) {
         await new Promise((r) => setTimeout(r, 300));
         waited += 300;
       }
 
-      return jsonResponse(req, res, 200, {
-        qr_data_url: qrDataUrl,
-        session_id: sessionId,
-        message: statusMessage,
-        connected: connStatus === 'connected',
-      });
+      return jsonResponse(req, res, 200, getSessionStatusView(session));
     }
 
     // GET /login/status — poll for connection status
     if (req.method === 'GET' && path === '/login/status') {
-      return jsonResponse(req, res, 200, {
-        connected: connStatus === 'connected',
-        message: statusMessage,
-        expired: qrExpired,
-      });
+      const session = getSessionStatusFromQuery(url.searchParams);
+      return jsonResponse(req, res, 200, getSessionStatusView(session));
     }
 
     // POST /message/send — send outgoing message via Baileys
     if (req.method === 'POST' && path === '/message/send') {
       const body = await parseBody(req);
+      const { instanceKey } = parseSessionScopedRequest(body);
       const { to, text } = body;
 
       if (!to || !text) {
         return jsonResponse(req, res, 400, { error: 'Missing "to" or "text" field' });
       }
 
-      await sendMessage(to, text);
-      return jsonResponse(req, res, 200, { success: true, message: 'Sent' });
+      if (!sessions.has(instanceKey)) {
+        return jsonResponse(req, res, 404, { error: `Unknown session for instance_key "${instanceKey}"` });
+      }
+
+      await sendMessage(to, text, sessions.get(instanceKey));
+      return jsonResponse(req, res, 200, { success: true, message: 'Sent', instance_key: instanceKey });
     }
 
     // POST /message/send-image — send image via URL
     if (req.method === 'POST' && path === '/message/send-image') {
       const body = await parseBody(req);
+      const { instanceKey } = parseSessionScopedRequest(body);
       const { to, image_url, caption } = body;
 
       if (!to || !image_url) {
         return jsonResponse(req, res, 400, { error: 'Missing "to" or "image_url" field' });
       }
 
-      await sendImage(to, image_url, caption || '');
-      return jsonResponse(req, res, 200, { success: true, message: 'Image sent' });
+      if (!sessions.has(instanceKey)) {
+        return jsonResponse(req, res, 404, { error: `Unknown session for instance_key "${instanceKey}"` });
+      }
+
+      await sendImage(to, image_url, caption || '', sessions.get(instanceKey));
+      return jsonResponse(req, res, 200, { success: true, message: 'Image sent', instance_key: instanceKey });
     }
 
     // POST /message/send-audio — send audio file or voice note via URL
     if (req.method === 'POST' && path === '/message/send-audio') {
       const body = await parseBody(req);
+      const { instanceKey } = parseSessionScopedRequest(body);
       const { to, audio_url, ptt } = body;
 
       if (!to || !audio_url) {
         return jsonResponse(req, res, 400, { error: 'Missing "to" or "audio_url" field' });
       }
 
+      if (!sessions.has(instanceKey)) {
+        return jsonResponse(req, res, 404, { error: `Unknown session for instance_key "${instanceKey}"` });
+      }
+
       // ptt (push-to-talk) defaults to true — sends as voice note bubble
-      await sendAudio(to, audio_url, ptt !== false);
-      return jsonResponse(req, res, 200, { success: true, message: 'Audio sent' });
+      await sendAudio(to, audio_url, ptt !== false, sessions.get(instanceKey));
+      return jsonResponse(req, res, 200, { success: true, message: 'Audio sent', instance_key: instanceKey });
     }
 
     // GET /conversations — list active stranger conversations (Step B)
     if (req.method === 'GET' && path === '/conversations') {
+      const session = getSessionStatusFromQuery(url.searchParams);
       const conversations = [];
-      for (const [jid, convo] of activeConversations) {
+      for (const [jid, convo] of session.activeConversations) {
         conversations.push({
           jid,
           pushName: convo.pushName,
@@ -2110,9 +2283,14 @@ const server = http.createServer(async (req, res) => {
 
     // GET /messages/unprocessed — messages that failed to forward (Fase 2.2)
     if (req.method === 'GET' && path === '/messages/unprocessed') {
-      const rows = dbGetUnprocessed(Date.now());
+      const instanceKey = (url.searchParams.get('instance_key') || '').trim();
+      if (!instanceKey) {
+        return jsonResponse(req, res, 400, { error: 'Missing "instance_key" query parameter' });
+      }
+      const rows = dbGetUnprocessed(instanceKey, Date.now());
       const unprocessed = rows.map(r => ({
         id: r.id,
+        instance_key: r.instance_key,
         jid: r.jid,
         text: r.text,
         push_name: r.push_name,
@@ -2130,13 +2308,18 @@ const server = http.createServer(async (req, res) => {
       if (!jid) {
         return jsonResponse(req, res, 400, { error: 'Missing JID in path' });
       }
+      const instanceKey = (url.searchParams.get('instance_key') || '').trim();
+      if (!instanceKey) {
+        return jsonResponse(req, res, 400, { error: 'Missing "instance_key" query parameter' });
+      }
       const limit = parseInt(url.searchParams.get('limit') || '20', 10);
       const since = parseInt(url.searchParams.get('since') || '0', 10);
-      const rows = dbGetMessagesByJid(jid, Math.min(limit, 100), since);
+      const rows = dbGetMessagesByJid(instanceKey, jid, Math.min(limit, 100), since);
       // Reverse to chronological order (query is DESC)
       rows.reverse();
       const messages = rows.map(r => ({
         id: r.id,
+        instance_key: r.instance_key,
         text: r.text,
         direction: r.direction,
         push_name: r.push_name,
@@ -2149,11 +2332,15 @@ const server = http.createServer(async (req, res) => {
 
     // GET /health — health check
     if (req.method === 'GET' && path === '/health') {
+      const instanceKey = (url.searchParams.get('instance_key') || '').trim();
+      const session = instanceKey ? getSessionStatusFromQuery(url.searchParams) : null;
       return jsonResponse(req, res, 200, {
         status: 'ok',
-        connected: connStatus === 'connected',
-        session_id: sessionId || null,
-        active_conversations: activeConversations.size,
+        instance_key: session?.instanceKey || null,
+        connected: session ? session.connStatus === 'connected' : [...sessions.values()].some((entry) => entry.connStatus === 'connected'),
+        session_id: session?.sessionId || null,
+        active_conversations: session ? session.activeConversations.size : [...sessions.values()].reduce((sum, entry) => sum + entry.activeConversations.size, 0),
+        active_sessions: sessions.size,
       });
     }
 
@@ -2172,24 +2359,25 @@ server.listen(PORT, '127.0.0.1', async () => {
   console.log(`[gateway] Default agent: ${DEFAULT_AGENT} (name: ${AGENT_NAME})`);
   console.log(`[gateway] Conversation TTL: ${CONVERSATION_TTL_HOURS}h`);
 
-  // Auto-connect from existing credentials on startup
-  const fs = require('node:fs');
-  const authPath = require('node:path').join(__dirname, 'auth_store', 'creds.json');
-  if (fs.existsSync(authPath)) {
-    console.log('[gateway] Found existing auth — auto-connecting...');
-    try {
-      await startConnection();
-    } catch (err) {
-      console.error('[gateway] Auto-connect failed:', err.message);
-      // Schedule a retry after a short delay — the daemon may still be booting
-      console.log('[gateway] Will retry auto-connect in 10s...');
-      setTimeout(async () => {
-        try {
-          await startConnection();
-        } catch (retryErr) {
-          console.error('[gateway] Auto-connect retry failed:', retryErr.message);
-        }
-      }, 10_000);
+  // Auto-connect all persisted instance sessions on startup.
+  const persistedKeys = listPersistedSessionKeys();
+  if (persistedKeys.length > 0) {
+    console.log(`[gateway] Found existing auth for ${persistedKeys.length} instance(s) — auto-connecting...`);
+    for (const instanceKey of persistedKeys) {
+      const session = getOrCreateSession(sessions, instanceKey);
+      try {
+        await startConnection(session);
+      } catch (err) {
+        console.error(`[gateway] Auto-connect failed for ${instanceKey}:`, err.message);
+        console.log(`[gateway] Will retry auto-connect for ${instanceKey} in 10s...`);
+        setTimeout(async () => {
+          try {
+            await startConnection(session);
+          } catch (retryErr) {
+            console.error(`[gateway] Auto-connect retry failed for ${instanceKey}:`, retryErr.message);
+          }
+        }, 10_000);
+      }
     }
   } else {
     console.log('[gateway] No auth found — waiting for POST /login/start to begin QR flow...');
@@ -2199,11 +2387,17 @@ server.listen(PORT, '127.0.0.1', async () => {
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n[gateway] Shutting down...');
+  for (const session of sessions.values()) {
+    session.sock?.end?.();
+  }
   if (sock) sock.end();
   server.close(() => process.exit(0));
 });
 
 process.on('SIGTERM', () => {
+  for (const session of sessions.values()) {
+    session.sock?.end?.();
+  }
   if (sock) sock.end();
   server.close(() => process.exit(0));
 });
@@ -2220,4 +2414,18 @@ module.exports = {
   isAllowedOrigin,
   parseBody,
   MAX_BODY_SIZE,
+  encodeInstanceKey,
+  decodeInstanceKey,
+  authStorePathForInstance,
+  parseSessionScopedRequest,
+  createSessionState,
+  getOrCreateSession,
+  getSessionStatusView,
+  dbSaveMessage,
+  dbGetMessagesByJid,
+  dbGetUnprocessed,
+  dbMarkProcessed,
+  dbIncrRetryOrFail,
+  dbUpdateLastSeen,
+  dbGetLastSeen,
 };

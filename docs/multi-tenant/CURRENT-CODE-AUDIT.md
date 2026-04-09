@@ -1,7 +1,7 @@
 # CURRENT-CODE-AUDIT: Multi-Tenant Branch State
 
 **Status:** Current
-**Date:** 2026-04-08
+**Date:** 2026-04-09
 **Related:** `TENANT-INVARIANTS.md`, `ROUTE-POLICY-MATRIX.md`, `ENTERPRISE-DECISIONS.md`, `PENDING-WORK.md`
 
 ---
@@ -52,10 +52,17 @@ Current behavior:
 - multiplicity enforcement rejects unsupported duplicate daemon instances
 - reload rollback preserves the previous working bridge when a conflicting
   single-instance family cannot be activated
+- channel bootstrap/session ownership records persist concrete `account_id`,
+  `channel_type`, `instance_key`, lifecycle status, and provider handle data
+- bootstrap/session lookup is keyed by owned `(channel_type, instance_key)`
+  rather than raw provider handle
+- WeChat bootstrap is instance-targeted and owned end to end
+- WhatsApp bootstrap is instance-targeted and owned end to end
+  - the WhatsApp gateway now maintains per-instance auth stores, runtime
+    session state, and per-instance persisted message state
 
 Still intentionally not complete:
 
-- QR/session ownership modeling
 - shared integration user/chat/thread binding beyond integration-instance binding
 - multi-tenant coexistence for fixed-route/shared-port adapter families
 
@@ -169,12 +176,7 @@ right policy.
 - current ingress binding is integration-instance -> tenant
 - shared user/chat/thread ownership beyond that is not modeled yet
 
-### 2. Channel session / QR ownership
-
-- config/runtime ownership is converged
-- QR/bootstrap/session ownership rules are still product work
-
-### 3. Residual `AccountId(None)` migration debt
+### 2. Residual `AccountId(None)` migration debt
 
 - active product paths now target explicit concrete account scope
 - tenant-owned `agents` handlers no longer use daemon-global fallback reads/writes
@@ -197,12 +199,12 @@ right policy.
   - migration debt:
     compatibility comments/tests that still need eventual pruning
 
-### 4. Broader tenant-owned skill content model
+### 3. Broader tenant-owned skill content model
 
 - hands are tenant-owned at the instance/settings layer
 - broader tenant-authored skill content or overlays remain future design work
 
-### 5. Knowledge-graph generic API follow-up
+### 4. Knowledge-graph generic API follow-up
 
 - tenant-facing memory relations writes/queries are now account-scoped and no
   longer share graph rows across tenants
