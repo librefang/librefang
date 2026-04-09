@@ -1928,12 +1928,6 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
 
     // Agents list — fully enriched (same fields as /api/agents) so AgentsPage
     // can use this snapshot directly instead of polling /api/agents separately.
-    //
-    // IMPORTANT: `catalog` is an `Option<RwLockReadGuard<...>>` which is !Send.
-    // It must be dropped before the `tokio::join!` await below, otherwise the
-    // async future becomes !Send and axum's Handler impl won't be satisfied.
-    // Scoping the guard inside this block ensures it is released before any
-    // await point.
     let agents: Vec<serde_json::Value> = {
         let catalog = state.kernel.model_catalog_ref().read().ok();
         let dm = {
@@ -1952,7 +1946,6 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
             .iter()
             .map(|e| super::agents::enrich_agent_json(e, &dm, &catalog))
             .collect()
-        // `catalog` (RwLockReadGuard) and `dm_override` are dropped here.
     };
 
     // Skills count — cached behind a 30s TTL to avoid scanning the skills
@@ -1985,7 +1978,7 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
         }
     };
 
-    // Workflows, providers, channels — all concurrent with a 5s timeout on
+    // Workflows, providers, channels — run concurrently with a 5s timeout on
     // providers/channels in case a local provider probe stalls.
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let (workflow_result, providers_result, channels_result) = tokio::join!(
