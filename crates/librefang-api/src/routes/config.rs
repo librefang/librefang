@@ -9,7 +9,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/health", axum::routing::get(health))
         .route("/health/detail", axum::routing::get(health_detail))
         .route("/status", axum::routing::get(status))
-        .route("/dashboard/snapshot", axum::routing::get(dashboard_snapshot))
+        .route(
+            "/dashboard/snapshot",
+            axum::routing::get(dashboard_snapshot),
+        )
         .route("/version", axum::routing::get(version))
         .route("/config", axum::routing::get(get_config))
         .route("/config/export", axum::routing::get(export_config))
@@ -294,12 +297,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     let status = if db_ok { "ok" } else { "degraded" };
 
-    let fts_only = state
-        .kernel
-        .config_ref()
-        .memory
-        .fts_only
-        .unwrap_or(false);
+    let fts_only = state.kernel.config_ref().memory.fts_only.unwrap_or(false);
     let embedding_ok = fts_only || state.kernel.embedding().is_some();
 
     Json(serde_json::json!({
@@ -1892,12 +1890,7 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
         .structured_get(shared_id, "__health_check__")
         .is_ok();
     let health_status = if db_ok { "ok" } else { "degraded" };
-    let fts_only = state
-        .kernel
-        .config_ref()
-        .memory
-        .fts_only
-        .unwrap_or(false);
+    let fts_only = state.kernel.config_ref().memory.fts_only.unwrap_or(false);
     let embedding_ok = fts_only || state.kernel.embedding().is_some();
     let health = serde_json::json!({
         "status": health_status,
@@ -1910,15 +1903,10 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
 
     // Status (same logic as /api/status, without the heavy per-agent list)
     let agent_entries = state.kernel.agent_registry().list();
-    let agent_count = agent_entries
-        .iter()
-        .filter(|e| !e.is_hand)
-        .count();
+    let agent_count = agent_entries.iter().filter(|e| !e.is_hand).count();
     let active_agent_count = agent_entries
         .iter()
-        .filter(|e| {
-            !e.is_hand && matches!(e.state, librefang_types::agent::AgentState::Running)
-        })
+        .filter(|e| !e.is_hand && matches!(e.state, librefang_types::agent::AgentState::Running))
         .count();
     let session_count = state
         .kernel
@@ -1947,10 +1935,7 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
             .default_model_override_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        super::agents::effective_default_model(
-            &cfg.default_model,
-            dm_override.as_ref(),
-        )
+        super::agents::effective_default_model(&cfg.default_model, dm_override.as_ref())
     };
     let mut agent_entries_visible: Vec<_> = agent_entries.iter().filter(|e| !e.is_hand).collect();
     // Sort by last_active descending — matches AgentsPage default query order.
