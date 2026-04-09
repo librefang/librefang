@@ -41,9 +41,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/packages /opt/librefang/packages
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV LIBREFANG_HOME=/data
-RUN mkdir -p $LIBREFANG_HOME && chown node:node $LIBREFANG_HOME
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
+    mkdir -p $LIBREFANG_HOME && \
+    chown node:node $LIBREFANG_HOME
 EXPOSE 4545
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["librefang", "start", "--foreground"]
