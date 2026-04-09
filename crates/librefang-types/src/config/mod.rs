@@ -603,6 +603,54 @@ mod tests {
     }
 
     #[test]
+    fn test_one_or_many_single_wechat_table() {
+        let toml_str = r#"
+            [channels.wechat]
+            bot_token_env = "WECHAT_TOKEN_MAIN"
+            account_id = "wechat-main"
+            default_agent = "assistant"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.channels.wechat.is_some());
+        assert_eq!(config.channels.wechat.len(), 1);
+
+        let wechat = config.channels.wechat.first().unwrap();
+        assert_eq!(wechat.bot_token_env, "WECHAT_TOKEN_MAIN");
+        assert_eq!(wechat.account_id.as_deref(), Some("wechat-main"));
+        assert_eq!(wechat.default_agent.as_deref(), Some("assistant"));
+    }
+
+    #[test]
+    fn test_one_or_many_array_of_wecom_tables() {
+        let toml_str = r#"
+            [[channels.wecom]]
+            bot_id = "bot-main"
+            secret_env = "WECOM_SECRET_MAIN"
+            account_id = "wecom-main"
+            default_agent = "assistant"
+
+            [[channels.wecom]]
+            bot_id = "bot-sales"
+            secret_env = "WECOM_SECRET_SALES"
+            account_id = "wecom-sales"
+            default_agent = "sales-assistant"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.channels.wecom.is_some());
+        assert_eq!(config.channels.wecom.len(), 2);
+
+        let bots: Vec<_> = config.channels.wecom.iter().collect();
+        assert_eq!(bots[0].bot_id, "bot-main");
+        assert_eq!(bots[0].secret_env, "WECOM_SECRET_MAIN");
+        assert_eq!(bots[0].account_id.as_deref(), Some("wecom-main"));
+        assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
+        assert_eq!(bots[1].bot_id, "bot-sales");
+        assert_eq!(bots[1].secret_env, "WECOM_SECRET_SALES");
+        assert_eq!(bots[1].account_id.as_deref(), Some("wecom-sales"));
+        assert_eq!(bots[1].default_agent.as_deref(), Some("sales-assistant"));
+    }
+
+    #[test]
     fn test_one_or_many_empty_default() {
         let config = KernelConfig::default();
         assert!(config.channels.telegram.is_none());
@@ -640,6 +688,8 @@ mod tests {
         assert!(SignalConfig::default().account_id.is_none());
         assert!(MatrixConfig::default().account_id.is_none());
         assert!(EmailConfig::default().account_id.is_none());
+        assert!(WeChatConfig::default().account_id.is_none());
+        assert!(WeComConfig::default().account_id.is_none());
     }
 
     #[test]
