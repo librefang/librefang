@@ -12,6 +12,7 @@ pub mod formatter;
 pub(crate) mod http_client;
 pub mod message_journal;
 pub mod rate_limiter;
+pub mod roster;
 pub mod router;
 pub mod sanitizer;
 pub mod sidecar;
