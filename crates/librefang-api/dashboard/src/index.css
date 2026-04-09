@@ -50,9 +50,9 @@
   --accent-color: #a78bfa;  /* Violet 400 */
   
   --bg-main: #020617;
-  --bg-surface: rgba(15, 23, 42, 0.6);
-  --bg-surface-hover: rgba(30, 41, 59, 0.4);
-  --border-color: rgba(30, 41, 59, 0.7);
+  --bg-surface: rgba(15, 23, 42, 0.92);
+  --bg-surface-hover: rgba(30, 41, 59, 0.75);
+  --border-color: rgba(51, 65, 85, 0.8);
   --text-muted: #94a3b8;
 }
 

@@ -368,12 +368,14 @@ export function SkillsPage() {
   // Queries
   const skillsQuery = useQuery({ queryKey: ["skills", "list"], queryFn: listSkills, refetchInterval: REFRESH_MS });
 
-  // ClawHub search API
+  // ClawHub search API — always runs in marketplace mode; falls back to "python"
+  // when no keyword so the tab shows results instead of an empty state.
+  const effectiveKeyword = searchKeyword || "python";
   const searchQuery = useQuery({
-    queryKey: ["clawhub", "search", searchKeyword],
-    queryFn: () => clawhubSearch(searchKeyword || "python"),
+    queryKey: ["clawhub", "search", effectiveKeyword],
+    queryFn: () => clawhubSearch(effectiveKeyword),
     staleTime: 60000,
-    enabled: viewMode === "marketplace" && !!searchKeyword,
+    enabled: viewMode === "marketplace",
   });
 
   // Skillhub queries — category selection also drives search
@@ -735,7 +737,7 @@ export function SkillsPage() {
         ) : marketplaceError ? (
           <EmptyState title={t("skills.load_error")} description={marketplaceError.message || t("common.error")} icon={<Search className="h-6 w-6" />} />
         ) : filteredMarketplace.length === 0 ? (
-          <EmptyState title={t("skills.no_results")} icon={<Search className="h-6 w-6" />} />
+          <EmptyState title={t("skills.no_results")} description={search ? t("skills.try_different_search", { defaultValue: "Try a different search term." }) : t("skills.browse_unavailable", { defaultValue: "Browse is temporarily unavailable. Try searching above." })} icon={<Search className="h-6 w-6" />} />
         ) : (
           <div className="overflow-y-auto max-h-[600px] pr-1">
             <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
