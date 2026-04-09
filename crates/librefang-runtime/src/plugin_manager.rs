@@ -367,14 +367,6 @@ pub struct PluginInfo {
     pub enabled: bool,
     /// Declared capabilities from the `needs` array in plugin.toml.
     pub needs: Vec<String>,
-    /// Config schema declared in `[config]` of plugin.toml.
-    ///
-    /// Each entry maps a field name to its type, default value, and description.
-    /// Hook subprocesses receive the resolved config (defaults + user overrides) as
-    /// JSON via the `LIBREFANG_PLUGIN_CONFIG` environment variable.
-    #[serde(default)]
-    pub config_schema:
-        std::collections::HashMap<String, librefang_types::config::PluginConfigField>,
 }
 
 /// Result of a plugin lint check.
@@ -552,8 +544,6 @@ pub fn get_plugin_info(plugin_name: &str) -> Result<PluginInfo, String> {
             .unwrap_or_default()
     };
 
-    let config_schema = manifest.config.clone();
-
     Ok(PluginInfo {
         manifest,
         path: plugin_dir,
@@ -561,7 +551,6 @@ pub fn get_plugin_info(plugin_name: &str) -> Result<PluginInfo, String> {
         size_bytes,
         enabled,
         needs,
-        config_schema,
     })
 }
 
@@ -635,10 +624,7 @@ pub fn run_doctor() -> DoctorReport {
         .map(|info| {
             let runtime_kind = PluginRuntime::from_tag(info.manifest.hooks.runtime.as_deref());
             let tag = runtime_kind.label();
-            let (available, hint) = availability
-                .get(tag.as_ref())
-                .copied()
-                .unwrap_or((false, ""));
+            let (available, hint) = availability.get(tag.as_ref()).copied().unwrap_or((false, ""));
             PluginDoctorEntry {
                 name: info.manifest.name,
                 runtime: tag.to_string(),
@@ -1044,7 +1030,7 @@ pub fn scaffold_plugin(
 
     // Each runtime declares its own hook filenames + template body so the
     // manifest + files stay in sync.
-    let files = hook_templates(runtime_kind);
+    let files = hook_templates(runtime_kind.clone());
     let (ingest_file, ingest_body) = files.ingest;
     let (after_file, after_body) = files.after_turn;
     let (assemble_file, assemble_body) = files.assemble;
@@ -1171,7 +1157,7 @@ after_turn = "hooks/{after_file}"
 
     info!(
         plugin = name,
-        runtime = runtime_tag.as_ref(),
+        runtime = runtime_tag,
         "Scaffolded new plugin"
     );
     Ok(plugin_dir)
