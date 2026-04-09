@@ -18,6 +18,7 @@ use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use librefang_types::workflow_template::{
     ParameterType, TemplateParameter, WorkflowTemplate, WorkflowTemplateStep,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -2639,6 +2640,136 @@ fn insert_test_memory(h: &MtHarness, agent_id_str: &str, tenant: &str, content: 
     mem_id.to_string()
 }
 
+async fn start_mock_openai_tool_server() -> String {
+    use axum::{extract::State, routing::post, Json};
+
+    #[derive(Clone)]
+    struct MockToolState {
+        call_index: Arc<AtomicUsize>,
+    }
+
+    async fn chat_completions(
+        State(state): State<MockToolState>,
+        Json(request): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        let call_index = state.call_index.fetch_add(1, Ordering::SeqCst);
+        let tool_result = request["messages"]
+            .as_array()
+            .and_then(|messages| {
+                messages.iter().rev().find_map(|msg| {
+                    (msg["role"].as_str() == Some("tool"))
+                        .then(|| msg["content"].as_str().map(str::to_string))
+                        .flatten()
+                })
+            })
+            .unwrap_or_default();
+
+        let response = match call_index {
+            0 => serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_store_a",
+                            "type": "function",
+                            "function": {
+                                "name": "memory_store",
+                                "arguments": "{\"key\":\"shared_probe\",\"value\":\"tenant-a-secret\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+            }),
+            1 => serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_recall_a",
+                            "type": "function",
+                            "function": {
+                                "name": "memory_recall",
+                                "arguments": "{\"key\":\"shared_probe\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+            }),
+            2 => serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": format!("tenant-a-read:{tool_result}"),
+                        "tool_calls": null
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+            }),
+            3 => serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_recall_b",
+                            "type": "function",
+                            "function": {
+                                "name": "memory_recall",
+                                "arguments": "{\"key\":\"shared_probe\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+            }),
+            4 => serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": format!("tenant-b-read:{tool_result}"),
+                        "tool_calls": null
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+            }),
+            _ => serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": "unexpected extra mock provider call",
+                        "tool_calls": null
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+            }),
+        };
+
+        Json(response)
+    }
+
+    let app = axum::Router::new()
+        .route("/v1/chat/completions", post(chat_completions))
+        .with_state(MockToolState {
+            call_index: Arc::new(AtomicUsize::new(0)),
+        });
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock tool server");
+    let addr = listener.local_addr().expect("mock tool server addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve mock tool server");
+    });
+
+    format!("http://{addr}/v1")
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_memory_search_scoped_by_tenant() {
     let h = start_mt_router().await;
@@ -2703,6 +2834,129 @@ async fn test_memory_search_scoped_by_tenant() {
         !items_a.is_empty(),
         "tenant-a should see its own memory via search, got empty results"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_shared_memory_sender_scope_stays_isolated_across_tenants_via_message_path() {
+    let h = start_mt_http_router().await;
+    let client = reqwest::Client::new();
+    let base_url = h.base_url.clone();
+    let provider_base_url = start_mock_openai_tool_server().await;
+    let api_key_env = format!(
+        "TEST_TENANT_MEMORY_{}_API_KEY",
+        uuid::Uuid::new_v4().simple()
+    );
+    std::env::set_var(&api_key_env, "test-key");
+
+    let manifest_for = |name: &str| {
+        format!(
+            r#"
+name = "{name}"
+version = "0.1.0"
+description = "Exercises tenant-scoped shared memory through the message path"
+author = "test"
+module = "builtin:chat"
+
+[model]
+provider = "tenant-mock-provider"
+model = "mock-model"
+api_key_env = "{api_key_env}"
+base_url = "{provider_base_url}"
+system_prompt = "Use the provided tools exactly when needed."
+
+[capabilities]
+tools = ["memory_store", "memory_recall"]
+memory_read = ["*"]
+memory_write = ["*"]
+"#
+        )
+    };
+    let tenant_a_spawn = client
+        .post(format!("{}/api/agents", base_url))
+        .header("X-Account-Id", "tenant-a")
+        .json(&serde_json::json!({ "manifest_toml": manifest_for("shared-memory-proof-agent-a") }))
+        .send()
+        .await
+        .expect("spawn tenant-a agent");
+    assert_eq!(tenant_a_spawn.status(), StatusCode::CREATED);
+    let tenant_a_spawn_body: serde_json::Value = tenant_a_spawn
+        .json()
+        .await
+        .expect("tenant-a spawn response json");
+    let tenant_a_agent = tenant_a_spawn_body["agent_id"]
+        .as_str()
+        .expect("tenant-a agent_id")
+        .to_string();
+
+    let tenant_b_spawn = client
+        .post(format!("{}/api/agents", base_url))
+        .header("X-Account-Id", "tenant-b")
+        .json(&serde_json::json!({ "manifest_toml": manifest_for("shared-memory-proof-agent-b") }))
+        .send()
+        .await
+        .expect("spawn tenant-b agent");
+    assert_eq!(tenant_b_spawn.status(), StatusCode::CREATED);
+    let tenant_b_spawn_body: serde_json::Value = tenant_b_spawn
+        .json()
+        .await
+        .expect("tenant-b spawn response json");
+    let tenant_b_agent = tenant_b_spawn_body["agent_id"]
+        .as_str()
+        .expect("tenant-b agent_id")
+        .to_string();
+
+    let tenant_a_resp = client
+        .post(format!(
+            "{}/api/agents/{}/message",
+            base_url, tenant_a_agent
+        ))
+        .header("X-Account-Id", "tenant-a")
+        .json(&serde_json::json!({
+            "message": "Store and then read back the shared probe value.",
+            "sender_id": "shared-sender"
+        }))
+        .send()
+        .await
+        .expect("tenant-a message request");
+    assert_eq!(tenant_a_resp.status(), StatusCode::OK);
+    let tenant_a_body: serde_json::Value = tenant_a_resp.json().await.expect("tenant-a json");
+    let tenant_a_text = tenant_a_body["response"]
+        .as_str()
+        .expect("tenant-a response text");
+    assert!(
+        tenant_a_text.contains("tenant-a-read:") && tenant_a_text.contains("tenant-a-secret"),
+        "tenant A should read its own shared-memory value, got: {tenant_a_text}"
+    );
+
+    let tenant_b_resp = client
+        .post(format!(
+            "{}/api/agents/{}/message",
+            base_url, tenant_b_agent
+        ))
+        .header("X-Account-Id", "tenant-b")
+        .json(&serde_json::json!({
+            "message": "Read the shared probe value.",
+            "sender_id": "shared-sender"
+        }))
+        .send()
+        .await
+        .expect("tenant-b message request");
+    assert_eq!(tenant_b_resp.status(), StatusCode::OK);
+    let tenant_b_body: serde_json::Value = tenant_b_resp.json().await.expect("tenant-b json");
+    let tenant_b_text = tenant_b_body["response"]
+        .as_str()
+        .expect("tenant-b response text");
+    assert!(
+        tenant_b_text.contains("tenant-b-read:")
+            && tenant_b_text.contains("No value found for key 'shared_probe'."),
+        "tenant B must not read tenant A's shared-memory value, got: {tenant_b_text}"
+    );
+    assert!(
+        !tenant_b_text.contains("tenant-a-secret"),
+        "tenant B response must not contain tenant A's secret, got: {tenant_b_text}"
+    );
+
+    std::env::remove_var(&api_key_env);
 }
 
 // ---------------------------------------------------------------------------
