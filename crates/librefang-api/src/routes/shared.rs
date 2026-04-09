@@ -31,13 +31,12 @@ pub fn check_account(
     entry: &AgentEntry,
     account: &AccountId,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    if let Some(ref account_id) = account.0 {
-        if entry.account_id.as_deref() != Some(account_id.as_str()) {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
-            ));
-        }
+    let account_id = require_concrete_account(account)?;
+    if entry.account_id.as_deref() != Some(account_id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Agent not found"})),
+        ));
     }
     Ok(())
 }
@@ -177,6 +176,20 @@ mod tests {
         );
         let (code, _) = result.unwrap_err();
         assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_check_account_rejects_missing_request_account_fail_closed() {
+        let entry = make_agent_entry(Some("tenant-a".to_string()));
+        let account = AccountId(None);
+        let result = check_account(&entry, &account);
+        assert!(
+            result.is_err(),
+            "Missing request account must fail closed at the ownership helper"
+        );
+        let (code, json) = result.unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "X-Account-Id required");
     }
 
     #[test]

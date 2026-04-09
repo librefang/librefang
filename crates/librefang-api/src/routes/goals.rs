@@ -27,15 +27,8 @@ use librefang_kernel::goals::GoalUpdate;
 use librefang_types::goal::{Goal, GoalId, GoalStatus};
 use std::sync::Arc;
 
-use crate::middleware::AccountId;
+use crate::middleware::ConcreteAccountId;
 use crate::types::ApiErrorResponse;
-
-fn scoped_account_id(account: &AccountId) -> Result<&str, axum::response::Response> {
-    account
-        .0
-        .as_deref()
-        .ok_or_else(|| ApiErrorResponse::bad_request("X-Account-Id required").into_response())
-}
 
 fn parse_goal_id(id: &str) -> Result<GoalId, axum::response::Response> {
     id.parse::<GoalId>()
@@ -93,27 +86,21 @@ fn parse_optional_agent_id(
 
 /// GET /api/goals — List all goals visible to the tenant.
 pub async fn list_goals(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.as_str();
     let goals = state.kernel.goal_store().list_by_account(account_id).await;
     Json(serde_json::json!({"goals": goals, "total": goals.len()})).into_response()
 }
 
 /// GET /api/goals/{id} — Get a tenant-owned goal by ID.
 pub async fn get_goal(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.as_str();
     let goal_id = match parse_goal_id(&id) {
         Ok(goal_id) => goal_id,
         Err(resp) => return resp,
@@ -131,14 +118,11 @@ pub async fn get_goal(
 
 /// GET /api/goals/{id}/children — Get all direct children of a tenant-owned goal.
 pub async fn get_goal_children(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.as_str();
     let goal_id = match parse_goal_id(&id) {
         Ok(goal_id) => goal_id,
         Err(resp) => return resp,
@@ -162,14 +146,11 @@ pub async fn get_goal_children(
 
 /// POST /api/goals — Create a tenant-owned goal.
 pub async fn create_goal(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.as_str();
     let title = match req["title"].as_str() {
         Some(title) if !title.is_empty() => title.to_string(),
         _ => {
@@ -217,15 +198,12 @@ pub async fn create_goal(
 
 /// PUT /api/goals/{id} — Update a tenant-owned goal.
 pub async fn update_goal_by_id(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.as_str();
     let goal_id = match parse_goal_id(&id) {
         Ok(goal_id) => goal_id,
         Err(resp) => return resp,
@@ -291,14 +269,11 @@ pub async fn update_goal_by_id(
 
 /// DELETE /api/goals/{id} — Delete a tenant-owned goal and all descendants.
 pub async fn delete_goal(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.as_str();
     let goal_id = match parse_goal_id(&id) {
         Ok(goal_id) => goal_id,
         Err(resp) => return resp,
@@ -329,12 +304,9 @@ pub async fn delete_goal(
     )
 )]
 pub async fn list_goal_templates(
-    account: AccountId,
+    _account: ConcreteAccountId,
     State(_state): State<Arc<AppState>>,
 ) -> axum::response::Response {
-    if let Err(resp) = scoped_account_id(&account) {
-        return resp;
-    }
     let templates = serde_json::json!([
         {
             "id": "product_launch",

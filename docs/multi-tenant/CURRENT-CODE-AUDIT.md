@@ -76,6 +76,8 @@ Current behavior:
 - workflow runs persist concrete `account_id`
 - schedules persist concrete `account_id`
 - triggers persist concrete `account_id`
+- tenant-owned workflow, trigger, and schedule handlers require concrete account
+  extraction at the route boundary
 - cross-tenant tenant-owned workflow resources resolve as `404`
 - workflow execution, cron firing, and tenant-bound command paths stay within the
   owning tenant namespace
@@ -94,6 +96,7 @@ Current behavior:
 
 - goal records persist concrete `account_id`
 - goal CRUD is tenant-scoped
+- goal route handlers require concrete account extraction at the route boundary
 - cross-tenant goal access resolves as `404`
 - prompt enrichment reads tenant-owned active goals
 - internal `goal_update` tooling now uses caller tenant context instead of
@@ -106,11 +109,29 @@ Current behavior:
 Current behavior:
 
 - tenant-owned provider records persist concrete `account_id`
+- tenant-owned provider handlers require concrete account extraction at the
+  route boundary
 - tenant provider keys, URLs, and defaults are no longer daemon-global
 - tenant runtime provider resolution fails closed instead of falling back to
   daemon-global defaults or env conventions
 - provider list/detail routes merge shared catalog metadata with caller-scoped
   tenant state
+
+### Prompts / Memory
+
+**Files:** `crates/librefang-api/src/routes/prompts.rs`, `crates/librefang-api/src/routes/memory.rs`
+
+Current behavior:
+
+- prompt route handlers require concrete account extraction at the route
+  boundary
+- tenant-facing memory handlers require concrete account extraction at the route
+  boundary
+- cross-tenant prompt and memory access resolves fail-closed instead of relying
+  on missing-account compatibility
+- `memory.rs` still contains a small helper bridge that converts concrete route
+  scope into older helper signatures; that bridge is compatibility cleanup, not
+  active tenant-ownership drift
 
 Still intentionally global/admin-only:
 
@@ -176,28 +197,28 @@ right policy.
 - current ingress binding is integration-instance -> tenant
 - shared user/chat/thread ownership beyond that is not modeled yet
 
-### 2. Residual `AccountId(None)` migration debt
+### 2. Intentional optional-account compatibility islands
 
-- active product paths now target explicit concrete account scope
-- tenant-owned `agents` handlers no longer use daemon-global fallback reads/writes
+- active tenant-owned route families now target explicit concrete account scope
+  at the handler boundary:
+  - prompts
+  - providers
+  - memory
+  - workflows
+  - goals
 - `/v1/models` no longer falls back to daemon-global agent listing
-- proactive-memory agent-scoped handlers no longer carry dead global-scope
-  fallback branches
 - `/api/status` and `/api/health/detail` now require a concrete account and only
   return the full daemon view to configured admin accounts
-- remaining debt is now small and classified:
-  - intentional admin/global compatibility path:
-    `require_admin()` still permits `AccountId(None)` for documented operator
-    infrastructure endpoints during migration
-  - intentional admin/global compatibility path:
-    a few `system` handlers still branch on `account.0` only after
-    `require_admin()` for daemon-global compatibility views
-  - migration debt:
-    extractor-level missing-header representation in `middleware.rs`
-  - migration debt:
-    legacy storage round-trip helpers such as `"system"` sentinels
-  - migration debt:
-    compatibility comments/tests that still need eventual pruning
+- remaining optional-account usage is now intentionally narrow and classified:
+  - extractor compatibility:
+    `AccountId` still exists beside `ConcreteAccountId` in `middleware.rs`
+  - helper bridges:
+    shared/helper paths such as parts of `memory.rs`, `shared.rs`, `channels.rs`,
+    and `agents.rs` still accept `AccountId`
+  - public/admin compatibility:
+    public/version/system surfaces and admin-only flows that are not tenant-owned
+  - comment/test cleanup:
+    stale compatibility wording that can be pruned separately
 
 ### 3. Broader tenant-owned skill content model
 

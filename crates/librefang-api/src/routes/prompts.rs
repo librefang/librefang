@@ -1,5 +1,3 @@
-// TODO(multi-tenant-phase2): Add AccountId parameter and tenant scoping
-
 use axum::{
     extract::{Path, State},
     response::IntoResponse,
@@ -13,7 +11,7 @@ use super::AppState;
 use librefang_runtime::kernel_handle::KernelHandle;
 use std::sync::Arc;
 
-use crate::middleware::AccountId;
+use crate::middleware::ConcreteAccountId;
 use crate::routes::shared::check_account;
 use crate::types::ApiErrorResponse;
 pub fn routes() -> Router<Arc<AppState>> {
@@ -56,7 +54,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[allow(clippy::result_large_err)]
 fn require_agent_access(
     state: &AppState,
-    account: &AccountId,
+    account: &ConcreteAccountId,
     agent_id: librefang_types::agent::AgentId,
 ) -> Result<(), axum::response::Response> {
     let entry = state.kernel.agent_registry().get(agent_id).ok_or_else(|| {
@@ -64,12 +62,16 @@ fn require_agent_access(
             .into_json_tuple()
             .into_response()
     })?;
-    check_account(&entry, account).map_err(|e| e.into_response())
+    check_account(
+        &entry,
+        &crate::middleware::AccountId(Some(account.0.clone())),
+    )
+    .map_err(|e| e.into_response())
 }
 
 async fn list_prompt_versions(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
@@ -93,7 +95,7 @@ async fn list_prompt_versions(
 
 async fn create_prompt_version(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
     Json(mut version): Json<PromptVersion>,
 ) -> impl IntoResponse {
@@ -125,7 +127,7 @@ async fn create_prompt_version(
 
 async fn get_prompt_version(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_prompt_version(&id) {
@@ -144,7 +146,7 @@ async fn get_prompt_version(
 
 async fn delete_prompt_version(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_prompt_version(&id) {
@@ -174,7 +176,7 @@ async fn delete_prompt_version(
 
 async fn activate_prompt_version(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -225,7 +227,7 @@ async fn activate_prompt_version(
 
 async fn list_experiments(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
@@ -249,7 +251,7 @@ async fn list_experiments(
 
 async fn create_experiment(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
     Json(mut experiment): Json<PromptExperiment>,
 ) -> impl IntoResponse {
@@ -281,7 +283,7 @@ async fn create_experiment(
 
 async fn get_experiment(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_experiment(&id) {
@@ -300,7 +302,7 @@ async fn get_experiment(
 
 async fn start_experiment(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_experiment(&id) {
@@ -333,7 +335,7 @@ async fn start_experiment(
 
 async fn pause_experiment(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_experiment(&id) {
@@ -366,7 +368,7 @@ async fn pause_experiment(
 
 async fn complete_experiment(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_experiment(&id) {
@@ -399,7 +401,7 @@ async fn complete_experiment(
 
 async fn get_experiment_metrics(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_experiment(&id) {

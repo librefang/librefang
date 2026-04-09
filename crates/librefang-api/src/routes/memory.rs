@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use super::AppState;
-use crate::middleware::AccountId;
+use crate::middleware::{AccountId, ConcreteAccountId};
 use crate::routes::shared::{check_account, require_admin_account};
 
 /// Build routes for the memory/KV domain.
@@ -159,6 +159,10 @@ fn scoped_account_id(account: &AccountId) -> Result<&str, (StatusCode, Json<serd
         .ok_or_else(|| ApiErrorResponse::bad_request("X-Account-Id required").into_json_tuple())
 }
 
+fn concrete_account_as_account_id(account: &ConcreteAccountId) -> AccountId {
+    AccountId(Some(account.0.clone()))
+}
+
 fn require_agent_access(
     state: &AppState,
     account: &AccountId,
@@ -214,17 +218,14 @@ fn require_memory_access(
 )]
 pub async fn memory_search(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Query(params): Query<MemorySearchQuery>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    let owner = match scoped_account_id(&account) {
-        Ok(owner) => owner,
-        Err(e) => return e,
-    };
+    let owner = account.0.as_str();
 
     let limit = params.limit.min(100);
     let result = store
@@ -258,17 +259,14 @@ pub async fn memory_search(
 )]
 pub async fn memory_list(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Query(params): Query<MemoryListQuery>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    let owner = match scoped_account_id(&account) {
-        Ok(owner) => owner,
-        Err(e) => return e,
-    };
+    let owner = account.0.as_str();
 
     let limit = params.limit.min(100);
     let offset = params.offset;
@@ -304,20 +302,18 @@ pub async fn memory_list(
 )]
 pub async fn memory_get_user(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
-    let owner = match scoped_account_id(&account) {
-        Ok(owner) => owner,
-        Err(e) => return e,
-    };
+    let owner = account.0.as_str();
+    let request_account = concrete_account_as_account_id(&account);
     // user_id is an arbitrary namespace key, not necessarily an agent UUID.
     // If it parses as an AgentId AND the agent is registered, verify ownership.
     // Otherwise reject because tenant-facing memory lookups require concrete ownership.
     let ownership_verified =
         if let Ok(agent_id) = user_id.parse::<librefang_types::agent::AgentId>() {
             if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-                if let Err(e) = check_account(&entry, &account) {
+                if let Err(e) = check_account(&entry, &request_account) {
                     return e;
                 }
                 true
@@ -365,17 +361,15 @@ pub async fn memory_get_user(
 )]
 pub async fn memory_add(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Json(body): Json<MemoryAddBody>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    let owner = match scoped_account_id(&account) {
-        Ok(owner) => owner,
-        Err(e) => return e,
-    };
+    let owner = account.0.as_str();
+    let request_account = concrete_account_as_account_id(&account);
 
     // In the proactive memory system, user_id maps to agent_id internally.
     // If agent_id is provided, prefer it; otherwise use user_id.
@@ -390,7 +384,7 @@ pub async fn memory_add(
     let ownership_verified =
         if let Ok(agent_id) = effective_id.parse::<librefang_types::agent::AgentId>() {
             if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-                if let Err(e) = check_account(&entry, &account) {
+                if let Err(e) = check_account(&entry, &request_account) {
                     return e;
                 }
                 true
@@ -437,7 +431,7 @@ pub async fn memory_add(
 )]
 pub async fn memory_update(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(memory_id): Path<String>,
     Json(body): Json<MemoryUpdateBody>,
 ) -> impl IntoResponse {
@@ -451,7 +445,12 @@ pub async fn memory_update(
     }
 
     // Look up the real agent_id that owns this memory so KV cleanup works correctly
-    let real_agent_id = match require_memory_access(&state, &store, &account, &memory_id) {
+    let real_agent_id = match require_memory_access(
+        &state,
+        &store,
+        &concrete_account_as_account_id(&account),
+        &memory_id,
+    ) {
         Ok(id) => id,
         Err(e) => return e,
     };
@@ -483,7 +482,7 @@ pub async fn memory_update(
 )]
 pub async fn memory_delete(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(memory_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -492,15 +491,17 @@ pub async fn memory_delete(
     };
 
     // Look up the real agent_id that owns this memory so KV cleanup works correctly
-    let real_agent_id = match require_memory_access(&state, &store, &account, &memory_id) {
+    let real_agent_id = match require_memory_access(
+        &state,
+        &store,
+        &concrete_account_as_account_id(&account),
+        &memory_id,
+    ) {
         Ok(id) => id,
         Err(e) => return e,
     };
 
-    let owner = match scoped_account_id(&account) {
-        Ok(owner) => owner,
-        Err(e) => return e,
-    };
+    let owner = account.0.as_str();
     let _ = real_agent_id;
 
     match store
@@ -532,17 +533,15 @@ pub async fn memory_delete(
 )]
 pub async fn memory_bulk_delete(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    let owner = match scoped_account_id(&account) {
-        Ok(owner) => owner,
-        Err(e) => return e,
-    };
+    let owner = account.0.as_str();
+    let request_account = concrete_account_as_account_id(&account);
 
     let ids: Vec<String> = match body.get("ids").and_then(|v| v.as_array()) {
         Some(arr) => arr
@@ -557,7 +556,7 @@ pub async fn memory_bulk_delete(
     let mut deleted = 0usize;
     let mut failed = 0usize;
     for id in &ids {
-        let agent_id = match require_memory_access(&state, &store, &account, id) {
+        let agent_id = match require_memory_access(&state, &store, &request_account, id) {
             Ok(id) => id,
             Err(_) => {
                 failed += 1;
@@ -598,16 +597,13 @@ pub async fn memory_bulk_delete(
 )]
 pub async fn memory_stats(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    let owner = match scoped_account_id(&account) {
-        Ok(owner) => owner,
-        Err(e) => return e,
-    };
+    let owner = account.0.as_str();
     let scope = MemoryScope::tenant(owner);
     let result = store.stats_scoped(scope).await;
 
@@ -631,10 +627,11 @@ pub async fn memory_stats(
 )]
 pub async fn memory_reset_agent(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    if let Err(e) = require_agent_access(&state, &request_account, &agent_id) {
         return e;
     }
     let store = match get_pm_store(&state) {
@@ -668,10 +665,11 @@ pub async fn memory_reset_agent(
 )]
 pub async fn memory_clear_level(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path((agent_id, level_str)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    if let Err(e) = require_agent_access(&state, &request_account, &agent_id) {
         return e;
     }
     let store = match get_pm_store(&state) {
@@ -730,11 +728,12 @@ pub async fn memory_clear_level(
 )]
 pub async fn memory_list_agent(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
     Query(params): Query<MemoryListQuery>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    if let Err(e) = require_agent_access(&state, &request_account, &agent_id) {
         return e;
     }
     let store = match get_pm_store(&state) {
@@ -781,11 +780,12 @@ pub async fn memory_list_agent(
 )]
 pub async fn memory_search_agent(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
     Query(params): Query<MemorySearchQuery>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    if let Err(e) = require_agent_access(&state, &request_account, &agent_id) {
         return e;
     }
     let store = match get_pm_store(&state) {
@@ -817,10 +817,11 @@ pub async fn memory_search_agent(
 )]
 pub async fn memory_stats_agent(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    if let Err(e) = require_agent_access(&state, &request_account, &agent_id) {
         return e;
     }
     let store = match get_pm_store(&state) {
@@ -828,10 +829,7 @@ pub async fn memory_stats_agent(
         Err(e) => return e,
     };
 
-    let owner = match scoped_account_id(&account) {
-        Ok(owner) => owner,
-        Err(err) => return err,
-    };
+    let owner = account.0.as_str();
     let scope = MemoryScope::tenant(owner);
     let result = store.stats_agent_scoped(&agent_id, scope).await;
 
@@ -855,10 +853,11 @@ pub async fn memory_stats_agent(
 )]
 pub async fn memory_duplicates(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    if let Err(e) = require_agent_access(&state, &request_account, &agent_id) {
         return e;
     }
     let store = match get_pm_store(&state) {
@@ -892,7 +891,7 @@ pub async fn memory_duplicates(
 )]
 pub async fn memory_history(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(memory_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -900,7 +899,8 @@ pub async fn memory_history(
         Err(e) => return e,
     };
 
-    if let Err(e) = require_memory_access(&state, &store, &account, &memory_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    if let Err(e) = require_memory_access(&state, &store, &request_account, &memory_id) {
         return e;
     }
 
@@ -934,10 +934,11 @@ pub async fn memory_history(
 )]
 pub async fn memory_consolidate(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    if let Err(e) = require_agent_access(&state, &request_account, &agent_id) {
         return e;
     }
     let store = match get_pm_store(&state) {
@@ -945,10 +946,7 @@ pub async fn memory_consolidate(
         Err(e) => return e,
     };
 
-    let owner = match scoped_account_id(&account) {
-        Ok(owner) => owner,
-        Err(err) => return err,
-    };
+    let owner = account.0.as_str();
     let result = store
         .consolidate_scoped(&agent_id, MemoryScope::tenant(owner))
         .await;
@@ -1020,10 +1018,11 @@ pub async fn memory_cleanup(
 )]
 pub async fn memory_export_agent(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    if let Err(e) = require_agent_access(&state, &request_account, &agent_id) {
         return e;
     }
     let store = match get_pm_store(&state) {
@@ -1059,11 +1058,12 @@ pub async fn memory_export_agent(
 )]
 pub async fn memory_import_agent(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
     Json(body): Json<Vec<librefang_memory::MemoryExportItem>>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    if let Err(e) = require_agent_access(&state, &request_account, &agent_id) {
         return e;
     }
     let store = match get_pm_store(&state) {
@@ -1071,10 +1071,7 @@ pub async fn memory_import_agent(
         Err(e) => return e,
     };
 
-    let owner = match scoped_account_id(&account) {
-        Ok(owner) => owner,
-        Err(err) => return err,
-    };
+    let owner = account.0.as_str();
     let scope = MemoryScope::tenant(owner);
     match store.import_memories_scoped(&agent_id, body, scope).await {
         Ok(count) => (
@@ -1152,11 +1149,12 @@ pub struct MemoryCountQuery {
 )]
 pub async fn memory_count_agent(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
     Query(params): Query<MemoryCountQuery>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    if let Err(e) = require_agent_access(&state, &request_account, &agent_id) {
         return e;
     }
     let store = match get_pm_store(&state) {
@@ -1202,18 +1200,16 @@ pub async fn memory_count_agent(
 )]
 pub async fn memory_store_relations(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
     Json(triples): Json<Vec<librefang_types::memory::RelationTriple>>,
 ) -> impl IntoResponse {
-    let parsed_agent_id = match require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    let parsed_agent_id = match require_agent_access(&state, &request_account, &agent_id) {
         Ok(agent_id) => agent_id,
         Err(e) => return e,
     };
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(e) => return e,
-    };
+    let account_id = account.0.as_str();
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -1263,18 +1259,16 @@ pub struct RelationQueryParams {
 )]
 pub async fn memory_query_relations(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
     Query(params): Query<RelationQueryParams>,
 ) -> impl IntoResponse {
-    let parsed_agent_id = match require_agent_access(&state, &account, &agent_id) {
+    let request_account = concrete_account_as_account_id(&account);
+    let parsed_agent_id = match require_agent_access(&state, &request_account, &agent_id) {
         Ok(agent_id) => agent_id,
         Err(e) => return e,
     };
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(e) => return e,
-    };
+    let account_id = account.0.as_str();
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,

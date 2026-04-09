@@ -30,18 +30,23 @@ If a module is already converged, it should not stay here as generic â€œdrift.â€
 - global catalog and install/reload lifecycle are intentionally split
 - tenant-authored skill content/overlays beyond hands remain future product work if needed
 
-### 3. Residual `AccountId(None)` migration debt
+### 3. Intentional optional-account compatibility islands
 
-- active target behavior is explicit concrete account scope
+- active target behavior is explicit concrete account scope for tenant-owned
+  route families:
+  - prompts
+  - providers
+  - memory
+  - workflows
+  - goals
 - admin-only route guards now require concrete configured admin accounts
-- remaining debt should be reduced to:
-  - the temporary `require_admin()` compatibility allowance for legacy operator
-    callers on documented admin/global paths
-  - the small set of `system` admin handlers that still branch on `account.0`
-    only behind that compatibility allowance
-  - extractor-level missing-header representation
-  - legacy storage round-trip helpers such as `"system"`
+- the remaining optional-account surface is intentionally narrow:
+  - extractor-level compatibility in `middleware.rs`
+  - helper-bridge cleanup in a few mixed modules
+  - public/admin endpoints that are not tenant-owned
   - stale comments/tests that still describe compatibility behavior too casually
+- this is no longer a broad tenant-owned route migration track unless product
+  decisions reopen `agents` or other mixed helper seams
 
 ### 4. Knowledge-graph caller-context wiring
 
@@ -69,6 +74,8 @@ If a module is already converged, it should not stay here as generic â€œdrift.â€
 - channels ingress binding v1
 - channels runtime adapter keying / reload cleanup / multiplicity enforcement
 - workflow tenant-owned definitions/runs/schedules/triggers
+- tenant-owned prompt/provider/memory/workflow/goal handlers using strict
+  concrete-account extraction
 - goal tenant-owned store and tool/runtime hardening
 - provider tenant-owned keys/URLs/defaults and fail-closed tenant runtime resolution
 - budget split-surface enforcement

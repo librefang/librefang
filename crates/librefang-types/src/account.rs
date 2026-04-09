@@ -17,10 +17,6 @@ use uuid::Uuid;
 pub struct AccountId(pub Option<String>);
 
 impl AccountId {
-    /// Compatibility sentinel for legacy storage defaults.
-    /// This is migration debt, not a valid runtime identity.
-    pub const SYSTEM: &'static str = "system";
-
     /// Create a new random account ID (UUID v4).
     pub fn new() -> Self {
         Self(Some(Uuid::new_v4().to_string()))
@@ -29,18 +25,6 @@ impl AccountId {
     /// Returns true if this is a scoped (non-None) request.
     pub fn is_scoped(&self) -> bool {
         self.0.is_some()
-    }
-
-    /// Returns the inner string, or the legacy `"system"` sentinel for
-    /// compatibility layers that still need to round-trip old storage.
-    ///
-    /// New tenant-facing or admin-facing runtime paths should prefer explicit
-    /// concrete-account checks instead of calling this helper.
-    pub fn as_str_or_system(&self) -> &str {
-        match &self.0 {
-            Some(s) => s.as_str(),
-            None => Self::SYSTEM,
-        }
     }
 }
 
@@ -74,13 +58,6 @@ mod tests {
     #[test]
     fn test_account_id_default_is_none() {
         assert_eq!(AccountId::default().0, None);
-    }
-
-    /// Legacy storage fallback: default account returns "system" for round-trip
-    /// compatibility with older persisted records.
-    #[test]
-    fn test_account_id_as_str_or_system_returns_system_for_default() {
-        assert_eq!(AccountId::default().as_str_or_system(), "system");
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -127,11 +104,11 @@ mod tests {
         assert!(!AccountId::default().is_scoped());
     }
 
-    /// Scoped accounts return inner string from as_str_or_system().
+    /// Scoped accounts preserve their inner string.
     #[test]
-    fn test_account_id_as_str_or_system_returns_inner_for_scoped() {
+    fn test_account_id_scoped_value_preserved() {
         let scoped = AccountId(Some("tenant-123".to_string()));
-        assert_eq!(scoped.as_str_or_system(), "tenant-123");
+        assert_eq!(scoped.0.as_deref(), Some("tenant-123"));
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -249,7 +226,7 @@ mod tests {
             empty.is_scoped(),
             "Empty string is Some, so is_scoped() = true"
         );
-        assert_eq!(empty.as_str_or_system(), "");
+        assert_eq!(empty.0.as_deref(), Some(""));
     }
 
     /// Whitespace-only account IDs are preserved (not trimmed). Comparison
@@ -257,7 +234,7 @@ mod tests {
     #[test]
     fn test_account_id_whitespace_preserved() {
         let ws = AccountId(Some("  ".to_string()));
-        assert_eq!(ws.as_str_or_system(), "  ");
+        assert_eq!(ws.0.as_deref(), Some("  "));
         assert_ne!(ws, AccountId::default());
     }
 

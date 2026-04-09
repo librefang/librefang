@@ -1,9 +1,8 @@
 //! Workflow, trigger, schedule, and cron job handlers.
 
-use super::shared::check_account;
 use super::shared::require_admin;
 use super::AppState;
-use crate::middleware::AccountId;
+use crate::middleware::{AccountId, ConcreteAccountId};
 
 /// Build routes for the workflow/trigger/schedule/cron domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
@@ -112,13 +111,6 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::types::ApiErrorResponse;
-
-fn scoped_account_id(account: &AccountId) -> Result<&str, axum::response::Response> {
-    account
-        .0
-        .as_deref()
-        .ok_or_else(|| ApiErrorResponse::bad_request("X-Account-Id required").into_response())
-}
 
 fn workflow_schedule_agent_id() -> AgentId {
     AgentId(uuid::Uuid::from_bytes([
@@ -302,13 +294,10 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
 )]
 pub async fn create_workflow(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Json(req): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let name = req["name"].as_str().unwrap_or("unnamed").to_string();
     let description = req["description"].as_str().unwrap_or("").to_string();
 
@@ -427,12 +416,9 @@ pub async fn create_workflow(
 )]
 pub async fn list_workflows(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let engine = state.kernel.workflow_engine();
     let workflows = engine.list_workflows_by_account(account_id).await;
     let all_runs = engine.list_runs_by_account(account_id, None).await;
@@ -492,13 +478,10 @@ pub async fn list_workflows(
 )]
 pub async fn get_workflow(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -561,14 +544,11 @@ pub async fn get_workflow(
 )]
 pub async fn update_workflow(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -735,13 +715,10 @@ pub async fn update_workflow(
 )]
 pub async fn delete_workflow(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -782,14 +759,11 @@ pub async fn delete_workflow(
 #[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "Workflow run started", body = serde_json::Value)))]
 pub async fn run_workflow(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -869,14 +843,11 @@ pub async fn run_workflow(
 )]
 pub async fn dry_run_workflow(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -931,13 +902,10 @@ pub async fn dry_run_workflow(
 )]
 pub async fn get_workflow_run(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(run_id): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let run_id = WorkflowRunId(match run_id.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -987,13 +955,10 @@ pub async fn get_workflow_run(
 #[utoipa::path(get, path = "/api/workflows/{id}/runs", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "List workflow runs", body = Vec<serde_json::Value>)))]
 pub async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -1137,13 +1102,10 @@ pub async fn save_workflow_as_template(
 )]
 pub async fn create_trigger(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Json(req): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let agent_id_str = match req["agent_id"].as_str() {
         Some(id) => id,
         None => {
@@ -1259,13 +1221,10 @@ pub async fn create_trigger(
 )]
 pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Query(params): Query<HashMap<String, String>>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let agent_filter = params
         .get("agent_id")
         .and_then(|id| id.parse::<AgentId>().ok());
@@ -1309,13 +1268,10 @@ pub async fn list_triggers(
 #[utoipa::path(delete, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger deleted")))]
 pub async fn delete_trigger(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let trigger_id = TriggerId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -1348,14 +1304,11 @@ pub async fn delete_trigger(
 #[utoipa::path(put, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), request_body = serde_json::Value, responses((status = 200, description = "Trigger updated", body = serde_json::Value)))]
 pub async fn update_trigger(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let trigger_id = TriggerId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -1455,12 +1408,9 @@ fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde
 )]
 pub async fn list_schedules(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let jobs = state.kernel.cron().list_jobs_by_account(account_id);
     let schedules: Vec<serde_json::Value> = jobs.iter().map(cron_job_to_schedule_json).collect();
     let total = schedules.len();
@@ -1471,13 +1421,10 @@ pub async fn list_schedules(
 #[utoipa::path(get, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule details", body = serde_json::Value)))]
 pub async fn get_schedule(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let job_id = match parse_cron_job_id(&id) {
         Ok(jid) => jid,
         Err(e) => return e.into_response(),
@@ -1502,13 +1449,10 @@ pub async fn get_schedule(
 )]
 pub async fn create_schedule(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Json(req): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let name = match req["name"].as_str() {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => {
@@ -1552,7 +1496,7 @@ pub async fn create_schedule(
         if let Ok(aid) = agent_id_str.parse::<AgentId>() {
             match state.kernel.agent_registry().get(aid) {
                 Some(entry) => {
-                    if let Err((_code, _json)) = check_account(&entry, &account) {
+                    if entry.account_id.as_deref() != Some(account_id) {
                         return ApiErrorResponse::not_found(format!(
                             "Agent not found: {agent_id_str}"
                         ))
@@ -1670,14 +1614,11 @@ pub async fn create_schedule(
 #[utoipa::path(put, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), request_body = serde_json::Value, responses((status = 200, description = "Schedule updated", body = serde_json::Value)))]
 pub async fn update_schedule(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let job_id = match parse_cron_job_id(&id) {
         Ok(jid) => jid,
         Err(e) => return e.into_response(),
@@ -1750,13 +1691,10 @@ pub async fn update_schedule(
 #[utoipa::path(delete, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule deleted")))]
 pub async fn delete_schedule(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let job_id = match parse_cron_job_id(&id) {
         Ok(jid) => jid,
         Err(e) => return e.into_response(),
@@ -1784,13 +1722,10 @@ pub async fn delete_schedule(
 #[utoipa::path(post, path = "/api/schedules/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule triggered", body = serde_json::Value)))]
 pub async fn run_schedule(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id,
-        Err(response) => return response,
-    };
+    let account_id = account.0.as_str();
     let job_id = match parse_cron_job_id(&id) {
         Ok(jid) => jid,
         Err(e) => return e.into_response(),
@@ -2722,7 +2657,7 @@ mod tests {
 
         let response = run_schedule(
             State(state.clone()),
-            AccountId(Some("tenant-a".to_string())),
+            ConcreteAccountId("tenant-a".to_string()),
             Path(job_id.to_string()),
         )
         .await;
@@ -2782,7 +2717,7 @@ mod tests {
 
         let response = run_schedule(
             State(state),
-            AccountId(Some("tenant-a".to_string())),
+            ConcreteAccountId("tenant-a".to_string()),
             Path(job_id.to_string()),
         )
         .await;
@@ -2802,7 +2737,7 @@ mod tests {
 
         let response = dry_run_workflow(
             State(state),
-            AccountId(Some("tenant-a".to_string())),
+            ConcreteAccountId("tenant-a".to_string()),
             Path(uuid::Uuid::new_v4().to_string()),
             Json(serde_json::json!({"input": "hello"})),
         )
@@ -2863,7 +2798,7 @@ mod tests {
 
         let response = run_schedule(
             State(state),
-            AccountId(Some("tenant-a".to_string())),
+            ConcreteAccountId("tenant-a".to_string()),
             Path(job_id.to_string()),
         )
         .await;

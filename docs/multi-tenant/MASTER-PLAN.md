@@ -100,6 +100,8 @@ The branch target is now the branch reality:
 
 - core tenant-owned slices are converged for channels, workflows, goals,
   providers, and hand-instance tenancy within skills
+- tenant-owned handler convergence now also uses strict concrete-account
+  extraction for prompts, providers, memory, workflows, and goals
 - route-policy cleanup is converged for budget, network, and system
 - channel bootstrap/session ownership is now converged at the
   integration-instance scope for WeChat and WhatsApp
@@ -114,7 +116,8 @@ The branch target is now the branch reality:
 
 - shared integration user/chat/thread binding beyond integration-instance scope
 - broader tenant-owned skill content beyond hands, only if product requires it
-- residual `AccountId(None)` and fallback compatibility debt
+- narrow optional-account compatibility islands outside tenant-owned handler
+  boundaries
 
 ---
 

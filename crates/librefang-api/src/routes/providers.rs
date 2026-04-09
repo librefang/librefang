@@ -61,16 +61,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use crate::middleware::AccountId;
+use crate::middleware::{AccountId, ConcreteAccountId};
 use crate::types::ApiErrorResponse;
-
-fn scoped_account_id(account: &AccountId) -> Result<&str, axum::response::Response> {
-    account.0.as_deref().ok_or_else(|| {
-        ApiErrorResponse::bad_request("X-Account-Id required")
-            .into_json_tuple()
-            .into_response()
-    })
-}
 
 fn sanitize_account_component(account_id: &str) -> String {
     let mut out = String::with_capacity(account_id.len());
@@ -390,13 +382,10 @@ fn attach_probe_result(
     )
 )]
 pub async fn list_providers(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id.to_string(),
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.clone();
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
         let catalog = state
             .kernel
@@ -542,14 +531,11 @@ pub async fn list_providers(
     )
 )]
 pub async fn get_provider(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id.to_string(),
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.clone();
     let (provider, models) = {
         let catalog = state
             .kernel
@@ -808,15 +794,12 @@ pub async fn remove_custom_model(
 
 #[utoipa::path(post, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "API key set", body = serde_json::Value)))]
 pub async fn set_provider_key(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id.to_string(),
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.clone();
     let key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
@@ -885,14 +868,11 @@ pub async fn set_provider_key(
 /// DELETE /api/providers/{name}/key — Remove an API key for a provider.
 #[utoipa::path(delete, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "API key deleted")))]
 pub async fn delete_provider_key(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id.to_string(),
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.clone();
     let record = match state
         .kernel
         .provider_store()
@@ -953,14 +933,11 @@ pub async fn delete_provider_key(
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
 #[utoipa::path(post, path = "/api/providers/{name}/test", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "Provider test result", body = serde_json::Value)))]
 pub async fn test_provider(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id.to_string(),
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.clone();
     let tenant_record = state
         .kernel
         .provider_store()
@@ -1213,15 +1190,12 @@ pub async fn test_provider(
 /// PUT /api/providers/{name}/url — Set a custom base URL for a provider.
 #[utoipa::path(put, path = "/api/providers/{name}/url", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "Provider URL set", body = serde_json::Value)))]
 pub async fn set_provider_url(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id.to_string(),
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.clone();
     // Accept any provider name — custom providers are supported via OpenAI-compatible format.
     let base_url = match body["base_url"].as_str() {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
@@ -1294,14 +1268,11 @@ pub async fn set_provider_url(
     )
 )]
 pub async fn set_default_provider(
-    account: AccountId,
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    let account_id = match scoped_account_id(&account) {
-        Ok(account_id) => account_id.to_string(),
-        Err(resp) => return resp,
-    };
+    let account_id = account.0.clone();
     // Verify the provider exists in the catalog
     let (default_model, env_var) = {
         let catalog = state

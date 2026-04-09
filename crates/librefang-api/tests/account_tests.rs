@@ -293,6 +293,43 @@ async fn start_st_router() -> MtHarness {
     }
 }
 
+/// Boot a full router with multi-tenant mode disabled but account-signature
+/// enforcement configured. The router should still mount tenant header checks.
+async fn start_sig_enforced_router() -> MtHarness {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        multi_tenant: false,
+        account_sig_secret: Some("test-account-secret".to_string()),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
+
+    MtHarness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Multi-tenant: missing header is rejected
 // ---------------------------------------------------------------------------
@@ -351,6 +388,53 @@ async fn mt_missing_account_header_rejected_on_workflows() {
         resp.status(),
         StatusCode::BAD_REQUEST,
         "Multi-tenant mode must reject requests without X-Account-Id on /workflows"
+    );
+
+    let run_resp = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/workflows/{}/run", uuid::Uuid::new_v4()))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"input": "hello"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        run_resp.status(),
+        StatusCode::BAD_REQUEST,
+        "Multi-tenant mode must reject requests without X-Account-Id on /workflows/:id/run"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sig_secret_missing_account_header_rejected_on_agents() {
+    let h = start_sig_enforced_router().await;
+    let resp = h
+        .send(
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "Configured account signing secret must still require X-Account-Id"
+    );
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"],
+        "X-Account-Id header required in multi-tenant mode"
     );
 }
 
@@ -1233,6 +1317,29 @@ async fn mt_tenant_workflow_crud_and_run_are_scoped() {
         )
         .await;
     assert_eq!(dry_run_b.status(), StatusCode::NOT_FOUND);
+
+    let delete_b = h
+        .send(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/workflows/{workflow_id}"))
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(delete_b.status(), StatusCode::NOT_FOUND);
+
+    let get_a_after_delete_b = h
+        .send(
+            Request::builder()
+                .uri(format!("/api/workflows/{workflow_id}"))
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(get_a_after_delete_b.status(), StatusCode::OK);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1392,6 +1499,9 @@ async fn mt_providers_are_tenant_owned() {
         )
         .await;
     assert_eq!(set_key.status(), StatusCode::OK);
+    let set_key_json = read_json(set_key).await;
+    assert_eq!(set_key_json["tenant_account_id"], "tenant-a");
+    assert_eq!(set_key_json["api_key_env"], "OPENAI_API_KEY__ACCT_TENANT_A");
 
     let set_default = h
         .send(
@@ -1453,6 +1563,36 @@ async fn mt_missing_account_header_rejected_on_providers() {
         .send(
             Request::builder()
                 .uri("/api/providers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mt_missing_account_header_rejected_on_provider_key_write() {
+    let h = start_mt_router().await;
+    let resp = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/openai/key")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"key":"tenant-a-secret"}"#))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mt_missing_account_header_rejected_on_memory_list() {
+    let h = start_mt_router().await;
+    let resp = h
+        .send(
+            Request::builder()
+                .uri("/api/memory")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2566,6 +2706,31 @@ async fn mt_whitespace_account_header_rejected() {
         resp.status(),
         StatusCode::BAD_REQUEST,
         "Whitespace-only X-Account-Id must be rejected in multi-tenant mode"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mt_prompts_route_rejects_missing_account_header() {
+    let h = start_mt_router().await;
+    let agent_id = register_tenant_agent(&h, "tenant-a", "agent-alpha");
+
+    let resp = h
+        .send(
+            Request::builder()
+                .uri(format!("/api/agents/{agent_id}/prompts/versions"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"],
+        "X-Account-Id header required in multi-tenant mode"
     );
 }
 

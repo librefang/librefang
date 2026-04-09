@@ -12,6 +12,7 @@
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
+use axum::Json;
 use librefang_types::i18n;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -892,6 +893,11 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AccountId(pub Option<String>);
 
+/// Strict account extractor for tenant-scoped routes that require a concrete
+/// account identity at the handler boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConcreteAccountId(pub String);
+
 impl From<AccountId> for librefang_types::account::AccountId {
     fn from(val: AccountId) -> Self {
         librefang_types::account::AccountId(val.0)
@@ -918,6 +924,29 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for AccountId {
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string());
         std::future::ready(Ok(AccountId(account)))
+    }
+}
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ConcreteAccountId {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        let account = parts
+            .headers
+            .get("x-account-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        std::future::ready(account.map(ConcreteAccountId).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "X-Account-Id required"})),
+            )
+        }))
     }
 }
 
@@ -1143,6 +1172,47 @@ mod account_tests {
                 .await
                 .unwrap();
         assert_eq!(account, AccountId(None));
+    }
+
+    #[tokio::test]
+    async fn test_concrete_account_id_accepts_present_header() {
+        let mut parts = make_parts_with_header("x-account-id", "tenant-123");
+        let account =
+            <ConcreteAccountId as axum::extract::FromRequestParts<()>>::from_request_parts(
+                &mut parts,
+                &(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(account, ConcreteAccountId("tenant-123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_concrete_account_id_rejects_missing_header() {
+        let mut parts = make_parts();
+        let (code, json) =
+            <ConcreteAccountId as axum::extract::FromRequestParts<()>>::from_request_parts(
+                &mut parts,
+                &(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "X-Account-Id required");
+    }
+
+    #[tokio::test]
+    async fn test_concrete_account_id_rejects_blank_header() {
+        let mut parts = make_parts_with_header("x-account-id", "   ");
+        let (code, json) =
+            <ConcreteAccountId as axum::extract::FromRequestParts<()>>::from_request_parts(
+                &mut parts,
+                &(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "X-Account-Id required");
     }
 
     // ─── Legacy Signature Verification (7 tests) ───
