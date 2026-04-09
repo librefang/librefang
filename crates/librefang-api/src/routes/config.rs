@@ -1928,22 +1928,32 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
 
     // Agents list — fully enriched (same fields as /api/agents) so AgentsPage
     // can use this snapshot directly instead of polling /api/agents separately.
-    let catalog = state.kernel.model_catalog_ref().read().ok();
-    let dm = {
-        let dm_override = state
-            .kernel
-            .default_model_override_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        super::agents::effective_default_model(&cfg.default_model, dm_override.as_ref())
+    //
+    // IMPORTANT: `catalog` is an `Option<RwLockReadGuard<...>>` which is !Send.
+    // It must be dropped before the `tokio::join!` await below, otherwise the
+    // async future becomes !Send and axum's Handler impl won't be satisfied.
+    // Scoping the guard inside this block ensures it is released before any
+    // await point.
+    let agents: Vec<serde_json::Value> = {
+        let catalog = state.kernel.model_catalog_ref().read().ok();
+        let dm = {
+            let dm_override = state
+                .kernel
+                .default_model_override_ref()
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            super::agents::effective_default_model(&cfg.default_model, dm_override.as_ref())
+        };
+        let mut agent_entries_visible: Vec<_> =
+            agent_entries.iter().filter(|e| !e.is_hand).collect();
+        // Sort by last_active descending — matches AgentsPage default query order.
+        agent_entries_visible.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        agent_entries_visible
+            .iter()
+            .map(|e| super::agents::enrich_agent_json(e, &dm, &catalog))
+            .collect()
+        // `catalog` (RwLockReadGuard) and `dm_override` are dropped here.
     };
-    let mut agent_entries_visible: Vec<_> = agent_entries.iter().filter(|e| !e.is_hand).collect();
-    // Sort by last_active descending — matches AgentsPage default query order.
-    agent_entries_visible.sort_by(|a, b| b.last_active.cmp(&a.last_active));
-    let agents: Vec<serde_json::Value> = agent_entries_visible
-        .iter()
-        .map(|e| super::agents::enrich_agent_json(e, &dm, &catalog))
-        .collect();
 
     // Skills count — cached behind a 30s TTL to avoid scanning the skills
     // directory on every poll cycle.
