@@ -1033,7 +1033,7 @@ pub fn scaffold_plugin(
 
     // Each runtime declares its own hook filenames + template body so the
     // manifest + files stay in sync.
-    let files = hook_templates(runtime_kind);
+    let files = hook_templates(runtime_kind.clone());
     let (ingest_file, ingest_body) = files.ingest;
     let (after_file, after_body) = files.after_turn;
     let (assemble_file, assemble_body) = files.assemble;
