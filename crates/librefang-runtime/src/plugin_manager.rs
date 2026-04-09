@@ -2624,11 +2624,9 @@ pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
         return Ok("No requirements.txt found — nothing to install".to_string());
     }
 
-    // When running inside a virtualenv, --user is forbidden (PEP 668).
-    // Detect venv via VIRTUAL_ENV env var and omit --user accordingly.
-    let in_venv = std::env::var("VIRTUAL_ENV").is_ok();
-    let pip_cmd = if in_venv { "pip" } else { "pip3" };
-    let mut args = vec!["install"];
+    // In virtualenv/conda environments, pip forbids --user installs.
+    let in_venv = std::env::var("VIRTUAL_ENV").is_ok() || std::env::var("CONDA_PREFIX").is_ok();
+    let mut args = vec!["-m", "pip", "install"];
     if !in_venv {
         args.push("--user");
     }
@@ -2641,19 +2639,19 @@ pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
         "Installing Python requirements"
     );
 
-    let output = tokio::process::Command::new(pip_cmd)
+    let output = tokio::process::Command::new("python")
         .args(&args)
         .arg(&requirements)
         .output()
         .await
-        .map_err(|e| format!("Failed to run {pip_cmd}: {e}"))?;
+        .map_err(|e| format!("Failed to run python -m pip: {e}"))?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(stdout.to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("pip3 install failed: {stderr}"))
+        Err(format!("python -m pip install failed: {stderr}"))
     }
 }
 
