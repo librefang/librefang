@@ -981,9 +981,11 @@ mod tests {
 
     #[test]
     fn test_plugin_manifest_config_serde_roundtrip() {
-        let mut manifest = PluginManifest::default();
-        manifest.name = "test-plugin".to_string();
-        manifest.version = "1.0.0".to_string();
+        let mut manifest = PluginManifest {
+            name: "test-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            ..Default::default()
+        };
         manifest.config.insert(
             "debug".to_string(),
             PluginConfigField {
