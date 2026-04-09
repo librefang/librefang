@@ -294,7 +294,13 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     let status = if db_ok { "ok" } else { "degraded" };
 
-    let embedding_ok = state.kernel.embedding().is_some();
+    let fts_only = state
+        .kernel
+        .config_ref()
+        .memory
+        .fts_only
+        .unwrap_or(false);
+    let embedding_ok = fts_only || state.kernel.embedding().is_some();
 
     Json(serde_json::json!({
         "status": status,
@@ -1886,7 +1892,13 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
         .structured_get(shared_id, "__health_check__")
         .is_ok();
     let health_status = if db_ok { "ok" } else { "degraded" };
-    let embedding_ok = state.kernel.embedding().is_some();
+    let fts_only = state
+        .kernel
+        .config_ref()
+        .memory
+        .fts_only
+        .unwrap_or(false);
+    let embedding_ok = fts_only || state.kernel.embedding().is_some();
     let health = serde_json::json!({
         "status": health_status,
         "version": env!("CARGO_PKG_VERSION"),
