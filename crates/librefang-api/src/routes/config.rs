@@ -1936,7 +1936,7 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
             .read()
             .unwrap_or_else(|e| e.into_inner());
         super::agents::effective_default_model(
-            &state.kernel.config_ref().default_model,
+            &cfg.default_model,
             dm_override.as_ref(),
         )
     };
@@ -1976,22 +1976,15 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
         }
     };
 
-    // Workflows count
-    let workflow_count = state
-        .kernel
-        .workflow_engine()
-        .list_workflows()
-        .await
-        .len();
-
-    // Providers and channels — run concurrently with a 5s timeout each.
-    // If either hangs (e.g. a local provider probe stalls), return an empty
-    // list rather than blocking the entire snapshot response.
+    // Workflows, providers, channels — all concurrent with a 5s timeout on
+    // providers/channels in case a local provider probe stalls.
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    let (providers_result, channels_result) = tokio::join!(
+    let (workflow_result, providers_result, channels_result) = tokio::join!(
+        state.kernel.workflow_engine().list_workflows(),
         tokio::time::timeout(PROBE_TIMEOUT, super::providers::providers_snapshot(&state)),
         tokio::time::timeout(PROBE_TIMEOUT, super::channels::channels_snapshot(&state)),
     );
+    let workflow_count = workflow_result.len();
     let providers = providers_result.unwrap_or_default();
     let channels = channels_result.unwrap_or_default();
 
