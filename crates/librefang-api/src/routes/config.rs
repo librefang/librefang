@@ -9,6 +9,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/health", axum::routing::get(health))
         .route("/health/detail", axum::routing::get(health_detail))
         .route("/status", axum::routing::get(status))
+        .route("/dashboard/snapshot", axum::routing::get(dashboard_snapshot))
         .route("/version", axum::routing::get(version))
         .route("/config", axum::routing::get(get_config))
         .route("/config/export", axum::routing::get(export_config))
@@ -1868,4 +1869,139 @@ pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
         }
         _ => toml::Value::String(value.to_string()),
     }
+}
+
+/// GET /api/dashboard/snapshot — Single aggregated snapshot for the dashboard.
+///
+/// Replaces 7 parallel frontend requests (health, status, providers, channels,
+/// skills, agents, workflows) with one round-trip, cutting poll overhead by ~7x.
+pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Health (same logic as /api/health)
+    let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+    ]));
+    let db_ok = state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, "__health_check__")
+        .is_ok();
+    let health_status = if db_ok { "ok" } else { "degraded" };
+    let embedding_ok = state.kernel.embedding().is_some();
+    let health = serde_json::json!({
+        "status": health_status,
+        "version": env!("CARGO_PKG_VERSION"),
+        "checks": [
+            { "name": "database", "status": if db_ok { "ok" } else { "error" } },
+            { "name": "embedding", "status": if embedding_ok { "ok" } else { "warn" } },
+        ],
+    });
+
+    // Status (same logic as /api/status, without the heavy per-agent list)
+    let agent_entries = state.kernel.agent_registry().list();
+    let agent_count = agent_entries
+        .iter()
+        .filter(|e| !e.is_hand)
+        .count();
+    let active_agent_count = agent_entries
+        .iter()
+        .filter(|e| {
+            !e.is_hand && matches!(e.state, librefang_types::agent::AgentState::Running)
+        })
+        .count();
+    let session_count = state
+        .kernel
+        .memory_substrate()
+        .list_sessions()
+        .map(|s| s.len())
+        .unwrap_or(0);
+    let cfg = state.kernel.config_ref();
+    let status = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "agent_count": agent_count,
+        "active_agent_count": active_agent_count,
+        "session_count": session_count,
+        "default_provider": cfg.default_model.provider,
+        "default_model": cfg.default_model.model,
+        "config_exists": true,
+        "network_enabled": cfg.network_enabled,
+    });
+
+    // Agents list — fully enriched (same fields as /api/agents) so AgentsPage
+    // can use this snapshot directly instead of polling /api/agents separately.
+    let catalog = state.kernel.model_catalog_ref().read().ok();
+    let dm = {
+        let dm_override = state
+            .kernel
+            .default_model_override_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        super::agents::effective_default_model(
+            &state.kernel.config_ref().default_model,
+            dm_override.as_ref(),
+        )
+    };
+    let mut agent_entries_visible: Vec<_> = agent_entries
+        .iter()
+        .filter(|e| !e.is_hand)
+        .collect();
+    // Sort by last_active descending — matches AgentsPage default query order.
+    agent_entries_visible.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+    let agents: Vec<serde_json::Value> = agent_entries_visible
+        .iter()
+        .map(|e| super::agents::enrich_agent_json(e, &dm, &catalog))
+        .collect();
+
+    // Skills count — cached behind a 30s TTL to avoid scanning the skills
+    // directory on every poll cycle.
+    static SKILL_COUNT_CACHE: std::sync::Mutex<Option<(usize, std::time::Instant)>> =
+        std::sync::Mutex::new(None);
+    let skill_count = {
+        let cached = SKILL_COUNT_CACHE.lock().unwrap().as_ref().and_then(|(n, t)| {
+            if t.elapsed() < std::time::Duration::from_secs(30) {
+                Some(*n)
+            } else {
+                None
+            }
+        });
+        match cached {
+            Some(n) => n,
+            None => {
+                let skills_dir = state.kernel.home_dir().join("skills");
+                let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
+                let _ = registry.load_all();
+                let n = registry.list().len();
+                *SKILL_COUNT_CACHE.lock().unwrap() = Some((n, std::time::Instant::now()));
+                n
+            }
+        }
+    };
+
+    // Workflows count
+    let workflow_count = state
+        .kernel
+        .workflow_engine()
+        .list_workflows()
+        .await
+        .len();
+
+    // Providers and channels — run concurrently with a 5s timeout each.
+    // If either hangs (e.g. a local provider probe stalls), return an empty
+    // list rather than blocking the entire snapshot response.
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let (providers_result, channels_result) = tokio::join!(
+        tokio::time::timeout(PROBE_TIMEOUT, super::providers::providers_snapshot(&state)),
+        tokio::time::timeout(PROBE_TIMEOUT, super::channels::channels_snapshot(&state)),
+    );
+    let providers = providers_result.unwrap_or_default();
+    let channels = channels_result.unwrap_or_default();
+
+    Json(serde_json::json!({
+        "health": health,
+        "status": status,
+        "agents": agents,
+        "providers": providers,
+        "channels": channels,
+        "skillCount": skill_count,
+        "workflowCount": workflow_count,
+    }))
 }
