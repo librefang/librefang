@@ -1,0 +1,14 @@
+name = "mempalace-indexer"
+version = "0.1.0"
+description = "Auto-index conversations into MemPalace and recall relevant memories"
+author = "LibreFang Community"
+runtime = "python"
+requirements = "requirements.txt"
+
+[[requires]]
+binary = "python3"
+reason = "needed to run ingest.py and after_turn.py hooks"
+
+[hooks]
+ingest = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
