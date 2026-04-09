@@ -1116,8 +1116,7 @@ impl ScriptableContextEngine {
             }
         }
         let json = serde_json::to_string_pretty(&resolved).ok()?;
-        let path = std::env::temp_dir()
-            .join(format!("librefang-plugin-config-{plugin_name}.json"));
+        let path = std::env::temp_dir().join(format!("librefang-plugin-config-{plugin_name}.json"));
         std::fs::write(&path, json).ok()?;
         Some(path)
     }
@@ -1185,6 +1184,7 @@ impl ScriptableContextEngine {
                             let schemas_c = hook_schemas.clone();
                             let state_c = shared_state_path.clone();
                             let store_c = trace_store.clone();
+                            let runtime = runtime.clone();
                             tokio::spawn(async move {
                                 let _ = ScriptableContextEngine::run_hook(
                                     "on_event",
@@ -1479,6 +1479,7 @@ impl ScriptableContextEngine {
             if let Some(ref script) = script_opt {
                 let resolved = Self::resolve_script_path(script);
                 if std::path::Path::new(&resolved).exists() {
+                    let runtime = runtime.clone();
                     match self
                         .process_pool
                         .prewarm(&resolved, runtime, &self.plugin_env)

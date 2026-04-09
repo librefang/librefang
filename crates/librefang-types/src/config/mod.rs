@@ -939,10 +939,7 @@ mod tests {
 
         let size_field = manifest.config.get("max_file_size_mb").unwrap();
         assert_eq!(size_field.field_type, PluginConfigFieldType::Number);
-        assert_eq!(
-            size_field.default,
-            Some(serde_json::json!(10))
-        );
+        assert_eq!(size_field.default, Some(serde_json::json!(10)));
     }
 
     #[test]
