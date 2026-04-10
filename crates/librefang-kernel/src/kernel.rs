@@ -8676,7 +8676,10 @@ system_prompt = "You are a helpful assistant."
         if !has_custom_key
             && !has_custom_url
             && (agent_provider.is_empty() || agent_provider == default_provider)
-            && effective_default.provider == "claude_code"
+            && matches!(
+                effective_default.provider.as_str(),
+                "claude_code" | "claude-code"
+            )
             && !effective_default.cli_profile_dirs.is_empty()
         {
             return Ok(self.default_driver.clone());
