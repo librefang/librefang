@@ -403,6 +403,8 @@ impl ModelCatalog {
                 regions: std::collections::HashMap::new(),
                 media_capabilities: Vec::new(),
                 available_models: Vec::new(),
+                // Added at runtime via set_provider_url → always custom.
+                is_custom: true,
             });
             // Re-detect auth for the newly added provider
             self.detect_auth();
