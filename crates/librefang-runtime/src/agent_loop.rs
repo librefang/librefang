@@ -17,7 +17,7 @@ use crate::tool_runner;
 use crate::web_search::WebToolsContext;
 use crate::workspace_sandbox::{ERR_PATH_TRAVERSAL, ERR_SANDBOX_ESCAPE};
 use librefang_memory::session::Session;
-use librefang_memory::{MemoryScope, MemorySubstrate, ProactiveMemoryHooks};
+use librefang_memory::{MemoryScope, MemorySubstrate};
 use librefang_skills::registry::SkillRegistry;
 use librefang_types::agent::{AgentManifest, STABLE_PREFIX_MODE_METADATA_KEY};
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -735,7 +735,15 @@ pub async fn run_agent_loop(
             let user_id = session.agent_id.0.to_string();
 
             match pm_store_arc
-                .auto_retrieve(&user_id, user_message, sender_user_id.as_deref())
+                .auto_retrieve_scoped(
+                    &user_id,
+                    user_message,
+                    sender_user_id.as_deref(),
+                    caller_account_id
+                        .as_deref()
+                        .map(MemoryScope::tenant)
+                        .unwrap_or_else(MemoryScope::global),
+                )
                 .await
             {
                 Ok(pm_memories) if !pm_memories.is_empty() => {
@@ -2330,7 +2338,15 @@ pub async fn run_agent_loop_streaming(
             let user_id = session.agent_id.0.to_string();
 
             match pm_store_arc
-                .auto_retrieve(&user_id, user_message, sender_user_id.as_deref())
+                .auto_retrieve_scoped(
+                    &user_id,
+                    user_message,
+                    sender_user_id.as_deref(),
+                    caller_account_id
+                        .as_deref()
+                        .map(MemoryScope::tenant)
+                        .unwrap_or_else(MemoryScope::global),
+                )
                 .await
             {
                 Ok(pm_memories) if !pm_memories.is_empty() => {

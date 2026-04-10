@@ -2510,6 +2510,60 @@ impl ProactiveMemoryStore {
             conflicts,
         })
     }
+
+    /// Proactively retrieve relevant context before agent execution, with tenant scoping.
+    ///
+    /// When `scope` is global, delegates directly to [`ProactiveMemoryHooks::auto_retrieve`].
+    /// When `scope` is tenant-scoped, the recall filter is restricted to memories belonging
+    /// to that tenant — preventing cross-tenant memory leakage.
+    pub async fn auto_retrieve_scoped(
+        &self,
+        user_id: &str,
+        query: &str,
+        peer_id: Option<&str>,
+        scope: MemoryScope<'_>,
+    ) -> LibreFangResult<Vec<MemoryItem>> {
+        if scope.is_global() {
+            return <Self as ProactiveMemoryHooks>::auto_retrieve(self, user_id, query, peer_id)
+                .await;
+        }
+
+        let cfg = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if !cfg.enabled || !cfg.auto_retrieve {
+            return Ok(Vec::new());
+        }
+
+        self.maybe_run_maintenance();
+
+        let agent_id = Self::parse_agent_id(user_id)?;
+
+        // Build a tenant-scoped filter via the existing helper — injects
+        // `account_id` into the filter's metadata map so that the SQL recall
+        // appends `AND account_id = ?`, preventing cross-tenant memory leakage.
+        let filter = Some({
+            let mut f = self.scoped_filter(Some(agent_id), scope);
+            f.peer_id = peer_id.map(String::from);
+            f
+        });
+
+        // Search across all memory levels — use vector search if available
+        let results = if let Some(ref emb) = self.embedding {
+            if let Ok(qe) = emb.embed_one(query).await {
+                self.semantic
+                    .recall_with_embedding(query, cfg.max_retrieve, filter, Some(&qe))?
+            } else {
+                self.semantic.recall(query, cfg.max_retrieve, filter)?
+            }
+        } else {
+            self.semantic.recall(query, cfg.max_retrieve, filter)?
+        };
+
+        Ok(results.into_iter().map(MemoryItem::from_fragment).collect())
+    }
 }
 
 /// A flat, JSON-serializable representation of a memory for import/export.
@@ -3407,6 +3461,51 @@ mod tests {
             .await
             .unwrap();
         assert!(!results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_auto_retrieve_scoped_enforces_tenant_isolation() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+
+        let agent_id = AgentId::new().to_string();
+
+        // Store a memory tagged to tenant-a
+        let msg = serde_json::json!({"role": "user", "content": "I prefer dark mode"});
+        store
+            .add_scoped(&[msg], &agent_id, MemoryScope::tenant("tenant-a"))
+            .await
+            .unwrap();
+
+        // tenant-a should see its own memories
+        let results_a = store
+            .auto_retrieve_scoped(
+                &agent_id,
+                "dark mode",
+                None,
+                MemoryScope::tenant("tenant-a"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !results_a.is_empty(),
+            "tenant-a should see its own memories"
+        );
+
+        // tenant-b must not see tenant-a's memories
+        let results_b = store
+            .auto_retrieve_scoped(
+                &agent_id,
+                "dark mode",
+                None,
+                MemoryScope::tenant("tenant-b"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            results_b.is_empty(),
+            "tenant-b must not see tenant-a's memories"
+        );
     }
 
     #[tokio::test]
