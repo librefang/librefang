@@ -174,7 +174,7 @@ pub(crate) fn valid_api_tokens(kernel: &LibreFangKernel) -> Vec<String> {
     tokens
 }
 
-fn has_dashboard_credentials(kernel: &LibreFangKernel) -> bool {
+pub(crate) fn has_dashboard_credentials(kernel: &LibreFangKernel) -> bool {
     let cfg = kernel.config_ref();
     let username = resolve_dashboard_credential(
         &cfg.dashboard_user,
@@ -190,7 +190,7 @@ fn has_dashboard_credentials(kernel: &LibreFangKernel) -> bool {
         && (!cfg.dashboard_pass_hash.trim().is_empty() || !password.trim().is_empty())
 }
 
-fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middleware::ApiUserAuth> {
+pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middleware::ApiUserAuth> {
     kernel
         .config_ref()
         .users

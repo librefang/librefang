@@ -135,7 +135,11 @@ pub async fn agent_ws(
 ) -> impl IntoResponse {
     // SECURITY: Authenticate WebSocket upgrades (bypasses middleware).
     let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
-    if !valid_tokens.is_empty() {
+    let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
+    let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
+    let auth_required =
+        !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
+    if auth_required {
         // SECURITY: Use constant-time comparison to prevent timing attacks on auth tokens.
         let matches_any = |token: &str| -> bool {
             use subtle::ConstantTimeEq;
@@ -157,6 +161,7 @@ pub async fn agent_ws(
         let query_auth = query_token.map(&matches_any).unwrap_or(false);
 
         let mut session_auth = false;
+        let mut user_key_auth = false;
         let provided_token = header_token.or(query_token);
         if let Some(token_str) = provided_token {
             let mut sessions = state.active_sessions.write().await;
@@ -168,9 +173,16 @@ pub async fn agent_ws(
             });
             session_auth = sessions.contains_key(token_str);
             drop(sessions);
+
+            // Check per-user API keys (hashed with Argon2).
+            if !session_auth {
+                user_key_auth = user_api_keys.iter().any(|user| {
+                    crate::password_hash::verify_password(token_str, &user.api_key_hash)
+                });
+            }
         }
 
-        if !header_auth && !query_auth && !session_auth {
+        if !header_auth && !query_auth && !session_auth && !user_key_auth {
             warn!("WebSocket upgrade rejected: invalid auth");
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }

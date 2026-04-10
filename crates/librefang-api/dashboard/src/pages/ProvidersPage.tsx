@@ -662,7 +662,7 @@ export function ProvidersPage() {
     setConfigProvider(provider);
     setKeyInput("");
     setUrlInput(provider.base_url || "");
-    setHasStoredKey(isProviderAvailable(provider.auth_status));
+    setHasStoredKey(provider.auth_status === "configured" || provider.auth_status === "validated_key");
     setKeyError(null);
     setKeyTestResult(null);
   };
