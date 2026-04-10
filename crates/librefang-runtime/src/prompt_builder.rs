@@ -533,9 +533,16 @@ fn build_channel_section(
         (None, None) => {}
     }
     if is_group {
-        section.push_str("\nThis message is from a group chat.");
+        section.push_str(
+            "\nThis message is from a group chat. \
+             Multiple humans participate — each message may come from a different sender. \
+             Always address the sender shown above, not a previous speaker. \
+             When someone writes @username, they are referring to another human in the group, \
+             NOT an agent in your system. Never say a @mentioned person is \"not found\" \
+             or treat them as a system entity.",
+        );
         if was_mentioned {
-            section.push_str(" You were @mentioned directly.");
+            section.push_str(" You were @mentioned directly — respond to this message.");
         }
     }
     section
