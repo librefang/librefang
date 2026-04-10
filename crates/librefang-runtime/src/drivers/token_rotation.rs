@@ -263,7 +263,7 @@ impl LlmDriver for TokenRotationDriver {
                     // user sees when the first profile becomes available.
                     if last_error
                         .as_ref()
-                        .map_or(true, |cur| Self::resets_sooner(cur, &err))
+                        .is_none_or(|cur| Self::resets_sooner(cur, &err))
                     {
                         last_error = Some(err);
                     }
@@ -326,7 +326,7 @@ impl LlmDriver for TokenRotationDriver {
                     // user sees when the first profile becomes available.
                     if last_error
                         .as_ref()
-                        .map_or(true, |cur| Self::resets_sooner(cur, &err))
+                        .is_none_or(|cur| Self::resets_sooner(cur, &err))
                     {
                         last_error = Some(err);
                     }

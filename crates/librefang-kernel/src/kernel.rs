@@ -5236,6 +5236,17 @@ system_prompt = "You are a helpful assistant."
                     serde_json::Value::String(ctx.channel.clone()),
                 );
             }
+            if !ctx.display_name.is_empty() {
+                manifest.metadata.insert(
+                    "sender_display_name".to_string(),
+                    serde_json::Value::String(ctx.display_name.clone()),
+                );
+            }
+            if ctx.is_group {
+                manifest
+                    .metadata
+                    .insert("is_group".to_string(), serde_json::Value::Bool(true));
+            }
         }
 
         let proactive_memory = self.proactive_memory.get().cloned();
