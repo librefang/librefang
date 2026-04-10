@@ -44,6 +44,7 @@ async fn start_test_server() -> TestServer {
             base_url: None,
             message_timeout_secs: 300,
             extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
     };
