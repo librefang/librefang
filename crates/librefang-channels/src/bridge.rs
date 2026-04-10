@@ -345,6 +345,25 @@ pub trait ChannelBridgeHandle: Send + Sync {
     ) -> Result<String, String> {
         Err("Channel push not available".to_string())
     }
+
+    /// Lightweight LLM precheck: should the agent reply to this group message?
+    ///
+    /// Returns `Ok(true)` → reply, `Ok(false)` → stay silent.
+    /// On error the caller fails open (replies anyway).
+    /// Default: always reply (opt-in via `reply_precheck = true` in channel config).
+    async fn classify_reply_intent(
+        &self,
+        _agent_id: AgentId,
+        _message: &str,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    /// Get the routing aliases for an agent (from `[metadata.routing].aliases`).
+    /// Default: empty (no aliases).
+    async fn get_agent_aliases(&self, _agent_id: AgentId) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 struct PendingMessage {
@@ -1259,6 +1278,22 @@ fn text_content(message: &ChannelMessage) -> Option<&str> {
     }
 }
 
+/// Convert plain alias strings into case-insensitive word-boundary regex patterns
+/// suitable for use in `group_trigger_patterns`.
+///
+/// This lets operators avoid manually translating agent aliases into regex syntax:
+/// `aliases_to_trigger_patterns(&["fandango", "oye fandango"])` produces
+/// `["(?i)\\bfandango\\b", "(?i)\\boye fandango\\b"]`.
+pub fn aliases_to_trigger_patterns(aliases: &[String]) -> Vec<String> {
+    aliases
+        .iter()
+        .map(|alias| {
+            let escaped = regex::escape(alias);
+            format!("(?i)\\b{escaped}\\b")
+        })
+        .collect()
+}
+
 fn matches_group_trigger_pattern(
     ct_str: &str,
     message: &ChannelMessage,
@@ -1328,6 +1363,7 @@ fn should_process_group_message(
     ct_str: &str,
     overrides: &ChannelOverrides,
     message: &ChannelMessage,
+    agent_aliases: &[String],
 ) -> bool {
     match overrides.group_policy {
         GroupPolicy::Ignore => {
@@ -1357,7 +1393,23 @@ fn should_process_group_message(
                     message,
                     &overrides.group_trigger_patterns,
                 );
-            if !was_mentioned && !is_command && !regex_triggered {
+            let alias_triggered = !was_mentioned
+                && !is_command
+                && !regex_triggered
+                && text_content(message).is_some_and(|text| {
+                    let lower = text.to_lowercase();
+                    agent_aliases
+                        .iter()
+                        .any(|alias| lower.contains(&alias.to_lowercase()))
+                });
+            if alias_triggered {
+                debug!(
+                    channel = ct_str,
+                    user = %message.sender.display_name,
+                    "Group message matched agent alias trigger"
+                );
+            }
+            if !was_mentioned && !is_command && !regex_triggered && !alias_triggered {
                 debug!(
                     "Ignoring group message on {ct_str} (group_policy=mention_only, not mentioned)"
                 );
@@ -1815,7 +1867,7 @@ async fn dispatch_message(
     // --- DM/Group policy check ---
     if let Some(ref ov) = overrides {
         if message.is_group {
-            if !should_process_group_message(ct_str, ov, message) {
+            if !should_process_group_message(ct_str, ov, message, &[]) {
                 return;
             }
         } else {
@@ -2135,6 +2187,58 @@ async fn dispatch_message(
             return;
         }
     };
+
+    // --- Post-resolution group filters (alias awareness + reply-intent precheck) ---
+    if message.is_group {
+        let was_mentioned = message
+            .metadata
+            .get("was_mentioned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Reply-intent precheck: lightweight LLM call to decide if the agent
+        // should reply. Only for non-mentioned group messages when enabled.
+        // Skipped for @mentions, commands, and DMs (those always get a reply).
+        if !was_mentioned && !matches!(message.content, ChannelContent::Command { .. }) {
+            // Check agent aliases first — if a message contains an alias like
+            // "oye fandango", treat it as an implicit mention (skip precheck).
+            let aliases = handle.get_agent_aliases(agent_id).await;
+            let alias_hit = !aliases.is_empty()
+                && text_content(message).is_some_and(|text| {
+                    let lower = text.to_lowercase();
+                    aliases.iter().any(|a| lower.contains(&a.to_lowercase()))
+                });
+
+            if alias_hit {
+                debug!(
+                    channel = ct_str,
+                    "Group message matched agent alias — treating as mention"
+                );
+            } else if let Some(ref ov) = overrides {
+                if ov.reply_precheck {
+                    // No mention, no alias — run LLM precheck
+                    if let Some(text) = text_content(message) {
+                        match handle.classify_reply_intent(agent_id, text).await {
+                            Ok(true) => {
+                                debug!(channel = ct_str, "Reply-intent precheck: REPLY");
+                            }
+                            Ok(false) => {
+                                debug!(
+                                    channel = ct_str,
+                                    "Reply-intent precheck: NO_REPLY — staying silent"
+                                );
+                                return;
+                            }
+                            Err(e) => {
+                                warn!(channel = ct_str, error = %e, "Reply-intent precheck failed — proceeding with reply");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let channel_key = format!("{:?}", message.channel);
 
     // RBAC: authorize the user before forwarding to agent
@@ -3390,7 +3494,10 @@ mod tests {
             ..Default::default()
         };
         assert!(should_process_group_message(
-            "whatsapp", &overrides, &message
+            "whatsapp",
+            &overrides,
+            &message,
+            &[]
         ));
     }
 
@@ -3402,7 +3509,10 @@ mod tests {
             ..Default::default()
         };
         assert!(!should_process_group_message(
-            "whatsapp", &overrides, &message
+            "whatsapp",
+            &overrides,
+            &message,
+            &[]
         ));
     }
 
@@ -3414,7 +3524,10 @@ mod tests {
             ..Default::default()
         };
         assert!(should_process_group_message(
-            "telegram", &overrides, &message
+            "telegram",
+            &overrides,
+            &message,
+            &[]
         ));
     }
 
@@ -3426,8 +3539,74 @@ mod tests {
             .insert("was_mentioned".to_string(), serde_json::Value::Bool(true));
         let overrides = ChannelOverrides::default();
         assert!(should_process_group_message(
-            "telegram", &overrides, &message
+            "telegram",
+            &overrides,
+            &message,
+            &[]
         ));
+    }
+
+    #[test]
+    fn test_mention_only_triggers_on_agent_alias() {
+        let message = group_text_message("hey fandango what do you think?");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["fandango".to_string()];
+        assert!(should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_alias_is_case_insensitive() {
+        let message = group_text_message("FANDANGO help me");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["Fandango".to_string()];
+        assert!(should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_rejects_no_alias_match() {
+        let message = group_text_message("hello there, anyone?");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["fandango".to_string(), "rodelo".to_string()];
+        assert!(!should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_alias_does_not_override_regex_trigger() {
+        // regex trigger and alias can independently activate — alias fires here
+        let message = group_text_message("oye fandango");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["oye fandango".to_string()];
+        assert!(should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_produces_word_boundary_regex() {
+        let aliases = vec!["fandango".to_string(), "oye fandango".to_string()];
+        let patterns = aliases_to_trigger_patterns(&aliases);
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0], r"(?i)\bfandango\b");
+        assert_eq!(patterns[1], r"(?i)\boye fandango\b");
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_escapes_special_chars() {
+        let aliases = vec!["bot.v2".to_string()];
+        let patterns = aliases_to_trigger_patterns(&aliases);
+        assert_eq!(patterns[0], r"(?i)\bbot\.v2\b");
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_empty() {
+        let patterns = aliases_to_trigger_patterns(&[]);
+        assert!(patterns.is_empty());
     }
 
     #[test]
