@@ -1873,7 +1873,10 @@ impl LibreFangKernel {
         // directory, wrapped in TokenRotationDriver for automatic failover.
         if driver_chain.is_empty()
             && !config.default_model.cli_profile_dirs.is_empty()
-            && config.default_model.provider == "claude_code"
+            && matches!(
+                config.default_model.provider.as_str(),
+                "claude_code" | "claude-code"
+            )
         {
             let profiles = &config.default_model.cli_profile_dirs;
             let mut profile_drivers: Vec<(Arc<dyn LlmDriver>, String)> = Vec::new();
@@ -8719,7 +8722,10 @@ system_prompt = "You are a helpful assistant."
         if !has_custom_key
             && !has_custom_url
             && (agent_provider.is_empty() || agent_provider == default_provider)
-            && effective_default.provider == "claude_code"
+            && matches!(
+                effective_default.provider.as_str(),
+                "claude_code" | "claude-code"
+            )
             && !effective_default.cli_profile_dirs.is_empty()
         {
             return Ok(self.default_driver.clone());
