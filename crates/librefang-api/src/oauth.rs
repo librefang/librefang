@@ -308,10 +308,23 @@ fn verify_state_token(state: &str) -> Result<OAuthStatePayload, String> {
 
 /// Derive the HMAC signing key for state tokens. Uses LIBREFANG_STATE_SECRET
 /// env var if set, otherwise falls back to a random per-process key.
+///
+/// **Production requirement**: set `LIBREFANG_STATE_SECRET` to a stable secret.
+/// Without it, OAuth state tokens are invalidated on every restart and will not
+/// work across multiple server instances (load balancer / rolling deploy).
 fn state_signing_key() -> String {
-    static KEY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        std::env::var("LIBREFANG_STATE_SECRET").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
-    });
+    static KEY: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| match std::env::var("LIBREFANG_STATE_SECRET") {
+            Ok(key) if !key.trim().is_empty() => key,
+            _ => {
+                tracing::warn!(
+                    "LIBREFANG_STATE_SECRET is not set — OAuth state tokens will not survive \
+                     server restarts or load-balanced deployments. Set this environment variable \
+                     to a stable secret in production."
+                );
+                uuid::Uuid::new_v4().to_string()
+            }
+        });
     KEY.clone()
 }
 

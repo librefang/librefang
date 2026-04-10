@@ -194,8 +194,8 @@ pub struct UpdateWebhookRequest {
     pub enabled: Option<bool>,
 }
 
-/// Maximum number of webhook subscriptions.
-const MAX_WEBHOOKS: usize = 100;
+/// Maximum number of webhook subscriptions per tenant account.
+const MAX_WEBHOOKS_PER_TENANT: usize = 25;
 /// Maximum name length.
 const MAX_NAME_LEN: usize = 128;
 /// Maximum URL length.
@@ -340,10 +340,15 @@ impl WebhookStore {
     ) -> Result<WebhookSubscription, String> {
         req.validate()?;
         let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
-        if data.webhooks.len() >= MAX_WEBHOOKS {
+        let tenant_count = data
+            .webhooks
+            .iter()
+            .filter(|w| w.account_id == account_id)
+            .count();
+        if tenant_count >= MAX_WEBHOOKS_PER_TENANT {
             return Err(format!(
-                "maximum number of webhooks ({}) reached",
-                MAX_WEBHOOKS
+                "maximum number of webhooks per account ({}) reached",
+                MAX_WEBHOOKS_PER_TENANT
             ));
         }
         let now = Utc::now();
@@ -672,10 +677,10 @@ mod tests {
     }
 
     #[test]
-    fn max_webhooks_enforced() {
+    fn max_webhooks_per_tenant_enforced() {
         let (store, _dir) = temp_store();
         let acct = account_id();
-        for i in 0..MAX_WEBHOOKS {
+        for i in 0..MAX_WEBHOOKS_PER_TENANT {
             let req = CreateWebhookRequest {
                 name: format!("hook-{i}"),
                 url: format!("https://example.com/hook/{i}"),
@@ -686,7 +691,35 @@ mod tests {
             store.create_scoped(req, acct.clone()).unwrap();
         }
         let err = store.create_scoped(valid_create_req(), acct).unwrap_err();
-        assert!(err.contains("maximum number of webhooks"));
+        assert!(err.contains("maximum number of webhooks per account"));
+    }
+
+    #[test]
+    fn tenant_quota_does_not_starve_other_tenants() {
+        let (store, _dir) = temp_store();
+        let acct_a = "tenant-a".to_string();
+        let acct_b = "tenant-b".to_string();
+
+        // Tenant A fills their entire quota
+        for i in 0..MAX_WEBHOOKS_PER_TENANT {
+            let req = CreateWebhookRequest {
+                name: format!("hook-{i}"),
+                url: format!("https://example.com/hook/{i}"),
+                secret: None,
+                events: vec![WebhookEvent::All],
+                enabled: true,
+            };
+            store.create_scoped(req, acct_a.clone()).unwrap();
+        }
+        // Tenant A is now blocked
+        let err = store.create_scoped(valid_create_req(), acct_a).unwrap_err();
+        assert!(err.contains("maximum number of webhooks per account"));
+
+        // Tenant B is unaffected — this is the regression test for the DoS vector
+        let wh_b = store
+            .create_scoped(valid_create_req(), acct_b.clone())
+            .unwrap();
+        assert_eq!(wh_b.account_id, acct_b);
     }
 
     #[test]

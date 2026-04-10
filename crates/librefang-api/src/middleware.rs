@@ -1052,29 +1052,6 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ConcreteAccountId {
     }
 }
 
-/// Verify that HMAC-SHA256(secret, account_id) matches the provided hex signature.
-/// Uses constant-time comparison via `hmac::Mac::verify_slice`.
-///
-/// # Security notes
-///
-/// - `hex::decode` is NOT constant-time: it will return early on invalid hex
-///   characters. This leaks whether the input was valid hex, but does NOT
-///   leak any bits of the expected signature. Acceptable trade-off: an
-///   attacker already knows the expected format is hex.
-/// - `verify_slice` internally uses `subtle::ConstantTimeEq`, so the actual
-///   HMAC comparison is timing-safe.
-#[deprecated(note = "Use verify_account_signature with replay protection instead")]
-#[allow(dead_code)]
-pub fn verify_account_sig(secret: &str, account_id: &str, sig_hex: &str) -> bool {
-    let Ok(sig_bytes) = hex::decode(sig_hex) else {
-        return false;
-    };
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(account_id.as_bytes());
-    mac.verify_slice(&sig_bytes).is_ok()
-}
-
 /// Middleware: verify `X-Account-Sig` HMAC-SHA256 signature when a shared
 /// secret is configured in `AppState.account_sig_secret`.
 ///
@@ -1128,35 +1105,6 @@ pub async fn account_sig_check(
             );
             rejection
         }
-    }
-}
-
-/// Core account signature policy check -- pure function, fully testable.
-///
-/// Returns None if the request should pass through, or Some(error_message)
-/// if it must be rejected with 401.
-///
-/// Policy matrix:
-/// | secret | account_id | sig     | Result                          |
-/// |--------|------------|---------|----------------------------------|
-/// | absent | any        | any     | None (pass)                      |
-/// | any    | absent     | any     | None (pass)                      |
-/// | present| present    | absent  | Some("Missing X-Account-Sig ...") |
-/// | present| present    | invalid | Some("Invalid account signature") |
-/// | present| present    | valid   | None (pass)                      |
-#[deprecated(note = "Middleware now uses extract_verified_account with replay protection")]
-#[allow(deprecated, dead_code)]
-pub(crate) fn account_sig_policy(
-    secret: Option<&str>,
-    account_id: Option<&str>,
-    sig: Option<&str>,
-) -> Option<&'static str> {
-    let secret = secret?;
-    let account_id = account_id?;
-    match sig {
-        None => Some("Missing X-Account-Sig header"),
-        Some(s) if !verify_account_sig(secret, account_id, s) => Some("Invalid account signature"),
-        Some(_) => None,
     }
 }
 
@@ -1403,110 +1351,6 @@ mod account_tests {
             .unwrap_err();
         assert_eq!(code, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"], "X-Account-Id required");
-    }
-
-    // ─── Legacy Signature Verification (7 tests) ───
-    // These test the deprecated legacy HMAC functions. Kept for coverage of
-    // the legacy fallback path in verify_account_signature.
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_verify_account_sig_valid_hmac() {
-        let secret = "my-secret";
-        let account_id = "tenant-123";
-        let sig_hex = {
-            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-            mac.update(account_id.as_bytes());
-            hex::encode(mac.finalize().into_bytes())
-        };
-        assert!(verify_account_sig(secret, account_id, &sig_hex));
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_verify_account_sig_invalid_hmac() {
-        assert!(!verify_account_sig("secret", "tenant-123", "deadbeef"));
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_verify_account_sig_malformed_hex() {
-        assert!(!verify_account_sig("secret", "tenant-123", "not-hex"));
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_verify_account_sig_empty_hex() {
-        assert!(!verify_account_sig("secret", "tenant-123", ""));
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_passes_when_no_secret() {
-        assert_eq!(account_sig_policy(None, Some("tenant-123"), None), None);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_passes_when_no_account_id() {
-        assert_eq!(account_sig_policy(Some("secret"), None, Some("sig")), None);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_requires_sig_when_secret_and_account_present() {
-        assert_eq!(
-            account_sig_policy(Some("secret"), Some("tenant-123"), None),
-            Some("Missing X-Account-Sig header")
-        );
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_rejects_invalid_sig() {
-        assert_eq!(
-            account_sig_policy(Some("secret"), Some("tenant-123"), Some("invalid")),
-            Some("Invalid account signature")
-        );
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_accepts_valid_sig() {
-        let secret = "my-secret";
-        let account_id = "tenant-123";
-        let sig_hex = {
-            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-            mac.update(account_id.as_bytes());
-            hex::encode(mac.finalize().into_bytes())
-        };
-        assert_eq!(
-            account_sig_policy(Some(secret), Some(account_id), Some(&sig_hex)),
-            None
-        );
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_matrix_row_1_no_secret() {
-        // Row 1: no secret configured -> always pass regardless of other headers
-        assert_eq!(
-            account_sig_policy(None, Some("acc-123"), Some("any-sig")),
-            None
-        );
-        assert_eq!(account_sig_policy(None, Some("acc-123"), None), None);
-        assert_eq!(account_sig_policy(None, None, None), None);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_matrix_row_2_no_account_id() {
-        // Row 2: no account_id header -> pass regardless of secret/sig
-        assert_eq!(
-            account_sig_policy(Some("secret"), None, Some("any-sig")),
-            None
-        );
-        assert_eq!(account_sig_policy(Some("secret"), None, None), None);
     }
 
     // ─── From conversion between middleware and types-crate AccountId ───
