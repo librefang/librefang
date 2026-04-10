@@ -3408,9 +3408,17 @@ pub async fn list_webhooks(
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
+    let account_id = match &account.0 {
+        Some(id) => id.clone(),
+        None => {
+            return ApiErrorResponse::bad_request("account context required")
+                .into_json_tuple()
+                .into_response()
+        }
+    };
     let webhooks: Vec<_> = state
         .webhook_store
-        .list()
+        .list_scoped(&account_id)
         .iter()
         .map(crate::webhook_store::redact_webhook_secret)
         .collect();
@@ -3433,6 +3441,14 @@ pub async fn get_webhook(
         return (code, json).into_response();
     }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let account_id = match &account.0 {
+        Some(id) => id.clone(),
+        None => {
+            return ApiErrorResponse::bad_request(t.t("account context required"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
     let wh_id = match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => crate::webhook_store::WebhookId(uuid),
         Err(_) => {
@@ -3441,7 +3457,7 @@ pub async fn get_webhook(
                 .into_response();
         }
     };
-    match state.webhook_store.get(wh_id) {
+    match state.webhook_store.get_scoped(wh_id, &account_id) {
         Some(wh) => {
             let redacted = crate::webhook_store::redact_webhook_secret(&wh);
             match serde_json::to_value(&redacted) {
@@ -3468,7 +3484,15 @@ pub async fn create_webhook(
         return (code, json).into_response();
     }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    match state.webhook_store.create(req) {
+    let account_id = match &account.0 {
+        Some(id) => id.clone(),
+        None => {
+            return ApiErrorResponse::bad_request(t.t("account context required"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    match state.webhook_store.create_scoped(req, account_id) {
         Ok(webhook) => {
             let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
             match serde_json::to_value(&redacted) {
@@ -3496,10 +3520,18 @@ pub async fn update_webhook(
         return (code, json).into_response();
     }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let account_id = match &account.0 {
+        Some(id) => id.clone(),
+        None => {
+            return ApiErrorResponse::bad_request(t.t("account context required"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let wh_id = crate::webhook_store::WebhookId(uuid);
-            match state.webhook_store.update(wh_id, req) {
+            match state.webhook_store.update_scoped(wh_id, &account_id, req) {
                 Ok(webhook) => {
                     let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
                     match serde_json::to_value(&redacted) {
@@ -3533,10 +3565,18 @@ pub async fn delete_webhook(
         return (code, json).into_response();
     }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let account_id = match &account.0 {
+        Some(id) => id.clone(),
+        None => {
+            return ApiErrorResponse::bad_request(t.t("account context required"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let wh_id = crate::webhook_store::WebhookId(uuid);
-            if state.webhook_store.delete(wh_id) {
+            if state.webhook_store.delete_scoped(wh_id, &account_id) {
                 (
                     StatusCode::OK,
                     Json(serde_json::json!({"status": "deleted"})),
@@ -3567,12 +3607,21 @@ pub async fn test_webhook(
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
-    let (err_invalid_id, err_not_found) = {
+    let (err_account_required, err_invalid_id, err_not_found) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
+            t.t("account context required"),
             t.t("api-error-webhook-invalid-id"),
             t.t("api-error-webhook-not-found"),
         )
+    };
+    let account_id = match &account.0 {
+        Some(id) => id.clone(),
+        None => {
+            return ApiErrorResponse::bad_request(err_account_required)
+                .into_json_tuple()
+                .into_response()
+        }
     };
     let wh_id = match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => crate::webhook_store::WebhookId(uuid),
@@ -3583,7 +3632,7 @@ pub async fn test_webhook(
         }
     };
 
-    let webhook = match state.webhook_store.get(wh_id) {
+    let webhook = match state.webhook_store.get_scoped(wh_id, &account_id) {
         Some(w) => w,
         None => {
             return ApiErrorResponse::not_found(err_not_found)
