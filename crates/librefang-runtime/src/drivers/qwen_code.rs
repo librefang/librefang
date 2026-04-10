@@ -197,7 +197,7 @@ impl QwenCodeDriver {
         args.push("--output-format".to_string());
         if streaming {
             args.push("stream-json".to_string());
-            args.push("--verbose".to_string());
+            args.push("--include-partial-messages".to_string());
         } else {
             args.push("json".to_string());
         }
@@ -712,7 +712,7 @@ mod tests {
         let driver = QwenCodeDriver::new(None, true);
         let args = driver.build_args("test prompt", "qwen-code/qwen3-coder", true);
         assert!(args.contains(&"stream-json".to_string()));
-        assert!(args.contains(&"--verbose".to_string()));
+        assert!(args.contains(&"--include-partial-messages".to_string()));
     }
 
     #[test]
