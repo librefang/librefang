@@ -112,16 +112,29 @@ impl CachedToolList {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct WorkspaceCacheKey {
+    account_id: Option<String>,
+    workspace: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SkillCacheKey {
+    account_id: Option<String>,
+    allowlist: Vec<String>,
+}
+
 /// Thread-safe cache for prompt-building metadata. Avoids redundant filesystem
 /// scans and skill registry iteration on every incoming message.
 ///
-/// Keyed by workspace path (for workspace metadata) and a sorted skill
-/// allowlist string (for skill metadata). Entries expire after [`PROMPT_CACHE_TTL`].
+/// Keyed by typed `(account_id, workspace path)` and `(account_id, allowlist)`
+/// structs rather than delimiter-built strings. Entries
+/// expire after [`PROMPT_CACHE_TTL`].
 ///
 /// Invalidated explicitly on skill reload, config reload, or workspace change.
 struct PromptMetadataCache {
-    workspace: dashmap::DashMap<PathBuf, CachedWorkspaceMetadata>,
-    skills: dashmap::DashMap<String, CachedSkillMetadata>,
+    workspace: dashmap::DashMap<WorkspaceCacheKey, CachedWorkspaceMetadata>,
+    skills: dashmap::DashMap<SkillCacheKey, CachedSkillMetadata>,
     /// Per-agent cached tool list. Invalidated by TTL, generation counters
     /// (skill reload / MCP tool changes), or explicit removal.
     tools: dashmap::DashMap<AgentId, CachedToolList>,
@@ -143,14 +156,22 @@ impl PromptMetadataCache {
         self.tools.clear();
     }
 
-    /// Build a cache key for the skill allowlist.
-    fn skill_cache_key(allowlist: &[String]) -> String {
-        if allowlist.is_empty() {
-            return String::from("*");
+    fn workspace_cache_key(account_id: Option<&str>, workspace: &Path) -> WorkspaceCacheKey {
+        WorkspaceCacheKey {
+            account_id: account_id.map(str::to_owned),
+            workspace: workspace.to_path_buf(),
         }
+    }
+
+    /// Build a tenant-scoped cache key for the skill allowlist.
+    fn skill_cache_key(account_id: Option<&str>, allowlist: &[String]) -> SkillCacheKey {
         let mut sorted = allowlist.to_vec();
         sorted.sort();
-        sorted.join(",")
+        sorted.dedup();
+        SkillCacheKey {
+            account_id: account_id.map(str::to_owned),
+            allowlist: sorted,
+        }
     }
 }
 
@@ -3267,10 +3288,13 @@ system_prompt = "You are a helpful assistant."
                 })
                 .collect();
 
-            let ws_meta = manifest
-                .workspace
-                .as_ref()
-                .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
+            let ws_meta = manifest.workspace.as_ref().map(|w| {
+                self.cached_workspace_metadata(
+                    entry.account_id.as_deref(),
+                    w,
+                    manifest.autonomous.is_some(),
+                )
+            });
 
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
@@ -3861,16 +3885,19 @@ system_prompt = "You are a helpful assistant."
                 .collect();
 
             // Use cached workspace metadata (identity files + workspace context)
-            let ws_meta = manifest
-                .workspace
-                .as_ref()
-                .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
+            let ws_meta = manifest.workspace.as_ref().map(|w| {
+                self.cached_workspace_metadata(
+                    entry.account_id.as_deref(),
+                    w,
+                    manifest.autonomous.is_some(),
+                )
+            });
 
             // Use cached skill metadata (summary + prompt context)
             let skill_meta = if manifest.skills_disabled {
                 None
             } else {
-                Some(self.cached_skill_metadata(&manifest.skills))
+                Some(self.cached_skill_metadata(entry.account_id.as_deref(), &manifest.skills))
             };
 
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
@@ -4847,16 +4874,19 @@ system_prompt = "You are a helpful assistant."
                 .collect();
 
             // Use cached workspace metadata (identity files + workspace context)
-            let ws_meta = manifest
-                .workspace
-                .as_ref()
-                .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
+            let ws_meta = manifest.workspace.as_ref().map(|w| {
+                self.cached_workspace_metadata(
+                    entry.account_id.as_deref(),
+                    w,
+                    manifest.autonomous.is_some(),
+                )
+            });
 
             // Use cached skill metadata (summary + prompt context)
             let skill_meta = if manifest.skills_disabled {
                 None
             } else {
-                Some(self.cached_skill_metadata(&manifest.skills))
+                Some(self.cached_skill_metadata(entry.account_id.as_deref(), &manifest.skills))
             };
 
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
@@ -9453,10 +9483,13 @@ system_prompt = "You are a helpful assistant."
     /// identity file reads do path canonicalization and file I/O for up to 7 files.
     fn cached_workspace_metadata(
         &self,
+        account_id: Option<&str>,
         workspace: &Path,
         is_autonomous: bool,
     ) -> CachedWorkspaceMetadata {
-        if let Some(entry) = self.prompt_metadata_cache.workspace.get(workspace) {
+        let cache_key = PromptMetadataCache::workspace_cache_key(account_id, workspace);
+
+        if let Some(entry) = self.prompt_metadata_cache.workspace.get(&cache_key) {
             if !entry.is_expired() {
                 return entry.clone();
             }
@@ -9484,14 +9517,18 @@ system_prompt = "You are a helpful assistant."
 
         self.prompt_metadata_cache
             .workspace
-            .insert(workspace.to_path_buf(), metadata.clone());
+            .insert(cache_key, metadata.clone());
         metadata
     }
 
     /// Get cached skill summary and prompt context for the given allowlist,
     /// rebuilding if the cache entry has expired.
-    fn cached_skill_metadata(&self, skill_allowlist: &[String]) -> CachedSkillMetadata {
-        let cache_key = PromptMetadataCache::skill_cache_key(skill_allowlist);
+    fn cached_skill_metadata(
+        &self,
+        account_id: Option<&str>,
+        skill_allowlist: &[String],
+    ) -> CachedSkillMetadata {
+        let cache_key = PromptMetadataCache::skill_cache_key(account_id, skill_allowlist);
 
         if let Some(entry) = self.prompt_metadata_cache.skills.get(&cache_key) {
             if !entry.is_expired() {
@@ -12347,6 +12384,60 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
+    }
+
+    #[test]
+    fn prompt_metadata_workspace_cache_key_is_tenant_scoped() {
+        let workspace = std::path::Path::new("/tmp/shared-workspace");
+        let tenant_a = PromptMetadataCache::workspace_cache_key(Some("tenant-a"), workspace);
+        let tenant_b = PromptMetadataCache::workspace_cache_key(Some("tenant-b"), workspace);
+
+        assert_ne!(tenant_a, tenant_b);
+    }
+
+    #[test]
+    fn prompt_metadata_skill_cache_key_is_tenant_scoped() {
+        let allowlist = vec!["skills.alpha".to_string(), "skills.beta".to_string()];
+
+        let tenant_a = PromptMetadataCache::skill_cache_key(Some("tenant-a"), &allowlist);
+        let tenant_b = PromptMetadataCache::skill_cache_key(Some("tenant-b"), &allowlist);
+
+        assert_ne!(tenant_a, tenant_b);
+    }
+
+    #[test]
+    fn prompt_metadata_skill_cache_key_distinguishes_none_from_scoped() {
+        let allowlist = vec!["skills.alpha".to_string()];
+
+        let none_key = PromptMetadataCache::skill_cache_key(None, &allowlist);
+        let scoped_key = PromptMetadataCache::skill_cache_key(Some("*"), &allowlist);
+
+        assert_ne!(none_key, scoped_key);
+    }
+
+    #[test]
+    fn prompt_metadata_skill_cache_key_resists_delimiter_injection() {
+        let allowlist = vec!["skills.alpha".to_string(), "skills.beta".to_string()];
+
+        let injected = PromptMetadataCache::skill_cache_key(Some("tenant|*"), &allowlist);
+        let legit = PromptMetadataCache::skill_cache_key(Some("tenant"), &allowlist);
+
+        assert_ne!(injected, legit);
+    }
+
+    #[test]
+    fn prompt_metadata_skill_cache_key_normalizes_allowlist_order_and_duplicates() {
+        let forward = vec![
+            "skills.alpha".to_string(),
+            "skills.beta".to_string(),
+            "skills.alpha".to_string(),
+        ];
+        let reverse = vec!["skills.beta".to_string(), "skills.alpha".to_string()];
+
+        let forward_key = PromptMetadataCache::skill_cache_key(Some("tenant-a"), &forward);
+        let reverse_key = PromptMetadataCache::skill_cache_key(Some("tenant-a"), &reverse);
+
+        assert_eq!(forward_key, reverse_key);
     }
 
     #[test]

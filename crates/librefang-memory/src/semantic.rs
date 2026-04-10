@@ -18,6 +18,41 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, warn};
 
+const DEFAULT_ACCOUNT_ID: &str = "default";
+
+fn normalized_account_id(metadata: &HashMap<String, serde_json::Value>) -> String {
+    match metadata.get("account_id") {
+        Some(value) => match value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(account_id) => account_id.to_string(),
+            None => {
+                warn!(
+                    account_id_value = %value,
+                    fallback = DEFAULT_ACCOUNT_ID,
+                    "Memory metadata account_id was invalid; normalizing to default account"
+                );
+                DEFAULT_ACCOUNT_ID.to_string()
+            }
+        },
+        None => {
+            warn!(
+                fallback = DEFAULT_ACCOUNT_ID,
+                "Memory metadata missing account_id; normalizing to default account"
+            );
+            DEFAULT_ACCOUNT_ID.to_string()
+        }
+    }
+}
+
+fn filter_account_id(filter: Option<&MemoryFilter>) -> Option<&str> {
+    filter
+        .and_then(|f| f.metadata.get("account_id"))
+        .and_then(|v| v.as_str())
+}
+
 /// Semantic store backed by SQLite with optional vector search.
 ///
 /// When a [`VectorStore`] backend is provided, vector similarity search in
@@ -135,6 +170,7 @@ impl SemanticStore {
             .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let meta_str = serde_json::to_string(&metadata)
             .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let account_id = normalized_account_id(&metadata);
         let embedding_bytes: Option<Vec<u8>> = embedding.map(embedding_to_bytes);
         let image_embedding_bytes: Option<Vec<u8>> = image_embedding.map(embedding_to_bytes);
         let modality_str = serde_json::to_string(&modality)
@@ -143,8 +179,8 @@ impl SemanticStore {
         let modality_str = modality_str.trim_matches('"');
 
         conn.execute(
-            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding, image_url, image_embedding, modality, peer_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6, ?7, ?7, 0, 0, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, account_id, created_at, accessed_at, access_count, deleted, embedding, image_url, image_embedding, modality, peer_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6, ?7, ?8, ?8, 0, 0, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 id.0.to_string(),
                 agent_id.0.to_string(),
@@ -152,6 +188,7 @@ impl SemanticStore {
                 source_str,
                 scope,
                 meta_str,
+                account_id,
                 now,
                 embedding_bytes,
                 image_url,
@@ -259,10 +296,14 @@ impl SemanticStore {
                 if let Some(s) = value.as_str() {
                     // Reject keys with non-alphanumeric characters to prevent injection
                     if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                        sql.push_str(&format!(
-                            " AND json_extract(metadata, '$.{}') = ?{param_idx}",
-                            key
-                        ));
+                        if key == "account_id" {
+                            sql.push_str(&format!(" AND account_id = ?{param_idx}"));
+                        } else {
+                            sql.push_str(&format!(
+                                " AND json_extract(metadata, '$.{}') = ?{param_idx}",
+                                key
+                            ));
+                        }
                         params.push(Box::new(s.to_string()));
                         param_idx += 1;
                     }
@@ -448,11 +489,16 @@ impl SemanticStore {
 
         // Hydrate full MemoryFragments from SQLite by ID
         let mut fragments = Vec::with_capacity(results.len());
+        let scoped_account_id = filter_account_id(filter.as_ref());
         for r in &results {
             let mem_id = uuid::Uuid::parse_str(&r.id)
                 .map(MemoryId)
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-            if let Some(frag) = self.get_by_id(mem_id, false)? {
+            let frag = match scoped_account_id {
+                Some(account_id) => self.get_by_id_scoped(mem_id, account_id, false)?,
+                None => self.get_by_id(mem_id, false)?,
+            };
+            if let Some(frag) = frag {
                 fragments.push(frag);
             }
         }
@@ -481,6 +527,25 @@ impl SemanticStore {
         id: MemoryId,
         include_deleted: bool,
     ) -> LibreFangResult<Option<MemoryFragment>> {
+        self.get_by_id_inner(id, None, include_deleted)
+    }
+
+    /// Get a single memory fragment by ID, restricted to a concrete account.
+    pub fn get_by_id_scoped(
+        &self,
+        id: MemoryId,
+        account_id: &str,
+        include_deleted: bool,
+    ) -> LibreFangResult<Option<MemoryFragment>> {
+        self.get_by_id_inner(id, Some(account_id), include_deleted)
+    }
+
+    fn get_by_id_inner(
+        &self,
+        id: MemoryId,
+        account_id: Option<&str>,
+        include_deleted: bool,
+    ) -> LibreFangResult<Option<MemoryFragment>> {
         let conn = self
             .conn
             .lock()
@@ -491,47 +556,90 @@ impl SemanticStore {
         } else {
             " AND deleted = 0"
         };
-        let sql = format!(
-            "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding, image_url, image_embedding, modality
-             FROM memories WHERE id = ?1{deleted_clause}",
-        );
+        let sql = if account_id.is_some() {
+            format!(
+                "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding, image_url, image_embedding, modality
+                 FROM memories WHERE id = ?1 AND account_id = ?2{deleted_clause}",
+            )
+        } else {
+            format!(
+                "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding, image_url, image_embedding, modality
+                 FROM memories WHERE id = ?1{deleted_clause}",
+            )
+        };
 
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
-        let result = stmt.query_row(rusqlite::params![id.0.to_string()], |row| {
-            let id_str: String = row.get(0)?;
-            let agent_str: String = row.get(1)?;
-            let content: String = row.get(2)?;
-            let source_str: String = row.get(3)?;
-            let scope: String = row.get(4)?;
-            let confidence: f64 = row.get(5)?;
-            let meta_str: String = row.get(6)?;
-            let created_str: String = row.get(7)?;
-            let accessed_str: String = row.get(8)?;
-            let access_count: i64 = row.get(9)?;
-            let embedding_bytes: Option<Vec<u8>> = row.get(10)?;
-            let image_url: Option<String> = row.get(11)?;
-            let image_embedding_bytes: Option<Vec<u8>> = row.get(12)?;
-            let modality_str: Option<String> = row.get(13)?;
-            Ok((
-                id_str,
-                agent_str,
-                content,
-                source_str,
-                scope,
-                confidence,
-                meta_str,
-                created_str,
-                accessed_str,
-                access_count,
-                embedding_bytes,
-                image_url,
-                image_embedding_bytes,
-                modality_str,
-            ))
-        });
+        let result = match account_id {
+            Some(account_id) => {
+                stmt.query_row(rusqlite::params![id.0.to_string(), account_id], |row| {
+                    let id_str: String = row.get(0)?;
+                    let agent_str: String = row.get(1)?;
+                    let content: String = row.get(2)?;
+                    let source_str: String = row.get(3)?;
+                    let scope: String = row.get(4)?;
+                    let confidence: f64 = row.get(5)?;
+                    let meta_str: String = row.get(6)?;
+                    let created_str: String = row.get(7)?;
+                    let accessed_str: String = row.get(8)?;
+                    let access_count: i64 = row.get(9)?;
+                    let embedding_bytes: Option<Vec<u8>> = row.get(10)?;
+                    let image_url: Option<String> = row.get(11)?;
+                    let image_embedding_bytes: Option<Vec<u8>> = row.get(12)?;
+                    let modality_str: Option<String> = row.get(13)?;
+                    Ok((
+                        id_str,
+                        agent_str,
+                        content,
+                        source_str,
+                        scope,
+                        confidence,
+                        meta_str,
+                        created_str,
+                        accessed_str,
+                        access_count,
+                        embedding_bytes,
+                        image_url,
+                        image_embedding_bytes,
+                        modality_str,
+                    ))
+                })
+            }
+            None => stmt.query_row(rusqlite::params![id.0.to_string()], |row| {
+                let id_str: String = row.get(0)?;
+                let agent_str: String = row.get(1)?;
+                let content: String = row.get(2)?;
+                let source_str: String = row.get(3)?;
+                let scope: String = row.get(4)?;
+                let confidence: f64 = row.get(5)?;
+                let meta_str: String = row.get(6)?;
+                let created_str: String = row.get(7)?;
+                let accessed_str: String = row.get(8)?;
+                let access_count: i64 = row.get(9)?;
+                let embedding_bytes: Option<Vec<u8>> = row.get(10)?;
+                let image_url: Option<String> = row.get(11)?;
+                let image_embedding_bytes: Option<Vec<u8>> = row.get(12)?;
+                let modality_str: Option<String> = row.get(13)?;
+                Ok((
+                    id_str,
+                    agent_str,
+                    content,
+                    source_str,
+                    scope,
+                    confidence,
+                    meta_str,
+                    created_str,
+                    accessed_str,
+                    access_count,
+                    embedding_bytes,
+                    image_url,
+                    image_embedding_bytes,
+                    modality_str,
+                ))
+            }),
+        };
 
         match result {
             Ok((
@@ -627,9 +735,10 @@ impl SemanticStore {
         if let Some(meta) = new_metadata {
             let meta_str = serde_json::to_string(&meta)
                 .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+            let account_id = normalized_account_id(&meta);
             conn.execute(
-                "UPDATE memories SET content = ?1, metadata = ?2, accessed_at = ?3 WHERE id = ?4 AND deleted = 0",
-                rusqlite::params![new_content, meta_str, now, id.0.to_string()],
+                "UPDATE memories SET content = ?1, metadata = ?2, account_id = ?3, accessed_at = ?4 WHERE id = ?5 AND deleted = 0",
+                rusqlite::params![new_content, meta_str, account_id, now, id.0.to_string()],
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         } else {
@@ -662,6 +771,23 @@ impl SemanticStore {
     /// Returns a map of `id_string -> embedding_vec`. IDs without stored
     /// embeddings are simply omitted from the result.
     pub fn get_embeddings_batch(&self, ids: &[&str]) -> LibreFangResult<HashMap<String, Vec<f32>>> {
+        self.get_embeddings_batch_inner(ids, None)
+    }
+
+    /// Load stored embeddings for a batch of memory IDs, restricted to one account.
+    pub fn get_embeddings_batch_scoped(
+        &self,
+        ids: &[&str],
+        account_id: &str,
+    ) -> LibreFangResult<HashMap<String, Vec<f32>>> {
+        self.get_embeddings_batch_inner(ids, Some(account_id))
+    }
+
+    fn get_embeddings_batch_inner(
+        &self,
+        ids: &[&str],
+        account_id: Option<&str>,
+    ) -> LibreFangResult<HashMap<String, Vec<f32>>> {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -673,14 +799,28 @@ impl SemanticStore {
         // SQLite doesn't support IN with parameterized lists easily for large N,
         // so we query one at a time for safety (N ≤ 100 in find_duplicates).
         let mut map = HashMap::new();
-        let mut stmt = conn
-            .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut stmt = match account_id {
+            Some(_) => conn
+                .prepare(
+                    "SELECT embedding FROM memories WHERE id = ?1 AND account_id = ?2 AND deleted = 0",
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?,
+            None => conn
+                .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?,
+        };
         for id in ids {
-            if let Ok(Some(b)) = stmt.query_row(rusqlite::params![*id], |row| {
-                let b: Option<Vec<u8>> = row.get(0)?;
-                Ok(b)
-            }) {
+            let result = match account_id {
+                Some(account_id) => stmt.query_row(rusqlite::params![*id, account_id], |row| {
+                    let b: Option<Vec<u8>> = row.get(0)?;
+                    Ok(b)
+                }),
+                None => stmt.query_row(rusqlite::params![*id], |row| {
+                    let b: Option<Vec<u8>> = row.get(0)?;
+                    Ok(b)
+                }),
+            };
+            if let Ok(Some(b)) = result {
                 if !b.is_empty() {
                     map.insert(id.to_string(), embedding_from_bytes(&b));
                 }
@@ -900,7 +1040,7 @@ impl SemanticStore {
     }
 
     /// Count non-deleted memories belonging to a specific account, optionally
-    /// filtered by scope.  Uses `json_extract` for an index-friendly COUNT.
+    /// filtered by scope. Uses the physical `account_id` column for index-friendly COUNT.
     pub fn count_by_account(&self, account_id: &str, scope: Option<&str>) -> LibreFangResult<u64> {
         let conn = self
             .conn
@@ -909,7 +1049,7 @@ impl SemanticStore {
         let count: i64 = if let Some(s) = scope {
             conn.query_row(
                 "SELECT COUNT(*) FROM memories \
-                 WHERE json_extract(metadata, '$.account_id') = ?1 \
+                 WHERE account_id = ?1 \
                  AND scope = ?2 AND deleted = 0",
                 rusqlite::params![account_id, s],
                 |row| row.get(0),
@@ -917,7 +1057,7 @@ impl SemanticStore {
         } else {
             conn.query_row(
                 "SELECT COUNT(*) FROM memories \
-                 WHERE json_extract(metadata, '$.account_id') = ?1 AND deleted = 0",
+                 WHERE account_id = ?1 AND deleted = 0",
                 rusqlite::params![account_id],
                 |row| row.get(0),
             )
@@ -942,7 +1082,7 @@ impl SemanticStore {
             conn.query_row(
                 "SELECT COUNT(*) FROM memories \
                  WHERE agent_id = ?1 \
-                 AND json_extract(metadata, '$.account_id') = ?2 \
+                 AND account_id = ?2 \
                  AND scope = ?3 AND deleted = 0",
                 rusqlite::params![agent_id.0.to_string(), account_id, s],
                 |row| row.get(0),
@@ -951,7 +1091,7 @@ impl SemanticStore {
             conn.query_row(
                 "SELECT COUNT(*) FROM memories \
                  WHERE agent_id = ?1 \
-                 AND json_extract(metadata, '$.account_id') = ?2 AND deleted = 0",
+                 AND account_id = ?2 AND deleted = 0",
                 rusqlite::params![agent_id.0.to_string(), account_id],
                 |row| row.get(0),
             )
@@ -977,7 +1117,7 @@ impl SemanticStore {
                     "SELECT json_extract(metadata, '$.category') AS cat, COUNT(*) \
                      FROM memories \
                      WHERE agent_id = ?1 \
-                     AND json_extract(metadata, '$.account_id') = ?2 \
+                     AND account_id = ?2 \
                      AND deleted = 0 \
                      AND json_extract(metadata, '$.category') IS NOT NULL \
                      GROUP BY cat"
@@ -991,7 +1131,7 @@ impl SemanticStore {
                 (
                     "SELECT json_extract(metadata, '$.category') AS cat, COUNT(*) \
                      FROM memories \
-                     WHERE json_extract(metadata, '$.account_id') = ?1 \
+                     WHERE account_id = ?1 \
                      AND deleted = 0 \
                      AND json_extract(metadata, '$.category') IS NOT NULL \
                      GROUP BY cat"
@@ -1144,6 +1284,22 @@ impl VectorStore for SqliteVectorStore {
                 sql.push_str(&format!(" AND scope = ?{param_idx}"));
                 params.push(Box::new(scope.clone()));
                 param_idx += 1;
+            }
+            for (key, value) in &f.metadata {
+                if let Some(s) = value.as_str() {
+                    if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        if key == "account_id" {
+                            sql.push_str(&format!(" AND account_id = ?{param_idx}"));
+                        } else {
+                            sql.push_str(&format!(
+                                " AND json_extract(metadata, '$.{}') = ?{param_idx}",
+                                key
+                            ));
+                        }
+                        params.push(Box::new(s.to_string()));
+                        param_idx += 1;
+                    }
+                }
             }
             let _ = param_idx;
         }
@@ -1514,6 +1670,137 @@ mod tests {
         assert_eq!(results.len(), 2);
         // Embedded memory should rank first
         assert_eq!(results[0].content, "Has embedding");
+    }
+
+    #[test]
+    fn test_count_by_account_uses_physical_account_column() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut metadata = HashMap::new();
+        metadata.insert("account_id".to_string(), serde_json::json!("tenant-a"));
+
+        store
+            .remember(
+                agent_id,
+                "Tenant A memory",
+                MemorySource::Conversation,
+                "episodic",
+                metadata,
+            )
+            .unwrap();
+
+        assert_eq!(store.count_by_account("tenant-a", None).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_by_agent_and_account(agent_id, "tenant-a", Some("episodic"))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_update_content_syncs_account_id_column() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let id = store
+            .remember(
+                agent_id,
+                "Tenant memory",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let mut metadata = HashMap::new();
+        metadata.insert("account_id".to_string(), serde_json::json!("tenant-b"));
+        store
+            .update_content(id, "Tenant memory updated", Some(metadata))
+            .unwrap();
+
+        assert_eq!(store.count_by_account("tenant-b", None).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_get_by_id_scoped_respects_account_boundary() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut metadata = HashMap::new();
+        metadata.insert("account_id".to_string(), serde_json::json!("tenant-a"));
+        let id = store
+            .remember(
+                agent_id,
+                "Tenant A only",
+                MemorySource::Conversation,
+                "episodic",
+                metadata,
+            )
+            .unwrap();
+
+        assert!(store
+            .get_by_id_scoped(id, "tenant-a", false)
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_by_id_scoped(id, "tenant-b", false)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_vector_store_search_respects_account_filter() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        {
+            let locked = conn.lock().unwrap();
+            run_migrations(&locked).unwrap();
+        }
+        let mut store = SemanticStore::new(Arc::clone(&conn));
+        store.set_vector_store(Arc::new(SqliteVectorStore::new(Arc::clone(&conn))));
+
+        let agent_id = AgentId::new();
+        let mut tenant_a = HashMap::new();
+        tenant_a.insert("account_id".to_string(), serde_json::json!("tenant-a"));
+        let mut tenant_b = HashMap::new();
+        tenant_b.insert("account_id".to_string(), serde_json::json!("tenant-b"));
+
+        store
+            .remember_with_embedding(
+                agent_id,
+                "Tenant A vector",
+                MemorySource::Conversation,
+                "episodic",
+                tenant_a,
+                Some(&[1.0, 0.0]),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+        store
+            .remember_with_embedding(
+                agent_id,
+                "Tenant B vector",
+                MemorySource::Conversation,
+                "episodic",
+                tenant_b,
+                Some(&[1.0, 0.0]),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+
+        let mut filter = MemoryFilter::agent(agent_id);
+        filter
+            .metadata
+            .insert("account_id".to_string(), serde_json::json!("tenant-a"));
+
+        let results = store
+            .recall_with_embedding("", 10, Some(filter), Some(&[1.0, 0.0]))
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "Tenant A vector");
     }
 
     #[test]

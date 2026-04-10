@@ -140,7 +140,7 @@ pub struct ProactiveMemoryStore {
     /// When absent, falls back to LIKE text matching.
     embedding: Option<Arc<dyn EmbeddingFn>>,
     /// Per-agent counters for auto-consolidation (runs every 10 auto_memorize calls per agent).
-    consolidation_counters: Arc<Mutex<HashMap<String, u32>>>,
+    consolidation_counters: Arc<Mutex<HashMap<ConsolidationCounterKey, u32>>>,
     /// Timestamp of the last confidence decay run (at most once per hour).
     last_decay_run: Arc<Mutex<Option<chrono::DateTime<Utc>>>>,
     /// Timestamp of the last session TTL cleanup run (at most once per hour).
@@ -164,7 +164,36 @@ impl Clone for ProactiveMemoryStore {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ConsolidationCounterKey {
+    account_id: Option<String>,
+    user_id: String,
+}
+
 impl ProactiveMemoryStore {
+    fn consolidation_counter_key(user_id: &str, scope: MemoryScope<'_>) -> ConsolidationCounterKey {
+        ConsolidationCounterKey {
+            account_id: scope.account_id.map(str::to_owned),
+            user_id: user_id.to_string(),
+        }
+    }
+
+    fn should_auto_consolidate(&self, user_id: &str, scope: MemoryScope<'_>) -> bool {
+        let counter_key = Self::consolidation_counter_key(user_id, scope);
+        let mut counters = self
+            .consolidation_counters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = counters.entry(counter_key.clone()).or_insert(0);
+        *entry += 1;
+        if *entry >= 10 {
+            counters.remove(&counter_key);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Create a new proactive memory store with default extractor.
     pub fn new(substrate: Arc<MemorySubstrate>, config: ProactiveMemoryConfig) -> Self {
         let conn = substrate.usage_conn();
@@ -494,7 +523,7 @@ impl ProactiveMemoryStore {
         // Agents that call auto_memorize < 10 times accumulate stale entries.
         if let Ok(mut counters) = self.consolidation_counters.lock() {
             if counters.len() > 1000 {
-                let mut entries: Vec<(String, u32)> = counters.drain().collect();
+                let mut entries: Vec<(ConsolidationCounterKey, u32)> = counters.drain().collect();
                 entries.sort_by(|a, b| b.1.cmp(&a.1));
                 entries.truncate(500);
                 *counters = entries.into_iter().collect();
@@ -1502,6 +1531,22 @@ impl ProactiveMemoryStore {
         }
     }
 
+    /// Look up the real agent_id for a memory by its ID, restricted to one tenant.
+    pub fn find_agent_id_for_memory_scoped(
+        &self,
+        memory_id: &str,
+        account_id: &str,
+    ) -> LibreFangResult<Option<AgentId>> {
+        let uuid = uuid::Uuid::parse_str(memory_id)
+            .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
+        let mid = MemoryId(uuid);
+
+        match self.semantic.get_by_id_scoped(mid, account_id, false)? {
+            Some(frag) => Ok(Some(frag.agent_id)),
+            None => Ok(None),
+        }
+    }
+
     /// Reset (soft-delete) ALL memories for a user/agent.
     pub fn reset(&self, user_id: &str) -> LibreFangResult<u64> {
         let agent_id = Self::parse_agent_id(user_id)?;
@@ -1630,6 +1675,32 @@ impl ProactiveMemoryStore {
             .unwrap_or_default();
 
         // Return in reverse chronological order (most recent first)
+        let mut history = history;
+        history.reverse();
+        Ok(history)
+    }
+
+    pub fn history_scoped(
+        &self,
+        memory_id: &str,
+        account_id: &str,
+    ) -> LibreFangResult<Vec<serde_json::Value>> {
+        let uuid = uuid::Uuid::parse_str(memory_id)
+            .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
+        let mid = MemoryId(uuid);
+
+        let frag = self
+            .semantic
+            .get_by_id_scoped(mid, account_id, false)?
+            .ok_or_else(|| LibreFangError::Internal("Memory not found".to_string()))?;
+
+        let history = frag
+            .metadata
+            .get("version_history")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
         let mut history = history;
         history.reverse();
         Ok(history)
@@ -2208,7 +2279,10 @@ impl ProactiveMemoryStore {
 
         // Look up the memory first (before deleting) so we can verify ownership
         // and capture the agent_id for KV cleanup.
-        let frag = match self.semantic.get_by_id(mid, false)? {
+        let frag = match match scope.account_id {
+            Some(account_id) => self.semantic.get_by_id_scoped(mid, account_id, false)?,
+            None => self.semantic.get_by_id(mid, false)?,
+        } {
             Some(f) => f,
             None => return Ok(()), // Memory not found — nothing to delete
         };
@@ -2411,6 +2485,21 @@ impl ProactiveMemoryStore {
 
         if !extraction_result.relations.is_empty() {
             self.store_relations(&extraction_result.relations, user_id);
+        }
+
+        if self.should_auto_consolidate(user_id, scope) {
+            match self.consolidate_scoped(user_id, scope).await {
+                Ok(merged) if merged > 0 => {
+                    tracing::info!(
+                        "Auto-consolidation (scoped): merged {} duplicate memories",
+                        merged
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!("Auto-consolidation (scoped) failed (non-fatal): {}", e);
+                }
+            }
         }
 
         Ok(ExtractionResult {
@@ -3047,22 +3136,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         }
 
         // Auto-consolidation: merge duplicates every 10 auto_memorize calls per agent
-        let should_consolidate = {
-            let mut counters = self
-                .consolidation_counters
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let entry = counters.entry(user_id.to_string()).or_insert(0);
-            *entry += 1;
-            if *entry >= 10 {
-                // Remove the entry to prevent unbounded HashMap growth
-                counters.remove(user_id);
-                true
-            } else {
-                false
-            }
-        };
-        if should_consolidate {
+        if self.should_auto_consolidate(user_id, MemoryScope::global()) {
             match self.consolidate(user_id).await {
                 Ok(merged) if merged > 0 => {
                     tracing::info!("Auto-consolidation: merged {} duplicate memories", merged);
@@ -3132,6 +3206,57 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_consolidation_counter_key_is_tenant_scoped() {
+        let tenant_a = ProactiveMemoryStore::consolidation_counter_key(
+            "agent-123",
+            MemoryScope::tenant("tenant-a"),
+        );
+        let tenant_b = ProactiveMemoryStore::consolidation_counter_key(
+            "agent-123",
+            MemoryScope::tenant("tenant-b"),
+        );
+
+        assert_ne!(tenant_a, tenant_b);
+    }
+
+    #[test]
+    fn test_auto_consolidation_counters_do_not_collide_across_tenants() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+
+        for _ in 0..9 {
+            assert!(!store.should_auto_consolidate("agent-123", MemoryScope::tenant("tenant-a")));
+        }
+        assert!(!store.should_auto_consolidate("agent-123", MemoryScope::tenant("tenant-b")));
+        assert!(store.should_auto_consolidate("agent-123", MemoryScope::tenant("tenant-a")));
+        assert!(!store.should_auto_consolidate("agent-123", MemoryScope::tenant("tenant-b")));
+    }
+
+    #[test]
+    fn test_consolidation_counter_key_distinguishes_none_from_scoped() {
+        let none_key =
+            ProactiveMemoryStore::consolidation_counter_key("agent-123", MemoryScope::global());
+        let scoped_key =
+            ProactiveMemoryStore::consolidation_counter_key("agent-123", MemoryScope::tenant("*"));
+
+        assert_ne!(none_key, scoped_key);
+    }
+
+    #[test]
+    fn test_consolidation_counter_key_resists_delimiter_injection() {
+        let injected = ProactiveMemoryStore::consolidation_counter_key(
+            "agent-123",
+            MemoryScope::tenant("tenant-a:other"),
+        );
+        let legit = ProactiveMemoryStore::consolidation_counter_key(
+            "agent-123",
+            MemoryScope::tenant("tenant-a"),
+        );
+
+        assert_ne!(injected, legit);
+    }
 
     #[tokio::test]
     async fn test_proactive_memory_search() {

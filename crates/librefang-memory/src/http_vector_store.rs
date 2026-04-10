@@ -43,6 +43,45 @@ impl HttpVectorStore {
     fn url(&self, path: &str) -> String {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }
+
+    fn expected_account_id(filter: Option<&MemoryFilter>) -> Option<&str> {
+        filter
+            .and_then(|filter| filter.metadata.get("account_id"))
+            .and_then(|value| value.as_str())
+    }
+
+    fn validate_search_item(
+        item: &SearchResponseItem,
+        expected_account_id: Option<&str>,
+    ) -> LibreFangResult<()> {
+        if let Some(expected_account_id) = expected_account_id {
+            let actual = item
+                .metadata
+                .get("account_id")
+                .and_then(|value| value.as_str());
+            if actual != Some(expected_account_id) {
+                return Err(LibreFangError::Internal(format!(
+                    "HTTP vector search returned mismatched account_id for id '{}'",
+                    item.id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_embedding_ids(
+        ids: &[&str],
+        map: &HashMap<String, Vec<f32>>,
+    ) -> LibreFangResult<()> {
+        let allowed: std::collections::HashSet<&str> = ids.iter().copied().collect();
+        if let Some(unexpected) = map.keys().find(|id| !allowed.contains(id.as_str())) {
+            return Err(LibreFangError::Internal(format!(
+                "HTTP vector get_embeddings returned unexpected id '{}'",
+                unexpected
+            )));
+        }
+        Ok(())
+    }
 }
 
 // ── Request / response DTOs ──────────────────────────────────────────────
@@ -148,6 +187,11 @@ impl VectorStore for HttpVectorStore {
             .json()
             .await
             .map_err(|e| LibreFangError::Internal(format!("HTTP vector search parse: {e}")))?;
+        let expected_account_id = Self::expected_account_id(body.filter);
+
+        for item in &items {
+            Self::validate_search_item(item, expected_account_id)?;
+        }
 
         Ok(items
             .into_iter()
@@ -204,6 +248,7 @@ impl VectorStore for HttpVectorStore {
         let map: HashMap<String, Vec<f32>> = resp.json().await.map_err(|e| {
             LibreFangError::Internal(format!("HTTP vector get_embeddings parse: {e}"))
         })?;
+        Self::validate_embedding_ids(ids, &map)?;
         Ok(map)
     }
 
@@ -215,6 +260,18 @@ impl VectorStore for HttpVectorStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{routing::post, Json, Router};
+    use librefang_types::memory::MemoryFilter;
+    use tokio::net::TcpListener;
+
+    async fn spawn_test_server(router: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve");
+        });
+        format!("http://{}", addr)
+    }
 
     #[test]
     fn test_url_building() {
@@ -227,5 +284,52 @@ mod tests {
     fn test_trailing_slash_stripped() {
         let store = HttpVectorStore::new("http://localhost:6333/v1/");
         assert_eq!(store.url("search"), "http://localhost:6333/v1/search");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_rejects_cross_tenant_response_items() {
+        let base = spawn_test_server(Router::new().route(
+            "/v1/search",
+            post(|| async {
+                Json(serde_json::json!([{
+                    "id": "mem-1",
+                    "payload": "leaked",
+                    "score": 0.9,
+                    "metadata": {"account_id": "tenant-b"}
+                }]))
+            }),
+        ))
+        .await;
+
+        let store = HttpVectorStore::new(format!("{base}/v1"));
+        let mut filter = MemoryFilter::default();
+        filter
+            .metadata
+            .insert("account_id".to_string(), serde_json::json!("tenant-a"));
+
+        let result = store.search(&[0.1, 0.2], 5, Some(filter)).await;
+        assert!(result.is_err());
+        let err = result.err().expect("error").to_string();
+        assert!(err.contains("mismatched account_id"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_embeddings_rejects_unrequested_ids() {
+        let base = spawn_test_server(Router::new().route(
+            "/v1/get_embeddings",
+            post(|| async {
+                Json(serde_json::json!({
+                    "mem-1": [0.1, 0.2],
+                    "mem-2": [0.3, 0.4]
+                }))
+            }),
+        ))
+        .await;
+
+        let store = HttpVectorStore::new(format!("{base}/v1"));
+        let result = store.get_embeddings(&["mem-1"]).await;
+        assert!(result.is_err());
+        let err = result.err().expect("error").to_string();
+        assert!(err.contains("unexpected id"));
     }
 }
