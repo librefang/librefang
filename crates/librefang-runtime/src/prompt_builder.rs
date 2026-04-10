@@ -1033,14 +1033,15 @@ mod tests {
     fn test_channel_group_chat_context() {
         let section = build_channel_section("whatsapp", Some("Alice"), None, true, false);
         assert!(section.contains("group chat"));
-        assert!(!section.contains("@mentioned"));
+        // Not mentioned — the "respond to this message" directive must be absent.
+        assert!(!section.contains("respond to this message"));
     }
 
     #[test]
     fn test_channel_group_mentioned() {
         let section = build_channel_section("whatsapp", Some("Bob"), None, true, true);
         assert!(section.contains("group chat"));
-        assert!(section.contains("@mentioned"));
+        assert!(section.contains("respond to this message"));
     }
 
     #[test]
