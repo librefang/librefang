@@ -373,6 +373,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "api_key_env": p.api_key_env,
             "base_url": p.base_url,
             "media_capabilities": p.media_capabilities,
+            "is_custom": p.is_custom,
         });
 
         // Attach region map so the dashboard can show available regions
@@ -483,6 +484,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             "api_key_env": p.api_key_env,
             "base_url": p.base_url,
             "media_capabilities": p.media_capabilities,
+            "is_custom": p.is_custom,
         });
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, state.kernel.model_catalog_ref());

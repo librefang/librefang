@@ -103,14 +103,10 @@ impl PtySession {
         Ok(())
     }
 
-    #[cfg(windows)]
-    pub fn resize(&mut self, _cols: u16, _rows: u16) -> std::io::Result<()> {
-        // Windows ConPTY resize is not yet implemented via portable-pty on this platform.
-        // TODO: investigate ConPTY resize support.
-        Ok(())
-    }
-
-    #[cfg(not(windows))]
+    /// Resize the underlying PTY. portable-pty 0.9 implements
+    /// `MasterPty::resize` on every backend it supports, including the
+    /// Windows ConPTY path (`ConPtyMasterPty`), so the same call works
+    /// cross-platform. Closes #2303.
     pub fn resize(&mut self, cols: u16, rows: u16) -> std::io::Result<()> {
         self._master
             .resize(PtySize {

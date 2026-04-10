@@ -522,6 +522,10 @@ export interface HandDefinitionItem {
   dashboard_metrics?: number;
   has_settings?: boolean;
   settings_count?: number;
+  /** True when the hand was installed by the user (lives under
+   *  `home/workspaces/{id}`). Built-in hands shipped by librefang-registry
+   *  report false and cannot be uninstalled. */
+  is_custom?: boolean;
 }
 
 export interface HandInstanceItem {
@@ -1833,6 +1837,13 @@ export async function deactivateHand(instanceId: string): Promise<ApiActionRespo
   return del<ApiActionResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}`);
 }
 
+/** Uninstall a user-installed hand. Fails with 404 for built-ins and
+ *  409 if there is still a live instance. Callers should deactivate
+ *  first, then call this. */
+export async function uninstallHand(handId: string): Promise<{ status: string; hand_id: string }> {
+  return del(`/api/hands/${encodeURIComponent(handId)}`);
+}
+
 export async function getHandStats(instanceId: string): Promise<HandStatsResponse> {
   return get<HandStatsResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/stats`);
 }
@@ -1870,6 +1881,15 @@ export async function getHandSettings(handId: string): Promise<HandSettingsRespo
 
 export async function setHandSecret(handId: string, key: string, value: string): Promise<{ ok: boolean }> {
   return post<{ ok: boolean }>(`/api/hands/${encodeURIComponent(handId)}/secret`, { key, value });
+}
+
+/** Update mutable settings on an active hand instance. The backend returns
+ *  404 if no instance exists for the hand — callers should guard accordingly. */
+export async function updateHandSettings(
+  handId: string,
+  config: Record<string, unknown>,
+): Promise<{ status: string; hand_id: string; instance_id: string; config: Record<string, unknown> }> {
+  return put(`/api/hands/${encodeURIComponent(handId)}/settings`, config);
 }
 
 export interface HandMessageResponse {

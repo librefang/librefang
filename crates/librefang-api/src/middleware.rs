@@ -264,7 +264,15 @@ pub async fn auth(
     } else {
         raw_path.clone()
     };
-    let path: &str = after_version.strip_suffix('/').unwrap_or(&after_version);
+    // Strip a trailing slash for consistent ACL matching, but preserve the
+    // root path "/" itself — otherwise stripping turns it into the empty
+    // string, and `is_public` checks that compare against "/" (e.g. for the
+    // dashboard HTML) silently miss, returning 401 for GET /.
+    let path: &str = if after_version == "/" {
+        "/"
+    } else {
+        after_version.strip_suffix('/').unwrap_or(&after_version)
+    };
     if path == "/api/shutdown" {
         let is_loopback = request
             .extensions()
@@ -795,6 +803,40 @@ mod tests {
         // After normalization "/api/agents/" → "/api/agents", which User
         // role is not allowed to POST to → FORBIDDEN.
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Regression for #2305: GET / must stay public. Earlier path
+    /// normalization stripped the trailing slash from "/" producing an
+    /// empty string, so the `path == "/"` public-endpoint check missed
+    /// and the dashboard HTML returned 401 instead of the SPA.
+    #[tokio::test]
+    async fn test_root_path_is_public_even_with_api_key_set() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("somekey".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![]),
+        };
+        let app = Router::new()
+            .route("/", get(|| async { "dashboard html" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "GET / must serve the dashboard HTML without auth so the SPA can render"
+        );
     }
 
     #[tokio::test]
