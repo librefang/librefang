@@ -65,6 +65,16 @@ install: dashboard-build
     mkdir -p ~/.librefang/bin
     cp -f target/release-local/librefang ~/.librefang/bin/librefang
 
+# Build release CLI, install binary and fresh dashboard to ~/.librefang
+[unix]
+install-full: dashboard-build
+    cargo build --profile release-local -p librefang-cli
+    mkdir -p ~/.librefang/bin
+    cp -f target/release-local/librefang ~/.librefang/bin/librefang
+    rm -rf ~/.librefang/dashboard
+    cp -r crates/librefang-api/static/react ~/.librefang/dashboard
+    cargo metadata --format-version 1 --no-deps 2>/dev/null | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; print(next(p['version'] for p in pkgs if p['name']=='librefang-cli'))" > ~/.librefang/dashboard/.version
+
 # Build release CLI and install to %USERPROFILE%\.librefang\bin (Windows)
 [windows]
 install: dashboard-build

@@ -30,6 +30,7 @@ const MediaPage = lazy(() => import("./pages/MediaPage").then(m => ({ default: m
 const NetworkPage = lazy(() => import("./pages/NetworkPage").then(m => ({ default: m.NetworkPage })));
 const A2APage = lazy(() => import("./pages/A2APage").then(m => ({ default: m.A2APage })));
 const TelemetryPage = lazy(() => import("./pages/TelemetryPage").then(m => ({ default: m.TelemetryPage })));
+const TerminalPage = lazy(() => import("./pages/TerminalPage").then(m => ({ default: m.TerminalPage })));
 const McpServersPage = lazy(() => import("./pages/McpServersPage").then(m => ({ default: m.McpServersPage })));
 
 // Suspense wrapper — shows nothing briefly while chunk loads (page transition animation covers it)
@@ -210,6 +211,11 @@ const telemetryRoute = createRoute({
   component: () => <L><TelemetryPage /></L>
 });
 
+const terminalRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/terminal",
+  component: () => <L><TerminalPage /></L>
+});
 const mcpServersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/mcp-servers",
@@ -244,6 +250,7 @@ const routeTree = rootRoute.addChildren([
   networkRoute,
   a2aRoute,
   telemetryRoute,
+  terminalRoute,
   mcpServersRoute,
 ]);
 

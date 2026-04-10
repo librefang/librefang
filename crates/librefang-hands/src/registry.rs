@@ -146,7 +146,19 @@ fn scan_agent_skill_files(dir: &Path) -> HashMap<String, String> {
     skills
 }
 
-/// Scan `home_dir/registry/hands/` for subdirectories containing HAND.toml.
+/// Scan for subdirectories containing HAND.toml across both the read-only
+/// registry (`home_dir/registry/hands/`) and the user-writable workspaces
+/// directory (`home_dir/workspaces/`), where `install_from_content_persisted`
+/// writes locally-installed hands.
+///
+/// Both locations are scanned because registry hands come from the shared
+/// librefang-registry tarball (reset on every sync) while workspaces hands
+/// come from the dashboard "install from content" flow and must survive
+/// daemon restarts. Registry entries take precedence when an id collides
+/// (the `seen` set drops duplicates after the first hit).
+///
+/// Subdirectories of `workspaces/` that are not hands (e.g. agent workspace
+/// directories) are naturally filtered out by the `HAND.toml` existence check.
 ///
 /// Returns `(hand_id, toml_content, shared_skill_content, per_agent_skill_content)`.
 /// Per-agent skill files follow the pattern `SKILL-{role}.md` (e.g. `SKILL-pm.md`).
@@ -154,7 +166,10 @@ fn scan_hands_dir(home_dir: &Path) -> Vec<(String, String, String, HashMap<Strin
     let mut seen = std::collections::HashSet::new();
     let mut results = Vec::new();
 
-    let dirs = [home_dir.join("registry").join("hands")];
+    let dirs = [
+        home_dir.join("registry").join("hands"),
+        home_dir.join("workspaces"),
+    ];
 
     for hands_dir in &dirs {
         if let Ok(entries) = std::fs::read_dir(hands_dir) {
