@@ -1962,13 +1962,37 @@ pub async fn run_agent_loop(
         .unwrap_or_default();
     let pii_filter = crate::pii_filter::PiiFilter::new(&privacy_config.redact_patterns);
 
+    // In group chats, prefix user messages with the sender's display name so
+    // the LLM can distinguish who said what across multiple turns (#2262).
+    let is_group_chat = manifest
+        .metadata
+        .get("is_group")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let group_sender_name: Option<String> = manifest
+        .metadata
+        .get("sender_display_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let effective_user_message = if is_group_chat {
+        if let Some(ref name) = group_sender_name {
+            format!("[{name}]: {user_message}")
+        } else if let Some(ref uid) = sender_user_id {
+            format!("[{uid}]: {user_message}")
+        } else {
+            user_message.to_string()
+        }
+    } else {
+        user_message.to_string()
+    };
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
     // PII filter is applied to text content before adding to session.
     push_filtered_user_message(
         session,
-        user_message,
+        &effective_user_message,
         user_content_blocks,
         &pii_filter,
         &privacy_config,
@@ -1977,7 +2001,7 @@ pub async fn run_agent_loop(
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
-    } = prepare_llm_messages(manifest, session, user_message, memory_context_msg);
+    } = prepare_llm_messages(manifest, session, &effective_user_message, memory_context_msg);
 
     let mut total_usage = TokenUsage::default();
     let final_response;
@@ -2835,13 +2859,37 @@ pub async fn run_agent_loop_streaming(
         .unwrap_or_default();
     let pii_filter = crate::pii_filter::PiiFilter::new(&privacy_config.redact_patterns);
 
+    // In group chats, prefix user messages with the sender's display name so
+    // the LLM can distinguish who said what across multiple turns (#2262).
+    let is_group_chat = manifest
+        .metadata
+        .get("is_group")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let group_sender_name: Option<String> = manifest
+        .metadata
+        .get("sender_display_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let effective_user_message = if is_group_chat {
+        if let Some(ref name) = group_sender_name {
+            format!("[{name}]: {user_message}")
+        } else if let Some(ref uid) = sender_user_id {
+            format!("[{uid}]: {user_message}")
+        } else {
+            user_message.to_string()
+        }
+    } else {
+        user_message.to_string()
+    };
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
     // PII filter is applied to text content before adding to session.
     push_filtered_user_message(
         session,
-        user_message,
+        &effective_user_message,
         user_content_blocks,
         &pii_filter,
         &privacy_config,
@@ -2850,7 +2898,7 @@ pub async fn run_agent_loop_streaming(
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
-    } = prepare_llm_messages(manifest, session, user_message, memory_context_msg);
+    } = prepare_llm_messages(manifest, session, &effective_user_message, memory_context_msg);
 
     let mut total_usage = TokenUsage::default();
     let final_response;
