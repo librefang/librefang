@@ -12,8 +12,10 @@ use axum::Router;
 use futures::{SinkExt, StreamExt};
 use librefang_api::routes::AppState;
 use librefang_api::server;
+use librefang_kernel::provider_accounts::TenantProviderUpdate;
 use librefang_kernel::workflow::{Workflow, WorkflowId, WorkflowRunId};
 use librefang_kernel::LibreFangKernel;
+use librefang_runtime::provider_health::ProbeResult;
 use librefang_types::approval::{ApprovalRequest, RiskLevel};
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use librefang_types::workflow_template::{
@@ -1564,6 +1566,7 @@ async fn mt_providers_are_tenant_owned() {
     let provider_a_json = read_json(provider_a).await;
     assert_eq!(provider_a_json["tenant"]["configured"], true);
     assert_eq!(provider_a_json["tenant"]["default"], true);
+    assert_eq!(provider_a_json["auth_status"], "configured");
 
     let provider_b = h
         .send(
@@ -1578,6 +1581,7 @@ async fn mt_providers_are_tenant_owned() {
     let provider_b_json = read_json(provider_b).await;
     assert_eq!(provider_b_json["tenant"]["configured"], false);
     assert_eq!(provider_b_json["tenant"]["default"], false);
+    assert_eq!(provider_b_json["auth_status"], "missing");
 
     let delete_b = h
         .send(
@@ -1590,6 +1594,293 @@ async fn mt_providers_are_tenant_owned() {
         )
         .await;
     assert_eq!(delete_b.status(), StatusCode::NOT_FOUND);
+}
+
+/// When the probe cache has expired (no entry for the tenant's custom URL),
+/// set_default_provider falls back to the catalog default. The response must
+/// communicate this via model_source so callers aren't silently surprised.
+#[tokio::test(flavor = "multi_thread")]
+async fn mt_set_default_provider_signals_catalog_fallback_when_probe_cache_empty() {
+    let h = start_mt_router().await;
+
+    // Tenant has a custom base_url but NO entry in the probe cache (expired or
+    // never probed). set_default_provider must fall back to the catalog default
+    // and report model_source = "catalog_fallback".
+    h.state
+        .kernel
+        .provider_store()
+        .upsert_scoped(
+            "tenant-a",
+            "openai",
+            TenantProviderUpdate {
+                base_url: Some(Some(
+                    "http://expired-openai.tenant-a.internal:8080".to_string(),
+                )),
+                api_key_env: None,
+            },
+        )
+        .await
+        .unwrap();
+    // Deliberately do NOT insert into provider_probe_cache
+
+    let resp = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/openai/default")
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = read_json(resp).await;
+    assert_eq!(
+        json["model_source"], "catalog_fallback",
+        "should report catalog_fallback when probe cache has no entry"
+    );
+}
+
+/// When a tenant has a custom base_url with probe-discovered models in the
+/// cache, set_default_provider must use those models — not the global catalog
+/// default — so the tenant's endpoint and its actual model list stay in sync.
+#[tokio::test(flavor = "multi_thread")]
+async fn mt_set_default_provider_prefers_probe_discovered_models() {
+    let h = start_mt_router().await;
+
+    let custom_url = "http://private-openai.tenant-a.internal:8080";
+    let discovered_model = "private-gpt-x1";
+
+    // Pre-seed the tenant's custom base_url in their provider record.
+    h.state
+        .kernel
+        .provider_store()
+        .upsert_scoped(
+            "tenant-a",
+            "openai",
+            TenantProviderUpdate {
+                base_url: Some(Some(custom_url.to_string())),
+                api_key_env: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Pre-seed the probe cache as if a successful probe had already run for
+    // that URL and discovered a model not present in the global catalog.
+    h.state.provider_probe_cache.insert(
+        "openai",
+        custom_url,
+        ProbeResult {
+            reachable: true,
+            latency_ms: 5,
+            discovered_models: vec![discovered_model.to_string()],
+            ..ProbeResult::default()
+        },
+    );
+
+    let set_default = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/openai/default")
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(set_default.status(), StatusCode::OK);
+    let json = read_json(set_default).await;
+    assert_eq!(
+        json["model"], discovered_model,
+        "expected probe-discovered model, got global catalog default"
+    );
+    assert_eq!(json["model_source"], "probe");
+    assert_eq!(json["tenant_account_id"], "tenant-a");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mt_manual_provider_test_cache_is_tenant_scoped() {
+    let h = start_mt_router().await;
+
+    let test_resp = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/claude-code/test")
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(test_resp.status(), StatusCode::OK);
+
+    let provider_a = h
+        .send(
+            Request::builder()
+                .uri("/api/providers/claude-code")
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(provider_a.status(), StatusCode::OK);
+    let provider_a_json = read_json(provider_a).await;
+    assert!(provider_a_json.get("last_tested").is_some());
+    assert!(provider_a_json.get("reachable").is_some());
+
+    let provider_b = h
+        .send(
+            Request::builder()
+                .uri("/api/providers/claude-code")
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(provider_b.status(), StatusCode::OK);
+    let provider_b_json = read_json(provider_b).await;
+    assert!(provider_b_json.get("last_tested").is_none());
+    assert!(provider_b_json.get("reachable").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mt_provider_test_uses_tenant_effective_auth_status() {
+    let h = start_mt_router().await;
+
+    {
+        let mut catalog = h
+            .state
+            .kernel
+            .model_catalog_ref()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog.set_provider_auth_status(
+            "openai",
+            librefang_types::model_catalog::AuthStatus::ConfiguredCli,
+        );
+    }
+
+    let resp = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/openai/test")
+                .header("x-account-id", "tenant-without-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(resp).await;
+    assert_eq!(body["error"], "Provider API key not configured");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mt_local_provider_probe_uses_tenant_effective_base_url() {
+    let h = start_mt_router().await;
+
+    h.state
+        .kernel
+        .provider_store()
+        .upsert_scoped(
+            "tenant-a",
+            "ollama",
+            librefang_kernel::provider_accounts::TenantProviderUpdate {
+                api_key_env: None,
+                base_url: Some(Some("http://tenant-a.local/v1".to_string())),
+            },
+        )
+        .await
+        .unwrap();
+    h.state
+        .kernel
+        .provider_store()
+        .upsert_scoped(
+            "tenant-b",
+            "ollama",
+            librefang_kernel::provider_accounts::TenantProviderUpdate {
+                api_key_env: None,
+                base_url: Some(Some("http://tenant-b.local/v1".to_string())),
+            },
+        )
+        .await
+        .unwrap();
+
+    h.state.provider_probe_cache.insert(
+        "ollama",
+        "http://tenant-a.local/v1",
+        librefang_runtime::provider_health::ProbeResult {
+            reachable: true,
+            latency_ms: 11,
+            discovered_models: vec!["tenant-a-model".to_string()],
+            discovered_model_info: vec![],
+            error: None,
+            probed_at: chrono::Utc::now().to_rfc3339(),
+        },
+    );
+    h.state.provider_probe_cache.insert(
+        "ollama",
+        "http://tenant-b.local/v1",
+        librefang_runtime::provider_health::ProbeResult {
+            reachable: true,
+            latency_ms: 22,
+            discovered_models: vec!["tenant-b-model".to_string()],
+            discovered_model_info: vec![],
+            error: None,
+            probed_at: chrono::Utc::now().to_rfc3339(),
+        },
+    );
+
+    let provider_a = h
+        .send(
+            Request::builder()
+                .uri("/api/providers/ollama")
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(provider_a.status(), StatusCode::OK);
+    let provider_a_json = read_json(provider_a).await;
+    assert_eq!(
+        provider_a_json["tenant"]["base_url"],
+        "http://tenant-a.local/v1"
+    );
+    assert_eq!(provider_a_json["latency_ms"], 11);
+    assert_eq!(provider_a_json["discovered_models"][0], "tenant-a-model");
+
+    let provider_b = h
+        .send(
+            Request::builder()
+                .uri("/api/providers/ollama")
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(provider_b.status(), StatusCode::OK);
+    let provider_b_json = read_json(provider_b).await;
+    assert_eq!(
+        provider_b_json["tenant"]["base_url"],
+        "http://tenant-b.local/v1"
+    );
+    assert_eq!(provider_b_json["latency_ms"], 22);
+    assert_eq!(provider_b_json["discovered_models"][0], "tenant-b-model");
+
+    let models_after_probe = h
+        .state
+        .kernel
+        .model_catalog_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .models_by_provider("ollama")
+        .into_iter()
+        .map(|m| m.id.clone())
+        .collect::<Vec<_>>();
+    assert!(!models_after_probe.iter().any(|id| id == "tenant-a-model"));
+    assert!(!models_after_probe.iter().any(|id| id == "tenant-b-model"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3882,7 +4173,284 @@ async fn test_system_admin_passes_with_configured_admin_account() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_system_approvals_admin_sees_global_agent_names() {
+async fn test_system_audit_recent_is_scoped_to_requesting_admin_account() {
+    let h = start_mt_router_with_admin("tenant-admin").await;
+
+    let tenant_admin_agent = make_agent_entry("tenant-admin-agent", Some("tenant-admin"));
+    let tenant_other_agent = make_agent_entry("tenant-other-agent", Some("tenant-b"));
+    let admin_agent_id = tenant_admin_agent.id;
+    let other_agent_id = tenant_other_agent.id;
+    h.state
+        .kernel
+        .agent_registry()
+        .register(tenant_admin_agent)
+        .unwrap();
+    h.state
+        .kernel
+        .agent_registry()
+        .register(tenant_other_agent)
+        .unwrap();
+
+    h.state.kernel.audit().record(
+        admin_agent_id.to_string(),
+        librefang_runtime::audit::AuditAction::AgentMessage,
+        "admin-owned event",
+        "ok",
+    );
+    h.state.kernel.audit().record(
+        other_agent_id.to_string(),
+        librefang_runtime::audit::AuditAction::AgentMessage,
+        "other-tenant event",
+        "ok",
+    );
+
+    let resp = h
+        .send(
+            Request::builder()
+                .uri("/api/audit/recent?n=10")
+                .header("x-account-id", "tenant-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let entries = body["entries"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    assert_eq!(body["total"].as_u64(), Some(1));
+    assert!(body.get("tip_hash").is_none());
+    assert!(entries
+        .iter()
+        .all(|entry| entry["agent_id"] != other_agent_id.to_string()));
+    assert!(entries
+        .iter()
+        .all(|entry| entry["account_id"] == "tenant-admin"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_audit_verify_is_disabled_in_multi_tenant_mode() {
+    let h = start_mt_router_with_admin("tenant-admin").await;
+
+    let resp = h
+        .send(
+            Request::builder()
+                .uri("/api/audit/verify")
+                .header("x-account-id", "tenant-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = read_json(resp).await;
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("unavailable in multi-tenant mode"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approval_audit_is_scoped_to_requesting_admin_account() {
+    let h = start_mt_router_with_admin("tenant-admin").await;
+
+    let tenant_admin_agent = make_agent_entry("tenant-admin-approval-agent", Some("tenant-admin"));
+    let tenant_other_agent = make_agent_entry("tenant-b-approval-agent", Some("tenant-b"));
+    let admin_agent_id = tenant_admin_agent.id;
+    let other_agent_id = tenant_other_agent.id;
+    h.state
+        .kernel
+        .agent_registry()
+        .register(tenant_admin_agent)
+        .unwrap();
+    h.state
+        .kernel
+        .agent_registry()
+        .register(tenant_other_agent)
+        .unwrap();
+
+    let admin_req = ApprovalRequest {
+        id: uuid::Uuid::new_v4(),
+        agent_id: admin_agent_id.to_string(),
+        tool_name: "shell_exec".to_string(),
+        description: "tenant-admin command".to_string(),
+        action_summary: "echo admin".to_string(),
+        risk_level: RiskLevel::High,
+        requested_at: chrono::Utc::now(),
+        timeout_secs: 60,
+        sender_id: None,
+        channel: None,
+        route_to: vec![],
+        escalation_count: 0,
+    };
+    let other_req = ApprovalRequest {
+        id: uuid::Uuid::new_v4(),
+        agent_id: other_agent_id.to_string(),
+        tool_name: "shell_exec".to_string(),
+        description: "tenant-b command".to_string(),
+        action_summary: "echo other".to_string(),
+        risk_level: RiskLevel::High,
+        requested_at: chrono::Utc::now(),
+        timeout_secs: 60,
+        sender_id: None,
+        channel: None,
+        route_to: vec![],
+        escalation_count: 0,
+    };
+
+    h.state
+        .kernel
+        .approvals()
+        .submit_request(
+            admin_req.clone(),
+            librefang_kernel::approval::DeferredToolExecution {
+                agent_id: admin_agent_id.to_string(),
+                tool_use_id: "admin-tool-use".to_string(),
+                tool_name: "shell_exec".to_string(),
+                input: serde_json::json!({"cmd": "echo admin"}),
+                allowed_tools: None,
+                sender_id: None,
+                channel: None,
+                workspace_root: None,
+            },
+        )
+        .unwrap();
+    h.state
+        .kernel
+        .approvals()
+        .resolve(
+            admin_req.id,
+            librefang_types::approval::ApprovalDecision::Approved,
+            Some("tenant-admin".to_string()),
+        )
+        .unwrap();
+
+    h.state
+        .kernel
+        .approvals()
+        .submit_request(
+            other_req.clone(),
+            librefang_kernel::approval::DeferredToolExecution {
+                agent_id: other_agent_id.to_string(),
+                tool_use_id: "other-tool-use".to_string(),
+                tool_name: "shell_exec".to_string(),
+                input: serde_json::json!({"cmd": "echo other"}),
+                allowed_tools: None,
+                sender_id: None,
+                channel: None,
+                workspace_root: None,
+            },
+        )
+        .unwrap();
+    h.state
+        .kernel
+        .approvals()
+        .resolve(
+            other_req.id,
+            librefang_types::approval::ApprovalDecision::Approved,
+            Some("tenant-b".to_string()),
+        )
+        .unwrap();
+
+    let resp = h
+        .send(
+            Request::builder()
+                .uri("/api/approvals/audit?limit=10")
+                .header("x-account-id", "tenant-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let entries = body["entries"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    assert!(entries
+        .iter()
+        .all(|entry| entry["agent_id"] != other_agent_id.to_string()));
+    assert!(entries
+        .iter()
+        .all(|entry| entry["agent_id"] == admin_agent_id.to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approval_count_is_scoped_to_requesting_admin_account() {
+    let h = start_mt_router_with_admin("tenant-admin").await;
+
+    let tenant_admin_agent = make_agent_entry("tenant-admin-count-agent", Some("tenant-admin"));
+    let tenant_other_agent = make_agent_entry("tenant-b-count-agent", Some("tenant-b"));
+    let admin_agent_id = tenant_admin_agent.id;
+    let other_agent_id = tenant_other_agent.id;
+    h.state
+        .kernel
+        .agent_registry()
+        .register(tenant_admin_agent)
+        .unwrap();
+    h.state
+        .kernel
+        .agent_registry()
+        .register(tenant_other_agent)
+        .unwrap();
+
+    for (agent_id, tool_use_id, cmd) in [
+        (
+            admin_agent_id.to_string(),
+            "admin-count-tool-use",
+            "echo admin",
+        ),
+        (
+            other_agent_id.to_string(),
+            "other-count-tool-use",
+            "echo other",
+        ),
+    ] {
+        let request = ApprovalRequest {
+            id: uuid::Uuid::new_v4(),
+            agent_id: agent_id.clone(),
+            tool_name: "shell_exec".to_string(),
+            description: "pending command".to_string(),
+            action_summary: cmd.to_string(),
+            risk_level: RiskLevel::High,
+            requested_at: chrono::Utc::now(),
+            timeout_secs: 60,
+            sender_id: None,
+            channel: None,
+            route_to: vec![],
+            escalation_count: 0,
+        };
+        h.state
+            .kernel
+            .approvals()
+            .submit_request(
+                request,
+                librefang_kernel::approval::DeferredToolExecution {
+                    agent_id,
+                    tool_use_id: tool_use_id.to_string(),
+                    tool_name: "shell_exec".to_string(),
+                    input: serde_json::json!({"cmd": cmd}),
+                    allowed_tools: None,
+                    sender_id: None,
+                    channel: None,
+                    workspace_root: None,
+                },
+            )
+            .unwrap();
+    }
+
+    let resp = h
+        .send(
+            Request::builder()
+                .uri("/api/approvals/count")
+                .header("x-account-id", "tenant-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    assert_eq!(body["pending"].as_u64(), Some(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_system_approvals_list_is_scoped_to_requesting_admin_account() {
     let h = start_mt_router_with_admin("tenant-admin").await;
     let entry = make_agent_entry("tenant-a-approval-agent", Some("tenant-a"));
     let agent_id = entry.id;
@@ -3903,9 +4471,23 @@ async fn test_system_approvals_admin_sees_global_agent_names() {
         escalation_count: 0,
     };
 
-    let kernel = h.state.kernel.clone();
-    let approval_task = tokio::spawn(async move { kernel.approvals().request_approval(req).await });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    h.state
+        .kernel
+        .approvals()
+        .submit_request(
+            req,
+            librefang_kernel::approval::DeferredToolExecution {
+                agent_id: agent_id.to_string(),
+                tool_use_id: "tenant-a-tool-use".to_string(),
+                tool_name: "shell_exec".to_string(),
+                input: serde_json::json!({"cmd": "echo hi"}),
+                allowed_tools: None,
+                sender_id: None,
+                channel: None,
+                workspace_root: None,
+            },
+        )
+        .unwrap();
 
     let req = Request::builder()
         .method("GET")
@@ -3918,25 +4500,10 @@ async fn test_system_approvals_admin_sees_global_agent_names() {
     let json = read_json(resp).await;
     let approvals = json["approvals"].as_array().expect("approvals array");
     assert!(
-        approvals
-            .iter()
-            .any(|item| item["agent_name"] == "tenant-a-approval-agent"),
-        "global admin approvals view should resolve tenant-owned agent names: {json}"
+        approvals.is_empty(),
+        "tenant-scoped admin must not see another tenant's pending approvals: {json}"
     );
-
-    let pending_id = json["approvals"][0]["id"]
-        .as_str()
-        .expect("approval id")
-        .to_string();
-    let resolve_req = Request::builder()
-        .method("POST")
-        .uri(format!("/api/approvals/{pending_id}/reject"))
-        .header("x-account-id", "tenant-admin")
-        .body(Body::empty())
-        .unwrap();
-    let resolve_resp = h.send(resolve_req).await;
-    assert_eq!(resolve_resp.status(), StatusCode::OK);
-    let _ = approval_task.await;
+    assert_eq!(json["total"].as_u64(), Some(0));
 }
 
 #[tokio::test(flavor = "multi_thread")]

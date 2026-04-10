@@ -79,6 +79,41 @@ async fn start_mt_router() -> MtHarness {
     }
 }
 
+async fn start_mt_router_with_admin(admin_account: &str) -> MtHarness {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        multi_tenant: true,
+        admin_accounts: vec![admin_account.to_string()],
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
+
+    MtHarness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
 /// Register an agent owned by the given tenant in the kernel registry.
 /// Returns the agent ID string so callers can embed it in URLs.
 fn register_agent(h: &MtHarness, tenant: &str, name: &str) -> String {
@@ -351,4 +386,79 @@ async fn cross_tenant_import_agent_memory_returns_404() {
         StatusCode::NOT_FOUND,
         "Cross-tenant POST /api/memory/agents/{{id}}/import must return 404"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_tenant_list_agent_kv_returns_404_even_for_other_admin() {
+    let h = start_mt_router_with_admin("tenant-b").await;
+    let agent_id = register_agent(&h, "tenant-a", "kv-target");
+
+    let resp = h
+        .send(
+            Request::builder()
+                .uri(format!("/api/memory/agents/{agent_id}/kv"))
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_tenant_get_agent_kv_key_returns_404_even_for_other_admin() {
+    let h = start_mt_router_with_admin("tenant-b").await;
+    let agent_id = register_agent(&h, "tenant-a", "kv-key-target");
+
+    let resp = h
+        .send(
+            Request::builder()
+                .uri(format!("/api/memory/agents/{agent_id}/kv/api-key"))
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_tenant_set_agent_kv_key_returns_404_even_for_other_admin() {
+    let h = start_mt_router_with_admin("tenant-b").await;
+    let agent_id = register_agent(&h, "tenant-a", "kv-set-target");
+
+    let resp = h
+        .send(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/memory/agents/{agent_id}/kv/api-key"))
+                .header("x-account-id", "tenant-b")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"value":"secret"}"#))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_tenant_delete_agent_kv_key_returns_404_even_for_other_admin() {
+    let h = start_mt_router_with_admin("tenant-b").await;
+    let agent_id = register_agent(&h, "tenant-a", "kv-delete-target");
+
+    let resp = h
+        .send(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/memory/agents/{agent_id}/kv/api-key"))
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

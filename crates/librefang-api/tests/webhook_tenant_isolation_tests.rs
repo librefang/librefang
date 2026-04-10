@@ -1,10 +1,8 @@
 //! Integration tests for webhook tenant isolation in multi-tenant environment.
 
 use librefang_api::webhook_store::{
-    CreateWebhookRequest, UpdateWebhookRequest, WebhookEvent, WebhookId, WebhookStore,
+    CreateWebhookRequest, UpdateWebhookRequest, WebhookEvent, WebhookStore,
 };
-use std::path::PathBuf;
-use uuid::Uuid;
 
 fn temp_store() -> (WebhookStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
