@@ -72,7 +72,7 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.1
         with:
           targets: ${{ matrix.platform.rust_target }}
 

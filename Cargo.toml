@@ -25,7 +25,7 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
 homepage = "https://librefang.ai"
-rust-version = "1.75"
+rust-version = "1.94.1"
 
 [workspace.dependencies]
 # Async runtime
