@@ -447,9 +447,10 @@ impl PromptStore {
                     .prepare("SELECT started_at FROM prompt_experiments WHERE id = ?1")
                     .map_err(|e| LibreFangError::Internal(e.to_string()))?;
                 let has_started: Option<String> = stmt
-                    .query_row([id.to_string()], |row| row.get(0))
+                    .query_row([id.to_string()], |row| row.get::<_, Option<String>>(0))
                     .optional()
-                    .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+                    .map_err(|e| LibreFangError::Internal(e.to_string()))?
+                    .flatten();
                 (has_started.or(Some(now.clone())), None)
             }
             ExperimentStatus::Completed => (None, Some(now.clone())),

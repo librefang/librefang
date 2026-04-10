@@ -1997,11 +1997,10 @@ pub struct KernelConfig {
     pub account_sig_secret: Option<String>,
     /// Account IDs that are granted admin privileges in multi-tenant mode.
     ///
-    /// When `require_admin()` is called, requests from these accounts are
-    /// allowed through (in addition to `AccountId(None)` in single-tenant
-    /// mode). Without this, admin-guarded endpoints are unreachable when
-    /// `multi_tenant = true` since `require_account_id` middleware rejects
-    /// requests without `X-Account-Id`.
+    /// When `require_admin()` is called, requests from these concrete accounts
+    /// are allowed through. Missing `X-Account-Id` is rejected, so admin-only
+    /// endpoints remain reachable in multi-tenant mode only through explicit
+    /// configured admin account identities.
     ///
     /// Example: `["admin-account-001", "ops-team"]`
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
