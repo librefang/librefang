@@ -15,6 +15,7 @@
 use crate::routes::AppState;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, Uri};
 use axum::response::IntoResponse;
 use dashmap::DashMap;
 use futures::stream::SplitSink;
@@ -116,44 +117,24 @@ pub fn try_acquire_ws_slot(ip: IpAddr, max_ws_per_ip: usize) -> Option<WsConnect
     Some(WsConnectionGuard { ip })
 }
 
-// ---------------------------------------------------------------------------
-// Terminal Connection Tracking
-// ---------------------------------------------------------------------------
-
-/// Global connection tracker for terminal WebSocket connections.
-pub fn terminal_ws_tracker() -> &'static DashMap<IpAddr, AtomicUsize> {
-    static TRACKER: std::sync::OnceLock<DashMap<IpAddr, AtomicUsize>> = std::sync::OnceLock::new();
-    TRACKER.get_or_init(DashMap::new)
-}
-
-/// RAII guard that decrements the terminal connection count on drop.
-pub struct TerminalWsGuard {
-    ip: IpAddr,
-}
-
-impl Drop for TerminalWsGuard {
-    fn drop(&mut self) {
-        if let Some(entry) = terminal_ws_tracker().get(&self.ip) {
-            let prev = entry.value().fetch_sub(1, Ordering::Relaxed);
-            if prev <= 1 {
-                drop(entry);
-                terminal_ws_tracker().remove(&self.ip);
-            }
+pub fn ws_query_param(uri: &Uri, key: &str) -> Option<String> {
+    let query = uri.query()?;
+    url::form_urlencoded::parse(query.as_bytes()).find_map(|(param, value)| {
+        if param == key {
+            Some(value.into_owned())
+        } else {
+            None
         }
-    }
+    })
 }
 
-/// Try to acquire a terminal WS connection slot for the given IP.
-pub fn try_acquire_terminal_ws_slot(ip: IpAddr, max_per_ip: usize) -> Option<TerminalWsGuard> {
-    let entry = terminal_ws_tracker()
-        .entry(ip)
-        .or_insert_with(|| AtomicUsize::new(0));
-    let current = entry.value().fetch_add(1, Ordering::Relaxed);
-    if current >= max_per_ip {
-        entry.value().fetch_sub(1, Ordering::Relaxed);
-        return None;
-    }
-    Some(TerminalWsGuard { ip })
+pub fn ws_auth_token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(ToOwned::to_owned)
+        .or_else(|| ws_query_param(uri, "token"))
 }
 
 // ---------------------------------------------------------------------------
@@ -187,22 +168,12 @@ pub async fn agent_ws(
             })
         };
 
-        let header_token = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
-
-        let query_token = uri
-            .query()
-            .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")));
-
-        let header_auth = header_token.map(&matches_any).unwrap_or(false);
-        let query_auth = query_token.map(&matches_any).unwrap_or(false);
-
+        let provided_token = ws_auth_token(&headers, &uri);
         let mut session_auth = false;
         let mut user_key_auth = false;
-        let provided_token = header_token.or(query_token);
-        if let Some(token_str) = provided_token {
+        let mut api_auth = false;
+        if let Some(token_str) = provided_token.as_deref() {
+            api_auth = matches_any(token_str);
             let mut sessions = state.active_sessions.write().await;
             sessions.retain(|_, st| {
                 !crate::password_hash::is_token_expired(
@@ -221,7 +192,7 @@ pub async fn agent_ws(
             }
         }
 
-        if !header_auth && !query_auth && !session_auth && !user_key_auth {
+        if !api_auth && !session_auth && !user_key_auth {
             warn!("WebSocket upgrade rejected: invalid auth");
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }
@@ -1455,6 +1426,29 @@ mod tests {
         assert_eq!(
             extract_status_code("API error (401): invalid api key"),
             Some(401)
+        );
+    }
+
+    #[test]
+    fn test_ws_query_param_decodes_percent_encoded_values() {
+        let uri: Uri = "/api/terminal/ws?token=abc%2Bdef%2Fghi%3D&cols=120"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            ws_query_param(&uri, "token").as_deref(),
+            Some("abc+def/ghi=")
+        );
+        assert_eq!(ws_query_param(&uri, "cols").as_deref(), Some("120"));
+    }
+
+    #[test]
+    fn test_ws_auth_token_prefers_bearer_header() {
+        let uri: Uri = "/api/terminal/ws?token=query-token".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer header-token".parse().unwrap());
+        assert_eq!(
+            ws_auth_token(&headers, &uri).as_deref(),
+            Some("header-token")
         );
     }
 

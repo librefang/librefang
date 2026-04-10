@@ -39,6 +39,12 @@ export function TerminalPage() {
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const sendCloseMessage = useCallback((ws: WebSocket | null) => {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "close" }));
+    }
+  }, []);
+
   const connect = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.close();
@@ -46,8 +52,12 @@ export function TerminalPage() {
 
     setError(null);
     setIsConnecting(true);
-    const url = buildAuthenticatedWebSocketUrl("/api/terminal/ws");
-    const ws = new WebSocket(url);
+    const url = new URL(buildAuthenticatedWebSocketUrl("/api/terminal/ws"));
+    if (terminalRef.current) {
+      url.searchParams.set("cols", String(terminalRef.current.cols));
+      url.searchParams.set("rows", String(terminalRef.current.rows));
+    }
+    const ws = new WebSocket(url.toString());
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -151,13 +161,13 @@ export function TerminalPage() {
 
     if (wsRef.current) {
       intentionalDisconnectRef.current = true;
-      wsRef.current.send(JSON.stringify({ type: "close" }));
+      sendCloseMessage(wsRef.current);
       wsRef.current.close();
       wsRef.current = null;
     }
     setIsConnected(false);
     setIsConnecting(false);
-  }, []);
+  }, [sendCloseMessage]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -205,7 +215,7 @@ export function TerminalPage() {
       }
       if (wsRef.current) {
         intentionalDisconnectRef.current = true;
-        wsRef.current.send(JSON.stringify({ type: "close" }));
+        sendCloseMessage(wsRef.current);
         wsRef.current.close();
         wsRef.current = null;
       }
@@ -213,7 +223,7 @@ export function TerminalPage() {
       setIsConnecting(false);
       term.dispose();
     };
-  }, []);
+  }, [sendCloseMessage]);
 
   return (
     <div className="flex flex-col h-full">

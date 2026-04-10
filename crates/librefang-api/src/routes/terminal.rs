@@ -22,8 +22,7 @@ use tracing::{info, warn};
 
 use super::AppState;
 use crate::terminal::PtySession;
-use crate::ws::send_json;
-use crate::ws::TerminalWsGuard;
+use crate::ws::{send_json, try_acquire_ws_slot, ws_auth_token, ws_query_param, WsConnectionGuard};
 
 pub const MAX_WS_MSG_SIZE: usize = 64 * 1024;
 
@@ -130,20 +129,10 @@ pub async fn terminal_ws(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
-    // Extract token from header or query string.
-    let header_token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-
-    let query_token = uri
-        .query()
-        .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")));
-
-    let provided_token = header_token.or(query_token);
+    let provided_token = ws_auth_token(&headers, &uri);
 
     // No token at all → immediate reject.
-    let token_str = match provided_token {
+    let token_str = match provided_token.as_deref() {
         Some(t) => t,
         None => {
             warn!("Terminal WebSocket rejected — no auth token provided");
@@ -153,6 +142,7 @@ pub async fn terminal_ws(
 
     // 1. Check against configured API tokens (constant-time compare).
     let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
+    let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
     let api_auth = {
         use subtle::ConstantTimeEq;
         valid_tokens.iter().any(|key| {
@@ -172,16 +162,24 @@ pub async fn terminal_ws(
         });
         sessions.contains_key(token_str)
     };
+    let mut user_key_auth = false;
+    if !session_auth {
+        user_key_auth = user_api_keys
+            .iter()
+            .any(|user| crate::password_hash::verify_password(token_str, &user.api_key_hash));
+    }
 
-    if !api_auth && !session_auth {
+    if !api_auth && !session_auth && !user_key_auth {
         warn!("Terminal WebSocket upgrade rejected: invalid auth");
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
     let ip = addr.ip();
     let max_ws_per_ip = state.kernel.config_ref().rate_limit.max_ws_per_ip;
+    let initial_cols = initial_terminal_dimension(&uri, "cols", MAX_COLS);
+    let initial_rows = initial_terminal_dimension(&uri, "rows", MAX_ROWS);
 
-    let _terminal_guard = match crate::ws::try_acquire_terminal_ws_slot(ip, max_ws_per_ip) {
+    let _terminal_guard = match try_acquire_ws_slot(ip, max_ws_per_ip) {
         Some(g) => g,
         None => {
             warn!(ip = %ip, max_ws_per_ip, "Terminal WebSocket rejected: too many connections from IP");
@@ -191,21 +189,29 @@ pub async fn terminal_ws(
 
     ws.on_upgrade(move |socket| {
         let guard = _terminal_guard;
-        handle_terminal_ws(socket, state, ip, guard)
+        handle_terminal_ws(socket, state, ip, guard, initial_cols, initial_rows)
     })
     .into_response()
+}
+
+fn initial_terminal_dimension(uri: &axum::http::Uri, key: &str, max: u16) -> Option<u16> {
+    ws_query_param(uri, key)
+        .and_then(|raw| raw.parse::<u16>().ok())
+        .filter(|value| (1..=max).contains(value))
 }
 
 async fn handle_terminal_ws(
     socket: WebSocket,
     state: Arc<AppState>,
     _client_ip: IpAddr,
-    _guard: TerminalWsGuard,
+    _guard: WsConnectionGuard,
+    initial_cols: Option<u16>,
+    initial_rows: Option<u16>,
 ) {
     let (sender, mut receiver) = socket.split();
     let sender = Arc::new(Mutex::new(sender));
 
-    let (mut pty, mut pty_rx) = match PtySession::spawn(None, None) {
+    let (mut pty, mut pty_rx) = match PtySession::spawn(initial_cols, initial_rows) {
         Ok((pty, rx)) => (pty, rx),
         Err(e) => {
             let _ = send_json(
@@ -446,7 +452,9 @@ async fn handle_terminal_ws(
 
 #[cfg(test)]
 mod tests {
-    use crate::routes::terminal::{router, ClientMessage, ServerMessage};
+    use crate::routes::terminal::{
+        initial_terminal_dimension, router, ClientMessage, ServerMessage, MAX_COLS, MAX_ROWS,
+    };
     use crate::terminal::shell_for_current_os;
 
     #[test]
@@ -500,6 +508,23 @@ mod tests {
         let ok = "x".repeat(64 * 1024);
         let msg = ClientMessage::Input { data: ok };
         assert!(msg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_initial_terminal_dimension_parses_valid_query_values() {
+        let uri: axum::http::Uri = "/api/terminal/ws?cols=132&rows=43".parse().unwrap();
+        assert_eq!(
+            initial_terminal_dimension(&uri, "cols", MAX_COLS),
+            Some(132)
+        );
+        assert_eq!(initial_terminal_dimension(&uri, "rows", MAX_ROWS), Some(43));
+    }
+
+    #[test]
+    fn test_initial_terminal_dimension_rejects_invalid_query_values() {
+        let uri: axum::http::Uri = "/api/terminal/ws?cols=2000&rows=0".parse().unwrap();
+        assert_eq!(initial_terminal_dimension(&uri, "cols", MAX_COLS), None);
+        assert_eq!(initial_terminal_dimension(&uri, "rows", MAX_ROWS), None);
     }
 
     #[test]
