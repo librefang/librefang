@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.94.1
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Generate contributors and star history SVGs
         env:

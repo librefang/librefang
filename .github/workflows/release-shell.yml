@@ -64,7 +64,7 @@ jobs:
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -118,7 +118,7 @@ jobs:
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - name: Install build deps
@@ -170,7 +170,7 @@ jobs:
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install cross
         run: cargo install cross --locked
       - uses: Swatinem/rust-cache@v2
@@ -217,7 +217,7 @@ jobs:
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - name: Install build deps
@@ -267,7 +267,7 @@ jobs:
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - name: Install cross
@@ -325,7 +325,7 @@ jobs:
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -373,7 +373,7 @@ jobs:
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -424,7 +424,7 @@ jobs:
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
