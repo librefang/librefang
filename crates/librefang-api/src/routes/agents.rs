@@ -275,7 +275,7 @@ async fn resolve_manifest(
     }
 
     // Parse TOML
-    let manifest: AgentManifest = match toml::from_str(&manifest_toml) {
+    let mut manifest: AgentManifest = match toml::from_str(&manifest_toml) {
         Ok(m) => m,
         Err(e) => {
             let _ = e;
@@ -285,6 +285,14 @@ async fn resolve_manifest(
             });
         }
     };
+
+    // Allow callers to override the manifest name, enabling multiple agents
+    // from the same template with distinct names.
+    if let Some(ref custom_name) = req.name {
+        if !custom_name.trim().is_empty() {
+            manifest.name = custom_name.trim().to_string();
+        }
+    }
 
     let name = manifest.name.clone();
     Ok(ResolvedManifest { manifest, name })

@@ -17,6 +17,8 @@ sdk/**/target
 .env
 .env.*
 !.env.example
+secrets.env
+secrets.env.*
 
 # Database
 *.db
