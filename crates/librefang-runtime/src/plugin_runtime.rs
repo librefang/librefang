@@ -1956,6 +1956,18 @@ mod tests {
     }
 
     #[test]
+    fn from_tag_full_path_uses_custom_runtime() {
+        assert_eq!(
+            PluginRuntime::from_tag(Some("/opt/homebrew/bin/python3")),
+            PluginRuntime::Custom("/opt/homebrew/bin/python3".to_string())
+        );
+        assert_eq!(
+            PluginRuntime::from_tag(Some("C:\\Python313\\python.exe")),
+            PluginRuntime::Custom("C:\\Python313\\python.exe".to_string())
+        );
+    }
+
+    #[test]
     fn parse_output_picks_last_json_line() {
         let lines = vec![
             "warming up...".to_string(),
@@ -2005,6 +2017,14 @@ mod tests {
         let (l, a) = build_command(PluginRuntime::Deno, "hooks/ingest.ts").unwrap();
         assert_eq!(l, "deno");
         assert!(a.contains(&"--allow-read".to_string()));
+
+        let (l, a) = build_command(
+            PluginRuntime::Custom("/opt/homebrew/bin/python3".to_string()),
+            "hooks/ingest.py",
+        )
+        .unwrap();
+        assert_eq!(l, "/opt/homebrew/bin/python3");
+        assert_eq!(a, vec!["hooks/ingest.py".to_string()]);
     }
 
     /// End-to-end: scaffold a sh-based native hook, run it, check JSON round-trip.
