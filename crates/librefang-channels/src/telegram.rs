@@ -1689,6 +1689,24 @@ async fn parse_telegram_update(
         }
     }
 
+    // Inject identity metadata so the bridge can populate the group roster and
+    // pass bot/sender @handles into the agent's system prompt. These keys are
+    // read by `build_sender_context` in bridge.rs.
+    metadata.insert(
+        "chat_id".to_string(),
+        serde_json::json!(chat_id.to_string()),
+    );
+    metadata.insert(
+        "sender_user_id".to_string(),
+        serde_json::json!(user_id.to_string()),
+    );
+    if let Some(ref uname) = username {
+        metadata.insert("sender_username".to_string(), serde_json::json!(uname));
+    }
+    if let Some(bot_uname) = bot_username {
+        metadata.insert("bot_username".to_string(), serde_json::json!(bot_uname));
+    }
+
     Ok(ChannelMessage {
         channel: ChannelType::Telegram,
         platform_message_id: message_id.to_string(),
