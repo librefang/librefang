@@ -58,26 +58,45 @@ function formToPayload(form: ServerFormState): McpServerConfigured {
     transport = { type: form.transportType, url: form.url };
   }
 
-  return {
+  const headers = form.headers.split("\n").map(s => s.trim()).filter(Boolean);
+  const result: McpServerConfigured = {
     name: form.name,
     transport,
     timeout_secs: form.timeout || 30,
     env: form.env.split("\n").map(s => s.trim()).filter(Boolean),
-    headers: form.headers.split("\n").map(s => s.trim()).filter(Boolean),
   };
+  // Only include headers if user explicitly entered values, to avoid
+  // overwriting server-side headers that the list API may not return.
+  if (headers.length > 0) {
+    result.headers = headers;
+  }
+  return result;
 }
 
 function configuredToForm(server: McpServerConfigured): ServerFormState {
+  const transport = server.transport ?? { type: "stdio" as const };
   return {
     name: server.name,
-    transportType: server.transport.type,
-    command: server.transport.command ?? "",
-    args: (server.transport.args ?? []).join("\n"),
-    url: server.transport.url ?? "",
+    transportType: transport.type ?? "stdio",
+    command: transport.command ?? "",
+    args: (transport.args ?? []).join("\n"),
+    url: transport.url ?? "",
     timeout: server.timeout_secs ?? 30,
     env: (server.env ?? []).join("\n"),
     headers: (server.headers ?? []).join("\n"),
   };
+}
+
+function getTransportType(server: McpServerConfigured): TransportType {
+  return server.transport?.type ?? "stdio";
+}
+
+function getTransportDetail(server: McpServerConfigured): string {
+  if (!server.transport) return "—";
+  if (server.transport.type === "stdio") {
+    return `${server.transport.command ?? ""} ${(server.transport.args ?? []).join(" ")}`.trim();
+  }
+  return server.transport.url ?? "—";
 }
 
 function TransportIcon({ type }: { type: TransportType }) {
@@ -247,9 +266,9 @@ export function McpServersPage() {
                       <div className="min-w-0">
                         <h3 className="text-sm font-bold tracking-tight truncate">{server.name}</h3>
                         <div className="flex items-center gap-1.5 mt-0.5">
-                          <TransportIcon type={server.transport.type} />
+                          <TransportIcon type={getTransportType(server)} />
                           <span className="text-[10px] font-bold uppercase tracking-wider text-text-dim">
-                            {server.transport.type}
+                            {getTransportType(server)}
                           </span>
                         </div>
                       </div>
@@ -261,9 +280,7 @@ export function McpServersPage() {
 
                   {/* Transport detail */}
                   <div className="text-xs text-text-dim font-mono truncate">
-                    {server.transport.type === "stdio"
-                      ? `${server.transport.command} ${(server.transport.args ?? []).join(" ")}`
-                      : server.transport.url}
+                    {getTransportDetail(server)}
                   </div>
 
                   {/* Tools count */}
