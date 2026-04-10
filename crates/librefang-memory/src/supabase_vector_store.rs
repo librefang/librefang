@@ -1134,12 +1134,7 @@ mod tests {
     #[test]
     fn test_batch_user_id_from_first_item() {
         // insert_batch extracts user_id from first item only
-        type BatchItem = (
-            String,
-            Vec<f32>,
-            String,
-            HashMap<String, serde_json::Value>,
-        );
+        type BatchItem = (String, Vec<f32>, String, HashMap<String, serde_json::Value>);
         let mut meta0 = HashMap::new();
         meta0.insert("user_id".to_string(), serde_json::json!("user-A"));
         let mut meta1 = HashMap::new();

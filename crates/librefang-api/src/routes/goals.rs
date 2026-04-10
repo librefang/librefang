@@ -59,7 +59,8 @@ fn parse_optional_goal_id(
         Some(v) => v
             .as_str()
             .ok_or_else(|| {
-                ApiErrorResponse::bad_request("parent_id must be a string or null").into_json_tuple()
+                ApiErrorResponse::bad_request("parent_id must be a string or null")
+                    .into_json_tuple()
             })?
             .parse::<GoalId>()
             .map(Some)

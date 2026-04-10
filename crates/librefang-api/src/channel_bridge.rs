@@ -296,9 +296,7 @@ fn has_any_configured_channels(config: &librefang_types::config::ChannelsConfig)
         || config.wecom.iter().next().is_some()
 }
 
-fn validate_runtime_multiplicity(
-    adapters: &[RuntimeAdapterEntry],
-) -> Result<(), String> {
+fn validate_runtime_multiplicity(adapters: &[RuntimeAdapterEntry]) -> Result<(), String> {
     let mut by_family: HashMap<String, (usize, String, Vec<String>)> = HashMap::new();
 
     for (adapter, _, account_id) in adapters {
