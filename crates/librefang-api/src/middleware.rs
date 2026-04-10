@@ -264,7 +264,11 @@ pub async fn auth(
     } else {
         raw_path.clone()
     };
-    let path: &str = after_version.strip_suffix('/').unwrap_or(&after_version);
+    let path: &str = match after_version.strip_suffix('/') {
+        Some("") => "/", // preserve root path
+        Some(stripped) => stripped,
+        None => &after_version,
+    };
     if path == "/api/shutdown" {
         let is_loopback = request
             .extensions()
