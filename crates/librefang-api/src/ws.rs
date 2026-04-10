@@ -137,8 +137,7 @@ pub async fn agent_ws(
     let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
     let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
     let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
-    let auth_required =
-        !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
+    let auth_required = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
     if auth_required {
         // SECURITY: Use constant-time comparison to prevent timing attacks on auth tokens.
         let matches_any = |token: &str| -> bool {
