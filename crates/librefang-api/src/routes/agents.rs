@@ -4664,6 +4664,7 @@ mod tests {
             base_url: None,
             message_timeout_secs: 300,
             extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         };
         let override_dm = librefang_types::config::DefaultModelConfig {
             provider: "deepseek".to_string(),
@@ -4672,6 +4673,7 @@ mod tests {
             base_url: None,
             message_timeout_secs: 300,
             extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         };
 
         let effective = effective_default_model(&base, Some(&override_dm));
@@ -4690,6 +4692,7 @@ mod tests {
             base_url: None,
             message_timeout_secs: 300,
             extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         };
 
         let effective = effective_default_model(&base, None);
