@@ -2489,7 +2489,14 @@ pub async fn run_agent_loop(
             }
             StopReason::MaxTokens => {
                 consecutive_max_tokens += 1;
-                if consecutive_max_tokens >= MAX_CONTINUATIONS {
+                // If the LLM hit the token cap without emitting any tool
+                // calls, this is a pure-text overflow — continuing would
+                // only make the response longer without ever completing
+                // an action, and downstream channels (Telegram: 4096 char
+                // cap) will keep rejecting it. Return the partial text
+                // immediately instead of burning more tokens (#2286).
+                let pure_text_overflow = response.tool_calls.is_empty();
+                if pure_text_overflow || consecutive_max_tokens >= MAX_CONTINUATIONS {
                     // Return partial response instead of continuing forever
                     let text = max_tokens_response_text(&response);
                     let (cleaned_text, parsed_directives) =
@@ -2499,11 +2506,20 @@ pub async fn run_agent_loop(
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on max continuations: {e}");
                     }
-                    warn!(
-                        iteration,
-                        consecutive_max_tokens,
-                        "Max continuations reached, returning partial response"
-                    );
+                    if pure_text_overflow {
+                        warn!(
+                            iteration,
+                            consecutive_max_tokens,
+                            text_len = text.len(),
+                            "Max tokens hit on pure-text response — returning partial (no tool calls to continue)"
+                        );
+                    } else {
+                        warn!(
+                            iteration,
+                            consecutive_max_tokens,
+                            "Max continuations reached, returning partial response"
+                        );
+                    }
                     // Fire AgentLoopEnd hook
                     let ctx = crate::hooks::HookContext {
                         agent_name: &manifest.name,
@@ -3448,7 +3464,9 @@ pub async fn run_agent_loop_streaming(
             }
             StopReason::MaxTokens => {
                 consecutive_max_tokens += 1;
-                if consecutive_max_tokens >= MAX_CONTINUATIONS {
+                // See non-streaming branch above — same logic for #2286.
+                let pure_text_overflow = response.tool_calls.is_empty();
+                if pure_text_overflow || consecutive_max_tokens >= MAX_CONTINUATIONS {
                     let text = max_tokens_response_text(&response);
                     let (cleaned_text, parsed_directives) =
                         crate::reply_directives::parse_directives(&text);
@@ -3457,11 +3475,20 @@ pub async fn run_agent_loop_streaming(
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on max continuations: {e}");
                     }
-                    warn!(
-                        iteration,
-                        consecutive_max_tokens,
-                        "Max continuations reached (streaming), returning partial response"
-                    );
+                    if pure_text_overflow {
+                        warn!(
+                            iteration,
+                            consecutive_max_tokens,
+                            text_len = text.len(),
+                            "Max tokens hit on pure-text response (streaming) — returning partial (no tool calls to continue)"
+                        );
+                    } else {
+                        warn!(
+                            iteration,
+                            consecutive_max_tokens,
+                            "Max continuations reached (streaming), returning partial response"
+                        );
+                    }
                     // Fire AgentLoopEnd hook
                     let ctx = crate::hooks::HookContext {
                         agent_name: &manifest.name,

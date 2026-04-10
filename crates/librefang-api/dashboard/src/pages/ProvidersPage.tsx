@@ -71,6 +71,10 @@ interface Provider {
   last_tested?: string;
   error_message?: string;
   media_capabilities?: string[];
+  /** True for providers added by the user at runtime; false for ones shipped
+   *  by the registry. Only custom providers can actually be deleted — built-ins
+   *  are recreated by the next registry sync, so we hide the delete control. */
+  is_custom?: boolean;
 }
 
 interface ProviderCardProps {
@@ -171,7 +175,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               <span className="hidden sm:inline">{t("common.edit")}</span>
             </Button>
           )}
-          {isConfigured && (
+          {isConfigured && p.is_custom && (
             <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
               <span className="hidden sm:inline text-error">{t("common.delete")}</span>
             </Button>
@@ -340,7 +344,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               {t("common.edit")}
             </Button>
           )}
-          {isConfigured && (
+          {isConfigured && p.is_custom && (
             <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
               {t("common.delete")}
             </Button>

@@ -184,6 +184,14 @@ pub struct ProviderInfo {
     /// Empty until background validation completes successfully.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_models: Vec<String>,
+    /// True when the provider was added at runtime by the user (via the
+    /// dashboard "Add provider" flow), false when it was shipped by the
+    /// librefang-registry. Drives whether the dashboard shows a real
+    /// "Delete" control — built-in providers can only be deconfigured
+    /// (key removed), not deleted, because the registry sync would
+    /// re-create their TOML on the next boot anyway.
+    #[serde(default)]
+    pub is_custom: bool,
 }
 
 impl Default for ProviderInfo {
@@ -200,6 +208,7 @@ impl Default for ProviderInfo {
             regions: HashMap::new(),
             media_capabilities: Vec::new(),
             available_models: Vec::new(),
+            is_custom: false,
         }
     }
 }
@@ -252,6 +261,9 @@ impl From<ProviderCatalogToml> for ProviderInfo {
             regions: p.regions,
             media_capabilities: p.media_capabilities,
             available_models: Vec::new(),
+            // Populated by the runtime catalog loader (classifies based on
+            // whether the file is also present in registry/providers/).
+            is_custom: false,
         }
     }
 }
@@ -414,6 +426,7 @@ mod tests {
             regions: HashMap::new(),
             media_capabilities: Vec::new(),
             available_models: Vec::new(),
+            is_custom: false,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: ProviderInfo = serde_json::from_str(&json).unwrap();
@@ -627,6 +640,7 @@ aliases = []
             ]),
             media_capabilities: Vec::new(),
             available_models: Vec::new(),
+            is_custom: false,
         };
 
         // Simulate region selection: if user picks "us", use that region's base_url

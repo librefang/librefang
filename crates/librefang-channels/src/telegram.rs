@@ -824,6 +824,12 @@ impl ChannelAdapter for TelegramAdapter {
         // Clear any existing webhook to avoid 409 Conflict during getUpdates polling.
         // This is necessary when the daemon restarts — the old polling session may
         // still be active on Telegram's side for ~30s, causing 409 errors.
+        //
+        // IMPORTANT: do NOT set drop_pending_updates=true here. For a messaging
+        // adapter, silently discarding user messages queued while the daemon was
+        // down is a data-loss bug. The Telegram API default (false) preserves the
+        // backlog, and the first getUpdates call after startup will pick up every
+        // update that accumulated during downtime.
         {
             let delete_url = format!(
                 "{}/bot{}/deleteWebhook",
@@ -833,7 +839,7 @@ impl ChannelAdapter for TelegramAdapter {
             match self
                 .client
                 .post(&delete_url)
-                .json(&serde_json::json!({"drop_pending_updates": true}))
+                .json(&serde_json::json!({"drop_pending_updates": false}))
                 .send()
                 .await
             {
