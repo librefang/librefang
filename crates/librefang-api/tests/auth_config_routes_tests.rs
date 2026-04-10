@@ -40,6 +40,22 @@ async fn read_json(resp: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+fn authenticated_request(
+    method: axum::http::Method,
+    uri: &str,
+    api_key: &str,
+    account_id: Option<&str>,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {api_key}"));
+    if let Some(account_id) = account_id {
+        builder = builder.header("x-account-id", account_id);
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
 async fn start_router(mut config: KernelConfig) -> Harness {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
     config.home_dir = tmp.path().to_path_buf();
@@ -345,4 +361,210 @@ async fn quick_init_creates_config_for_admin() {
     assert!(config_toml.contains("[default_model]"));
     assert!(config_toml.contains("provider = "));
     assert!(config_toml.contains("model = "));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn privileged_get_routes_require_real_auth_when_api_key_is_configured() {
+    let mut config = default_config();
+    config.api_key = "secret-api-key".to_string();
+    config.admin_accounts = vec!["admin".to_string()];
+
+    let h = start_router(config).await;
+
+    for uri in [
+        "/api/status",
+        "/api/config",
+        "/api/agents",
+        "/api/budget/agents",
+        "/api/channels",
+        "/api/workflows",
+        "/api/models",
+        "/api/models/aliases",
+        "/api/providers",
+        "/api/network/status",
+    ] {
+        let resp = h
+            .send(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-account-id", "admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri} should require API auth"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn privileged_get_routes_accept_authenticated_admin_or_tenant_access() {
+    let mut config = default_config();
+    config.api_key = "secret-api-key".to_string();
+    config.admin_accounts = vec!["admin".to_string()];
+
+    let h = start_router(config).await;
+
+    let admin_status = h
+        .send(authenticated_request(
+            axum::http::Method::GET,
+            "/api/status",
+            "secret-api-key",
+            Some("admin"),
+        ))
+        .await;
+    assert_eq!(admin_status.status(), StatusCode::OK);
+
+    let admin_config = h
+        .send(authenticated_request(
+            axum::http::Method::GET,
+            "/api/config",
+            "secret-api-key",
+            Some("admin"),
+        ))
+        .await;
+    assert_eq!(admin_config.status(), StatusCode::OK);
+
+    let tenant_channels = h
+        .send(authenticated_request(
+            axum::http::Method::GET,
+            "/api/channels",
+            "secret-api-key",
+            Some("tenant-a"),
+        ))
+        .await;
+    assert_eq!(tenant_channels.status(), StatusCode::OK);
+
+    let tenant_workflows = h
+        .send(authenticated_request(
+            axum::http::Method::GET,
+            "/api/workflows",
+            "secret-api-key",
+            Some("tenant-a"),
+        ))
+        .await;
+    assert_eq!(tenant_workflows.status(), StatusCode::OK);
+
+    let tenant_agents = h
+        .send(authenticated_request(
+            axum::http::Method::GET,
+            "/api/agents",
+            "secret-api-key",
+            Some("tenant-a"),
+        ))
+        .await;
+    assert_eq!(tenant_agents.status(), StatusCode::OK);
+
+    for uri in [
+        "/api/models",
+        "/api/models/aliases",
+        "/api/providers",
+        "/api/network/status",
+    ] {
+        let resp = h
+            .send(authenticated_request(
+                axum::http::Method::GET,
+                uri,
+                "secret-api-key",
+                Some("admin"),
+            ))
+            .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "{uri} should allow authenticated admin access"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn versioned_public_system_routes_match_unversioned_aliases_in_multi_tenant_mode() {
+    let mut config = default_config();
+    config.multi_tenant = true;
+
+    let h = start_router(config).await;
+
+    for uri in [
+        "/api/profiles",
+        "/api/v1/profiles",
+        "/api/profiles/minimal",
+        "/api/v1/profiles/minimal",
+        "/api/commands",
+        "/api/v1/commands",
+    ] {
+        let resp = h
+            .send(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "{uri} should remain publicly reachable without X-Account-Id"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn versioned_and_unversioned_protected_routes_require_the_same_auth() {
+    let mut config = default_config();
+    config.api_key = "secret-api-key".to_string();
+    config.admin_accounts = vec!["admin".to_string()];
+
+    let h = start_router(config).await;
+
+    for uri in [
+        "/api/status",
+        "/api/v1/status",
+        "/api/agents",
+        "/api/v1/agents",
+    ] {
+        let resp = h
+            .send(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-account-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri} should require auth"
+        );
+    }
+
+    for uri in ["/api/agents", "/api/v1/agents"] {
+        let resp = h
+            .send(authenticated_request(
+                axum::http::Method::GET,
+                uri,
+                "secret-api-key",
+                Some("tenant-a"),
+            ))
+            .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "{uri} should allow authenticated tenant access"
+        );
+    }
+
+    for uri in ["/api/status", "/api/v1/status"] {
+        let resp = h
+            .send(authenticated_request(
+                axum::http::Method::GET,
+                uri,
+                "secret-api-key",
+                Some("admin"),
+            ))
+            .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "{uri} should allow authenticated admin access"
+        );
+    }
 }

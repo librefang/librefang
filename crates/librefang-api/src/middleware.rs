@@ -45,6 +45,17 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 #[derive(Clone, Debug)]
 pub struct RequestLanguage(pub &'static str);
 
+fn normalize_api_path<'a>(path: &'a str, normalized: &'a mut Option<String>) -> &'a str {
+    if path.starts_with("/api/v1/") {
+        let value = normalized.get_or_insert_with(|| format!("/api{}", &path[7..]));
+        value.as_str()
+    } else if path == "/api/v1" {
+        "/api"
+    } else {
+        path
+    }
+}
+
 fn is_public_system_route(path: &str, method: &axum::http::Method) -> bool {
     let is_get = *method == axum::http::Method::GET;
     is_get
@@ -53,6 +64,37 @@ fn is_public_system_route(path: &str, method: &axum::http::Method) -> bool {
             || path.starts_with("/api/profiles/")
             || path == "/api/commands"
             || path.starts_with("/api/commands/"))
+}
+
+fn is_anonymous_public_route(path: &str, method: &axum::http::Method) -> bool {
+    let is_get = *method == axum::http::Method::GET;
+    path == "/"
+        || path == "/logo.png"
+        || path == "/favicon.ico"
+        || (path.starts_with("/dashboard/") && is_get)
+        || (path == "/.well-known/agent.json" && is_get)
+        || (path.starts_with("/a2a/") && is_get)
+        || path == "/api/health"
+        || path == "/api/health/detail"
+        || path == "/api/version"
+        || path == "/api/openapi.json"
+        || (path == "/api/config/schema" && is_get)
+        || (path == "/api/a2a/agents" && is_get)
+        || (path == "/api/hands" && is_get)
+        || (path == "/api/hands/active" && is_get)
+        || (path.starts_with("/api/hands/") && is_get)
+        || (path == "/api/skills" && is_get)
+        || (path == "/api/integrations" && is_get)
+        || (path == "/api/integrations/available" && is_get)
+        || (path == "/api/integrations/health" && is_get)
+        || (path.starts_with("/api/cron/") && is_get)
+        || path.starts_with("/api/providers/github-copilot/oauth/")
+        || is_public_system_route(path, method)
+        || (path == "/api/auth/providers" && is_get)
+        || (path.starts_with("/api/auth/login") && is_get)
+        || path == "/api/auth/callback"
+        || path == "/api/auth/dashboard-login"
+        || path == "/api/auth/dashboard-check"
 }
 
 /// Middleware: parse `Accept-Language` header and store the resolved language
@@ -216,15 +258,8 @@ pub async fn auth(
     // Normalize versioned paths: /api/v1/foo → /api/foo so public endpoint
     // checks work identically for both /api/ and /api/v1/ prefixes.
     let raw_path = request.uri().path().to_string();
-    let normalized;
-    let path: &str = if raw_path.starts_with("/api/v1/") {
-        normalized = format!("/api{}", &raw_path[7..]);
-        normalized.as_str()
-    } else if raw_path == "/api/v1" {
-        "/api"
-    } else {
-        &raw_path
-    };
+    let mut normalized = None;
+    let path = normalize_api_path(&raw_path, &mut normalized);
     if path == "/api/shutdown" {
         let is_loopback = request
             .extensions()
@@ -241,53 +276,7 @@ pub async fn auth(
     // SECURITY: Public endpoints are GET-only unless explicitly noted.
     // POST/PUT/DELETE to any endpoint ALWAYS requires auth to prevent
     // unauthenticated writes (cron job creation, skill install, etc.).
-    let is_get = method == axum::http::Method::GET;
-    let is_public = path == "/"
-        || path == "/logo.png"
-        || path == "/favicon.ico"
-        || (path.starts_with("/dashboard/") && is_get)
-        || (path == "/.well-known/agent.json" && is_get)
-        || (path.starts_with("/a2a/") && is_get)
-        || path == "/api/health"
-        || path == "/api/health/detail"
-        || path == "/api/status"
-        || path == "/api/version"
-        || (path == "/api/agents" && is_get)
-        || (path == "/api/config" && is_get)
-        || (path == "/api/config/schema" && is_get)
-        // SECURITY: /api/uploads/* removed from public endpoints — uploads
-        // require authentication to prevent unauthorized file access (H1 fix).
-        // Dashboard read endpoints — allow unauthenticated so the SPA can
-        // render before the user enters their API key.
-        || (path == "/api/models" && is_get)
-        || (path == "/api/models/aliases" && is_get)
-        || (path == "/api/providers" && is_get)
-        || (path == "/api/budget" && is_get)
-        || (path == "/api/budget/agents" && is_get)
-        || (path.starts_with("/api/budget/agents/") && is_get)
-        || (path == "/api/network/status" && is_get)
-        || (path == "/api/a2a/agents" && is_get)
-        || (path == "/api/channels" && is_get)
-        || (path == "/api/hands" && is_get)
-        || (path == "/api/hands/active" && is_get)
-        || (path.starts_with("/api/hands/") && is_get)
-        || (path == "/api/skills" && is_get)
-        || (path == "/api/integrations" && is_get)
-        || (path == "/api/integrations/available" && is_get)
-        || (path == "/api/integrations/health" && is_get)
-        || (path == "/api/workflows" && is_get)
-        || (path.starts_with("/api/cron/") && is_get)
-        || path.starts_with("/api/providers/github-copilot/oauth/")
-        || is_public_system_route(path, &method)
-        // OAuth/OIDC auth flow endpoints must be accessible without API key
-        // (they are the authentication entry points themselves).
-        || (path == "/api/auth/providers" && is_get)
-        || (path.starts_with("/api/auth/login") && is_get)
-        || path == "/api/auth/callback"
-        || path == "/api/auth/dashboard-login"
-        || path == "/api/auth/dashboard-check";
-
-    if is_public {
+    if is_anonymous_public_route(path, &method) {
         return next.run(request).await;
     }
 
@@ -1056,7 +1045,9 @@ pub(crate) fn account_sig_policy(
 /// A small set of infrastructure endpoints (health, version, OpenAPI spec)
 /// are exempt because they are not tenant-scoped.
 pub async fn require_account_id(request: Request<Body>, next: Next) -> Response<Body> {
-    let path = request.uri().path();
+    let raw_path = request.uri().path().to_string();
+    let mut normalized = None;
+    let path = normalize_api_path(&raw_path, &mut normalized);
 
     // Only enforce tenant headers on API/protocol surfaces that can expose or
     // mutate tenant data. Static assets and dashboard boot resources must stay
@@ -1074,17 +1065,9 @@ pub async fn require_account_id(request: Request<Body>, next: Next) -> Response<
     // Allow health/version/public/auth endpoints without account ID.
     // Auth endpoints are exempt because the user is in the process of
     // authenticating and cannot yet carry an X-Account-Id header.
-    let is_exempt = path == "/api/health"
-        || path == "/api/health/detail"
-        || path == "/api/version"
-        || path == "/api/openapi.json"
-        || path == "/api/v1/health"
-        || path == "/api/v1/health/detail"
-        || path == "/api/v1/version"
-        || path.starts_with("/api/auth/")
-        || path.starts_with("/api/v1/auth/")
+    let is_exempt = path == "/api/openapi.json"
         || path == "/openapi.json"
-        || is_public_system_route(path, request.method());
+        || is_anonymous_public_route(path, request.method());
 
     if !is_exempt {
         let has_account = request
