@@ -56,7 +56,7 @@ there is a deliberate documented decision to change the policy.
   - own account: success
   - other account: `404`
 - Notes:
-  - upload serving follows tenant-owned policy
+  - upload serving is now fully tenant-owned and fail-closed: runtime-generated uploads carry sidecar ownership metadata, and the legacy disk-only fallback has been removed
   - remaining `AccountId(None)` comments/tests should be treated as cleanup targets
 
 ### `memory.rs`

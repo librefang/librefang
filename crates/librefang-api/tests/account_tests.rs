@@ -258,6 +258,42 @@ async fn start_mt_http_router() -> MtHttpHarness {
     }
 }
 
+async fn spawn_http_agent(
+    h: &MtHttpHarness,
+    client: &reqwest::Client,
+    tenant: &str,
+    name: &str,
+) -> String {
+    let manifest = format!(
+        r#"
+name = "{name}"
+version = "0.1.0"
+description = "HTTP smoke-test agent"
+author = "test"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are a test agent."
+
+[capabilities]
+tools = []
+"#
+    );
+
+    let response = client
+        .post(format!("{}/api/agents", h.base_url))
+        .header("X-Account-Id", tenant)
+        .json(&serde_json::json!({ "manifest_toml": manifest }))
+        .send()
+        .await
+        .expect("spawn agent request");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: serde_json::Value = response.json().await.expect("spawn agent json");
+    body["agent_id"].as_str().expect("agent_id").to_string()
+}
+
 /// Boot a full router with multi-tenant mode disabled (single-tenant/legacy).
 async fn start_st_router() -> MtHarness {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
@@ -2603,6 +2639,56 @@ async fn mt_tenant_cannot_access_other_tenant_registered_upload() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn mt_admin_account_cannot_access_other_tenant_registered_upload() {
+    let h = start_mt_router_with_admin("admin-tenant").await;
+    let entry = make_agent_entry("uploader-agent", Some("tenant-a"));
+    let agent_id = entry.id;
+    let _ = h.state.kernel.agent_registry().register(entry);
+
+    let upload = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/{agent_id}/upload"))
+                .header("x-account-id", "tenant-a")
+                .header("content-type", "text/plain")
+                .header("x-filename", "admin-fence.txt")
+                .body(Body::from("admin-fence"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(upload.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(upload.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let file_id = json["file_id"].as_str().expect("file_id");
+
+    let tenant_resp = h
+        .send(
+            Request::builder()
+                .uri(format!("/api/uploads/{file_id}"))
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(tenant_resp.status(), StatusCode::OK);
+
+    let admin_resp = h
+        .send(
+            Request::builder()
+                .uri(format!("/api/uploads/{file_id}"))
+                .header("x-account-id", "admin-tenant")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(admin_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn mt_unregistered_upload_fallback_is_hidden_from_tenants() {
     let file_id = uuid::Uuid::new_v4().to_string();
     let upload_dir = std::env::temp_dir().join("librefang_uploads");
@@ -2630,7 +2716,7 @@ async fn mt_unregistered_upload_fallback_is_hidden_from_tenants() {
                 .unwrap(),
         )
         .await;
-    assert_eq!(admin_resp.status(), StatusCode::OK);
+    assert_eq!(admin_resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3123,6 +3209,96 @@ memory_write = ["*"]
     );
 
     std::env::remove_var(&api_key_env);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_http_smoke_user_visible_multi_tenant_isolation() {
+    let h = start_mt_http_router().await;
+    let client = reqwest::Client::new();
+
+    let missing_header = client
+        .get(format!("{}/api/agents", h.base_url))
+        .send()
+        .await
+        .expect("missing-header request");
+    assert_eq!(missing_header.status(), StatusCode::BAD_REQUEST);
+
+    let agent_a = spawn_http_agent(&h, &client, "tenant-a", "smoke-agent-a").await;
+    let _agent_b = spawn_http_agent(&h, &client, "tenant-b", "smoke-agent-b").await;
+
+    let own_agent = client
+        .get(format!("{}/api/agents/{}", h.base_url, agent_a))
+        .header("X-Account-Id", "tenant-a")
+        .send()
+        .await
+        .expect("tenant-a get own agent");
+    assert_eq!(own_agent.status(), StatusCode::OK);
+
+    let cross_agent = client
+        .get(format!("{}/api/agents/{}", h.base_url, agent_a))
+        .header("X-Account-Id", "tenant-b")
+        .send()
+        .await
+        .expect("tenant-b get tenant-a agent");
+    assert_eq!(cross_agent.status(), StatusCode::NOT_FOUND);
+
+    let create_workflow = client
+        .post(format!("{}/api/workflows", h.base_url))
+        .header("X-Account-Id", "tenant-a")
+        .json(&serde_json::json!({
+            "name": "tenant-a-smoke-workflow",
+            "description": "owned by tenant a",
+            "steps": []
+        }))
+        .send()
+        .await
+        .expect("create workflow");
+    assert_eq!(create_workflow.status(), StatusCode::CREATED);
+    let workflow_body: serde_json::Value = create_workflow.json().await.expect("workflow json");
+    let workflow_id = workflow_body["workflow_id"]
+        .as_str()
+        .expect("workflow_id")
+        .to_string();
+
+    let list_a = client
+        .get(format!("{}/api/workflows", h.base_url))
+        .header("X-Account-Id", "tenant-a")
+        .send()
+        .await
+        .expect("tenant-a list workflows");
+    assert_eq!(list_a.status(), StatusCode::OK);
+    let list_a_json: serde_json::Value = list_a.json().await.expect("tenant-a workflows json");
+    let workflows_a = list_a_json["workflows"]
+        .as_array()
+        .expect("tenant-a workflows");
+    assert!(
+        workflows_a.iter().any(|w| w["id"] == workflow_id),
+        "tenant-a should see its own workflow"
+    );
+
+    let list_b = client
+        .get(format!("{}/api/workflows", h.base_url))
+        .header("X-Account-Id", "tenant-b")
+        .send()
+        .await
+        .expect("tenant-b list workflows");
+    assert_eq!(list_b.status(), StatusCode::OK);
+    let list_b_json: serde_json::Value = list_b.json().await.expect("tenant-b workflows json");
+    let workflows_b = list_b_json["workflows"]
+        .as_array()
+        .expect("tenant-b workflows");
+    assert!(
+        workflows_b.iter().all(|w| w["id"] != workflow_id),
+        "tenant-b must not see tenant-a workflow"
+    );
+
+    let get_cross_tenant = client
+        .get(format!("{}/api/workflows/{}", h.base_url, workflow_id))
+        .header("X-Account-Id", "tenant-b")
+        .send()
+        .await
+        .expect("tenant-b get tenant-a workflow");
+    assert_eq!(get_cross_tenant.status(), StatusCode::NOT_FOUND);
 }
 
 // ---------------------------------------------------------------------------

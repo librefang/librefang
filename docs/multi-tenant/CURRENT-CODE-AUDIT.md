@@ -61,6 +61,18 @@ Current behavior:
   - the WhatsApp gateway now maintains per-instance auth stores, runtime
     session state, and per-instance persisted message state
 
+### Agents / Uploads
+
+**Files:** `crates/librefang-api/src/routes/agents.rs`, `crates/librefang-runtime/src/tool_runner.rs`
+
+Current behavior:
+
+- agent CRUD, sessions, messaging, files, uploads, traces, tools, and skill assignment are tenant-owned
+- runtime-generated uploads now carry sidecar ownership metadata
+- upload serving requires registry metadata or sidecar ownership metadata and fails closed when neither is present
+- the old disk-only `/api/uploads` fallback is removed
+- cross-tenant and unregistered uploads now resolve as `404` instead of falling back to raw disk reads
+
 Still intentionally not complete:
 
 - shared integration user/chat/thread binding beyond integration-instance binding
