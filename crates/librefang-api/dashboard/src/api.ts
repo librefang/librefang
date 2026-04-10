@@ -522,6 +522,10 @@ export interface HandDefinitionItem {
   dashboard_metrics?: number;
   has_settings?: boolean;
   settings_count?: number;
+  /** True when the hand was installed by the user (lives under
+   *  `home/workspaces/{id}`). Built-in hands shipped by librefang-registry
+   *  report false and cannot be uninstalled. */
+  is_custom?: boolean;
 }
 
 export interface HandInstanceItem {
@@ -1831,6 +1835,13 @@ export async function resumeHand(instanceId: string): Promise<ApiActionResponse>
 
 export async function deactivateHand(instanceId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}`);
+}
+
+/** Uninstall a user-installed hand. Fails with 404 for built-ins and
+ *  409 if there is still a live instance. Callers should deactivate
+ *  first, then call this. */
+export async function uninstallHand(handId: string): Promise<{ status: string; hand_id: string }> {
+  return del(`/api/hands/${encodeURIComponent(handId)}`);
 }
 
 export async function getHandStats(instanceId: string): Promise<HandStatsResponse> {

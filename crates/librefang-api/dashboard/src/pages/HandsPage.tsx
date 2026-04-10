@@ -11,6 +11,7 @@ import {
   listHands,
   pauseHand,
   resumeHand,
+  uninstallHand,
   getHandStats,
   getHandDetail,
   getHandSettings,
@@ -399,6 +400,7 @@ function HandDetailPanel({
   onPause,
   onResume,
   onChat,
+  onUninstall,
   isPending,
 }: {
   hand: HandDefinitionItem;
@@ -409,6 +411,7 @@ function HandDetailPanel({
   onDeactivate: (id: string) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
+  onUninstall?: (id: string) => void;
   onChat: (instanceId: string, handName: string) => void;
   isPending: boolean;
 }) {
@@ -550,14 +553,27 @@ function HandDetailPanel({
                   </button>
                 </>
               ) : (
-                <button
-                  onClick={() => onActivate(hand.id)}
-                  disabled={isPending || !hand.requirements_met}
-                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold text-white bg-brand hover:brightness-110 shadow-md shadow-brand/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none disabled:bg-main disabled:text-text-dim"
-                >
-                  {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
-                  {!hand.requirements_met ? t("hands.missing_req") : t("hands.activate")}
-                </button>
+                <>
+                  <button
+                    onClick={() => onActivate(hand.id)}
+                    disabled={isPending || !hand.requirements_met}
+                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold text-white bg-brand hover:brightness-110 shadow-md shadow-brand/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none disabled:bg-main disabled:text-text-dim"
+                  >
+                    {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
+                    {!hand.requirements_met ? t("hands.missing_req") : t("hands.activate")}
+                  </button>
+                  {hand.is_custom && onUninstall && (
+                    <button
+                      onClick={() => onUninstall(hand.id)}
+                      disabled={isPending}
+                      title={t("hands.uninstall", { defaultValue: "Uninstall this hand" })}
+                      className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-sm font-bold text-error bg-error/10 hover:bg-error/20 transition-colors disabled:opacity-40"
+                    >
+                      {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <X className="w-4 h-4" />}
+                      {t("hands.uninstall", { defaultValue: "Uninstall" })}
+                    </button>
+                  )}
+                </>
               )}
             </div>
 
@@ -1337,6 +1353,25 @@ export function HandsPage() {
     }
   }
 
+  async function handleUninstall(handId: string) {
+    const confirmMsg = t("hands.uninstall_confirm", {
+      defaultValue: "Uninstall this hand? Its HAND.toml and workspace files will be deleted. This cannot be undone.",
+    });
+    if (!window.confirm(confirmMsg)) return;
+    setPendingId(handId);
+    try {
+      await uninstallHand(handId);
+      await queryClient.invalidateQueries({ queryKey: ["hands"] });
+      addToast(t("common.success"), "success");
+      setDetailHand(null);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : t("common.error");
+      addToast(msg, "error");
+    } finally {
+      setPendingId(null);
+    }
+  }
+
   async function handlePause(id: string) {
     setPendingId(id);
     try {
@@ -1544,6 +1579,7 @@ export function HandsPage() {
             const inst = instances.find(i => i.instance_id === instanceId);
             navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
           }}
+          onUninstall={handleUninstall}
           isPending={pendingId === detailHandLatest.id}
         />
       )}

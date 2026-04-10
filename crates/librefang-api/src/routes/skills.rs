@@ -50,6 +50,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         // Hands (browser automation engine)
         .route("/hands", axum::routing::get(list_hands))
         .route("/hands/install", axum::routing::post(install_hand))
+        .route("/hands/{hand_id}", axum::routing::delete(uninstall_hand))
         .route("/hands/active", axum::routing::get(list_active_hands))
         .route("/hands/{hand_id}", axum::routing::get(get_hand))
         .route(
@@ -1221,6 +1222,7 @@ pub async fn list_hands(
         .unwrap_or("en");
 
     let defs = state.kernel.hands().list_definitions();
+    let home_dir = state.kernel.home_dir().to_path_buf();
     let hands: Vec<serde_json::Value> = defs
         .iter()
         .map(|d| {
@@ -1236,6 +1238,16 @@ pub async fn list_hands(
                 .unwrap_or(false);
             let active = readiness.as_ref().map(|r| r.active).unwrap_or(false);
             let degraded = readiness.as_ref().map(|r| r.degraded).unwrap_or(false);
+
+            // A hand is user-installed (uninstallable) if its HAND.toml lives
+            // in `home/workspaces/{id}/`. Built-ins synced from the registry
+            // live under `home/registry/hands/{id}/` and are recreated on
+            // every sync, so the UI should not offer to uninstall them.
+            let is_custom = home_dir
+                .join("workspaces")
+                .join(&d.id)
+                .join("HAND.toml")
+                .exists();
 
             let i18n_entry = d.i18n.get(lang);
             let resolved_name = i18n_entry
@@ -1255,6 +1267,7 @@ pub async fn list_hands(
                 "requirements_met": requirements_met,
                 "active": active,
                 "degraded": degraded,
+                "is_custom": is_custom,
                 "requirements": reqs.iter().map(|(r, ok)| {
                     let mut req = serde_json::json!({
                         "key": r.check_value,
@@ -1756,6 +1769,58 @@ pub async fn install_hand_deps(
             }).collect::<Vec<_>>(),
         })),
     )
+}
+
+/// DELETE /api/hands/{hand_id} — Uninstall a user-installed hand.
+///
+/// Only hands that live under `home_dir/workspaces/{id}/` can be removed.
+/// Built-in hands (shipped by librefang-registry under `home_dir/registry/hands/`)
+/// cannot be uninstalled because the next registry sync would recreate them.
+/// Hands with live instances must be deactivated first.
+#[utoipa::path(
+    delete,
+    path = "/api/hands/{hand_id}",
+    tag = "hands",
+    params(
+        ("hand_id" = String, Path, description = "Hand ID"),
+    ),
+    responses(
+        (status = 200, description = "Hand uninstalled", body = serde_json::Value),
+        (status = 404, description = "Hand not found or is a built-in"),
+        (status = 409, description = "Hand is still active — deactivate first"),
+    )
+)]
+pub async fn uninstall_hand(
+    State(state): State<Arc<AppState>>,
+    Path(hand_id): Path<String>,
+) -> impl IntoResponse {
+    let home_dir = state.kernel.home_dir().to_path_buf();
+    match state.kernel.hands().uninstall_hand(&home_dir, &hand_id) {
+        Ok(()) => {
+            librefang_kernel::router::invalidate_hand_route_cache();
+            state.kernel.persist_hand_state();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "hand_id": hand_id,
+                })),
+            )
+        }
+        Err(librefang_hands::HandError::NotFound(id)) => {
+            ApiErrorResponse::not_found(format!("Hand not found: {id}")).into_json_tuple()
+        }
+        Err(librefang_hands::HandError::BuiltinHand(id)) => {
+            ApiErrorResponse::not_found(format!(
+                "Hand '{id}' is a built-in and cannot be uninstalled"
+            ))
+            .into_json_tuple()
+        }
+        Err(librefang_hands::HandError::AlreadyActive(msg)) => {
+            ApiErrorResponse::conflict(msg).into_json_tuple()
+        }
+        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+    }
 }
 
 /// POST /api/hands/install — Install a hand from TOML content.
