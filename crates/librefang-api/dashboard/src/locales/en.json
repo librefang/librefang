@@ -35,6 +35,7 @@
     "network": "Network",
     "a2a": "A2A",
     "telemetry": "Telemetry",
+    "terminal": "Terminal",
     "user_center": "User Center",
     "logout": "Logout",
     "expand_sidebar": "Expand sidebar",
@@ -1404,6 +1405,21 @@
     "navigate": "Navigate",
     "open": "Open",
     "close": "Close"
+  },
+  "terminal": {
+    "badge": "Terminal",
+    "title": "Terminal",
+    "subtitle_connected": "Connected",
+    "subtitle_disconnected": "Disconnected",
+    "subtitle_error": "Error: {{error}}",
+    "connect": "Connect",
+    "disconnect": "Disconnect",
+    "started": "[Terminal started: {{shell}} (PID: {{pid}})]",
+    "exited": "[Process exited with code {{code}}]",
+    "error_unknown": "Unknown error",
+    "websocket_error": "WebSocket connection error",
+    "connection_closed_non_recoverable": "Connection closed due to a non-recoverable error",
+    "max_reconnect_exceeded": "Max reconnection attempts reached. Please connect manually."
   },
   "mcp": {
     "title": "MCP Servers",

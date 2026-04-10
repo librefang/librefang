@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
-import { Search, Home, Layers, MessageCircle, Server, Network, Calendar, Shield, BarChart3, FileText, Settings, Bot, Clock, CheckCircle, Database, Activity, Hand, Puzzle, Cpu, Radio } from "lucide-react";
+import { Search, Home, Layers, MessageCircle, Server, Network, Calendar, Shield, BarChart3, FileText, Settings, Bot, Clock, CheckCircle, Database, Activity, Hand, Puzzle, Cpu, Radio, Terminal } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useFocusTrap } from "../../lib/useFocusTrap";
 
@@ -48,6 +48,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
     { id: "runtime", labelKey: "nav.runtime", categoryKey: "nav.system", icon: Activity, action: () => navigate({ to: "/runtime" }) },
     { id: "logs", labelKey: "nav.logs", categoryKey: "nav.system", icon: FileText, action: () => navigate({ to: "/logs" }) },
     { id: "settings", labelKey: "nav.settings", categoryKey: "nav.system", icon: Settings, action: () => navigate({ to: "/settings" }) },
+    { id: "terminal", labelKey: "nav.terminal", categoryKey: "nav.advanced", icon: Terminal, action: () => navigate({ to: "/terminal" }) },
   ], [navigate]);
 
   const filteredCommands = useMemo(() => commands.filter(cmd => {

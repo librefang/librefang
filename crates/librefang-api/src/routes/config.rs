@@ -11,7 +11,11 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/status", axum::routing::get(status))
         .route(
             "/dashboard/snapshot",
-            axum::routing::get(dashboard_snapshot),
+            axum::routing::get({
+                |State(state): State<Arc<AppState>>| async move {
+                    axum::Json(dashboard_snapshot_inner(&state).await)
+                }
+            }),
         )
         .route("/version", axum::routing::get(version))
         .route("/config", axum::routing::get(get_config))
@@ -1879,7 +1883,13 @@ pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
 ///
 /// Replaces 7 parallel frontend requests (health, status, providers, channels,
 /// skills, agents, workflows) with one round-trip, cutting poll overhead by ~7x.
-pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn dashboard_snapshot(
+    State(state): State<Arc<AppState>>,
+) -> axum::Json<serde_json::Value> {
+    axum::Json(dashboard_snapshot_inner(&state).await)
+}
+
+async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
     // Health (same logic as /api/health)
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -1983,14 +1993,14 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let (workflow_result, providers_result, channels_result) = tokio::join!(
         state.kernel.workflow_engine().list_workflows(),
-        tokio::time::timeout(PROBE_TIMEOUT, super::providers::providers_snapshot(&state)),
-        tokio::time::timeout(PROBE_TIMEOUT, super::channels::channels_snapshot(&state)),
+        tokio::time::timeout(PROBE_TIMEOUT, super::providers::providers_snapshot(state)),
+        tokio::time::timeout(PROBE_TIMEOUT, super::channels::channels_snapshot(state)),
     );
     let workflow_count = workflow_result.len();
     let providers = providers_result.unwrap_or_default();
     let channels = channels_result.unwrap_or_default();
 
-    Json(serde_json::json!({
+    serde_json::json!({
         "health": health,
         "status": status,
         "agents": agents,
@@ -1998,5 +2008,5 @@ pub async fn dashboard_snapshot(State(state): State<Arc<AppState>>) -> impl Into
         "channels": channels,
         "skillCount": skill_count,
         "workflowCount": workflow_count,
-    }))
+    })
 }
