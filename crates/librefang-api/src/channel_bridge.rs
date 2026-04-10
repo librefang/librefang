@@ -668,48 +668,45 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         agent_id: AgentId,
         message: &str,
     ) -> Result<bool, String> {
-        // Heuristic-based reply-intent classification (zero LLM cost).
-        //
-        // Full LLM classification (like ZeroClaw's classify_channel_reply_intent)
-        // requires a direct provider call without the agent loop, which librefang
-        // doesn't currently expose via ChannelBridgeHandle. Using send_message()
-        // or send_message_ephemeral() would be nearly as expensive as just
-        // replying — defeating the purpose of a lightweight precheck.
-        //
-        // This heuristic approach covers the common cases:
-        // - Messages containing a question mark → likely wants a response
-        // - Messages starting with a greeting → likely starting a conversation
-        // - Very short messages (< 5 chars) → probably not for the bot
-        // - Messages that are a reply to the bot → handled upstream (was_mentioned)
-        //
-        // Future: when librefang exposes a lightweight `provider.classify()`
-        // API, upgrade this to an actual LLM call.
+        // Lightweight LLM classification via kernel.classify_text() — calls the
+        // agent's LLM driver directly without the agent loop. ~100-200 tokens.
+        const CLASSIFY_SYSTEM: &str = "\
+            Decide whether the assistant should reply to this group chat message.\n\
+            Return exactly one word: REPLY or NO_REPLY.\n\n\
+            Rules:\n\
+            - If the message is addressed to the assistant, asks a question, or \
+              continues a conversation the assistant is part of → REPLY\n\
+            - If the message is casual chat between humans that doesn't concern \
+              the assistant → NO_REPLY\n\
+            - When in doubt, prefer NO_REPLY to avoid being noisy.";
 
-        let _ = agent_id; // Will be used when LLM classification is available
-        let trimmed = message.trim();
-
-        // Very short messages are usually not directed at the bot
-        if trimmed.len() < 5 {
-            return Ok(false);
+        match self
+            .kernel
+            .classify_text(agent_id, CLASSIFY_SYSTEM, message, 10)
+            .await
+        {
+            Ok(response) => {
+                let trimmed = response.trim().to_uppercase();
+                Ok(!trimmed.contains("NO_REPLY"))
+            }
+            Err(e) => {
+                // Fail-open: if LLM fails, fall back to heuristic
+                tracing::warn!(
+                    error = %e,
+                    "LLM reply-intent classification failed — falling back to heuristic"
+                );
+                let trimmed = message.trim();
+                if trimmed.len() < 5 {
+                    return Ok(false);
+                }
+                if trimmed.contains('?') {
+                    return Ok(true);
+                }
+                let lower = trimmed.to_lowercase();
+                let greetings = ["hola", "buenas", "hey", "hi", "hello", "oye", "ayuda"];
+                Ok(greetings.iter().any(|g| lower.starts_with(g)))
+            }
         }
-
-        // Questions are likely seeking a response
-        if trimmed.contains('?') {
-            return Ok(true);
-        }
-
-        // Messages starting with common greetings
-        let lower = trimmed.to_lowercase();
-        let greetings = [
-            "hola", "buenas", "hey", "hi", "hello", "buenos", "oye", "eh", "a ver", "mira",
-            "venga", "vale", "ok ", "help", "ayuda",
-        ];
-        if greetings.iter().any(|g| lower.starts_with(g)) {
-            return Ok(true);
-        }
-
-        // Default: don't reply to random group chatter
-        Ok(false)
     }
 
     async fn uptime_info(&self) -> String {
