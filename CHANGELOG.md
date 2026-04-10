@@ -5,6 +5,75 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.10] - 2026-04-10
+
+### Added
+
+- Per-channel session isolation via deterministic UUID v5 (#2097) (@f-liva)
+- Save channel images as files instead of inline base64 (#2098) (@f-liva)
+- TOTP second-factor for critical tool approvals (#2131) (@houko)
+- Proper resource composition for hand agents (#2133) (@houko)
+- Add extra_params support for openai compatible model (#2181) (@houko)
+- Add config export/backup endpoint and UI button (#2186) (@houko)
+- Prefill TOML editor from template selection (#2187) (@houko)
+- Add per-channel auto-routing with configurable strategies (#2189) (@houko)
+- Allow hooks to access vault secrets via allowed_secrets (#2216) (@houko)
+- Add [config] section support to plugin.toml (#2218) (@houko)
+- Add [[requires]] system binary checks to plugin.toml (#2219) (@houko)
+
+### Fixed
+
+- Detect "[no reply needed]" as silent response (#2093) (@f-liva)
+- Harden agent loop tool flow and trim handling (#2135) (@leszek3737)
+- Timezone-aware schedule creation (#2138) (@f-liva)
+- Replace librefang.dev with librefang.ai (#2147) (@houko)
+- Glob-match declared tools and auto-promote shell_exec exec_policy (#2148) (@houko)
+- Persist mcp server updates in patch agent (#2151) (@TechWizard9999)
+- Use codex exec for codex cli driver (#2153) (@TechWizard9999)
+- Improve Claude Code detection for keychain auth and non-login shells (#2166) (@x86txt)
+- Show active agent count instead of total in overview card (#2170) (@DaBlitzStein)
+- Handle SkillHub search response format with proper headers (#2171) (@DaBlitzStein)
+- Suppress CMD window flash on Windows (#2159) (#2176) (@houko)
+- Resolve hand.toml agent scan conflict (#2136) (#2177) (@houko)
+- Parameter errors trigger self-correction not user report (#2144) (#2178) (@houko)
+- Resolve pre-existing clippy and test compile failures (#2180) (@houko)
+- Multi-bot Telegram routing uses account_id, not first-match on allowed_users (#2183) (@houko)
+- Resolve build errors and clippy warnings (#2184) (@houko)
+- Skip auto-init when piped via curl, prompt user to run manually (#2190) (@houko)
+- Clean up post-install messaging for piped installs (#2192) (@houko)
+- Replace as_deref() with as_ref() for ChannelOverrides in bridge.rs (#2193) (@houko)
+- Add missing extra_body field to make_completion_request (#2197) (@houko)
+- Remove dead completion_timeout_override and build_completion_request (#2198) (@houko)
+- Derive Default for PluginManifest (#2205) (@houko)
+- Add INFO logs for all ingest hook success paths (#2213) (@houko)
+- Reduce agent count display lag on state changes (#2215) (@houko)
+- Decryption retry, streaming tag leak, session isolation (#2217) (@f-liva)
+- Filter tool_use/tool_result blocks from chat rendering (#2220) (@f-liva)
+- Resolve default provider in agent detail endpoint (#2221) (@DaBlitzStein)
+- Resolve default provider before creating driver (#2222) (@DaBlitzStein)
+- Add error handling to channel config dialog (#2224) (@DaBlitzStein)
+- Default to unconfigured tab when no channels are set up (#2225) (@DaBlitzStein)
+- Propagate ClawHub/Skillhub errors instead of returning 200 OK with empty items (#2231) (@DaBlitzStein)
+- Fix compile errors and rustfmt from Custom variant merge (#2234) (@houko)
+- Show embedding status ok when fts_only mode is active (#2236) (@houko)
+- Rustfmt formatting in snapshot handler (#2237) (@houko)
+- Rustfmt formatting in config routes (#2238) (@houko)
+- Merge extra_body into JSON Value to avoid duplicate keys (#2239) (@shilkazx)
+- Scope RwLockReadGuard before await in dashboard_snapshot (#2241) (@houko)
+- Increase dark theme surface opacity for readable dropdowns (#2242) (@houko)
+- Always load marketplace skills even without search keyword (#2243) (@houko)
+
+### Changed
+
+- Typed enums, O(1) indexes, and typed persistence v4 (#2161) (@leszek3737)
+
+### Maintenance
+
+- Apply rustfmt formatting across bridge, router, kernel, system (#2195) (@houko)
+- Remove extra blank line in agent_loop.rs (#2203) (@houko)
+- Remove mempalace-indexer from contrib — moved to registry (#2247) (@houko)
+
+
 ## [2026.4.7] - 2026-04-07
 
 ### Fixed
