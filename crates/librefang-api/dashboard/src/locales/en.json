@@ -1318,6 +1318,8 @@
     "description": "This instance requires authentication to access.",
     "credentials_title": "Sign In Required",
     "credentials_description": "Enter your dashboard username and password to continue.",
+    "credentials_tab": "Password",
+    "api_key_tab": "API Key",
     "placeholder": "Enter API key...",
     "username_placeholder": "Enter username...",
     "password_placeholder": "Enter password...",

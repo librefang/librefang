@@ -1514,6 +1514,8 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls"}),
             allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
             sender_id: None,
             channel: None,
             workspace_root: None,
@@ -1538,6 +1540,11 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls"}),
             allowed_tools: Some(vec!["shell_exec".to_string()]),
+            allowed_env_vars: Some(vec!["OPENAI_API_KEY".to_string()]),
+            exec_policy: Some(librefang_types::config::ExecPolicy {
+                mode: librefang_types::config::ExecSecurityMode::Full,
+                ..Default::default()
+            }),
             sender_id: Some("user-123".to_string()),
             channel: Some("telegram".to_string()),
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
@@ -1555,6 +1562,14 @@ mod tests {
         assert_eq!(stored.agent_id, "agent-1");
         assert_eq!(stored.tool_use_id, "tool-1");
         assert_eq!(stored.tool_name, "shell_exec");
+        assert_eq!(
+            stored.allowed_env_vars,
+            Some(vec!["OPENAI_API_KEY".to_string()])
+        );
+        assert_eq!(
+            stored.exec_policy.as_ref().map(|p| p.mode),
+            Some(librefang_types::config::ExecSecurityMode::Full)
+        );
         assert_eq!(stored.sender_id, Some("user-123".to_string()));
         assert_eq!(stored.channel, Some("telegram".to_string()));
     }
@@ -1569,6 +1584,8 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls"}),
             allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
             sender_id: None,
             channel: None,
             workspace_root: None,
@@ -1606,6 +1623,8 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls"}),
             allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
             sender_id: None,
             channel: None,
             workspace_root: None,
@@ -1637,6 +1656,8 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls"}),
             allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
             sender_id: None,
             channel: None,
             workspace_root: None,
@@ -1672,6 +1693,8 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls"}),
             allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
             sender_id: None,
             channel: None,
             workspace_root: None,
@@ -1687,6 +1710,8 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls"}),
             allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
             sender_id: None,
             channel: None,
             workspace_root: None,
@@ -1710,6 +1735,8 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls"}),
             allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
             sender_id: None,
             channel: None,
             workspace_root: None,
@@ -1723,6 +1750,8 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls"}),
             allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
             sender_id: None,
             channel: None,
             workspace_root: None,
@@ -1748,6 +1777,8 @@ mod tests {
                 tool_name: "shell_exec".to_string(),
                 input: serde_json::json!({"cmd": format!("ls {i}")}),
                 allowed_tools: None,
+                allowed_env_vars: None,
+                exec_policy: None,
                 sender_id: None,
                 channel: None,
                 workspace_root: None,
@@ -1764,6 +1795,8 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls extra"}),
             allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
             sender_id: None,
             channel: None,
             workspace_root: None,
@@ -1780,6 +1813,8 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls other"}),
             allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
             sender_id: None,
             channel: None,
             workspace_root: None,
@@ -1810,6 +1845,8 @@ mod tests {
                     tool_name: "shell_exec".to_string(),
                     input: serde_json::json!({"cmd": "ls"}),
                     allowed_tools: None,
+                    allowed_env_vars: None,
+                    exec_policy: None,
                     sender_id: None,
                     channel: None,
                     workspace_root: None,
@@ -1849,6 +1886,8 @@ mod tests {
                     tool_name: "shell_exec".to_string(),
                     input: serde_json::json!({"cmd": "ls"}),
                     allowed_tools: None,
+                    allowed_env_vars: None,
+                    exec_policy: None,
                     sender_id: None,
                     channel: None,
                     workspace_root: None,

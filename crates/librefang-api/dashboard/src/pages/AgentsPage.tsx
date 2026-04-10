@@ -56,6 +56,21 @@ export function AgentsPage() {
   useCreateShortcut(() => setShowCreate(true));
   const queryClient = useQueryClient();
   const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
+  const localizedTemplates = useMemo(
+    () =>
+      (templatesQuery.data ?? []).map((template) => ({
+        ...template,
+        displayName: t(`agents.builtin.${template.name}.name`, { defaultValue: template.name }),
+        displayDescription: t(`agents.builtin.${template.name}.description`, {
+          defaultValue: template.description || template.name,
+        }),
+      })),
+    [templatesQuery.data, t],
+  );
+  const selectedTemplate = useMemo(
+    () => localizedTemplates.find((template) => template.name === templateName) ?? null,
+    [localizedTemplates, templateName],
+  );
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,
     onSuccess: () => {
@@ -731,10 +746,16 @@ export function AgentsPage() {
                 }}
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
                 <option value="">{t("agents.template_placeholder")}</option>
-                {(templatesQuery.data ?? []).map(tmpl => (
-                  <option key={tmpl.name} value={tmpl.name}>{tmpl.name}</option>
+                {localizedTemplates.map(tmpl => (
+                  <option key={tmpl.name} value={tmpl.name}>{tmpl.displayName}</option>
                 ))}
               </select>
+              {selectedTemplate && (
+                <div className="mt-2 rounded-xl border border-border-subtle/60 bg-surface/60 px-3 py-2">
+                  <p className="text-xs font-bold text-text">{selectedTemplate.displayName}</p>
+                  <p className="mt-1 text-[11px] leading-relaxed text-text-dim">{selectedTemplate.displayDescription}</p>
+                </div>
+              )}
               {templateTomlLoading && (
                 <p className="text-[10px] text-text-dim mt-1 flex items-center gap-1">
                   <Loader2 className="w-3 h-3 animate-spin" />

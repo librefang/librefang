@@ -174,6 +174,41 @@ pub(crate) fn valid_api_tokens(kernel: &LibreFangKernel) -> Vec<String> {
     tokens
 }
 
+fn has_dashboard_credentials(kernel: &LibreFangKernel) -> bool {
+    let cfg = kernel.config_ref();
+    let username = resolve_dashboard_credential(
+        &cfg.dashboard_user,
+        "LIBREFANG_DASHBOARD_USER",
+        kernel.home_dir(),
+    );
+    let password = resolve_dashboard_credential(
+        &cfg.dashboard_pass,
+        "LIBREFANG_DASHBOARD_PASS",
+        kernel.home_dir(),
+    );
+    !username.trim().is_empty()
+        && (!cfg.dashboard_pass_hash.trim().is_empty() || !password.trim().is_empty())
+}
+
+fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middleware::ApiUserAuth> {
+    kernel
+        .config_ref()
+        .users
+        .iter()
+        .filter_map(|user| {
+            let api_key_hash = user.api_key_hash.as_deref()?.trim();
+            if api_key_hash.is_empty() {
+                return None;
+            }
+            Some(middleware::ApiUserAuth {
+                name: user.name.clone(),
+                role: librefang_kernel::auth::UserRole::from_str_role(&user.role),
+                api_key_hash: api_key_hash.to_string(),
+            })
+        })
+        .collect()
+}
+
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
 /// a randomly generated session token with expiration metadata.
@@ -271,9 +306,23 @@ async fn dashboard_auth_check(
     let has_pass_hash = !cfg.dashboard_pass_hash.trim().is_empty();
     let has_credentials = !du.trim().is_empty() && (has_pass_hash || !dp.trim().is_empty());
     let has_api_key = !cfg.api_key.trim().is_empty();
+    let has_user_api_keys = cfg.users.iter().any(|user| {
+        user.api_key_hash
+            .as_deref()
+            .is_some_and(|hash| !hash.trim().is_empty())
+    });
+    let mode = if has_credentials && (has_api_key || has_user_api_keys) {
+        "hybrid"
+    } else if has_credentials {
+        "credentials"
+    } else if has_api_key || has_user_api_keys {
+        "api_key"
+    } else {
+        "none"
+    };
 
     axum::response::Json(serde_json::json!({
-        "mode": if has_credentials { "credentials" } else if has_api_key { "api_key" } else { "none" },
+        "mode": mode,
         "username": if has_credentials { du.trim().to_string() } else { String::new() },
     }))
 }
@@ -636,6 +685,8 @@ pub async fn build_router(
     let auth_state = middleware::AuthState {
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),
+        dashboard_auth_enabled: has_dashboard_credentials(state.kernel.as_ref()),
+        user_api_keys: Arc::new(configured_user_api_keys(state.kernel.as_ref())),
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     let gcra_limiter = rate_limiter::GcraState {

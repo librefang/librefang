@@ -1293,6 +1293,8 @@
     "description": "此实例需要身份验证才能访问。",
     "credentials_title": "需要登录",
     "credentials_description": "请输入 Dashboard 用户名和密码以继续。",
+    "credentials_tab": "密码登录",
+    "api_key_tab": "API Key",
     "placeholder": "输入 API Key...",
     "username_placeholder": "输入用户名...",
     "password_placeholder": "输入密码...",
