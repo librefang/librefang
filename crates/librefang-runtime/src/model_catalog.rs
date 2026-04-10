@@ -46,21 +46,34 @@ impl ModelCatalog {
         providers_dir: &std::path::Path,
         registry_providers_dir: Option<&std::path::Path>,
     ) -> Self {
-        let builtin_filenames: std::collections::HashSet<std::ffi::OsString> =
-            registry_providers_dir
-                .and_then(|d| std::fs::read_dir(d).ok())
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter_map(|e| {
-                    let path = e.path();
-                    if path.extension().is_some_and(|ext| ext == "toml") {
-                        path.file_name().map(|n| n.to_os_string())
-                    } else {
-                        None
-                    }
+        // Built-in filename set for custom classification.
+        //
+        // Tri-state semantics:
+        //   - `None` registry dir passed, or `read_dir` on it failed
+        //     (missing / corrupt / unreadable cache) → classification
+        //     unavailable, fall back to is_custom=false for every provider.
+        //     This keeps the delete button hidden, which is the safe
+        //     default — a user can always remove an API key via the edit
+        //     dialog's "Remove Key" control.
+        //   - `Some(set)` successful read, even if `set` is empty → trust
+        //     the classification. An empty registry dir genuinely means
+        //     every provider is user-added.
+        let builtin_filenames: Option<std::collections::HashSet<std::ffi::OsString>> =
+            registry_providers_dir.and_then(|dir| {
+                std::fs::read_dir(dir).ok().map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|e| {
+                            let path = e.path();
+                            if path.extension().is_some_and(|ext| ext == "toml") {
+                                path.file_name().map(|n| n.to_os_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
                 })
-                .collect();
+            });
 
         let mut sources: Vec<(String, bool)> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(providers_dir) {
@@ -68,11 +81,10 @@ impl ModelCatalog {
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "toml") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        let is_custom = registry_providers_dir.is_some()
-                            && path
-                                .file_name()
-                                .map(|n| !builtin_filenames.contains(n))
-                                .unwrap_or(false);
+                        let is_custom = match (&builtin_filenames, path.file_name()) {
+                            (Some(set), Some(name)) => !set.contains(name),
+                            _ => false,
+                        };
                         sources.push((content, is_custom));
                     }
                 }
@@ -899,6 +911,73 @@ mod tests {
     fn test_catalog_has_models() {
         let catalog = test_catalog();
         assert!(catalog.list_models().len() >= 30);
+    }
+
+    /// P2 regression: when registry classification is unavailable
+    /// (registry dir unreadable or missing), every provider must fall back
+    /// to is_custom=false so the dashboard does not re-enable the misleading
+    /// delete button on built-ins.
+    #[test]
+    fn test_is_custom_safe_fallback_on_missing_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let providers_dir = tmp.path().join("providers");
+        std::fs::create_dir_all(&providers_dir).unwrap();
+        std::fs::write(
+            providers_dir.join("acme.toml"),
+            r#"[provider]
+id = "acme"
+display_name = "Acme"
+api_key_env = "ACME_API_KEY"
+base_url = "https://acme.test"
+"#,
+        )
+        .unwrap();
+
+        // Case 1: registry dir argument is None → classification skipped.
+        let catalog = ModelCatalog::new_from_dir_with_registry(&providers_dir, None);
+        assert!(
+            !catalog.list_providers().iter().any(|p| p.is_custom),
+            "is_custom must be false when no registry dir is supplied"
+        );
+
+        // Case 2: registry dir points to a nonexistent path → read_dir
+        // fails, classification must degrade to false (not true).
+        let missing_registry = tmp.path().join("nonexistent-registry");
+        let catalog =
+            ModelCatalog::new_from_dir_with_registry(&providers_dir, Some(&missing_registry));
+        assert!(
+            !catalog.list_providers().iter().any(|p| p.is_custom),
+            "is_custom must be false when registry read_dir fails"
+        );
+
+        // Case 3: registry dir exists and does NOT contain acme.toml →
+        // acme is correctly flagged custom.
+        let registry_dir = tmp.path().join("registry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        let catalog =
+            ModelCatalog::new_from_dir_with_registry(&providers_dir, Some(&registry_dir));
+        assert!(
+            catalog.list_providers().iter().any(|p| p.id == "acme" && p.is_custom),
+            "acme must be flagged custom when registry dir exists but does not list it"
+        );
+
+        // Case 4: registry dir lists acme.toml → acme is a built-in.
+        std::fs::write(
+            registry_dir.join("acme.toml"),
+            r#"[provider]
+id = "acme"
+"#,
+        )
+        .unwrap();
+        let catalog =
+            ModelCatalog::new_from_dir_with_registry(&providers_dir, Some(&registry_dir));
+        assert!(
+            catalog
+                .list_providers()
+                .iter()
+                .any(|p| p.id == "acme" && !p.is_custom),
+            "acme must NOT be flagged custom when registry dir lists it"
+        );
     }
 
     #[test]
