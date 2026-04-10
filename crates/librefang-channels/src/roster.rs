@@ -41,7 +41,7 @@ impl GroupRosterStore {
             return;
         }
         let key = (channel.to_string(), chat_id.to_string());
-        let members = self.rosters.entry(key).or_insert_with(DashMap::new);
+        let members = self.rosters.entry(key).or_default();
         members.insert(member.user_id.clone(), member);
     }
 

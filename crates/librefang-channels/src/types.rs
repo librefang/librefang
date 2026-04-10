@@ -652,7 +652,17 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
 fn retreat_past_html_entity(text: &str, pos: usize) -> usize {
     // Maximum entity length we consider (e.g. `&#1114111;` = 10 chars).
     const MAX_ENTITY_LEN: usize = 12;
-    let search_start = pos.saturating_sub(MAX_ENTITY_LEN);
+    let raw_start = pos.saturating_sub(MAX_ENTITY_LEN);
+    // Snap to the nearest char boundary so we never slice inside a multi-byte
+    // UTF-8 sequence (e.g. `ñ` = 2 bytes, emoji = 4 bytes). Without this,
+    // text containing non-ASCII characters panics on the `text[start..pos]`
+    // slice below. See #2285.
+    let search_start = (raw_start..=pos)
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(pos);
+    if search_start >= pos {
+        return pos;
+    }
     // Look for the last `&` in the window ending at `pos`.
     if let Some(rel) = text[search_start..pos].rfind('&') {
         let amp_pos = search_start + rel;
@@ -702,6 +712,40 @@ mod tests {
         let text = "line1\nline2\nline3";
         let chunks = split_message(text, 10);
         assert_eq!(chunks, vec!["line1", "line2", "line3"]);
+    }
+
+    #[test]
+    fn test_split_message_multibyte_utf8_no_panic() {
+        // Regression test for #2285: retreat_past_html_entity panicked when
+        // search_start landed inside a multi-byte char like ñ (2 bytes).
+        // Build a string where ñ straddles the max_len - 12 boundary.
+        let text = "coño ".repeat(300); // 1500 chars, plenty of ñ near any boundary
+        let chunks = split_message(&text, 50);
+        assert!(!chunks.is_empty());
+        // Verify all chunks are valid UTF-8 (implicit — they're &str)
+        for chunk in &chunks {
+            assert!(chunk.len() <= 50);
+        }
+    }
+
+    #[test]
+    fn test_split_message_emoji_no_panic() {
+        // Emoji are 4 bytes in UTF-8 — even more fragile than ñ.
+        let text = "hello 😀 ".repeat(200);
+        let chunks = split_message(&text, 40);
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(chunk.len() <= 40);
+        }
+    }
+
+    #[test]
+    fn test_retreat_past_html_entity_multibyte_safe() {
+        // Direct test: pos just after a ñ, search window crosses into it.
+        let text = "aaaaaaaaañbbbbb"; // ñ at byte 9-10
+        let result = retreat_past_html_entity(text, 11);
+        // Should not panic, and should return 11 (no & found)
+        assert_eq!(result, 11);
     }
 
     #[test]
