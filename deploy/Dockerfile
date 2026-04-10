@@ -27,6 +27,7 @@ COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
+    cargo clean -p librefang-runtime -p librefang-kernel --release 2>/dev/null; \
     cargo build --release --bin librefang && \
     cp target/release/librefang /usr/local/bin/librefang
 
