@@ -30,19 +30,45 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Action items
     let show = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
     let browser = MenuItem::with_id(app, "browser", "Open in Browser", true, None::<&str>)?;
+    let change_server =
+        MenuItem::with_id(app, "change_server", "Change Server...", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
 
     // Informational items (disabled — display only)
+    let is_remote = app
+        .try_state::<crate::RemoteMode>()
+        .map(|r| *r.0.read().unwrap())
+        .unwrap_or(false);
+
+    let status_text = if is_remote {
+        let url = app
+            .try_state::<crate::ServerUrlState>()
+            .map(|s| s.0.read().unwrap().clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        format!("Status: Remote ({url})")
+    } else if let Some(ks) = app.try_state::<crate::KernelState>() {
+        let guard = ks.0.read().unwrap();
+        if let Some(ref inner) = *guard {
+            let uptime = format_uptime(inner.started_at.elapsed().as_secs());
+            format!("Status: Running ({uptime})")
+        } else {
+            "Status: Not connected".to_string()
+        }
+    } else {
+        "Status: Not connected".to_string()
+    };
+
     let agent_count = if let Some(ks) = app.try_state::<crate::KernelState>() {
-        ks.kernel.agent_registry().list().len()
+        let guard = ks.0.read().unwrap();
+        if let Some(ref inner) = *guard {
+            inner.kernel.agent_registry().list().len()
+        } else {
+            0
+        }
     } else {
         0
     };
-    let uptime = if let Some(ks) = app.try_state::<crate::KernelState>() {
-        format_uptime(ks.started_at.elapsed().as_secs())
-    } else {
-        "0s".to_string()
-    };
+
     let agents_info = MenuItem::with_id(
         app,
         "agents_info",
@@ -50,13 +76,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         false,
         None::<&str>,
     )?;
-    let status_info = MenuItem::with_id(
-        app,
-        "status_info",
-        format!("Status: Running ({uptime})"),
-        false,
-        None::<&str>,
-    )?;
+    let status_info = MenuItem::with_id(app, "status_info", &status_text, false, None::<&str>)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
 
     // Settings items
@@ -92,6 +112,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         &[
             &show,
             &browser,
+            &change_server,
             &sep1,
             &agents_info,
             &status_info,
@@ -121,9 +142,49 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "browser" => {
-                if let Some(port) = app.try_state::<crate::PortState>() {
-                    let url = format!("http://127.0.0.1:{}", port.0);
-                    let _ = open::that(&url);
+                // Use ServerUrlState (works for both remote and local modes)
+                if let Some(url_state) = app.try_state::<crate::ServerUrlState>() {
+                    let url = url_state.0.read().unwrap().clone();
+                    if !url.is_empty() {
+                        let _ = open::that(&url);
+                    }
+                } else if let Some(port) = app.try_state::<crate::PortState>() {
+                    // Fallback for backward compatibility
+                    if let Some(p) = *port.0.read().unwrap() {
+                        let url = format!("http://127.0.0.1:{p}");
+                        let _ = open::that(&url);
+                    }
+                }
+            }
+            "change_server" => {
+                // Shut down existing local server if running.
+                if let Some(holder) = app.try_state::<crate::ServerHandleHolder>() {
+                    let mut guard = holder.0.lock().unwrap();
+                    if let Some(handle) = guard.take() {
+                        std::thread::spawn(move || handle.shutdown());
+                    }
+                }
+                // Clear local-mode state so commands report "not running".
+                if let Some(state) = app.try_state::<crate::PortState>() {
+                    *state.0.write().unwrap() = None;
+                }
+                if let Some(state) = app.try_state::<crate::KernelState>() {
+                    *state.0.write().unwrap() = None;
+                }
+
+                // Navigate back to the connection screen
+                if let Some(w) = app.get_webview_window("main") {
+                    let html = crate::connection::connection_html();
+                    let escaped = serde_json::to_string(&html).unwrap_or_default();
+                    let js =
+                        format!("document.open(); document.write({escaped}); document.close();");
+                    if let Err(e) = w.eval(&js) {
+                        warn!("Failed to show connection screen: {e}");
+                    }
+                    let _ = w.set_title("LibreFang — Connect");
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
                 }
             }
             "launch_at_login" => {
