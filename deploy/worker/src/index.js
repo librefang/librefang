@@ -1,18 +1,6 @@
 const FLY_API = 'https://api.machines.dev/v1';
 const DOCKER_IMAGE = 'ghcr.io/librefang/librefang:latest';
 const REGION = 'nrt';
-const FREE_MODEL = 'openrouter/stepfun/step-3.5-flash:free';
-
-// Default config.toml for deployed instances (uses OpenRouter free model)
-const DEFAULT_CONFIG = `
-api_listen = "0.0.0.0:4545"
-log_level = "info"
-
-[default_model]
-provider = "openrouter"
-model = "${FREE_MODEL}"
-api_key_env = "OPENROUTER_API_KEY"
-`.trim();
 
 export default {
   async fetch(request, env) {
@@ -90,12 +78,11 @@ async function handleDeploy(request, env) {
       return json({ error: `Failed to create volume: ${err}` }, 500);
     }
 
-    // 5. Build env — inject built-in OpenRouter key + default config
+    // 5. Build env
     const builtinKey = env.OPENROUTER_API_KEY || '';
     const env_vars = {
       LIBREFANG_HOME: '/data',
       OPENROUTER_API_KEY: builtinKey,
-      LIBREFANG_DEFAULT_CONFIG: DEFAULT_CONFIG,
     };
 
     // 6. Create machine
