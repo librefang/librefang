@@ -987,12 +987,13 @@ fn is_channel_configured(
     }
 }
 
-fn require_tenant_account_id(account: &AccountId) -> Result<&str, axum::response::Response> {
+type ChannelRouteError = (StatusCode, Json<serde_json::Value>);
+
+fn require_tenant_account_id(account: &AccountId) -> Result<&str, ChannelRouteError> {
     account.0.as_deref().ok_or_else(|| {
         ApiErrorResponse::bad_request("X-Account-Id header required for channel operations")
             .with_status(StatusCode::UNAUTHORIZED)
             .into_json_tuple()
-            .into_response()
     })
 }
 
@@ -1606,7 +1607,7 @@ pub async fn list_channels(
 ) -> axum::response::Response {
     let account_id = match require_tenant_account_id(&account) {
         Ok(account_id) => account_id,
-        Err(response) => return response,
+        Err(err) => return err.into_response(),
     };
     // Read the live channels config (updated on every hot-reload) instead of the
     // stale boot-time kernel.config, so newly configured channels show correctly.
@@ -1689,7 +1690,7 @@ pub async fn get_channel(
 ) -> axum::response::Response {
     let account_id = match require_tenant_account_id(&account) {
         Ok(account_id) => account_id,
-        Err(response) => return response,
+        Err(err) => return err.into_response(),
     };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
@@ -1767,7 +1768,7 @@ pub async fn configure_channel(
 ) -> axum::response::Response {
     let account_id = match require_tenant_account_id(&account) {
         Ok(account_id) => account_id,
-        Err(response) => return response,
+        Err(err) => return err.into_response(),
     };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
@@ -1895,7 +1896,7 @@ pub async fn remove_channel(
 ) -> axum::response::Response {
     let account_id = match require_tenant_account_id(&account) {
         Ok(account_id) => account_id,
-        Err(response) => return response,
+        Err(err) => return err.into_response(),
     };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
@@ -1982,7 +1983,7 @@ pub async fn test_channel(
 ) -> axum::response::Response {
     let account_id = match require_tenant_account_id(&account) {
         Ok(account_id) => account_id,
-        Err(response) => return response,
+        Err(err) => return err.into_response(),
     };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
@@ -2164,8 +2165,9 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
     use std::time::Instant;
+    use tokio::sync::Mutex;
     use tower::ServiceExt;
 
     #[test]
@@ -2289,7 +2291,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn wechat_bootstrap_start_persists_owned_session_for_target_instance() {
-        let _guard = wechat_test_guard().lock().unwrap();
+        let _guard = wechat_test_guard().lock().await;
         let temp = tempfile::tempdir().unwrap();
         let ilink = spawn_wechat_ilink_stub(vec![(
             "/ilink/bot/get_bot_qrcode?bot_type=3".to_string(),
@@ -2347,7 +2349,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn wechat_bootstrap_status_confirms_owned_session_and_persists_token_to_owner_slot() {
-        let _guard = wechat_test_guard().lock().unwrap();
+        let _guard = wechat_test_guard().lock().await;
         let temp = tempfile::tempdir().unwrap();
         let ilink = spawn_wechat_ilink_stub(vec![
             (
@@ -2435,7 +2437,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn wechat_bootstrap_cancel_marks_owned_session_cancelled() {
-        let _guard = wechat_test_guard().lock().unwrap();
+        let _guard = wechat_test_guard().lock().await;
         let temp = tempfile::tempdir().unwrap();
         let ilink = spawn_wechat_ilink_stub(vec![(
             "/ilink/bot/get_bot_qrcode?bot_type=3".to_string(),
@@ -2500,7 +2502,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn whatsapp_bootstrap_start_persists_owned_session_for_target_instance() {
-        let _guard = wechat_test_guard().lock().unwrap();
+        let _guard = wechat_test_guard().lock().await;
         let temp = tempfile::tempdir().unwrap();
         let gateway = spawn_gateway_stub(vec![(
             "POST".to_string(),
@@ -2557,7 +2559,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn whatsapp_bootstrap_status_confirms_owned_session() {
-        let _guard = wechat_test_guard().lock().unwrap();
+        let _guard = wechat_test_guard().lock().await;
         let temp = tempfile::tempdir().unwrap();
         let gateway = spawn_gateway_stub(vec![
             (
@@ -2641,7 +2643,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn whatsapp_bootstrap_cancel_marks_owned_session_cancelled() {
-        let _guard = wechat_test_guard().lock().unwrap();
+        let _guard = wechat_test_guard().lock().await;
         let temp = tempfile::tempdir().unwrap();
         let gateway = spawn_gateway_stub(vec![(
             "POST".to_string(),
@@ -2976,7 +2978,7 @@ pub async fn whatsapp_bootstrap_start(
     let created_by =
         match require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts) {
             Ok(account_id) => account_id,
-            Err(response) => return response,
+            Err(err) => return err.into_response(),
         };
     let target = {
         let live_channels = state.channels_config.read().await;
@@ -3084,10 +3086,10 @@ pub async fn whatsapp_bootstrap_status(
     State(state): State<Arc<AppState>>,
     Path(instance_key): Path<String>,
 ) -> axum::response::Response {
-    if let Err(response) =
+    if let Err(err) =
         require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
     {
-        return response;
+        return err.into_response();
     }
     let target = {
         let live_channels = state.channels_config.read().await;
@@ -3266,10 +3268,10 @@ pub async fn whatsapp_bootstrap_cancel(
     State(state): State<Arc<AppState>>,
     Path(instance_key): Path<String>,
 ) -> axum::response::Response {
-    if let Err(response) =
+    if let Err(err) =
         require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
     {
-        return response;
+        return err.into_response();
     }
     let target = {
         let live_channels = state.channels_config.read().await;
@@ -3440,11 +3442,9 @@ struct WeChatBootstrapTarget {
 fn require_admin_account_id(
     account: &AccountId,
     admin_accounts: &[String],
-) -> Result<String, axum::response::Response> {
+) -> Result<String, ChannelRouteError> {
     let account_id = require_tenant_account_id(account)?.to_string();
-    if let Err((code, json)) = require_admin(account, admin_accounts) {
-        return Err((code, json).into_response());
-    }
+    require_admin(account, admin_accounts)?;
     Ok(account_id)
 }
 
@@ -3574,7 +3574,7 @@ pub async fn wechat_bootstrap_start(
     let created_by =
         match require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts) {
             Ok(account_id) => account_id,
-            Err(response) => return response,
+            Err(err) => return err.into_response(),
         };
     let target = {
         let live_channels = state.channels_config.read().await;
@@ -3702,10 +3702,10 @@ pub async fn wechat_bootstrap_status(
     State(state): State<Arc<AppState>>,
     Path(instance_key): Path<String>,
 ) -> axum::response::Response {
-    if let Err(response) =
+    if let Err(err) =
         require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
     {
-        return response;
+        return err.into_response();
     }
 
     let target = {
@@ -3965,10 +3965,10 @@ pub async fn wechat_bootstrap_cancel(
     State(state): State<Arc<AppState>>,
     Path(instance_key): Path<String>,
 ) -> axum::response::Response {
-    if let Err(response) =
+    if let Err(err) =
         require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
     {
-        return response;
+        return err.into_response();
     }
     let target = {
         let live_channels = state.channels_config.read().await;

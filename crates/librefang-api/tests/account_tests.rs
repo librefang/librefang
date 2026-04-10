@@ -4443,13 +4443,13 @@ async fn mt_network_comms_topology_and_events_only_include_owned_agents() {
     let _ = h.state.kernel.agent_registry().register(tenant_b_child);
 
     h.state.kernel.audit().record(
-        &tenant_a_parent_id.to_string(),
+        tenant_a_parent_id.to_string(),
         librefang_runtime::audit::AuditAction::AgentMessage,
         "tokens_in=5, tokens_out=7",
         "ok",
     );
     h.state.kernel.audit().record(
-        &tenant_b_child_id.to_string(),
+        tenant_b_child_id.to_string(),
         librefang_runtime::audit::AuditAction::AgentMessage,
         "tokens_in=11, tokens_out=13",
         "ok",

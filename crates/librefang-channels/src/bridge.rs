@@ -1468,7 +1468,7 @@ fn sender_user_id(message: &ChannelMessage) -> &str {
         .unwrap_or(&message.sender.platform_id)
 }
 
-fn ingress_binding_account_id<'a>(message: &'a ChannelMessage) -> Result<&'a str, &'static str> {
+fn ingress_binding_account_id(message: &ChannelMessage) -> Result<&str, &'static str> {
     match message.channel {
         ChannelType::CLI => Ok("cli"),
         _ => message

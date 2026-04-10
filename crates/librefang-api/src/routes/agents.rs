@@ -175,9 +175,7 @@ fn agent_action_failed_response(message: &str) -> serde_json::Value {
     serde_json::json!({ "error": message })
 }
 
-fn tenant_owner<'a>(
-    account: &'a AccountId,
-) -> Result<&'a str, (StatusCode, Json<serde_json::Value>)> {
+fn tenant_owner(account: &AccountId) -> Result<&str, (StatusCode, Json<serde_json::Value>)> {
     require_concrete_account(account)
 }
 

@@ -38,6 +38,30 @@ pub fn test_request(method: Method, path: &str, body: Option<&str>) -> Request<B
     builder.body(body).expect("failed to build test request")
 }
 
+/// Builds a tenant-scoped test HTTP request with `X-Account-Id`.
+pub fn test_tenant_request(
+    method: Method,
+    path: &str,
+    body: Option<&str>,
+    account_id: &str,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("x-account-id", account_id);
+
+    if body.is_some() {
+        builder = builder.header("content-type", "application/json");
+    }
+
+    let body = match body {
+        Some(b) => Body::from(b.to_string()),
+        None => Body::empty(),
+    };
+
+    builder.body(body).expect("failed to build test request")
+}
+
 /// Asserts the response status is 200 and the body is valid JSON.
 ///
 /// Returns the parsed `serde_json::Value`.

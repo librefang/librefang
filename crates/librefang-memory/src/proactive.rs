@@ -3565,6 +3565,8 @@ mod tests {
     async fn test_knowledge_graph_stores_relations() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
         let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+        let agent_id = AgentId::new().to_string();
+        let account_id = "tenant-test";
 
         // Manually store a relation
         let triples = vec![librefang_types::memory::RelationTriple {
@@ -3574,17 +3576,23 @@ mod tests {
             object: "Acme Corp".to_string(),
             object_type: "organization".to_string(),
         }];
-        store.store_relations(&triples, "test-agent");
+        store
+            .store_relations_scoped(&triples, &agent_id, account_id)
+            .unwrap();
 
         // Query the knowledge graph
         let matches = substrate
             .knowledge()
-            .query_graph(GraphPattern {
-                source: Some("alice".to_string()),
-                relation: None,
-                target: None,
-                max_depth: 1,
-            })
+            .query_graph_scoped(
+                GraphPattern {
+                    source: Some("Alice".to_string()),
+                    relation: None,
+                    target: None,
+                    max_depth: 1,
+                },
+                Some(&agent_id),
+                Some(account_id),
+            )
             .unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].target.name, "Acme Corp");
@@ -3765,6 +3773,8 @@ mod tests {
     async fn test_store_relations_dedup() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
         let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+        let agent_id = AgentId::new().to_string();
+        let account_id = "tenant-test";
 
         let triples = vec![librefang_types::memory::RelationTriple {
             subject: "Bob".to_string(),
@@ -3775,18 +3785,26 @@ mod tests {
         }];
 
         // Store twice
-        store.store_relations(&triples, "test-agent");
-        store.store_relations(&triples, "test-agent");
+        store
+            .store_relations_scoped(&triples, &agent_id, account_id)
+            .unwrap();
+        store
+            .store_relations_scoped(&triples, &agent_id, account_id)
+            .unwrap();
 
         // Should only have 1 relation (deduped)
         let matches = substrate
             .knowledge()
-            .query_graph(GraphPattern {
-                source: Some("bob".to_string()),
-                relation: None,
-                target: None,
-                max_depth: 1,
-            })
+            .query_graph_scoped(
+                GraphPattern {
+                    source: Some("Bob".to_string()),
+                    relation: None,
+                    target: None,
+                    max_depth: 1,
+                },
+                Some(&agent_id),
+                Some(account_id),
+            )
             .unwrap();
         assert_eq!(matches.len(), 1);
     }
