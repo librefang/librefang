@@ -5,7 +5,8 @@
 //! flow is used to obtain and cache access tokens for outbound API calls.
 
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    split_message, ChannelAdapter, ChannelAdapterMultiplicity, ChannelContent, ChannelMessage,
+    ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -275,6 +276,12 @@ impl ChannelAdapter for TeamsAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Teams
+    }
+
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+            reason: "teams uses a fixed shared webhook route on the main API server",
+        }
     }
 
     async fn create_webhook_routes(

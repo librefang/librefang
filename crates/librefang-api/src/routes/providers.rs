@@ -49,6 +49,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         )
 }
 
+use super::shared::require_admin;
 use super::skills::{remove_secret_env, write_secret_env};
 use super::AppState;
 use axum::extract::{Path, Query, State};
@@ -60,7 +61,30 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
+use crate::middleware::{AccountId, ConcreteAccountId};
 use crate::types::ApiErrorResponse;
+
+fn sanitize_account_component(account_id: &str) -> String {
+    let mut out = String::with_capacity(account_id.len());
+    for ch in account_id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    out.trim_matches('_').to_string()
+}
+
+fn scoped_provider_env_var(base_env: &str, account_id: &str) -> String {
+    format!(
+        "{base_env}__ACCT_{}",
+        sanitize_account_component(account_id)
+    )
+}
 #[utoipa::path(
     get,
     path = "/api/models",
@@ -70,9 +94,13 @@ use crate::types::ApiErrorResponse;
     )
 )]
 pub async fn list_models(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let catalog = state
         .kernel
         .model_catalog_ref()
@@ -143,10 +171,17 @@ pub async fn list_models(
             "available": available_count,
         })),
     )
+        .into_response()
 }
 
 #[utoipa::path(get, path = "/api/models/aliases", tag = "models", responses((status = 200, description = "List model aliases", body = serde_json::Value)))]
-pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_aliases(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let aliases = state
         .kernel
         .model_catalog_ref()
@@ -171,6 +206,7 @@ pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoRespon
             "total": entries.len(),
         })),
     )
+        .into_response()
 }
 
 /// POST /api/models/aliases — Create a new alias mapping.
@@ -178,9 +214,13 @@ pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoRespon
 /// Body: `{ "alias": "my-alias", "model_id": "gpt-4o" }`
 #[utoipa::path(post, path = "/api/models/aliases", tag = "models", request_body = serde_json::Value, responses((status = 200, description = "Alias created", body = serde_json::Value)))]
 pub async fn create_alias(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let alias = body
         .get("alias")
         .and_then(|v| v.as_str())
@@ -193,10 +233,14 @@ pub async fn create_alias(
         .to_string();
 
     if alias.is_empty() {
-        return ApiErrorResponse::bad_request("Missing required field: alias").into_json_tuple();
+        return ApiErrorResponse::bad_request("Missing required field: alias")
+            .into_json_tuple()
+            .into_response();
     }
     if model_id.is_empty() {
-        return ApiErrorResponse::bad_request("Missing required field: model_id").into_json_tuple();
+        return ApiErrorResponse::bad_request("Missing required field: model_id")
+            .into_json_tuple()
+            .into_response();
     }
 
     let mut catalog = state
@@ -207,7 +251,8 @@ pub async fn create_alias(
 
     if !catalog.add_alias(&alias, &model_id) {
         return ApiErrorResponse::conflict(format!("Alias '{}' already exists", alias))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     (
@@ -218,14 +263,19 @@ pub async fn create_alias(
             "status": "created"
         })),
     )
+        .into_response()
 }
 
 /// DELETE /api/models/aliases/{alias} — Remove an alias mapping.
 #[utoipa::path(delete, path = "/api/models/aliases/{alias}", tag = "models", params(("alias" = String, Path, description = "Alias name")), responses((status = 200, description = "Alias deleted")))]
 pub async fn delete_alias(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(alias): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let mut catalog = state
         .kernel
         .model_catalog_ref()
@@ -234,20 +284,26 @@ pub async fn delete_alias(
 
     if !catalog.remove_alias(&alias) {
         return ApiErrorResponse::not_found(format!("Alias '{}' not found", alias))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     (
         StatusCode::OK,
         Json(serde_json::json!({"status": "removed"})),
     )
+        .into_response()
 }
 
 #[utoipa::path(get, path = "/api/models/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Model details", body = serde_json::Value)))]
 pub async fn get_model(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let catalog = state
         .kernel
         .model_catalog_ref()
@@ -280,6 +336,7 @@ pub async fn get_model(
         }
         None => ApiErrorResponse::not_found(format!("Model '{}' not found", id)).into_json_tuple(),
     }
+    .into_response()
 }
 
 /// Attach local-provider probe results to a JSON entry and optionally merge
@@ -324,7 +381,11 @@ fn attach_probe_result(
         (status = 200, description = "List configured providers", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_providers(
+    account: ConcreteAccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    let account_id = account.0.clone();
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
         let catalog = state
             .kernel
@@ -333,6 +394,18 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             .unwrap_or_else(|e| e.into_inner());
         catalog.list_providers().to_vec()
     };
+    let tenant_records = state
+        .kernel
+        .provider_store()
+        .list_by_account(&account_id)
+        .await;
+    let tenant_by_provider: HashMap<
+        String,
+        librefang_kernel::provider_accounts::TenantProviderRecord,
+    > = tenant_records
+        .into_iter()
+        .map(|record| (record.provider.clone(), record))
+        .collect();
 
     // Collect local providers that need probing
     let local_providers: Vec<(usize, String, String)> = provider_list
@@ -364,6 +437,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     let mut providers: Vec<serde_json::Value> = Vec::with_capacity(provider_list.len());
 
     for (i, p) in provider_list.iter().enumerate() {
+        let tenant_record = tenant_by_provider.get(&p.id);
         let mut entry = serde_json::json!({
             "id": p.id,
             "display_name": p.display_name,
@@ -373,6 +447,13 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "api_key_env": p.api_key_env,
             "base_url": p.base_url,
             "media_capabilities": p.media_capabilities,
+            "tenant": {
+                "configured": tenant_record.and_then(|record| record.api_key_env.as_ref()).is_some(),
+                "default": tenant_record.map(|record| record.is_default).unwrap_or(false),
+                "api_key_env": tenant_record.and_then(|record| record.api_key_env.clone()),
+                "base_url": tenant_record.and_then(|record| record.base_url.clone()),
+                "default_model": tenant_record.and_then(|record| record.default_model.clone()),
+            }
         });
 
         // Attach region map so the dashboard can show available regions
@@ -435,6 +516,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "total": total,
         })),
     )
+        .into_response()
 }
 
 /// GET /api/providers/{name} — Get details for a single provider.
@@ -449,9 +531,11 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 )]
 pub async fn get_provider(
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.clone();
     let (provider, models) = {
         let catalog = state
             .kernel
@@ -482,7 +566,8 @@ pub async fn get_provider(
             }
             None => {
                 return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
-                    .into_json_tuple();
+                    .into_json_tuple()
+                    .into_response();
             }
         }
     };
@@ -497,6 +582,28 @@ pub async fn get_provider(
         "base_url": provider.base_url,
         "models": models,
     });
+    if let Some(record) = state
+        .kernel
+        .provider_store()
+        .get_scoped(&account_id, &name)
+        .await
+    {
+        entry["tenant"] = serde_json::json!({
+            "configured": record.api_key_env.is_some(),
+            "default": record.is_default,
+            "api_key_env": record.api_key_env,
+            "base_url": record.base_url,
+            "default_model": record.default_model,
+        });
+    } else {
+        entry["tenant"] = serde_json::json!({
+            "configured": false,
+            "default": false,
+            "api_key_env": serde_json::Value::Null,
+            "base_url": serde_json::Value::Null,
+            "default_model": serde_json::Value::Null,
+        });
+    }
 
     // For local providers, run a probe and attach the result
     if librefang_runtime::provider_health::is_local_provider(&provider.id)
@@ -523,7 +630,7 @@ pub async fn get_provider(
         entry["is_local"] = serde_json::json!(true);
     }
 
-    (StatusCode::OK, Json(entry))
+    (StatusCode::OK, Json(entry)).into_response()
 }
 
 /// POST /api/models/custom — Add a custom model to the catalog.
@@ -532,9 +639,13 @@ pub async fn get_provider(
 /// available in the catalog.
 #[utoipa::path(post, path = "/api/models/custom", tag = "models", request_body = serde_json::Value, responses((status = 200, description = "Custom model added", body = serde_json::Value)))]
 pub async fn add_custom_model(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let id = body
         .get("id")
         .and_then(|v| v.as_str())
@@ -556,7 +667,9 @@ pub async fn add_custom_model(
         .unwrap_or(8_192);
 
     if id.is_empty() {
-        return ApiErrorResponse::bad_request("Missing required field: id").into_json_tuple();
+        return ApiErrorResponse::bad_request("Missing required field: id")
+            .into_json_tuple()
+            .into_response();
     }
 
     let display = body
@@ -606,7 +719,8 @@ pub async fn add_custom_model(
             "Model '{}' already exists for provider '{}'",
             id, provider
         ))
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
 
     // Persist to disk. If save fails, roll back the in-memory add so the
@@ -617,7 +731,8 @@ pub async fn add_custom_model(
         tracing::warn!("Failed to persist custom models: {e}");
         catalog.remove_custom_model(&id);
         return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     (
@@ -628,14 +743,19 @@ pub async fn add_custom_model(
             "status": "added"
         })),
     )
+        .into_response()
 }
 
 /// DELETE /api/models/custom/{id} — Remove a custom model.
 #[utoipa::path(delete, path = "/api/models/custom/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Custom model removed")))]
 pub async fn remove_custom_model(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let mut catalog = state
         .kernel
         .model_catalog_ref()
@@ -648,7 +768,8 @@ pub async fn remove_custom_model(
     let snapshot = catalog.find_model(&model_id).cloned();
     if !catalog.remove_custom_model(&model_id) {
         return ApiErrorResponse::not_found(format!("Custom model '{}' not found", model_id))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     let custom_path = state.kernel.home_dir().join("custom_models.json");
@@ -658,32 +779,38 @@ pub async fn remove_custom_model(
             catalog.add_custom_model(entry);
         }
         return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     (
         StatusCode::OK,
         Json(serde_json::json!({"status": "removed"})),
     )
+        .into_response()
 }
 
 // ── A2A (Agent-to-Agent) Protocol Endpoints ─────────────────────────
 
 #[utoipa::path(post, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "API key set", body = serde_json::Value)))]
 pub async fn set_provider_key(
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.clone();
     let key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
-            return ApiErrorResponse::bad_request("Missing or empty 'key' field").into_json_tuple();
+            return ApiErrorResponse::bad_request("Missing or empty 'key' field")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     // Look up env var from catalog; for unknown/custom providers derive one.
-    let env_var = {
+    let base_env_var = {
         let catalog = state
             .kernel
             .model_catalog_ref()
@@ -698,226 +825,124 @@ pub async fn set_provider_key(
                 format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
             })
     };
+    let env_var = scoped_provider_env_var(&base_env_var, &account_id);
 
     // Write to secrets.env file
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_var, &key) {
         return ApiErrorResponse::internal(format!("Failed to write secrets.env: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Set env var in current process so detect_auth picks it up
     std::env::set_var(&env_var, &key);
-
-    // Refresh auth detection (sync, sets status to Configured if non-empty)
-    state
+    if let Err(e) = state
         .kernel
-        .model_catalog_ref()
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .detect_auth();
-
-    // Kick off a background probe to validate the new key immediately so the
-    // dashboard reflects ValidatedKey / InvalidKey without waiting for restart.
-    state.kernel.clone().spawn_key_validation();
-
-    // Auto-switch default provider if current default has no working key.
-    // This fixes the common case where a user adds e.g. a Gemini key via dashboard
-    // but their agent still tries to use the previous provider (which has no key).
-    //
-    // Read the effective default from the hot-reload override (if set) rather than
-    // the stale boot-time config — a previous set_provider_key call may have already
-    // switched the default.
-    let (current_provider, current_key_env) = {
-        let guard = state
-            .kernel
-            .default_model_override_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        match guard.as_ref() {
-            Some(dm) => (dm.provider.clone(), dm.api_key_env.clone()),
-            None => {
-                let dm = state.kernel.config_ref().default_model.clone();
-                (dm.provider, dm.api_key_env)
-            }
-        }
-    };
-    let current_has_key = if current_key_env.is_empty() {
-        false
-    } else {
-        std::env::var(&current_key_env)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
-    };
-    let switched = if !current_has_key && current_provider != name {
-        // Find a default model for the newly-keyed provider
-        let default_model = {
-            let catalog = state
-                .kernel
-                .model_catalog_ref()
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            catalog.default_model_for_provider(&name)
-        };
-        if let Some(model_id) = default_model {
-            // Update config.toml to persist the switch
-            let config_path = state.kernel.home_dir().join("config.toml");
-            if let Err(e) = persist_default_model(&config_path, &name, &model_id, &env_var) {
-                tracing::warn!("Failed to persist default_model to config.toml: {e}");
-            }
-
-            // Hot-update the in-memory default model override so resolve_driver()
-            // immediately creates drivers for the new provider — no restart needed.
-            {
-                let new_dm = librefang_types::config::DefaultModelConfig {
-                    provider: name.clone(),
-                    model: model_id,
-                    api_key_env: env_var.clone(),
-                    base_url: None,
-                    ..Default::default()
-                };
-                let mut guard = state
-                    .kernel
-                    .default_model_override_ref()
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                *guard = Some(new_dm);
-            }
-            true
-        } else {
-            false
-        }
-    } else if current_provider == name {
-        // User is saving a key for the CURRENT default provider. The env var is
-        // already set (set_var above), but we must ensure default_model_override
-        // has the correct api_key_env so resolve_driver reads the right variable.
-        let needs_update = {
-            let guard = state
-                .kernel
-                .default_model_override_ref()
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            match guard.as_ref() {
-                Some(dm) => dm.api_key_env != env_var,
-                None => state.kernel.config_ref().default_model.api_key_env != env_var,
-            }
-        };
-        if needs_update {
-            let mut guard = state
-                .kernel
-                .default_model_override_ref()
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            let base = guard
-                .clone()
-                .unwrap_or_else(|| state.kernel.config_ref().default_model.clone());
-            *guard = Some(librefang_types::config::DefaultModelConfig {
-                api_key_env: env_var.clone(),
-                ..base
-            });
-        }
-        false
-    } else {
-        false
-    };
-
-    // Reset log-once flag so future provider removal gets logged again
-    state
-        .kernel
-        .provider_unconfigured_flag()
-        .store(false, std::sync::atomic::Ordering::Relaxed);
-
-    // Trigger all active hands so they resume immediately
-    state.kernel.trigger_all_hands();
-
-    // If default provider switched, update registry entries for agents that were
-    // using the old default so they immediately pick up the new provider/model.
-    if switched {
-        let new_dm = {
-            let guard = state
-                .kernel
-                .default_model_override_ref()
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            guard
-                .clone()
-                .unwrap_or_else(|| state.kernel.config_ref().default_model.clone())
-        };
-        state
-            .kernel
-            .sync_default_model_agents(&current_provider, &new_dm);
+        .provider_store()
+        .upsert_scoped(
+            &account_id,
+            &name,
+            librefang_kernel::provider_accounts::TenantProviderUpdate {
+                api_key_env: Some(Some(env_var.clone())),
+                base_url: None,
+            },
+        )
+        .await
+    {
+        return ApiErrorResponse::internal(format!("Failed to persist tenant provider state: {e}"))
+            .into_json_tuple()
+            .into_response();
     }
 
-    let mut resp = serde_json::json!({"status": "saved", "provider": name});
-    if switched {
-        resp["switched_default"] = serde_json::json!(true);
-        resp["message"] = serde_json::json!(format!(
-            "API key saved and default provider switched to '{}'.",
-            name
-        ));
-    }
+    let resp = serde_json::json!({
+        "status": "saved",
+        "provider": name,
+        "tenant_account_id": account_id,
+        "api_key_env": env_var,
+    });
 
-    (StatusCode::OK, Json(resp))
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
 /// DELETE /api/providers/{name}/key — Remove an API key for a provider.
 #[utoipa::path(delete, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "API key deleted")))]
 pub async fn delete_provider_key(
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
-    let env_var = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        catalog
-            .get_provider(&name)
-            .map(|p| p.api_key_env.clone())
-            .filter(|env| !env.trim().is_empty())
-            .unwrap_or_else(|| {
-                // Custom/unknown provider — derive env var from convention
-                format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
-            })
+) -> axum::response::Response {
+    let account_id = account.0.clone();
+    let record = match state
+        .kernel
+        .provider_store()
+        .get_scoped(&account_id, &name)
+        .await
+    {
+        Some(record) => record,
+        None => {
+            return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
+                .into_json_tuple()
+                .into_response();
+        }
     };
-
-    if env_var.is_empty() {
-        return ApiErrorResponse::bad_request("Provider does not require an API key")
-            .into_json_tuple();
-    }
+    let env_var = match record.api_key_env.clone() {
+        Some(env_var) => env_var,
+        None => {
+            return ApiErrorResponse::not_found(format!("Provider '{}' key not configured", name))
+                .into_json_tuple()
+                .into_response();
+        }
+    };
 
     // Remove from secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
         return ApiErrorResponse::internal(format!("Failed to update secrets.env: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Remove from process environment
     std::env::remove_var(&env_var);
-
-    // Refresh auth detection
-    state
+    if let Err(e) = state
         .kernel
-        .model_catalog_ref()
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .detect_auth();
+        .provider_store()
+        .upsert_scoped(
+            &account_id,
+            &name,
+            librefang_kernel::provider_accounts::TenantProviderUpdate {
+                api_key_env: Some(None),
+                base_url: None,
+            },
+        )
+        .await
+    {
+        return ApiErrorResponse::internal(format!("Failed to persist tenant provider state: {e}"))
+            .into_json_tuple()
+            .into_response();
+    }
 
     (
         StatusCode::OK,
-        Json(serde_json::json!({"status": "removed", "provider": name})),
+        Json(serde_json::json!({"status": "removed", "provider": name, "tenant_account_id": account_id})),
     )
+        .into_response()
 }
 
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
 #[utoipa::path(post, path = "/api/providers/{name}/test", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "Provider test result", body = serde_json::Value)))]
 pub async fn test_provider(
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.clone();
+    let tenant_record = state
+        .kernel
+        .provider_store()
+        .get_scoped(&account_id, &name)
+        .await;
     let (env_var, base_url, key_required, auth_status) = {
         let catalog = state
             .kernel
@@ -926,14 +951,21 @@ pub async fn test_provider(
             .unwrap_or_else(|e| e.into_inner());
         match catalog.get_provider(&name) {
             Some(p) => (
-                p.api_key_env.clone(),
-                p.base_url.clone(),
+                tenant_record
+                    .as_ref()
+                    .and_then(|record| record.api_key_env.clone())
+                    .unwrap_or_default(),
+                tenant_record
+                    .as_ref()
+                    .and_then(|record| record.base_url.clone())
+                    .unwrap_or_else(|| p.base_url.clone()),
                 p.key_required,
                 p.auth_status,
             ),
             None => {
                 return ApiErrorResponse::not_found(format!("Unknown provider '{}'", name))
-                    .into_json_tuple();
+                    .into_json_tuple()
+                    .into_response();
             }
         }
     };
@@ -967,7 +999,7 @@ pub async fn test_provider(
                     serde_json::json!({"status":"error","provider":name,"error":"CLI not found in PATH"}),
                 ),
             )
-        };
+        }.into_response();
     }
 
     // API provider with CLI fallback but no API key — test the CLI instead.
@@ -1006,12 +1038,14 @@ pub async fn test_provider(
                     serde_json::json!({"status":"error","provider":name,"error":format!("{cli_name} CLI not found in PATH")}),
                 ),
             )
-        };
+        }.into_response();
     }
 
     // API providers with no base_url configured cannot be tested.
     if base_url.is_empty() {
-        return ApiErrorResponse::bad_request("Provider base URL not configured").into_json_tuple();
+        return ApiErrorResponse::bad_request("Provider base URL not configured")
+            .into_json_tuple()
+            .into_response();
     }
 
     // Treat empty-string env vars the same as missing — an env var set to ""
@@ -1019,8 +1053,10 @@ pub async fn test_provider(
     let api_key = std::env::var(&env_var)
         .ok()
         .filter(|k| !k.trim().is_empty());
-    if key_required && api_key.is_none() && !env_var.is_empty() {
-        return ApiErrorResponse::bad_request("Provider API key not configured").into_json_tuple();
+    if key_required && api_key.is_none() {
+        return ApiErrorResponse::bad_request("Provider API key not configured")
+            .into_json_tuple()
+            .into_response();
     }
 
     let start = std::time::Instant::now();
@@ -1034,7 +1070,8 @@ pub async fn test_provider(
             return ApiErrorResponse::internal(format!(
                 "Failed to build HTTP client for provider test: {e}"
             ))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
         }
     };
 
@@ -1052,7 +1089,8 @@ pub async fn test_provider(
                 "latency_ms": 0,
                 "note": "AWS Bedrock uses IAM auth; key presence verified"
             })),
-        );
+        )
+            .into_response();
     }
 
     // ── Provider-specific test URL ──
@@ -1104,7 +1142,8 @@ pub async fn test_provider(
                     "provider": name,
                     "error": format!("Connection failed: {e}"),
                 })),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -1145,59 +1184,60 @@ pub async fn test_provider(
             })),
         )
     }
+    .into_response()
 }
 
 /// PUT /api/providers/{name}/url — Set a custom base URL for a provider.
 #[utoipa::path(put, path = "/api/providers/{name}/url", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "Provider URL set", body = serde_json::Value)))]
 pub async fn set_provider_url(
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.clone();
     // Accept any provider name — custom providers are supported via OpenAI-compatible format.
     let base_url = match body["base_url"].as_str() {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing or empty 'base_url' field")
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     // Validate URL scheme
     if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
         return ApiErrorResponse::bad_request("base_url must start with http:// or https://")
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
-    // Update catalog in memory
+    if let Err(e) = state
+        .kernel
+        .provider_store()
+        .upsert_scoped(
+            &account_id,
+            &name,
+            librefang_kernel::provider_accounts::TenantProviderUpdate {
+                api_key_env: None,
+                base_url: Some(Some(base_url.clone())),
+            },
+        )
+        .await
     {
-        let mut catalog = state
-            .kernel
-            .model_catalog_ref()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        catalog.set_provider_url(&name, &base_url);
-    }
-
-    // Persist to config.toml [provider_urls] section
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if let Err(e) = upsert_provider_url(&config_path, &name, &base_url) {
-        return ApiErrorResponse::internal(format!("Failed to save config: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to persist tenant provider state: {e}"))
+            .into_json_tuple()
+            .into_response();
     }
 
     // Probe reachability at the new URL
     let probe = librefang_runtime::provider_health::probe_provider(&name, &base_url).await;
 
-    // Merge discovered models into catalog
-    if !probe.discovered_models.is_empty() {
-        if let Ok(mut catalog) = state.kernel.model_catalog_ref().write() {
-            catalog.merge_discovered_models(&name, &probe.discovered_models);
-        }
-    }
-
     let mut resp = serde_json::json!({
         "status": "saved",
         "provider": name,
+        "tenant_account_id": account_id,
         "base_url": base_url,
         "reachable": probe.reachable,
         "latency_ms": probe.latency_ms,
@@ -1209,7 +1249,7 @@ pub async fn set_provider_url(
         resp["discovered_model_info"] = serde_json::json!(probe.discovered_model_info);
     }
 
-    (StatusCode::OK, Json(resp))
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
 /// POST /api/providers/{name}/default — Set a provider as the default model provider.
@@ -1228,9 +1268,11 @@ pub async fn set_provider_url(
     )
 )]
 pub async fn set_default_provider(
+    account: ConcreteAccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.clone();
     // Verify the provider exists in the catalog
     let (default_model, env_var) = {
         let catalog = state
@@ -1242,7 +1284,8 @@ pub async fn set_default_provider(
             Some(p) => p.clone(),
             None => {
                 return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
-                    .into_json_tuple();
+                    .into_json_tuple()
+                    .into_response();
             }
         };
         let model_id = catalog.default_model_for_provider(&name);
@@ -1256,54 +1299,42 @@ pub async fn set_default_provider(
                 "No models found for provider '{}'",
                 name
             ))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
         }
     };
-
-    // Update config.toml to persist the switch
-    let config_path = state.kernel.home_dir().join("config.toml");
-    let persisted = match persist_default_model(&config_path, &name, &model_id, &env_var) {
-        Ok(()) => true,
+    let old_provider = state
+        .kernel
+        .provider_store()
+        .effective_default_for_account_async(&account_id)
+        .await
+        .map(|dm| dm.provider)
+        .unwrap_or_default();
+    let record = match state
+        .kernel
+        .provider_store()
+        .set_default_scoped(&account_id, &name, model_id.clone())
+        .await
+    {
+        Ok(record) => record,
         Err(e) => {
-            tracing::warn!("Failed to persist default_model to config.toml: {e}");
-            false
+            return ApiErrorResponse::internal(format!(
+                "Failed to persist tenant default provider: {e}"
+            ))
+            .into_json_tuple()
+            .into_response();
         }
     };
-
-    // Read old default before updating, so sync_default_model_agents knows what to migrate
-    let old_provider = {
-        let guard = state
-            .kernel
-            .default_model_override_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        match guard.as_ref() {
-            Some(dm) => dm.provider.clone(),
-            None => state.kernel.config_ref().default_model.provider.clone(),
-        }
-    };
-
-    // Hot-update the in-memory default model override
     let new_dm = librefang_types::config::DefaultModelConfig {
         provider: name.clone(),
         model: model_id.clone(),
-        api_key_env: env_var.clone(),
-        base_url: None,
+        api_key_env: record.api_key_env.clone().unwrap_or(env_var.clone()),
+        base_url: record.base_url.clone(),
         ..Default::default()
     };
-    {
-        let mut guard = state
-            .kernel
-            .default_model_override_ref()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        *guard = Some(new_dm.clone());
-    }
-
-    // Update registry entries for agents that were tracking the old default
     state
         .kernel
-        .sync_default_model_agents(&old_provider, &new_dm);
+        .sync_account_default_model_agents(&account_id, &old_provider, &new_dm);
 
     (
         StatusCode::OK,
@@ -1311,101 +1342,11 @@ pub async fn set_default_provider(
             "status": "updated",
             "provider": name,
             "model": model_id,
-            "api_key_env": env_var,
-            "persisted": persisted,
+            "api_key_env": record.api_key_env.unwrap_or(env_var),
+            "tenant_account_id": account_id,
         })),
     )
-}
-
-/// Safely persist the `[default_model]` section into config.toml using proper
-/// TOML serialization (avoids format-string injection).
-fn persist_default_model(
-    config_path: &std::path::Path,
-    provider: &str,
-    model: &str,
-    api_key_env: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut dm_table = toml::map::Map::new();
-    dm_table.insert(
-        "provider".to_string(),
-        toml::Value::String(provider.to_string()),
-    );
-    dm_table.insert("model".to_string(), toml::Value::String(model.to_string()));
-    dm_table.insert(
-        "api_key_env".to_string(),
-        toml::Value::String(api_key_env.to_string()),
-    );
-
-    let content = std::fs::read_to_string(config_path).unwrap_or_default();
-    let mut doc: toml::Value = if content.trim().is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content)?
-    };
-    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
-    root.insert("default_model".to_string(), toml::Value::Table(dm_table));
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
-    Ok(())
-}
-
-/// Upsert a provider URL in the `[provider_urls]` section of config.toml.
-fn upsert_provider_url(
-    config_path: &std::path::Path,
-    provider: &str,
-    url: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml") {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid config path '{}'", config_path.display()),
-        )
-        .into());
-    }
-    // Block path-traversal (`..`) but allow Windows drive-letter prefixes
-    if config_path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("unsafe config path '{}'", config_path.display()),
-        )
-        .into());
-    }
-
-    let content = if config_path.exists() {
-        std::fs::read_to_string(config_path)?
-    } else {
-        String::new()
-    };
-
-    let mut doc: toml::Value = if content.trim().is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content)?
-    };
-
-    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
-
-    if !root.contains_key("provider_urls") {
-        root.insert(
-            "provider_urls".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
-    }
-    let urls_table = root
-        .get_mut("provider_urls")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("provider_urls is not a table")?;
-
-    urls_table.insert(provider.to_string(), toml::Value::String(url.to_string()));
-
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
-    Ok(())
+        .into_response()
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1427,7 +1368,13 @@ static COPILOT_FLOWS: LazyLock<DashMap<String, CopilotFlowState>> = LazyLock::ne
 /// Initiates a GitHub device flow for Copilot authentication.
 /// Returns a user code and verification URI that the user visits in their browser.
 #[utoipa::path(post, path = "/api/providers/github-copilot/oauth/start", tag = "models", responses((status = 200, description = "OAuth flow started", body = serde_json::Value)))]
-pub async fn copilot_oauth_start() -> impl IntoResponse {
+pub async fn copilot_oauth_start(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Clean up expired flows first
     COPILOT_FLOWS.retain(|_, state| state.expires_at > Instant::now());
 
@@ -1460,6 +1407,7 @@ pub async fn copilot_oauth_start() -> impl IntoResponse {
             Json(serde_json::json!({ "error": e })),
         ),
     }
+    .into_response()
 }
 
 /// GET /api/providers/github-copilot/oauth/poll/{poll_id}
@@ -1469,9 +1417,13 @@ pub async fn copilot_oauth_start() -> impl IntoResponse {
 /// On `complete`, saves the token to secrets.env and sets GITHUB_TOKEN.
 #[utoipa::path(get, path = "/api/providers/github-copilot/oauth/poll/{poll_id}", tag = "models", params(("poll_id" = String, Path, description = "Poll ID")), responses((status = 200, description = "OAuth poll result", body = serde_json::Value)))]
 pub async fn copilot_oauth_poll(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(poll_id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let flow = match COPILOT_FLOWS.get(&poll_id) {
         Some(f) => f,
         None => {
@@ -1479,6 +1431,7 @@ pub async fn copilot_oauth_poll(
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"status": "not_found", "error": "Unknown poll_id"})),
             )
+                .into_response()
         }
     };
 
@@ -1488,7 +1441,8 @@ pub async fn copilot_oauth_poll(
         return (
             StatusCode::OK,
             Json(serde_json::json!({"status": "expired"})),
-        );
+        )
+            .into_response();
     }
 
     let device_code = flow.device_code.clone();
@@ -1508,7 +1462,7 @@ pub async fn copilot_oauth_poll(
                     Json(
                         serde_json::json!({"status": "error", "error": format!("Failed to save token: {e}")}),
                     ),
-                );
+                ).into_response();
             }
 
             // Set in current process
@@ -1558,7 +1512,7 @@ pub async fn copilot_oauth_poll(
             StatusCode::OK,
             Json(serde_json::json!({"status": "error", "error": e})),
         ),
-    }
+    }.into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1570,7 +1524,13 @@ pub async fn copilot_oauth_poll(
 /// Downloads the latest catalog TOML files from GitHub and caches them locally.
 /// After syncing, the kernel's in-memory catalog is refreshed.
 #[utoipa::path(post, path = "/api/catalog/update", tag = "models", responses((status = 200, description = "Catalog updated", body = serde_json::Value)))]
-pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn catalog_update(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let cfg = state.kernel.config_ref();
     let mirror = &cfg.registry.registry_mirror;
     match librefang_runtime::catalog_sync::sync_catalog_to(state.kernel.home_dir(), mirror).await {
@@ -1615,26 +1575,40 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
         )
             .into_response(),
     }
+    .into_response()
 }
 
 /// GET /api/catalog/status — Check last catalog sync time.
 #[utoipa::path(get, path = "/api/catalog/status", tag = "models", responses((status = 200, description = "Catalog sync status", body = serde_json::Value)))]
-pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn catalog_status(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let last_sync = librefang_runtime::catalog_sync::last_sync_time_for(state.kernel.home_dir());
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))
+    .into_response()
 }
 
 /// GET /api/providers/ollama/detect — Probe localhost for Ollama availability
-pub async fn detect_ollama() -> impl IntoResponse {
+pub async fn detect_ollama(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
     {
         Ok(c) => c,
         Err(_) => {
-            return Json(serde_json::json!({ "available": false, "models": [] }));
+            return Json(serde_json::json!({ "available": false, "models": [] })).into_response();
         }
     };
 
@@ -1656,6 +1630,7 @@ pub async fn detect_ollama() -> impl IntoResponse {
         }
         _ => Json(serde_json::json!({ "available": false, "models": [] })),
     }
+    .into_response()
 }
 
 #[cfg(test)]

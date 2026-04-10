@@ -8,7 +8,7 @@ api-error-agent-already-exists = Agent existiert bereits
 
 # Message errors
 api-error-message-too-large = Nachricht zu gross (max 64KB)
-api-error-message-delivery-failed = Nachrichtzustellung fehlgeschlagen: { $reason }
+api-error-message-delivery-failed = Nachrichtzustellung fehlgeschlagen
 
 # Template errors
 api-error-template-invalid-name = Ungueltiger Vorlagenname

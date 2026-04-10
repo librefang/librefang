@@ -596,6 +596,12 @@ pub async fn build_router(
         webhook_router,
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
+        account_sig_secret: kernel
+            .config_ref()
+            .account_sig_secret
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string()),
     });
 
     // CORS: allow localhost origins by default, plus any configured in cors_origin.
@@ -643,6 +649,13 @@ pub async fn build_router(
         retry_after_secs: rl_cfg.retry_after_secs,
     };
 
+    // Multi-tenant enforcement is active when explicitly enabled OR when an
+    // HMAC signing secret is configured (backward compat: existing deployments
+    // with account_sig_secret must not silently lose tenant-header enforcement).
+    let mt_enabled = state.kernel.config_ref().multi_tenant || state.account_sig_secret.is_some();
+    let require_account_layer =
+        mt_enabled.then(|| axum::middleware::from_fn(middleware::require_account_id));
+
     // Build the versioned API routes. All /api/* endpoints are defined once
     // in api_v1_routes() and mounted at both /api and /api/v1 for backward
     // compatibility. Future versions (v2, v3) can be added as separate routers.
@@ -689,6 +702,27 @@ pub async fn build_router(
             "/v1/models",
             axum::routing::get(crate::openai_compat::list_models),
         )
+        // Upload routes are merged BEFORE middleware layers so they inherit all
+        // auth / rate-limit / account-sig middleware.  They carry their own
+        // RequestBodyLimitLayer (50 MB) which takes precedence over the global
+        // limit applied further below.
+        .merge(
+            Router::new()
+                .route(
+                    "/api/agents/{id}/upload",
+                    axum::routing::post(routes::agents::upload_file),
+                )
+                .route(
+                    "/api/v1/agents/{id}/upload",
+                    axum::routing::post(routes::agents::upload_file),
+                )
+                .layer(RequestBodyLimitLayer::new(50 * 1024 * 1024)),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::account_sig_check,
+        ))
+        .layer(tower::util::option_layer(require_account_layer))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             middleware::auth,
@@ -709,24 +743,12 @@ pub async fn build_router(
         .layer(TraceLayer::new_for_http())
         .layer(cors);
 
-    // Split body-limit application: apply the global limit to the main app,
-    // then merge the upload route WITHOUT the limit.  The handler enforces its
-    // own configurable max_upload_size_bytes (default 10 MB).
-    let upload_routes = Router::new()
-        .route(
-            "/api/agents/{id}/upload",
-            axum::routing::post(routes::agents::upload_file),
-        )
-        .route(
-            "/api/v1/agents/{id}/upload",
-            axum::routing::post(routes::agents::upload_file),
-        );
-
-    let app = app
-        .layer(RequestBodyLimitLayer::new(
-            kernel.config_ref().max_request_body_bytes,
-        ))
-        .merge(upload_routes);
+    // Apply the global body-size limit to the main app.  Upload routes already
+    // carry their own 50 MB RequestBodyLimitLayer (merged above BEFORE the
+    // middleware layers), so they are unaffected by this smaller global limit.
+    let app = app.layer(RequestBodyLimitLayer::new(
+        kernel.config_ref().max_request_body_bytes,
+    ));
 
     // NOTE: HTTP metrics are recorded inside `request_logging` middleware via
     // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics

@@ -1,7 +1,10 @@
 //! Audit, logging, tools, profiles, templates, memory, approvals,
 //! bindings, pairing, webhooks, and miscellaneous system handlers.
 
+use super::shared::check_account;
+use super::shared::{require_admin, require_admin_owner};
 use super::AppState;
+use crate::middleware::AccountId;
 
 /// Build routes for the system miscellaneous domain (audit, logs, tools, sessions, approvals, pairing, etc.).
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
@@ -66,31 +69,34 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route(
             "/approvals/{id}/approve",
             axum::routing::post(
-                |state: State<Arc<AppState>>,
+                |account: AccountId,
+                 state: State<Arc<AppState>>,
                  id: Path<String>,
                  lang: Option<axum::Extension<RequestLanguage>>| async move {
-                    approve_request(state, id, lang).await
+                    approve_request(account, state, id, lang).await
                 },
             ),
         )
         .route(
             "/approvals/{id}/reject",
             axum::routing::post(
-                |state: State<Arc<AppState>>,
+                |account: AccountId,
+                 state: State<Arc<AppState>>,
                  id: Path<String>,
                  lang: Option<axum::Extension<RequestLanguage>>| async move {
-                    reject_request(state, id, lang).await
+                    reject_request(account, state, id, lang).await
                 },
             ),
         )
         .route(
             "/approvals/{id}/modify",
             axum::routing::post(
-                |state: State<Arc<AppState>>,
+                |account: AccountId,
+                 state: State<Arc<AppState>>,
                  id: Path<String>,
                  lang: Option<axum::Extension<RequestLanguage>>,
                  body: Json<ModifyRequestBody>| async move {
-                    modify_request(state, id, body, lang).await
+                    modify_request(account, state, id, body, lang).await
                 },
             ),
         )
@@ -193,6 +199,61 @@ use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn invalid_session_label_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Invalid session label").into_json_tuple()
+}
+
+fn backup_create_error_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to create backup").into_json_tuple()
+}
+
+fn backup_delete_error_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to delete backup").into_json_tuple()
+}
+
+fn backup_open_error_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to open backup").into_json_tuple()
+}
+
+fn invalid_backup_archive_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Invalid backup archive").into_json_tuple()
+}
+
+fn webhook_url_unsafe_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Webhook URL is not allowed").into_json_tuple()
+}
+
+fn webhook_reach_failed_response(webhook_id: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({
+            "status": "error",
+            "error": "Failed to reach webhook",
+            "webhook_id": webhook_id,
+        })),
+    )
+}
+
+fn registry_content_missing_identifier_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Missing required content identifier").into_json_tuple()
+}
+
+fn registry_content_invalid_identifier_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Invalid content identifier").into_json_tuple()
+}
+
+fn registry_content_invalid_type_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Unsupported registry content type").into_json_tuple()
+}
+
+fn registry_content_already_exists_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::conflict("Registry content already exists").into_json_tuple()
+}
+
+fn registry_content_type_not_found_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("Registry content type not found").into_json_tuple()
+}
+
 // ---------------------------------------------------------------------------
 // Profile + Mode endpoints
 // ---------------------------------------------------------------------------
@@ -206,7 +267,7 @@ use std::sync::Arc;
         (status = 200, description = "List tool profiles", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_profiles() -> impl IntoResponse {
+pub async fn list_profiles(_account: AccountId) -> impl IntoResponse {
     use librefang_types::agent::ToolProfile;
 
     let profiles = [
@@ -234,6 +295,7 @@ pub async fn list_profiles() -> impl IntoResponse {
 /// GET /api/profiles/:name — Get a single profile by name.
 #[utoipa::path(get, path = "/api/profiles/{name}", tag = "system", params(("name" = String, Path, description = "Profile name")), responses((status = 200, description = "Profile details", body = serde_json::Value)))]
 pub async fn get_profile(
+    _account: AccountId,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -271,7 +333,13 @@ pub async fn get_profile(
 
 /// GET /api/templates — List available agent templates.
 #[utoipa::path(get, path = "/api/templates", tag = "system", operation_id = "list_agent_templates", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
-pub async fn list_agent_templates() -> impl IntoResponse {
+pub async fn list_agent_templates(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let agents_dir = librefang_kernel::config::librefang_home()
         .join("workspaces")
         .join("agents");
@@ -308,14 +376,20 @@ pub async fn list_agent_templates() -> impl IntoResponse {
         "templates": templates,
         "total": templates.len(),
     }))
+    .into_response()
 }
 
 /// GET /api/templates/:name — Get template details.
 #[utoipa::path(get, path = "/api/templates/{name}", tag = "system", operation_id = "get_agent_template", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details", body = serde_json::Value)))]
 pub async fn get_agent_template(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agents_dir = librefang_kernel::config::librefang_home()
         .join("workspaces")
@@ -323,7 +397,9 @@ pub async fn get_agent_template(
     let manifest_path = agents_dir.join(&name).join("agent.toml");
 
     if !manifest_path.exists() {
-        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found"))
+            .into_json_tuple()
+            .into_response();
     }
 
     match std::fs::read_to_string(&manifest_path) {
@@ -348,16 +424,20 @@ pub async fn get_agent_template(
                     },
                     "manifest_toml": content,
                 })),
-            ),
+            )
+                .into_response(),
             Err(e) => {
                 tracing::warn!("Invalid template manifest for '{name}': {e}");
                 ApiErrorResponse::internal(t.t("api-error-template-invalid-manifest"))
                     .into_json_tuple()
+                    .into_response()
             }
         },
         Err(e) => {
             tracing::warn!("Failed to read template '{name}': {e}");
-            ApiErrorResponse::internal(t.t("api-error-template-read-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-template-read-failed"))
+                .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -369,16 +449,21 @@ pub async fn get_agent_template(
 /// GET /api/memory/agents/:id/kv — List KV pairs for an agent.
 #[utoipa::path(get, path = "/api/memory/agents/{id}/kv", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent KV store", body = serde_json::Value)))]
 pub async fn get_agent_kv(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
     match state.kernel.memory_substrate().list_kv(agent_id) {
@@ -387,11 +472,13 @@ pub async fn get_agent_kv(
                 .into_iter()
                 .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
                 .collect();
-            (StatusCode::OK, Json(serde_json::json!({"kv_pairs": kv})))
+            (StatusCode::OK, Json(serde_json::json!({"kv_pairs": kv}))).into_response()
         }
         Err(e) => {
             tracing::warn!("Memory list_kv failed: {e}");
-            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -399,16 +486,21 @@ pub async fn get_agent_kv(
 /// GET /api/memory/agents/:id/kv/:key — Get a specific KV value.
 #[utoipa::path(get, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), responses((status = 200, description = "KV value", body = serde_json::Value)))]
 pub async fn get_agent_kv_key(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
     match state
@@ -419,13 +511,16 @@ pub async fn get_agent_kv_key(
         Ok(Some(val)) => (
             StatusCode::OK,
             Json(serde_json::json!({"key": key, "value": val})),
-        ),
-        Ok(None) => {
-            ApiErrorResponse::not_found(t.t("api-error-kv-key-not-found")).into_json_tuple()
-        }
+        )
+            .into_response(),
+        Ok(None) => ApiErrorResponse::not_found(t.t("api-error-kv-key-not-found"))
+            .into_json_tuple()
+            .into_response(),
         Err(e) => {
             tracing::warn!("Memory get failed for key '{key}': {e}");
-            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -433,17 +528,22 @@ pub async fn get_agent_kv_key(
 /// PUT /api/memory/agents/:id/kv/:key — Set a KV value.
 #[utoipa::path(put, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), request_body = serde_json::Value, responses((status = 200, description = "KV value set", body = serde_json::Value)))]
 pub async fn set_agent_kv_key(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
     let value = body.get("value").cloned().unwrap_or(body);
@@ -456,10 +556,13 @@ pub async fn set_agent_kv_key(
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "stored", "key": key})),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             tracing::warn!("Memory set failed for key '{key}': {e}");
-            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -467,16 +570,21 @@ pub async fn set_agent_kv_key(
 /// DELETE /api/memory/agents/:id/kv/:key — Delete a KV value.
 #[utoipa::path(delete, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), responses((status = 200, description = "KV key deleted")))]
 pub async fn delete_agent_kv_key(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
     match state
@@ -487,10 +595,13 @@ pub async fn delete_agent_kv_key(
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "deleted", "key": key})),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             tracing::warn!("Memory delete failed for key '{key}': {e}");
-            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -498,6 +609,7 @@ pub async fn delete_agent_kv_key(
 /// GET /api/agents/:id/memory/export — Export all KV memory for an agent as JSON.
 #[utoipa::path(get, path = "/api/agents/{id}/memory/export", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Exported memory", body = serde_json::Value)))]
 pub async fn export_agent_memory(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -511,9 +623,16 @@ pub async fn export_agent_memory(
         }
     };
 
-    // Verify agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+    // Verify agent exists and belongs to requesting account
+    match state.kernel.agent_registry().get(agent_id) {
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+        }
+        Some(entry) => {
+            if let Err((code, json)) = check_account(&entry, &account) {
+                return (code, json);
+            }
+        }
     }
 
     match state.kernel.memory_substrate().list_kv(agent_id) {
@@ -541,6 +660,7 @@ pub async fn export_agent_memory(
 /// Optionally accepts `clear_existing: true` to wipe existing memory before import.
 #[utoipa::path(post, path = "/api/agents/{id}/memory/import", tag = "memory", params(("id" = String, Path, description = "Agent ID")), request_body = serde_json::Value, responses((status = 200, description = "Memory imported", body = serde_json::Value)))]
 pub async fn import_agent_memory(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -555,9 +675,16 @@ pub async fn import_agent_memory(
         }
     };
 
-    // Verify agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+    // Verify agent exists and belongs to requesting account
+    match state.kernel.agent_registry().get(agent_id) {
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+        }
+        Some(entry) => {
+            if let Err((code, json)) = check_account(&entry, &account) {
+                return (code, json);
+            }
+        }
     }
 
     let kv = match body.get("kv").and_then(|v| v.as_object()) {
@@ -639,9 +766,13 @@ pub async fn import_agent_memory(
 /// GET /api/audit/recent — Get recent audit log entries.
 #[utoipa::path(get, path = "/api/audit/recent", tag = "system", responses((status = 200, description = "Recent audit entries", body = Vec<serde_json::Value>)))]
 pub async fn audit_recent(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let n: usize = params
         .get("n")
         .and_then(|v| v.parse().ok())
@@ -667,39 +798,49 @@ pub async fn audit_recent(
         .collect();
 
     Json(serde_json::json!({
-        "entries": items,
-        "total": state.kernel.audit().len(),
-        "tip_hash": tip,
+    "entries": items,
+    "total": state.kernel.audit().len(),
+    "tip_hash": tip,
     }))
+    .into_response()
 }
 
 /// GET /api/audit/verify — Verify the audit chain integrity.
 #[utoipa::path(get, path = "/api/audit/verify", tag = "system", responses((status = 200, description = "Audit verification result", body = serde_json::Value)))]
-pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn audit_verify(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let entry_count = state.kernel.audit().len();
     match state.kernel.audit().verify_integrity() {
         Ok(()) => {
             if entry_count == 0 {
                 // SECURITY: Warn that an empty audit log has no forensic value
                 Json(serde_json::json!({
-                    "valid": true,
-                    "entries": 0,
-                    "warning": "Audit log is empty — no events have been recorded yet",
-                    "tip_hash": state.kernel.audit().tip_hash(),
-                }))
+                "valid": true,
+                "entries": 0,
+                "warning": "Audit log is empty — no events have been recorded yet",
+                "tip_hash": state.kernel.audit().tip_hash(),
+                            }))
+                .into_response()
             } else {
                 Json(serde_json::json!({
-                    "valid": true,
-                    "entries": entry_count,
-                    "tip_hash": state.kernel.audit().tip_hash(),
-                }))
+                "valid": true,
+                "entries": entry_count,
+                "tip_hash": state.kernel.audit().tip_hash(),
+                            }))
+                .into_response()
             }
         }
         Err(msg) => Json(serde_json::json!({
             "valid": false,
             "error": msg,
             "entries": entry_count,
-        })),
+        }))
+        .into_response(),
     }
 }
 
@@ -717,9 +858,13 @@ pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoRespon
 /// as a backfill so the client has immediate context.
 #[utoipa::path(get, path = "/api/logs/stream", tag = "system", responses((status = 200, description = "SSE log stream")))]
 pub async fn logs_stream(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     use axum::response::sse::{Event, KeepAlive, Sse};
 
     let level_filter = params.get("level").cloned().unwrap_or_default();
@@ -826,7 +971,13 @@ fn classify_audit_level(action: &str) -> &'static str {
         (status = 200, description = "List available tools", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_tools(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let mut tools: Vec<serde_json::Value> = builtin_tool_definitions()
         .iter()
         .map(|t| {
@@ -850,16 +1001,20 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse
         }
     }
 
-    Json(serde_json::json!({"tools": tools, "total": tools.len()}))
+    Json(serde_json::json!({"tools": tools, "total": tools.len()})).into_response()
 }
 
 /// GET /api/tools/:name — Get a single tool definition by name.
 #[utoipa::path(get, path = "/api/tools/{name}", tag = "skills", params(("name" = String, Path, description = "Tool name")), responses((status = 200, description = "Tool details", body = serde_json::Value)))]
 pub async fn get_tool(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let tr = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Search built-in tools first
     for t in builtin_tool_definitions() {
@@ -871,7 +1026,8 @@ pub async fn get_tool(
                     "description": t.description,
                     "input_schema": t.input_schema,
                 })),
-            );
+            )
+                .into_response();
         }
     }
 
@@ -887,13 +1043,15 @@ pub async fn get_tool(
                         "input_schema": t.input_schema,
                         "source": "mcp",
                     })),
-                );
+                )
+                    .into_response();
             }
         }
     }
 
     ApiErrorResponse::not_found(tr.t_args("api-error-tool-not-found", &[("name", &name)]))
         .into_json_tuple()
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -909,26 +1067,37 @@ pub async fn get_tool(
         (status = 200, description = "List sessions", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_sessions(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match state.kernel.memory_substrate().list_sessions() {
-        Ok(sessions) => Json(serde_json::json!({"sessions": sessions})),
-        Err(_) => Json(serde_json::json!({"sessions": []})),
+        Ok(sessions) => Json(serde_json::json!({"sessions": sessions})).into_response(),
+        Err(_) => Json(serde_json::json!({"sessions": []})).into_response(),
     }
 }
 
 /// GET /api/sessions/:id — Get a single session by ID.
 #[utoipa::path(get, path = "/api/sessions/{id}", tag = "sessions", params(("id" = String, Path, description = "Session ID")), responses((status = 200, description = "Session found", body = serde_json::Value), (status = 404, description = "Session not found")))]
 pub async fn get_session(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -948,13 +1117,16 @@ pub async fn get_session(
                 "label": session.label,
                 "created_at": created_at,
             })),
-        ),
-        Ok(None) => {
-            ApiErrorResponse::not_found(t.t("api-error-session-not-found")).into_json_tuple()
-        }
+        )
+            .into_response(),
+        Ok(None) => ApiErrorResponse::not_found(t.t("api-error-session-not-found"))
+            .into_json_tuple()
+            .into_response(),
         Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+            tracing::warn!("Failed to load session {session_id}: {e}");
+            ApiErrorResponse::internal("Failed to load session")
                 .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -962,16 +1134,21 @@ pub async fn get_session(
 /// DELETE /api/sessions/:id — Delete a session.
 #[utoipa::path(delete, path = "/api/sessions/{id}", tag = "sessions", params(("id" = String, Path, description = "Session ID")), responses((status = 200, description = "Session deleted")))]
 pub async fn delete_session(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -979,10 +1156,13 @@ pub async fn delete_session(
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "deleted", "session_id": id})),
-        ),
+        )
+            .into_response(),
         Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+            tracing::warn!("Failed to delete session {session_id}: {e}");
+            ApiErrorResponse::internal("Failed to delete session")
                 .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -990,17 +1170,22 @@ pub async fn delete_session(
 /// PUT /api/sessions/:id/label — Set a session label.
 #[utoipa::path(put, path = "/api/sessions/{id}/label", tag = "sessions", params(("id" = String, Path, description = "Session ID")), request_body = serde_json::Value, responses((status = 200, description = "Label set", body = serde_json::Value)))]
 pub async fn set_session_label(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -1009,10 +1194,8 @@ pub async fn set_session_label(
     // Validate label if present
     if let Some(lbl) = label {
         if let Err(e) = librefang_types::agent::SessionLabel::new(lbl) {
-            return ApiErrorResponse::bad_request(
-                t.t_args("api-error-generic", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple();
+            tracing::warn!("Invalid session label for session {session_id}: {e}");
+            return invalid_session_label_response().into_response();
         }
     }
 
@@ -1028,10 +1211,13 @@ pub async fn set_session_label(
                 "session_id": id,
                 "label": label,
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+            tracing::warn!("Failed to update label for session {session_id}: {e}");
+            ApiErrorResponse::internal("Failed to update session label")
                 .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -1039,10 +1225,14 @@ pub async fn set_session_label(
 /// GET /api/sessions/by-label/:label — Find session by label (scoped to agent).
 #[utoipa::path(get, path = "/api/agents/{id}/sessions/by-label/{label}", tag = "sessions", params(("id" = String, Path, description = "Agent ID"), ("label" = String, Path, description = "Session label")), responses((status = 200, description = "Session found", body = serde_json::Value)))]
 pub async fn find_session_by_label(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path((agent_id_str, label)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id = match agent_id_str.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::AgentId(u),
@@ -1052,7 +1242,8 @@ pub async fn find_session_by_label(
                 Some(entry) => entry.id,
                 None => {
                     return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
-                        .into_json_tuple();
+                        .into_json_tuple()
+                        .into_response();
                 }
             }
         }
@@ -1071,13 +1262,16 @@ pub async fn find_session_by_label(
                 "label": session.label,
                 "message_count": session.messages.len(),
             })),
-        ),
-        Ok(None) => {
-            ApiErrorResponse::not_found(t.t("api-error-session-no-label")).into_json_tuple()
-        }
+        )
+            .into_response(),
+        Ok(None) => ApiErrorResponse::not_found(t.t("api-error-session-no-label"))
+            .into_json_tuple()
+            .into_response(),
         Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+            tracing::warn!("Failed to find session by label '{label}' for agent {agent_id}: {e}");
+            ApiErrorResponse::internal("Failed to load session")
                 .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -1092,10 +1286,13 @@ pub async fn find_session_by_label(
 /// `[session]` policy. Returns `{"sessions_deleted": N}`.
 #[utoipa::path(post, path = "/api/sessions/cleanup", tag = "sessions", responses((status = 200, description = "Cleanup result", body = serde_json::Value)))]
 pub async fn session_cleanup(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-    lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    _lang: Option<axum::Extension<RequestLanguage>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let kcfg = state.kernel.config_ref();
     let cfg = &kcfg.session;
     let mut total: u64 = 0;
@@ -1108,11 +1305,10 @@ pub async fn session_cleanup(
         {
             Ok(n) => total += n,
             Err(e) => {
-                return ApiErrorResponse::internal(t.t_args(
-                    "api-error-session-cleanup-expired-failed",
-                    &[("error", &e.to_string())],
-                ))
-                .into_json_tuple();
+                tracing::warn!("Failed to clean up expired sessions: {e}");
+                return ApiErrorResponse::internal("Failed to clean up sessions")
+                    .into_json_tuple()
+                    .into_response();
             }
         }
     }
@@ -1125,11 +1321,10 @@ pub async fn session_cleanup(
         {
             Ok(n) => total += n,
             Err(e) => {
-                return ApiErrorResponse::internal(t.t_args(
-                    "api-error-session-cleanup-excess-failed",
-                    &[("error", &e.to_string())],
-                ))
-                .into_json_tuple();
+                tracing::warn!("Failed to clean up excess sessions: {e}");
+                return ApiErrorResponse::internal("Failed to clean up sessions")
+                    .into_json_tuple()
+                    .into_response();
             }
         }
     }
@@ -1138,6 +1333,7 @@ pub async fn session_cleanup(
         StatusCode::OK,
         Json(serde_json::json!({"sessions_deleted": total})),
     )
+        .into_response()
 }
 
 /// GET /api/sessions/search?q=...&agent_id=... — Full-text search across session content.
@@ -1155,14 +1351,19 @@ pub async fn session_cleanup(
     )
 )]
 pub async fn search_sessions(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let query = match params.get("q") {
         Some(q) if !q.is_empty() => q.clone(),
         _ => {
             return ApiErrorResponse::bad_request("missing or empty 'q' parameter")
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -1180,9 +1381,23 @@ pub async fn search_sessions(
         Ok(results) => (
             StatusCode::OK,
             Json(serde_json::json!({"results": results})),
-        ),
-        Err(e) => ApiErrorResponse::internal(e.to_string()).into_json_tuple(),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!("Failed to search sessions: {e}");
+            ApiErrorResponse::internal("Failed to search sessions")
+                .into_json_tuple()
+                .into_response()
+        }
     }
+}
+
+fn admin_internal_error_response(
+    action: &'static str,
+    err: impl std::fmt::Display,
+) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::warn!(error = %err, "admin route failed: {action}");
+    ApiErrorResponse::internal(format!("Failed to {action}")).into_json_tuple()
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,7 +1437,13 @@ fn approval_to_json(
 /// Transforms field names to match the dashboard template expectations:
 /// `action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.
 #[utoipa::path(get, path = "/api/approvals", tag = "approvals", responses((status = 200, description = "List pending and recent approvals", body = Vec<serde_json::Value>)))]
-pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_approvals(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let pending = state.kernel.approvals().list_pending();
     let recent = state.kernel.approvals().list_recent(50);
 
@@ -1280,33 +1501,39 @@ pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResp
 
     let total = approvals.len();
 
-    Json(serde_json::json!({"approvals": approvals, "total": total}))
+    Json(serde_json::json!({"approvals": approvals, "total": total})).into_response()
 }
 
 /// GET /api/approvals/{id} — Get a single approval request by ID.
 #[utoipa::path(get, path = "/api/approvals/{id}", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Single approval request", body = serde_json::Value), (status = 404, description = "Approval not found")))]
 pub async fn get_approval(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     match state.kernel.approvals().get_pending(uuid) {
         Some(a) => {
             let registry_agents = state.kernel.agent_registry().list();
-            (StatusCode::OK, Json(approval_to_json(&a, &registry_agents)))
+            (StatusCode::OK, Json(approval_to_json(&a, &registry_agents))).into_response()
         }
         None => {
             ApiErrorResponse::not_found(t.t_args("api-error-approval-not-found", &[("id", &id)]))
                 .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -1328,9 +1555,13 @@ pub struct CreateApprovalRequest {
 
 #[utoipa::path(post, path = "/api/approvals", tag = "approvals", request_body = serde_json::Value, responses((status = 200, description = "Approval created", body = serde_json::Value)))]
 pub async fn create_approval(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateApprovalRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     use librefang_types::approval::{ApprovalRequest, RiskLevel};
 
     let policy = state.kernel.approvals().policy();
@@ -1368,15 +1599,20 @@ pub async fn create_approval(
         StatusCode::CREATED,
         Json(serde_json::json!({"id": id.to_string(), "status": "pending"})),
     )
+        .into_response()
 }
 
 /// POST /api/approvals/{id}/approve — Approve a pending request.
 #[utoipa::path(post, path = "/api/approvals/{id}/approve", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Request approved", body = serde_json::Value)))]
 pub async fn approve_request(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
@@ -1410,10 +1646,14 @@ pub async fn approve_request(
 /// POST /api/approvals/{id}/reject — Reject a pending request.
 #[utoipa::path(post, path = "/api/approvals/{id}/reject", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Request rejected", body = serde_json::Value)))]
 pub async fn reject_request(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
@@ -1457,11 +1697,15 @@ pub struct ModifyRequestBody {
 
 #[utoipa::path(post, path = "/api/approvals/{id}/modify", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = serde_json::Value, responses((status = 200, description = "Request modified", body = serde_json::Value)))]
 pub async fn modify_request(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(body): Json<ModifyRequestBody>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Truncate feedback to prevent database bloat
     let feedback: String = body
         .feedback
@@ -1507,9 +1751,13 @@ pub struct BatchResolveRequest {
 
 #[utoipa::path(post, path = "/api/approvals/batch", tag = "approvals", request_body = serde_json::Value, responses((status = 200, description = "Batch resolve results", body = serde_json::Value)))]
 pub async fn batch_resolve(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<BatchResolveRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     const MAX_BATCH_SIZE: usize = 100;
 
     if body.ids.len() > MAX_BATCH_SIZE {
@@ -1518,7 +1766,7 @@ pub async fn batch_resolve(
             Json(
                 serde_json::json!({"error": format!("batch size {} exceeds maximum {MAX_BATCH_SIZE}", body.ids.len())}),
             ),
-        );
+                ).into_response();
     }
 
     let decision = match body.decision.as_str() {
@@ -1530,7 +1778,7 @@ pub async fn batch_resolve(
                 Json(
                     serde_json::json!({"error": format!("invalid decision: {other}, expected 'approve' or 'reject'")}),
                 ),
-            );
+            ).into_response();
         }
     };
 
@@ -1571,6 +1819,7 @@ pub async fn batch_resolve(
         StatusCode::OK,
         Json(serde_json::json!({"results": result_json})),
     )
+        .into_response()
 }
 
 /// GET /api/approvals/audit — Query the persistent approval audit log.
@@ -1590,9 +1839,13 @@ fn default_audit_limit() -> usize {
 
 #[utoipa::path(get, path = "/api/approvals/audit", tag = "approvals", params(("limit" = Option<usize>, Query, description = "Max entries"), ("offset" = Option<usize>, Query, description = "Offset"), ("agent_id" = Option<String>, Query, description = "Filter by agent"), ("tool_name" = Option<String>, Query, description = "Filter by tool")), responses((status = 200, description = "Audit log entries", body = serde_json::Value)))]
 pub async fn audit_log(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     const MAX_AUDIT_LIMIT: usize = 500;
     let limit = params.limit.min(MAX_AUDIT_LIMIT);
     let entries = state.kernel.approvals().query_audit(
@@ -1606,14 +1859,20 @@ pub async fn audit_log(
         .approvals()
         .audit_count(params.agent_id.as_deref(), params.tool_name.as_deref());
 
-    Json(serde_json::json!({"entries": entries, "total": total}))
+    Json(serde_json::json!({"entries": entries, "total": total})).into_response()
 }
 
 /// GET /api/approvals/count — Lightweight pending count for notification badges.
 #[utoipa::path(get, path = "/api/approvals/count", tag = "approvals", responses((status = 200, description = "Pending approval count", body = serde_json::Value)))]
-pub async fn approval_count(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn approval_count(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let pending = state.kernel.approvals().pending_count();
-    Json(serde_json::json!({"pending": pending}))
+    Json(serde_json::json!({"pending": pending})).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1626,11 +1885,17 @@ pub async fn approval_count(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// trigger proactive agents that subscribe to the event type.
 #[utoipa::path(post, path = "/api/hooks/wake", tag = "webhooks", request_body = serde_json::Value, responses((status = 200, description = "Wake hook triggered", body = serde_json::Value)))]
 pub async fn webhook_wake(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<librefang_types::webhook::WakePayload>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let admin_owner = match require_admin_owner(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        Ok(owner) => owner,
+        Err((code, json)) => return (code, json).into_response(),
+    };
     let (err_webhook_not_enabled, err_invalid_token) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
@@ -1644,18 +1909,24 @@ pub async fn webhook_wake(
     let wh_config = match &cfg.webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
-            return ApiErrorResponse::not_found(err_webhook_not_enabled).into_json_tuple();
+            return ApiErrorResponse::not_found(err_webhook_not_enabled)
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     // Validate bearer token (constant-time comparison)
     if !validate_webhook_token(&headers, &wh_config.token_env) {
-        return ApiErrorResponse::bad_request(err_invalid_token).into_json_tuple();
+        return ApiErrorResponse::bad_request(err_invalid_token)
+            .into_json_tuple()
+            .into_response();
     }
 
     // Validate payload
     if let Err(e) = body.validate() {
-        return ApiErrorResponse::bad_request(e).into_json_tuple();
+        return ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
+            .into_response();
     }
 
     // Publish through the kernel's publish_event (KernelHandle trait), which
@@ -1665,24 +1936,29 @@ pub async fn webhook_wake(
         "mode": body.mode,
         "text": body.text,
     });
-    if let Err(e) =
-        KernelHandle::publish_event(state.kernel.as_ref(), "webhook.wake", event_payload).await
+    if let Err(e) = KernelHandle::publish_event_scoped(
+        state.kernel.as_ref(),
+        "webhook.wake",
+        event_payload,
+        Some(admin_owner),
+    )
+    .await
     {
         tracing::warn!("Webhook wake event publish failed: {e}");
         let err_msg = {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            t.t_args(
-                "api-error-webhook-publish-failed",
-                &[("error", &e.to_string())],
-            )
+            t.t("api-error-webhook-publish-failed")
         };
-        return ApiErrorResponse::internal(err_msg).into_json_tuple();
+        return ApiErrorResponse::internal(err_msg)
+            .into_json_tuple()
+            .into_response();
     }
 
     (
         StatusCode::OK,
         Json(serde_json::json!({"status": "accepted", "mode": body.mode})),
     )
+        .into_response()
 }
 
 /// POST /hooks/agent — Run an isolated agent turn via webhook.
@@ -1691,11 +1967,17 @@ pub async fn webhook_wake(
 /// This enables external systems (CI/CD, Slack, etc.) to trigger agent work.
 #[utoipa::path(post, path = "/api/hooks/agent", tag = "webhooks", request_body = serde_json::Value, responses((status = 200, description = "Agent hook triggered", body = serde_json::Value)))]
 pub async fn webhook_agent(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<librefang_types::webhook::AgentHookPayload>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let admin_owner = match require_admin_owner(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        Ok(owner) => owner,
+        Err((code, json)) => return (code, json).into_response(),
+    };
     let (err_webhook_not_enabled, err_invalid_token, err_no_agents) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
@@ -1710,44 +1992,72 @@ pub async fn webhook_agent(
     let wh_config = match &cfg2.webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
-            return ApiErrorResponse::not_found(err_webhook_not_enabled).into_json_tuple();
+            return ApiErrorResponse::not_found(err_webhook_not_enabled)
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     // Validate bearer token
     if !validate_webhook_token(&headers, &wh_config.token_env) {
-        return ApiErrorResponse::bad_request(err_invalid_token).into_json_tuple();
+        return ApiErrorResponse::bad_request(err_invalid_token)
+            .into_json_tuple()
+            .into_response();
     }
 
     // Validate payload
     if let Err(e) = body.validate() {
-        return ApiErrorResponse::bad_request(e).into_json_tuple();
+        return ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
+            .into_response();
     }
 
     // Resolve the agent by name or ID (if not specified, use the first running agent)
     let agent_id: AgentId = match &body.agent {
         Some(agent_ref) => match agent_ref.parse() {
-            Ok(id) => id,
+            Ok(id) => match state.kernel.agent_registry().get(id) {
+                Some(entry) if entry.account_id.as_deref() == Some(admin_owner) => id,
+                _ => {
+                    let err_msg = {
+                        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+                        t.t_args("api-error-webhook-agent-not-found", &[("id", agent_ref)])
+                    };
+                    return ApiErrorResponse::not_found(err_msg)
+                        .into_json_tuple()
+                        .into_response();
+                }
+            },
             Err(_) => {
                 // Try name lookup
-                match state.kernel.agent_registry().find_by_name(agent_ref) {
+                let candidate = state
+                    .kernel
+                    .agent_registry()
+                    .list_by_account(admin_owner)
+                    .into_iter()
+                    .find(|entry| entry.name == *agent_ref);
+                match candidate {
                     Some(entry) => entry.id,
                     None => {
                         let err_msg = {
                             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
                             t.t_args("api-error-webhook-agent-not-found", &[("id", agent_ref)])
                         };
-                        return ApiErrorResponse::not_found(err_msg).into_json_tuple();
+                        return ApiErrorResponse::not_found(err_msg)
+                            .into_json_tuple()
+                            .into_response();
                     }
                 }
             }
         },
         None => {
             // No agent specified — use the first available agent
-            match state.kernel.agent_registry().list().first() {
+            let agents = state.kernel.agent_registry().list_by_account(admin_owner);
+            match agents.first() {
                 Some(entry) => entry.id,
                 None => {
-                    return ApiErrorResponse::not_found(err_no_agents).into_json_tuple();
+                    return ApiErrorResponse::not_found(err_no_agents)
+                        .into_json_tuple()
+                        .into_response();
                 }
             }
         }
@@ -1766,14 +2076,15 @@ pub async fn webhook_agent(
                     "output_tokens": result.total_usage.output_tokens,
                 },
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => {
+            tracing::warn!("Webhook agent execution failed: {e}");
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            let msg = t.t_args(
-                "api-error-webhook-agent-exec-failed",
-                &[("error", &e.to_string())],
-            );
-            ApiErrorResponse::internal(msg).into_json_tuple()
+            let msg = t.t("api-error-webhook-agent-exec-failed");
+            ApiErrorResponse::internal(msg)
+                .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -1782,20 +2093,31 @@ pub async fn webhook_agent(
 
 /// GET /api/bindings — List all agent bindings.
 #[utoipa::path(get, path = "/api/bindings", tag = "system", responses((status = 200, description = "List key bindings", body = Vec<serde_json::Value>)))]
-pub async fn list_bindings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_bindings(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let bindings = state.kernel.list_bindings();
     (
         StatusCode::OK,
         Json(serde_json::json!({ "bindings": bindings })),
     )
+        .into_response()
 }
 
 /// POST /api/bindings — Add a new agent binding.
 #[utoipa::path(post, path = "/api/bindings", tag = "system", request_body = serde_json::Value, responses((status = 200, description = "Binding added", body = serde_json::Value)))]
 pub async fn add_binding(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(binding): Json<librefang_types::config::AgentBinding>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Validate agent exists
     let agents = state.kernel.agent_registry().list();
     let agent_exists = agents.iter().any(|e| e.name == binding.agent)
@@ -1809,25 +2131,32 @@ pub async fn add_binding(
         StatusCode::CREATED,
         Json(serde_json::json!({ "status": "created" })),
     )
+        .into_response()
 }
 
 /// DELETE /api/bindings/:index — Remove a binding by index.
 #[utoipa::path(delete, path = "/api/bindings/{index}", tag = "system", params(("index" = u32, Path, description = "Binding index")), responses((status = 200, description = "Binding removed")))]
 pub async fn remove_binding(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(index): Path<usize>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match state.kernel.remove_binding(index) {
         Some(_) => (
             StatusCode::OK,
             Json(serde_json::json!({ "status": "removed" })),
-        ),
+        )
+            .into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": t.t("api-error-binding-index-out-of-range") })),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -1836,13 +2165,18 @@ pub async fn remove_binding(
 /// POST /api/pairing/request — Create a new pairing request (returns token + QR URI).
 #[utoipa::path(post, path = "/api/pairing/request", tag = "pairing", responses((status = 200, description = "Pairing request created", body = serde_json::Value)))]
 pub async fn pairing_request(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
         return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
             .into_json_tuple()
+            .into_response()
             .into_response();
     }
     match state.kernel.pairing_ref().create_pairing_request() {
@@ -1857,6 +2191,7 @@ pub async fn pairing_request(
         }
         Err(e) => ApiErrorResponse::bad_request(e)
             .into_json_tuple()
+            .into_response()
             .into_response(),
     }
 }
@@ -1864,14 +2199,19 @@ pub async fn pairing_request(
 /// POST /api/pairing/complete — Complete pairing with token + device info.
 #[utoipa::path(post, path = "/api/pairing/complete", tag = "pairing", request_body = serde_json::Value, responses((status = 200, description = "Pairing completed", body = serde_json::Value)))]
 pub async fn pairing_complete(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
         return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
             .into_json_tuple()
+            .into_response()
             .into_response();
     }
     let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
@@ -1909,6 +2249,7 @@ pub async fn pairing_complete(
         .into_response(),
         Err(e) => ApiErrorResponse::bad_request(e)
             .into_json_tuple()
+            .into_response()
             .into_response(),
     }
 }
@@ -1916,13 +2257,18 @@ pub async fn pairing_complete(
 /// GET /api/pairing/devices — List paired devices.
 #[utoipa::path(get, path = "/api/pairing/devices", tag = "pairing", responses((status = 200, description = "List paired devices", body = Vec<serde_json::Value>)))]
 pub async fn pairing_devices(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
         return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
             .into_json_tuple()
+            .into_response()
             .into_response();
     }
     let devices: Vec<_> = state
@@ -1946,20 +2292,26 @@ pub async fn pairing_devices(
 /// DELETE /api/pairing/devices/{id} — Remove a paired device.
 #[utoipa::path(delete, path = "/api/pairing/devices/{id}", tag = "pairing", params(("id" = String, Path, description = "Device ID")), responses((status = 200, description = "Device removed")))]
 pub async fn pairing_remove_device(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(device_id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
         return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
             .into_json_tuple()
+            .into_response()
             .into_response();
     }
     match state.kernel.pairing_ref().remove_device(&device_id) {
         Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => ApiErrorResponse::not_found(e)
             .into_json_tuple()
+            .into_response()
             .into_response(),
     }
 }
@@ -1967,10 +2319,14 @@ pub async fn pairing_remove_device(
 /// POST /api/pairing/notify — Push a notification to all paired devices.
 #[utoipa::path(post, path = "/api/pairing/notify", tag = "pairing", request_body = serde_json::Value, responses((status = 200, description = "Notification sent", body = serde_json::Value)))]
 pub async fn pairing_notify(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let (err_pairing_not_enabled, err_message_required) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
@@ -1981,6 +2337,7 @@ pub async fn pairing_notify(
     if !state.kernel.config_ref().pairing.enabled {
         return ApiErrorResponse::not_found(err_pairing_not_enabled)
             .into_json_tuple()
+            .into_response()
             .into_response();
     }
     let title = body
@@ -1991,6 +2348,7 @@ pub async fn pairing_notify(
     if message.is_empty() {
         return ApiErrorResponse::bad_request(err_message_required)
             .into_json_tuple()
+            .into_response()
             .into_response();
     }
     state
@@ -1998,13 +2356,16 @@ pub async fn pairing_notify(
         .pairing_ref()
         .notify_devices(title, message)
         .await;
-    Json(serde_json::json!({"ok": true, "notified": state.kernel.pairing_ref().list_devices().len()}))
+    Json(serde_json::json!({"ok": true, "notified": state.kernel.pairing_ref().list_devices().len()})).into_response()
         .into_response()
 }
 
 /// GET /api/commands — List available chat commands (for dynamic slash menu).
 #[utoipa::path(get, path = "/api/commands", tag = "system", responses((status = 200, description = "List chat commands", body = Vec<serde_json::Value>)))]
-pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_commands(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let mut commands = vec![
         serde_json::json!({"cmd": "/help", "desc": "Show available commands"}),
         serde_json::json!({"cmd": "/new", "desc": "Reset session (clear history)"}),
@@ -2040,6 +2401,7 @@ pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// GET /api/commands/{name} — Lookup a single command by name.
 #[utoipa::path(get, path = "/api/commands/{name}", tag = "system", params(("name" = String, Path, description = "Command name")), responses((status = 200, description = "Command details", body = serde_json::Value)))]
 pub async fn get_command(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -2130,18 +2492,21 @@ struct BackupManifest {
 /// in `<home_dir>/backups/` with a timestamped filename.
 #[utoipa::path(post, path = "/api/backup", tag = "system", responses((status = 200, description = "Backup created", body = serde_json::Value)))]
 pub async fn create_backup(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
-    lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    _lang: Option<axum::Extension<RequestLanguage>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let home_dir = &state.kernel.home_dir();
     let backups_dir = home_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-backup-create-dir-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
+        tracing::warn!(
+            "Failed to create backups dir {}: {e}",
+            backups_dir.display()
+        );
+        return backup_create_error_response().into_response();
     }
 
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
@@ -2154,11 +2519,11 @@ pub async fn create_backup(
     let file = match std::fs::File::create(&backup_path) {
         Ok(f) => f,
         Err(e) => {
-            return ApiErrorResponse::internal(t.t_args(
-                "api-error-backup-create-file-failed",
-                &[("error", &e.to_string())],
-            ))
-            .into_json_tuple();
+            tracing::warn!(
+                "Failed to create backup file {}: {e}",
+                backup_path.display()
+            );
+            return backup_create_error_response().into_response();
         }
     };
     let mut zip = zip::ZipWriter::new(file);
@@ -2309,11 +2674,11 @@ pub async fn create_backup(
     }
 
     if let Err(e) = zip.finish() {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-backup-finalize-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
+        tracing::warn!(
+            "Failed to finalize backup archive {}: {e}",
+            backup_path.display()
+        );
+        return backup_create_error_response().into_response();
     }
 
     let size = std::fs::metadata(&backup_path)
@@ -2342,14 +2707,21 @@ pub async fn create_backup(
             "created_at": manifest.created_at,
         })),
     )
+        .into_response()
 }
 
 /// GET /api/backups — List existing backups.
 #[utoipa::path(get, path = "/api/backups", tag = "system", responses((status = 200, description = "List backups", body = Vec<serde_json::Value>)))]
-pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_backups(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let backups_dir = state.kernel.home_dir().join("backups");
     if !backups_dir.exists() {
-        return Json(serde_json::json!({"backups": [], "total": 0}));
+        return Json(serde_json::json!({"backups": [], "total": 0})).into_response();
     }
 
     let mut backups: Vec<serde_json::Value> = Vec::new();
@@ -2396,7 +2768,7 @@ pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoRespon
     });
 
     let total = backups.len();
-    Json(serde_json::json!({"backups": backups, "total": total}))
+    Json(serde_json::json!({"backups": backups, "total": total})).into_response()
 }
 
 fn is_invalid_backup_filename(filename: &str) -> bool {
@@ -2433,19 +2805,25 @@ fn find_backup_path(
 /// DELETE /api/backups/{filename} — Delete a specific backup.
 #[utoipa::path(delete, path = "/api/backups/{filename}", tag = "system", params(("filename" = String, Path, description = "Backup filename")), responses((status = 200, description = "Backup deleted")))]
 pub async fn delete_backup(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(filename): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Sanitize filename to prevent path traversal
     if is_invalid_backup_filename(&filename) {
         return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
     if !filename.ends_with(".zip") {
         return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     let backups_dir = state.kernel.home_dir().join("backups");
@@ -2453,27 +2831,26 @@ pub async fn delete_backup(
         Ok(Some(path)) => path,
         Ok(None) => {
             return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
         Err(e) => {
-            return ApiErrorResponse::internal(t.t_args(
-                "api-error-backup-delete-failed",
-                &[("error", &e.to_string())],
-            ))
-            .into_json_tuple();
+            tracing::warn!(
+                "Failed to resolve backup path for deletion {}: {e}",
+                filename
+            );
+            return backup_delete_error_response().into_response();
         }
     };
 
     if let Err(e) = std::fs::remove_file(&backup_path) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-backup-delete-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
+        tracing::warn!("Failed to delete backup {}: {e}", backup_path.display());
+        return backup_delete_error_response().into_response();
     }
 
     tracing::info!("Backup deleted: {filename}");
@@ -2481,6 +2858,7 @@ pub async fn delete_backup(
         StatusCode::OK,
         Json(serde_json::json!({"deleted": filename})),
     )
+        .into_response()
 }
 
 /// POST /api/restore — Restore kernel state from a backup archive.
@@ -2492,27 +2870,34 @@ pub async fn delete_backup(
 /// restarted after a restore for all changes to take effect.
 #[utoipa::path(post, path = "/api/restore", tag = "system", request_body = serde_json::Value, responses((status = 200, description = "Backup restored", body = serde_json::Value)))]
 pub async fn restore_backup(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let filename = match req.get("filename").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
         None => {
             return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-filename"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     // Sanitize
     if is_invalid_backup_filename(&filename) {
         return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
     if !filename.ends_with(".zip") {
         return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     let home_dir = &state.kernel.home_dir();
@@ -2521,17 +2906,20 @@ pub async fn restore_backup(
         Ok(Some(path)) => path,
         Ok(None) => {
             return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
         Err(e) => {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple();
+            tracing::warn!(
+                "Failed to resolve backup path for restore {}: {e}",
+                filename
+            );
+            return backup_open_error_response().into_response();
         }
     };
 
@@ -2539,20 +2927,15 @@ pub async fn restore_backup(
     let file = match std::fs::File::open(&backup_path) {
         Ok(f) => f,
         Err(e) => {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple();
+            tracing::warn!("Failed to open backup {}: {e}", backup_path.display());
+            return backup_open_error_response().into_response();
         }
     };
     let mut archive = match zip::ZipArchive::new(file) {
         Ok(a) => a,
         Err(e) => {
-            return ApiErrorResponse::bad_request(t.t_args(
-                "api-error-backup-invalid-archive",
-                &[("error", &e.to_string())],
-            ))
-            .into_json_tuple();
+            tracing::warn!("Invalid backup archive {}: {e}", backup_path.display());
+            return invalid_backup_archive_response().into_response();
         }
     };
 
@@ -2573,7 +2956,8 @@ pub async fn restore_backup(
 
     if manifest.is_none() {
         return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-manifest"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     let mut restored: Vec<String> = Vec::new();
@@ -2651,6 +3035,7 @@ pub async fn restore_backup(
             "message": "Restore complete. Restart the daemon for all changes to take effect.",
         })),
     )
+        .into_response()
 }
 
 /// Read the `manifest.json` from a backup zip without extracting everything.
@@ -2665,7 +3050,13 @@ fn read_backup_manifest(path: &std::path::Path) -> Option<BackupManifest> {
 
 /// GET /api/queue/status — Command queue status and occupancy.
 #[utoipa::path(get, path = "/api/queue/status", tag = "system", responses((status = 200, description = "Queue status", body = serde_json::Value)))]
-pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn queue_status(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let occupancy = state.kernel.command_queue_ref().occupancy();
     let lanes: Vec<serde_json::Value> = occupancy
         .iter()
@@ -2681,13 +3072,14 @@ pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
     let kcfg2 = state.kernel.config_ref();
     let queue_cfg = &kcfg2.queue;
     Json(serde_json::json!({
-        "lanes": lanes,
-        "config": {
-            "max_depth_per_agent": queue_cfg.max_depth_per_agent,
-            "max_depth_global": queue_cfg.max_depth_global,
-            "task_ttl_secs": queue_cfg.task_ttl_secs,
-        },
+    "lanes": lanes,
+    "config": {
+        "max_depth_per_agent": queue_cfg.max_depth_per_agent,
+        "max_depth_global": queue_cfg.max_depth_global,
+        "task_ttl_secs": queue_cfg.task_ttl_secs,
+    },
     }))
+    .into_response()
 }
 
 /// Get the machine hostname (best-effort).
@@ -2738,7 +3130,7 @@ fn validate_webhook_token(headers: &axum::http::HeaderMap, token_env: &str) -> b
         (status = 200, description = "API version info", body = serde_json::Value)
     )
 )]
-pub async fn api_versions() -> impl IntoResponse {
+pub async fn api_versions(_account: AccountId) -> impl IntoResponse {
     let supported: Vec<&str> = crate::versioning::SUPPORTED_VERSIONS.to_vec();
     let deprecated: Vec<&str> = crate::versioning::DEPRECATED_VERSIONS.to_vec();
 
@@ -2837,17 +3229,28 @@ fn redact_webhook_secret(webhook: &serde_json::Value) -> serde_json::Value {
 }
 
 /// GET /api/webhooks/events — List all event webhook subscriptions.
-pub async fn list_event_webhooks() -> impl IntoResponse {
+pub async fn list_event_webhooks(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let store = EVENT_WEBHOOKS.read().await;
     let list: Vec<serde_json::Value> = store.values().map(redact_webhook_secret).collect();
-    Json(list)
+    Json(list).into_response()
 }
 
 /// POST /api/webhooks/events — Create a new event webhook subscription.
 pub async fn create_event_webhook(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Pre-translate error messages before .await to avoid holding !Send ErrorTranslator across await
     let (err_missing_url, err_invalid_url, err_missing_events) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -2861,21 +3264,27 @@ pub async fn create_event_webhook(
     let url = match req["url"].as_str() {
         Some(u) if !u.is_empty() => u.to_string(),
         _ => {
-            return ApiErrorResponse::bad_request(err_missing_url).into_json_tuple();
+            return ApiErrorResponse::bad_request(err_missing_url)
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     if url::Url::parse(&url).is_err() {
-        return ApiErrorResponse::bad_request(err_invalid_url).into_json_tuple();
+        return ApiErrorResponse::bad_request(err_invalid_url)
+            .into_json_tuple()
+            .into_response();
     }
 
     let events = match req.get("events").and_then(|v| v.as_array()) {
         Some(arr) => match validate_event_types(arr, lang.as_ref()) {
             Ok(ev) => ev,
-            Err(e) => return e,
+            Err(e) => return e.into_response(),
         },
         None => {
-            return ApiErrorResponse::bad_request(err_missing_events).into_json_tuple();
+            return ApiErrorResponse::bad_request(err_missing_events)
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -2897,15 +3306,20 @@ pub async fn create_event_webhook(
         .await
         .insert(id.clone(), webhook.clone());
 
-    (StatusCode::CREATED, Json(redact_webhook_secret(&webhook)))
+    (StatusCode::CREATED, Json(redact_webhook_secret(&webhook))).into_response()
 }
 
 /// PUT /api/webhooks/events/{id} — Update an event webhook subscription.
 pub async fn update_event_webhook(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let (err_webhook_not_found, err_invalid_url) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
@@ -2917,7 +3331,9 @@ pub async fn update_event_webhook(
     let existing = match store.get(&id) {
         Some(w) => w.clone(),
         None => {
-            return ApiErrorResponse::not_found(err_webhook_not_found).into_json_tuple();
+            return ApiErrorResponse::not_found(err_webhook_not_found)
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -2925,7 +3341,9 @@ pub async fn update_event_webhook(
 
     if let Some(url_val) = req.get("url").and_then(|v| v.as_str()) {
         if url::Url::parse(url_val).is_err() {
-            return ApiErrorResponse::bad_request(err_invalid_url).into_json_tuple();
+            return ApiErrorResponse::bad_request(err_invalid_url)
+                .into_json_tuple()
+                .into_response();
         }
         updated["url"] = serde_json::json!(url_val);
     }
@@ -2933,7 +3351,7 @@ pub async fn update_event_webhook(
     if let Some(arr) = req.get("events").and_then(|v| v.as_array()) {
         match validate_event_types(arr, lang.as_ref()) {
             Ok(ev) => updated["events"] = serde_json::json!(ev),
-            Err(e) => return e,
+            Err(e) => return e.into_response(),
         }
     }
 
@@ -2947,14 +3365,19 @@ pub async fn update_event_webhook(
 
     store.insert(id, updated.clone());
 
-    (StatusCode::OK, Json(redact_webhook_secret(&updated)))
+    (StatusCode::OK, Json(redact_webhook_secret(&updated))).into_response()
 }
 
 /// DELETE /api/webhooks/events/{id} — Remove an event webhook subscription.
 pub async fn delete_event_webhook(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let err_webhook_not_found = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         t.t("api-error-webhook-not-found")
@@ -2965,8 +3388,11 @@ pub async fn delete_event_webhook(
             StatusCode::OK,
             Json(serde_json::json!({"status": "removed", "id": id})),
         )
+            .into_response()
     } else {
-        ApiErrorResponse::not_found(err_webhook_not_found).into_json_tuple()
+        ApiErrorResponse::not_found(err_webhook_not_found)
+            .into_json_tuple()
+            .into_response()
     }
 }
 
@@ -2975,7 +3401,13 @@ pub async fn delete_event_webhook(
 // ---------------------------------------------------------------------------
 
 /// GET /api/webhooks — List all webhook subscriptions (secrets redacted).
-pub async fn list_webhooks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_webhooks(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let webhooks: Vec<_> = state
         .webhook_store
         .list()
@@ -2987,62 +3419,82 @@ pub async fn list_webhooks(State(state): State<Arc<AppState>>) -> impl IntoRespo
         StatusCode::OK,
         Json(serde_json::json!({"webhooks": webhooks, "total": total})),
     )
+        .into_response()
 }
 
 /// GET /api/webhooks/{id} — Get a single webhook subscription (secret redacted).
 pub async fn get_webhook(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let wh_id = match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => crate::webhook_store::WebhookId(uuid),
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
     match state.webhook_store.get(wh_id) {
         Some(wh) => {
             let redacted = crate::webhook_store::redact_webhook_secret(&wh);
             match serde_json::to_value(&redacted) {
-                Ok(v) => (StatusCode::OK, Json(v)),
+                Ok(v) => (StatusCode::OK, Json(v)).into_response(),
                 Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
-                    .into_json_tuple(),
+                    .into_json_tuple()
+                    .into_response(),
             }
         }
-        None => ApiErrorResponse::not_found(t.t("api-error-webhook-not-found")).into_json_tuple(),
+        None => ApiErrorResponse::not_found(t.t("api-error-webhook-not-found"))
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
 /// POST /api/webhooks — Create a new webhook subscription.
 pub async fn create_webhook(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<crate::webhook_store::CreateWebhookRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match state.webhook_store.create(req) {
         Ok(webhook) => {
             let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
             match serde_json::to_value(&redacted) {
-                Ok(v) => (StatusCode::CREATED, Json(v)),
+                Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
                 Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
-                    .into_json_tuple(),
+                    .into_json_tuple()
+                    .into_response(),
             }
         }
-        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
+        Err(e) => ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
 /// PUT /api/webhooks/{id} — Update a webhook subscription.
 pub async fn update_webhook(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<crate::webhook_store::UpdateWebhookRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
@@ -3051,28 +3503,35 @@ pub async fn update_webhook(
                 Ok(webhook) => {
                     let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
                     match serde_json::to_value(&redacted) {
-                        Ok(v) => (StatusCode::OK, Json(v)),
+                        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
                         Err(_) => {
                             ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
                                 .into_json_tuple()
+                                .into_response()
                         }
                     }
                 }
-                Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
+                Err(e) => ApiErrorResponse::not_found(e)
+                    .into_json_tuple()
+                    .into_response(),
             }
         }
-        Err(_) => {
-            ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id")).into_json_tuple()
-        }
+        Err(_) => ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id"))
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
 /// DELETE /api/webhooks/{id} — Delete a webhook subscription.
 pub async fn delete_webhook(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
@@ -3082,13 +3541,16 @@ pub async fn delete_webhook(
                     StatusCode::OK,
                     Json(serde_json::json!({"status": "deleted"})),
                 )
+                    .into_response()
             } else {
-                ApiErrorResponse::not_found(t.t("api-error-webhook-not-found")).into_json_tuple()
+                ApiErrorResponse::not_found(t.t("api-error-webhook-not-found"))
+                    .into_json_tuple()
+                    .into_response()
             }
         }
-        Err(_) => {
-            ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id")).into_json_tuple()
-        }
+        Err(_) => ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id"))
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -3097,10 +3559,14 @@ pub async fn delete_webhook(
 /// Includes HMAC-SHA256 signature in `X-Webhook-Signature` header when
 /// the webhook has a secret configured.
 pub async fn test_webhook(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let (err_invalid_id, err_not_found) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
@@ -3111,24 +3577,25 @@ pub async fn test_webhook(
     let wh_id = match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => crate::webhook_store::WebhookId(uuid),
         Err(_) => {
-            return ApiErrorResponse::bad_request(err_invalid_id).into_json_tuple();
+            return ApiErrorResponse::bad_request(err_invalid_id)
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     let webhook = match state.webhook_store.get(wh_id) {
         Some(w) => w,
         None => {
-            return ApiErrorResponse::not_found(err_not_found).into_json_tuple();
+            return ApiErrorResponse::not_found(err_not_found)
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     // Re-validate the URL against SSRF rules before sending
     if let Err(e) = crate::webhook_store::validate_webhook_url(&webhook.url) {
-        let err_msg = {
-            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            t.t_args("api-error-webhook-url-unsafe", &[("error", &e.to_string())])
-        };
-        return ApiErrorResponse::bad_request(err_msg).into_json_tuple();
+        tracing::warn!("Webhook {} URL rejected during test send: {e}", webhook.id);
+        return webhook_url_unsafe_response().into_response();
     }
 
     let test_payload = serde_json::json!({
@@ -3168,21 +3635,11 @@ pub async fn test_webhook(
                     "webhook_id": id,
                 })),
             )
+                .into_response()
         }
         Err(e) => {
-            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            let msg = t.t_args(
-                "api-error-webhook-reach-failed",
-                &[("error", &e.to_string())],
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "status": "error",
-                    "error": msg,
-                    "webhook_id": id,
-                })),
-            )
+            tracing::warn!("Webhook test send failed for {id}: {e}");
+            webhook_reach_failed_response(&id).into_response()
         }
     }
 }
@@ -3193,9 +3650,13 @@ pub async fn test_webhook(
 
 /// GET /api/tasks/status — Summary counts of tasks by status.
 pub async fn task_queue_status(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     _lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match state.kernel.task_list(None).await {
         Ok(tasks) => {
             let mut pending = 0u64;
@@ -3221,17 +3682,22 @@ pub async fn task_queue_status(
                     "failed": failed,
                 })),
             )
+                .into_response()
         }
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => admin_internal_error_response("load tasks", e).into_response(),
     }
 }
 
 /// GET /api/tasks/list — List tasks, optionally filtered by ?status=pending|in_progress|completed|failed.
 pub async fn task_queue_list(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     _lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let status_filter = params.get("status").map(|s| s.as_str());
     match state.kernel.task_list(status_filter).await {
         Ok(tasks) => {
@@ -3240,17 +3706,22 @@ pub async fn task_queue_list(
                 StatusCode::OK,
                 Json(serde_json::json!({"tasks": tasks, "total": total})),
             )
+                .into_response()
         }
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => admin_internal_error_response("list tasks", e).into_response(),
     }
 }
 
 /// DELETE /api/tasks/{id} — Remove a task from the queue.
 pub async fn task_queue_delete(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let err_task_not_found = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         t.t("api-error-task-not-found")
@@ -3259,9 +3730,12 @@ pub async fn task_queue_delete(
         Ok(true) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "deleted", "id": id})),
-        ),
-        Ok(false) => ApiErrorResponse::not_found(err_task_not_found).into_json_tuple(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        )
+            .into_response(),
+        Ok(false) => ApiErrorResponse::not_found(err_task_not_found)
+            .into_json_tuple()
+            .into_response(),
+        Err(e) => admin_internal_error_response("delete task", e).into_response(),
     }
 }
 
@@ -3269,10 +3743,14 @@ pub async fn task_queue_delete(
 ///
 /// In-progress tasks cannot be retried to prevent duplicate execution.
 pub async fn task_queue_retry(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let err_task_not_retryable = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         t.t("api-error-task-not-retryable")
@@ -3281,14 +3759,16 @@ pub async fn task_queue_retry(
         Ok(true) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "retried", "id": id})),
-        ),
+        )
+            .into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": err_task_not_retryable
             })),
-        ),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        )
+            .into_response(),
+        Err(e) => admin_internal_error_response("retry task", e).into_response(),
     }
 }
 
@@ -3297,14 +3777,23 @@ pub async fn task_queue_retry(
 // ---------------------------------------------------------------------------
 
 /// GET /api/registry/schema — Return the full registry schema for all content types.
-async fn registry_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn registry_schema(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let home_dir = state.kernel.home_dir();
     match librefang_types::registry_schema::load_registry_schema(home_dir) {
         Some(schema) => match serde_json::to_value(&schema) {
             Ok(val) => Json(val).into_response(),
-            Err(e) => ApiErrorResponse::internal(e.to_string())
-                .into_json_tuple()
-                .into_response(),
+            Err(e) => {
+                tracing::warn!("Failed to serialize registry schema: {e}");
+                ApiErrorResponse::internal("Failed to load registry schema")
+                    .into_json_tuple()
+                    .into_response()
+            }
         },
         None => ApiErrorResponse::not_found(
             "Registry schema not found or not yet in machine-parseable format",
@@ -3316,23 +3805,28 @@ async fn registry_schema(State(state): State<Arc<AppState>>) -> impl IntoRespons
 
 /// GET /api/registry/schema/:content_type — Return schema for a specific content type.
 async fn registry_schema_by_type(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(content_type): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let home_dir = state.kernel.home_dir();
     match librefang_types::registry_schema::load_registry_schema(home_dir) {
         Some(schema) => match schema.content_types.get(&content_type) {
             Some(ct) => match serde_json::to_value(ct) {
                 Ok(val) => Json(val).into_response(),
-                Err(e) => ApiErrorResponse::internal(e.to_string())
-                    .into_json_tuple()
-                    .into_response(),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to serialize registry content type '{content_type}': {e}"
+                    );
+                    ApiErrorResponse::internal("Failed to load registry schema")
+                        .into_json_tuple()
+                        .into_response()
+                }
             },
-            None => ApiErrorResponse::not_found(format!(
-                "Content type '{content_type}' not found in registry schema"
-            ))
-            .into_json_tuple()
-            .into_response(),
+            None => registry_content_type_not_found_response().into_response(),
         },
         None => ApiErrorResponse::not_found("Registry schema not found")
             .into_json_tuple()
@@ -3355,11 +3849,15 @@ async fn registry_schema_by_type(
 /// For provider files, the in-memory model catalog is refreshed after the write
 /// so new models / provider changes are available immediately without a restart.
 async fn create_registry_content(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(content_type): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let home_dir = state.kernel.home_dir();
     let allow_overwrite = params
         .get("allow_overwrite")
@@ -3391,17 +3889,13 @@ async fn create_registry_content(
     let identifier = match identifier {
         Some(id) => id,
         None => {
-            return ApiErrorResponse::bad_request("Missing required 'id' or 'name' field")
-                .into_json_tuple()
-                .into_response();
+            return registry_content_missing_identifier_response().into_response();
         }
     };
 
     // Validate identifier (prevent path traversal)
     if identifier.contains('/') || identifier.contains('\\') || identifier.contains("..") {
-        return ApiErrorResponse::bad_request("Invalid identifier")
-            .into_json_tuple()
-            .into_response();
+        return registry_content_invalid_identifier_response().into_response();
     }
 
     // Determine target file path
@@ -3424,19 +3918,13 @@ async fn create_registry_content(
             .join(&identifier)
             .join("plugin.toml"),
         _ => {
-            return ApiErrorResponse::bad_request(format!("Unknown content type '{content_type}'"))
-                .into_json_tuple()
-                .into_response();
+            return registry_content_invalid_type_response().into_response();
         }
     };
 
     // Don't overwrite existing content unless explicitly allowed
     if target.exists() && !allow_overwrite {
-        return ApiErrorResponse::conflict(format!(
-            "{content_type} '{identifier}' already exists (use ?allow_overwrite=true to replace)"
-        ))
-        .into_json_tuple()
-        .into_response();
+        return registry_content_already_exists_response().into_response();
     }
 
     // Convert JSON values to TOML.
@@ -3453,7 +3941,10 @@ async fn create_registry_content(
     let toml_string = match toml::to_string_pretty(&toml_value) {
         Ok(s) => s,
         Err(e) => {
-            return ApiErrorResponse::internal(e.to_string())
+            tracing::warn!(
+                "Failed to convert registry content '{content_type}/{identifier}' to TOML: {e}"
+            );
+            return ApiErrorResponse::internal("Failed to serialize registry content")
                 .into_json_tuple()
                 .into_response();
         }
@@ -3462,13 +3953,21 @@ async fn create_registry_content(
     // Create parent directories and write file
     if let Some(parent) = target.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            return ApiErrorResponse::internal(e.to_string())
+            tracing::warn!(
+                "Failed to create parent directory for registry content '{}': {e}",
+                target.display()
+            );
+            return ApiErrorResponse::internal("Failed to prepare registry content path")
                 .into_json_tuple()
                 .into_response();
         }
     }
     if let Err(e) = std::fs::write(&target, &toml_string) {
-        return ApiErrorResponse::internal(e.to_string())
+        tracing::warn!(
+            "Failed to write registry content '{}': {e}",
+            target.display()
+        );
+        return ApiErrorResponse::internal("Failed to write registry content")
             .into_json_tuple()
             .into_response();
     }
@@ -3494,7 +3993,6 @@ async fn create_registry_content(
         "ok": true,
         "content_type": content_type,
         "identifier": identifier,
-        "path": target.display().to_string(),
     }))
     .into_response()
 }
@@ -3503,13 +4001,17 @@ async fn create_registry_content(
 ///
 /// Same as POST but always allows overwriting existing files.
 async fn update_registry_content(
+    account: AccountId,
     state: State<Arc<AppState>>,
     path: Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let mut overwrite = HashMap::new();
     overwrite.insert("allow_overwrite".to_string(), "true".to_string());
-    create_registry_content(state, path, Query(overwrite), Json(body)).await
+    create_registry_content(account, state, path, Query(overwrite), Json(body)).await
 }
 
 /// Ensure a provider JSON body has the `[provider]` wrapper required by
@@ -3684,6 +4186,42 @@ mod event_webhook_tests {
     static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn webhook_router() -> Router {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            admin_accounts: vec!["admin".to_string()],
+            ..Default::default()
+        };
+        let kernel = std::sync::Arc::new(
+            librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"),
+        );
+        let state = std::sync::Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            api_key_lock: std::sync::Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+                Router::new(),
+            ))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+        std::mem::forget(tmp);
         Router::new()
             .route(
                 "/api/webhooks/events",
@@ -3693,20 +4231,47 @@ mod event_webhook_tests {
                 "/api/webhooks/events/{id}",
                 axum::routing::put(update_event_webhook).delete(delete_event_webhook),
             )
+            .with_state(state)
+    }
+
+    fn admin_request(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+        builder.header("x-account-id", "admin")
     }
 
     async fn clear_webhooks() {
         EVENT_WEBHOOKS.write().await.clear();
     }
 
-    #[tokio::test]
+    fn tenant_agent(name: &str, account_id: &str) -> librefang_types::agent::AgentEntry {
+        librefang_types::agent::AgentEntry {
+            id: AgentId::new(),
+            account_id: Some(account_id.to_string()),
+            name: name.to_string(),
+            manifest: AgentManifest::default(),
+            state: librefang_types::agent::AgentState::Created,
+            mode: librefang_types::agent::AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: librefang_types::agent::AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_list_empty() {
         let _guard = TEST_LOCK.lock().await;
         clear_webhooks().await;
         let app = webhook_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .uri("/api/webhooks/events")
                     .body(Body::empty())
                     .unwrap(),
@@ -3719,7 +4284,7 @@ mod event_webhook_tests {
         assert_eq!(json, serde_json::json!([]));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_create_and_list() {
         let _guard = TEST_LOCK.lock().await;
         clear_webhooks().await;
@@ -3734,7 +4299,7 @@ mod event_webhook_tests {
         let resp = app
             .clone()
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("POST")
                     .uri("/api/webhooks/events")
                     .header("content-type", "application/json")
@@ -3755,7 +4320,7 @@ mod event_webhook_tests {
         // List should contain the webhook with redacted secret
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .uri("/api/webhooks/events")
                     .body(Body::empty())
                     .unwrap(),
@@ -3768,7 +4333,7 @@ mod event_webhook_tests {
         assert_eq!(list[0]["secret"], "***");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_create_invalid_event() {
         let _guard = TEST_LOCK.lock().await;
         clear_webhooks().await;
@@ -3781,7 +4346,7 @@ mod event_webhook_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("POST")
                     .uri("/api/webhooks/events")
                     .header("content-type", "application/json")
@@ -3793,7 +4358,7 @@ mod event_webhook_tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_create_missing_url() {
         let _guard = TEST_LOCK.lock().await;
         clear_webhooks().await;
@@ -3805,7 +4370,7 @@ mod event_webhook_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("POST")
                     .uri("/api/webhooks/events")
                     .header("content-type", "application/json")
@@ -3817,7 +4382,7 @@ mod event_webhook_tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_create_invalid_url() {
         let _guard = TEST_LOCK.lock().await;
         clear_webhooks().await;
@@ -3842,7 +4407,7 @@ mod event_webhook_tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_update_webhook() {
         let _guard = TEST_LOCK.lock().await;
         clear_webhooks().await;
@@ -3855,7 +4420,7 @@ mod event_webhook_tests {
         let resp = app
             .clone()
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("POST")
                     .uri("/api/webhooks/events")
                     .header("content-type", "application/json")
@@ -3874,7 +4439,7 @@ mod event_webhook_tests {
         });
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("PUT")
                     .uri(format!("/api/webhooks/events/{id}"))
                     .header("content-type", "application/json")
@@ -3890,7 +4455,7 @@ mod event_webhook_tests {
         assert_eq!(updated["events"].as_array().unwrap().len(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_delete_webhook() {
         let _guard = TEST_LOCK.lock().await;
         clear_webhooks().await;
@@ -3903,7 +4468,7 @@ mod event_webhook_tests {
         let resp = app
             .clone()
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("POST")
                     .uri("/api/webhooks/events")
                     .header("content-type", "application/json")
@@ -3919,7 +4484,7 @@ mod event_webhook_tests {
         let resp = app
             .clone()
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("DELETE")
                     .uri(format!("/api/webhooks/events/{id}"))
                     .body(Body::empty())
@@ -3931,7 +4496,7 @@ mod event_webhook_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .uri("/api/webhooks/events")
                     .body(Body::empty())
                     .unwrap(),
@@ -3943,7 +4508,7 @@ mod event_webhook_tests {
         assert_eq!(list.as_array().unwrap().len(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_delete_not_found() {
         let _guard = TEST_LOCK.lock().await;
         clear_webhooks().await;
@@ -3951,7 +4516,7 @@ mod event_webhook_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("DELETE")
                     .uri("/api/webhooks/events/nonexistent-id")
                     .body(Body::empty())
@@ -3962,7 +4527,7 @@ mod event_webhook_tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_update_not_found() {
         let _guard = TEST_LOCK.lock().await;
         clear_webhooks().await;
@@ -3971,7 +4536,7 @@ mod event_webhook_tests {
         let payload = serde_json::json!({"enabled": false});
         let resp = app
             .oneshot(
-                Request::builder()
+                admin_request(Request::builder())
                     .method("PUT")
                     .uri("/api/webhooks/events/nonexistent-id")
                     .header("content-type", "application/json")
@@ -3981,5 +4546,520 @@ mod event_webhook_tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_webhook_wake_keeps_event_scoped_to_request_account() {
+        let _guard = TEST_LOCK.lock().await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let token = "0123456789abcdef0123456789abcdef";
+        std::env::set_var("LIBREFANG_TEST_WEBHOOK_TOKEN", token);
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            admin_accounts: vec!["tenant-a".to_string()],
+            webhook_triggers: Some(librefang_types::config::WebhookTriggerConfig {
+                enabled: true,
+                token_env: "LIBREFANG_TEST_WEBHOOK_TOKEN".to_string(),
+                max_payload_bytes: 65_536,
+                rate_limit_per_minute: 30,
+            }),
+            ..Default::default()
+        };
+        let kernel = std::sync::Arc::new(
+            librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"),
+        );
+        let tenant_a_source = tenant_agent("tenant-a-source", "tenant-a");
+        let tenant_a_target = tenant_agent("tenant-a-target", "tenant-a");
+        let tenant_b_target = tenant_agent("tenant-b-target", "tenant-b");
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        kernel.agent_registry().register(tenant_a_source).unwrap();
+        kernel.agent_registry().register(tenant_a_target).unwrap();
+        kernel.agent_registry().register(tenant_b_target).unwrap();
+
+        let tenant_a_trigger = kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                librefang_kernel::triggers::TriggerPattern::All,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_b_trigger = kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                librefang_kernel::triggers::TriggerPattern::All,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let state = std::sync::Arc::new(AppState {
+            kernel: kernel.clone(),
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            api_key_lock: std::sync::Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+                Router::new(),
+            ))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+
+        let response = webhook_wake(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            axum::http::HeaderMap::from_iter([(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            )]),
+            None,
+            Json(librefang_types::webhook::WakePayload {
+                mode: librefang_types::webhook::WakeMode::Now,
+                text: "wake tenant a".to_string(),
+            }),
+        )
+        .await;
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "same-tenant webhook target should pass payload/token validation"
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "same-tenant webhook target should resolve within owner scope"
+        );
+
+        let tenant_a = kernel
+            .trigger_engine()
+            .get(tenant_a_trigger)
+            .expect("tenant-a trigger");
+        let tenant_b = kernel
+            .trigger_engine()
+            .get(tenant_b_trigger)
+            .expect("tenant-b trigger");
+        assert_eq!(tenant_a.fire_count, 1);
+        assert_eq!(
+            tenant_b.fire_count, 0,
+            "webhook-triggered event should not cross tenant boundaries"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_webhook_agent_cannot_target_other_tenant_by_name() {
+        let _guard = TEST_LOCK.lock().await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let token = "0123456789abcdef0123456789abcdef";
+        std::env::set_var("LIBREFANG_TEST_WEBHOOK_TOKEN", token);
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            admin_accounts: vec!["tenant-a".to_string()],
+            webhook_triggers: Some(librefang_types::config::WebhookTriggerConfig {
+                enabled: true,
+                token_env: "LIBREFANG_TEST_WEBHOOK_TOKEN".to_string(),
+                max_payload_bytes: 65_536,
+                rate_limit_per_minute: 30,
+            }),
+            ..Default::default()
+        };
+        let kernel = std::sync::Arc::new(
+            librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"),
+        );
+        kernel
+            .agent_registry()
+            .register(tenant_agent("tenant-b-agent", "tenant-b"))
+            .unwrap();
+
+        let state = std::sync::Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            api_key_lock: std::sync::Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+                Router::new(),
+            ))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+
+        let response = webhook_agent(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            axum::http::HeaderMap::from_iter([(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            )]),
+            None,
+            Json(librefang_types::webhook::AgentHookPayload {
+                agent: Some("tenant-b-agent".to_string()),
+                message: "hello".to_string(),
+                deliver: false,
+                channel: None,
+                model: None,
+                timeout_secs: 120,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_webhook_agent_can_target_same_tenant_by_name() {
+        let _guard = TEST_LOCK.lock().await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let token = "0123456789abcdef0123456789abcdef";
+        std::env::set_var("LIBREFANG_TEST_WEBHOOK_TOKEN", token);
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            admin_accounts: vec!["tenant-a".to_string()],
+            webhook_triggers: Some(librefang_types::config::WebhookTriggerConfig {
+                enabled: true,
+                token_env: "LIBREFANG_TEST_WEBHOOK_TOKEN".to_string(),
+                max_payload_bytes: 65_536,
+                rate_limit_per_minute: 30,
+            }),
+            ..Default::default()
+        };
+        let kernel = std::sync::Arc::new(
+            librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"),
+        );
+        kernel
+            .agent_registry()
+            .register(tenant_agent("tenant-a-agent", "tenant-a"))
+            .unwrap();
+
+        let state = std::sync::Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            api_key_lock: std::sync::Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+                Router::new(),
+            ))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+
+        let response = webhook_agent(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            axum::http::HeaderMap::from_iter([(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            )]),
+            None,
+            Json(librefang_types::webhook::AgentHookPayload {
+                agent: Some("tenant-a-agent".to_string()),
+                message: "hello".to_string(),
+                deliver: false,
+                channel: None,
+                model: None,
+                timeout_secs: 120,
+            }),
+        )
+        .await;
+
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "same-tenant webhook target should pass payload/token validation"
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "same-tenant webhook target should resolve within owner scope"
+        );
+    }
+
+    #[test]
+    fn invalid_session_label_response_is_generic() {
+        let response = invalid_session_label_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Invalid session label"));
+    }
+
+    #[test]
+    fn backup_create_error_response_is_generic() {
+        let response = backup_create_error_response();
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Failed to create backup"));
+    }
+
+    #[test]
+    fn backup_delete_error_response_is_generic() {
+        let response = backup_delete_error_response();
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Failed to delete backup"));
+    }
+
+    #[test]
+    fn backup_open_error_response_is_generic() {
+        let response = backup_open_error_response();
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Failed to open backup"));
+    }
+
+    #[test]
+    fn invalid_backup_archive_response_is_generic() {
+        let response = invalid_backup_archive_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Invalid backup archive"));
+    }
+
+    #[test]
+    fn webhook_url_unsafe_response_is_generic() {
+        let response = webhook_url_unsafe_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Webhook URL is not allowed"));
+    }
+
+    #[test]
+    fn webhook_reach_failed_response_is_generic() {
+        let response = webhook_reach_failed_response("test-webhook");
+        assert_eq!(response.0, StatusCode::BAD_GATEWAY);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Failed to reach webhook"));
+        assert_eq!(body["webhook_id"].as_str(), Some("test-webhook"));
+        assert_eq!(body["status"].as_str(), Some("error"));
+    }
+
+    #[test]
+    fn registry_content_missing_identifier_response_is_generic() {
+        let response = registry_content_missing_identifier_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(
+            body["error"].as_str(),
+            Some("Missing required content identifier")
+        );
+    }
+
+    #[test]
+    fn registry_content_invalid_identifier_response_is_generic() {
+        let response = registry_content_invalid_identifier_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Invalid content identifier"));
+    }
+
+    #[test]
+    fn registry_content_invalid_type_response_is_generic() {
+        let response = registry_content_invalid_type_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(
+            body["error"].as_str(),
+            Some("Unsupported registry content type")
+        );
+    }
+
+    #[test]
+    fn registry_content_already_exists_response_is_generic() {
+        let response = registry_content_already_exists_response();
+        assert_eq!(response.0, StatusCode::CONFLICT);
+        let Json(body) = response.1;
+        assert_eq!(
+            body["error"].as_str(),
+            Some("Registry content already exists")
+        );
+    }
+
+    #[test]
+    fn registry_content_type_not_found_response_is_generic() {
+        let response = registry_content_type_not_found_response();
+        assert_eq!(response.0, StatusCode::NOT_FOUND);
+        let Json(body) = response.1;
+        assert_eq!(
+            body["error"].as_str(),
+            Some("Registry content type not found")
+        );
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::Router;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn binding_router(
+        admin_account: &str,
+        bindings: Vec<librefang_types::config::AgentBinding>,
+        agents: Vec<librefang_types::agent::AgentEntry>,
+    ) -> Router {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            admin_accounts: vec![admin_account.to_string()],
+            ..Default::default()
+        };
+        let kernel = std::sync::Arc::new(
+            librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"),
+        );
+        for agent in agents {
+            kernel
+                .agent_registry()
+                .register(agent)
+                .expect("register agent");
+        }
+        for binding in bindings {
+            kernel.add_binding(binding);
+        }
+        let state = std::sync::Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            api_key_lock: std::sync::Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+                Router::new(),
+            ))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+        std::mem::forget(tmp);
+        Router::new()
+            .route("/api/bindings", axum::routing::get(list_bindings))
+            .with_state(state)
+    }
+
+    fn tenant_agent(name: &str, account_id: &str) -> librefang_types::agent::AgentEntry {
+        librefang_types::agent::AgentEntry {
+            id: AgentId::new(),
+            account_id: Some(account_id.to_string()),
+            name: name.to_string(),
+            manifest: AgentManifest::default(),
+            state: librefang_types::agent::AgentState::Created,
+            mode: librefang_types::agent::AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: librefang_types::agent::AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_system_bindings_admin_sees_global_bindings() {
+        let binding = librefang_types::config::AgentBinding {
+            agent: "tenant-b-agent".to_string(),
+            match_rule: librefang_types::config::BindingMatchRule {
+                channel: Some("discord".to_string()),
+                account_id: Some("bot-1".to_string()),
+                ..Default::default()
+            },
+        };
+        let app = binding_router(
+            "tenant-a",
+            vec![binding],
+            vec![tenant_agent("tenant-b-agent", "tenant-b")],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/bindings")
+                    .header("x-account-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let bindings = json["bindings"].as_array().expect("bindings array");
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0]["agent"], "tenant-b-agent");
+        assert_eq!(bindings[0]["match_rule"]["channel"], "discord");
+        assert_eq!(bindings[0]["match_rule"]["account_id"], "bot-1");
+    }
+
+    #[test]
+    fn test_admin_internal_error_response_is_generic() {
+        let (status, Json(body)) = admin_internal_error_response("list tasks", "backend exploded");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let err = body["error"].as_str().expect("error string");
+        assert_eq!(err, "Failed to list tasks");
+        assert!(!err.contains("backend exploded"));
     }
 }

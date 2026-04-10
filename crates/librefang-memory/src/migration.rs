@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 17;
+const SCHEMA_VERSION: u32 = 18;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -77,6 +77,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 17 {
         migrate_v17(conn)?;
+    }
+
+    if current_version < 18 {
+        migrate_v18(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -599,6 +603,35 @@ fn migrate_v17(conn: &Connection) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// V18: Add account_id to knowledge graph tables for tenant scoping.
+fn migrate_v18(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "entities", "account_id") {
+        conn.execute(
+            "ALTER TABLE entities ADD COLUMN account_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "relations", "account_id") {
+        conn.execute(
+            "ALTER TABLE relations ADD COLUMN account_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_entities_account ON entities(account_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_relations_account ON relations(account_id)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (18, datetime('now'), 'Add account_id to knowledge graph tables for tenant scoping')",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -650,5 +683,14 @@ mod tests {
         assert!(tables.contains(&"prompt_experiments".to_string()));
         assert!(tables.contains(&"experiment_variants".to_string()));
         assert!(tables.contains(&"experiment_metrics".to_string()));
+    }
+
+    #[test]
+    fn test_migration_v18_adds_knowledge_account_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "entities", "account_id"));
+        assert!(column_exists(&conn, "relations", "account_id"));
     }
 }

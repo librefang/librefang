@@ -6,7 +6,8 @@
 //! Authentication uses the page access token as a query parameter on the Send API.
 
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    split_message, ChannelAdapter, ChannelAdapterMultiplicity, ChannelContent, ChannelMessage,
+    ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -333,6 +334,12 @@ impl ChannelAdapter for MessengerAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Custom("messenger".to_string())
+    }
+
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+            reason: "messenger uses a fixed shared webhook route on the main API server",
+        }
     }
 
     async fn create_webhook_routes(

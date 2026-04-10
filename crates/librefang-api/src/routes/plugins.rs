@@ -6,8 +6,10 @@ use axum::response::IntoResponse;
 use axum::Json;
 use std::sync::Arc;
 
+use super::shared::require_admin;
 use super::AppState;
 
+use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 /// Build routes for the context engine plugin domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
@@ -37,7 +39,13 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         (status = 200, description = "List installed plugins", body = serde_json::Value)
     )
 )]
-pub async fn list_plugins() -> impl IntoResponse {
+pub async fn list_plugins(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let plugins = librefang_runtime::plugin_manager::list_plugins();
     let items: Vec<serde_json::Value> = plugins
         .iter()
@@ -63,6 +71,7 @@ pub async fn list_plugins() -> impl IntoResponse {
         "total": items.len(),
         "plugins_dir": librefang_runtime::plugin_manager::plugins_dir().display().to_string(),
     }))
+    .into_response()
 }
 
 /// GET /api/plugins/:name — Get details of a specific plugin.
@@ -76,7 +85,14 @@ pub async fn list_plugins() -> impl IntoResponse {
         (status = 404, description = "Plugin not found")
     )
 )]
-pub async fn get_plugin(Path(name): Path<String>) -> impl IntoResponse {
+pub async fn get_plugin(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match librefang_runtime::plugin_manager::get_plugin_info(&name) {
         Ok(info) => (
             StatusCode::OK,
@@ -94,8 +110,11 @@ pub async fn get_plugin(Path(name): Path<String>) -> impl IntoResponse {
                 "path": info.path.display().to_string(),
                 "requirements": info.manifest.requirements,
             })),
-        ),
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::not_found(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -118,7 +137,14 @@ pub async fn get_plugin(Path(name): Path<String>) -> impl IntoResponse {
         (status = 409, description = "Plugin already installed")
     )
 )]
-pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn install_plugin(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let source = match body.get("source").and_then(|s| s.as_str()) {
         Some("registry") => {
             let name = match body.get("name").and_then(|n| n.as_str()) {
@@ -126,6 +152,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
                 None => {
                     return ApiErrorResponse::bad_request("Missing 'name' for registry install")
                         .into_json_tuple()
+                        .into_response()
                 }
             };
             let github_repo = body
@@ -140,6 +167,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
                 None => {
                     return ApiErrorResponse::bad_request("Missing 'path' for local install")
                         .into_json_tuple()
+                        .into_response()
                 }
             };
             librefang_runtime::plugin_manager::PluginSource::Local { path }
@@ -150,6 +178,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
                 None => {
                     return ApiErrorResponse::bad_request("Missing 'url' for git install")
                         .into_json_tuple()
+                        .into_response()
                 }
             };
             let branch = body
@@ -163,6 +192,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
                 "Invalid source. Use 'registry', 'local', or 'git'",
             )
             .into_json_tuple()
+            .into_response()
         }
     };
 
@@ -176,14 +206,15 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
                 "path": info.path.display().to_string(),
                 "restart_required": true,
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             let status = if e.contains("already installed") {
                 StatusCode::CONFLICT
             } else {
                 StatusCode::BAD_REQUEST
             };
-            (status, Json(serde_json::json!({"error": e})))
+            (status, Json(serde_json::json!({"error": e}))).into_response()
         }
     }
 }
@@ -201,24 +232,36 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
         (status = 404, description = "Plugin not found")
     )
 )]
-pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn uninstall_plugin(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let name = match body.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
-        None => return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::bad_request("Missing 'name'")
+                .into_json_tuple()
+                .into_response()
+        }
     };
 
     match librefang_runtime::plugin_manager::remove_plugin(name) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"removed": true, "name": name})),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             let status = if e.contains("not installed") || e.contains("not found") {
                 StatusCode::NOT_FOUND
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
-            (status, Json(serde_json::json!({"error": e})))
+            (status, Json(serde_json::json!({"error": e}))).into_response()
         }
     }
 }
@@ -243,10 +286,21 @@ pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoR
         (status = 409, description = "Plugin already exists")
     )
 )]
-pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn scaffold_plugin(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let name = match body.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
-        None => return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::bad_request("Missing 'name'")
+                .into_json_tuple()
+                .into_response()
+        }
     };
     let description = body
         .get("description")
@@ -263,14 +317,15 @@ pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRe
                 "name": name,
                 "path": path.display().to_string(),
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             let status = if e.contains("already exists") {
                 StatusCode::CONFLICT
             } else {
                 StatusCode::BAD_REQUEST
             };
-            (status, Json(serde_json::json!({"error": e})))
+            (status, Json(serde_json::json!({"error": e}))).into_response()
         }
     }
 }
@@ -288,7 +343,13 @@ pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRe
         (status = 200, description = "Runtime availability + per-plugin diagnostics", body = serde_json::Value)
     )
 )]
-pub async fn plugin_doctor() -> impl IntoResponse {
+pub async fn plugin_doctor(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // `run_doctor` spawns subprocesses — keep it off the async runtime.
     let report = tokio::task::spawn_blocking(librefang_runtime::plugin_manager::run_doctor)
         .await
@@ -299,7 +360,7 @@ pub async fn plugin_doctor() -> impl IntoResponse {
                 plugins: Vec::new(),
             }
         });
-    Json(report)
+    Json(report).into_response()
 }
 
 /// POST /api/plugins/:name/install-deps — Install Python dependencies for a plugin.
@@ -313,13 +374,23 @@ pub async fn plugin_doctor() -> impl IntoResponse {
         (status = 400, description = "Installation failed")
     )
 )]
-pub async fn install_plugin_deps(Path(name): Path<String>) -> impl IntoResponse {
+pub async fn install_plugin_deps(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match librefang_runtime::plugin_manager::install_requirements(&name).await {
         Ok(output) => (
             StatusCode::OK,
             Json(serde_json::json!({"success": true, "output": output})),
-        ),
-        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -332,7 +403,13 @@ pub async fn install_plugin_deps(Path(name): Path<String>) -> impl IntoResponse 
         (status = 200, description = "Configured registries with available plugins", body = serde_json::Value)
     )
 )]
-pub async fn list_plugin_registries(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_plugin_registries(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Ensure the official registry is always present.
     let mut registries = state
         .kernel
@@ -401,5 +478,5 @@ pub async fn list_plugin_registries(State(state): State<Arc<AppState>>) -> impl 
         }));
     }
 
-    Json(serde_json::json!({ "registries": results }))
+    Json(serde_json::json!({ "registries": results })).into_response()
 }

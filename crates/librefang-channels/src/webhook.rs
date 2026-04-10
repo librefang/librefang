@@ -6,7 +6,8 @@
 //! callback URL with the same signature scheme.
 
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    split_message, ChannelAdapter, ChannelAdapterMultiplicity, ChannelContent, ChannelMessage,
+    ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -171,6 +172,12 @@ impl ChannelAdapter for WebhookAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Custom("webhook".to_string())
+    }
+
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+            reason: "webhook uses a fixed shared callback route on the main API server",
+        }
     }
 
     async fn create_webhook_routes(

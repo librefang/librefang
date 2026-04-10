@@ -112,6 +112,7 @@ async fn start_test_server_with_provider(
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
         provider_test_cache: dashmap::DashMap::new(),
+        account_sig_secret: None,
     });
 
     let app = Router::new()
@@ -437,6 +438,7 @@ async fn test_build_router_providers_marks_lemonade_as_local() {
         .oneshot(
             Request::builder()
                 .uri("/api/providers")
+                .header("X-Account-Id", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -806,10 +808,12 @@ async fn test_send_message_with_llm() {
 async fn test_workflow_crud() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
+    let account_id = "tenant-a";
 
     // Spawn agent for workflow
     let resp = client
         .post(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", account_id)
         .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
         .send()
         .await
@@ -820,6 +824,7 @@ async fn test_workflow_crud() {
     // Create workflow
     let resp = client
         .post(format!("{}/api/workflows", server.base_url))
+        .header("X-Account-Id", account_id)
         .json(&serde_json::json!({
             "name": "test-workflow",
             "description": "Integration test workflow",
@@ -844,6 +849,7 @@ async fn test_workflow_crud() {
     // List workflows
     let resp = client
         .get(format!("{}/api/workflows", server.base_url))
+        .header("X-Account-Id", account_id)
         .send()
         .await
         .unwrap();
@@ -859,10 +865,12 @@ async fn test_workflow_crud() {
 async fn test_trigger_crud() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
+    let account_id = "tenant-a";
 
     // Spawn agent for trigger
     let resp = client
         .post(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", account_id)
         .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
         .send()
         .await
@@ -873,6 +881,7 @@ async fn test_trigger_crud() {
     // Create trigger (Lifecycle pattern — simplest variant)
     let resp = client
         .post(format!("{}/api/triggers", server.base_url))
+        .header("X-Account-Id", account_id)
         .json(&serde_json::json!({
             "agent_id": agent_id,
             "pattern": "lifecycle",
@@ -890,6 +899,7 @@ async fn test_trigger_crud() {
     // List triggers (unfiltered)
     let resp = client
         .get(format!("{}/api/triggers", server.base_url))
+        .header("X-Account-Id", account_id)
         .send()
         .await
         .unwrap();
@@ -907,6 +917,7 @@ async fn test_trigger_crud() {
             "{}/api/triggers?agent_id={}",
             server.base_url, agent_id
         ))
+        .header("X-Account-Id", account_id)
         .send()
         .await
         .unwrap();
@@ -918,6 +929,7 @@ async fn test_trigger_crud() {
     // Delete trigger
     let resp = client
         .delete(format!("{}/api/triggers/{}", server.base_url, trigger_id))
+        .header("X-Account-Id", account_id)
         .send()
         .await
         .unwrap();
@@ -926,6 +938,7 @@ async fn test_trigger_crud() {
     // List triggers (should be empty)
     let resp = client
         .get(format!("{}/api/triggers", server.base_url))
+        .header("X-Account-Id", account_id)
         .send()
         .await
         .unwrap();
@@ -1363,6 +1376,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
+        account_sig_secret: None,
     });
 
     let api_key_state = middleware::AuthState {
@@ -1465,9 +1479,9 @@ async fn test_auth_rejects_no_token() {
     let client = reqwest::Client::new();
 
     // Protected endpoint without auth header → 401
-    // Note: /api/status is public (dashboard needs it), so use a protected endpoint
+    // Note: /api/status and the small system catalog subset are public.
     let resp = client
-        .get(format!("{}/api/commands", server.base_url))
+        .get(format!("{}/api/templates", server.base_url))
         .send()
         .await
         .unwrap();
@@ -1482,9 +1496,9 @@ async fn test_auth_rejects_wrong_token() {
     let client = reqwest::Client::new();
 
     // Wrong bearer token → 401
-    // Note: /api/status is public (dashboard needs it), so use a protected endpoint
+    // Note: /api/status and the small system catalog subset are public.
     let resp = client
-        .get(format!("{}/api/commands", server.base_url))
+        .get(format!("{}/api/templates", server.base_url))
         .header("authorization", "Bearer wrong-key")
         .send()
         .await

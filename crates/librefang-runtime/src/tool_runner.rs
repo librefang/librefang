@@ -289,9 +289,9 @@ pub async fn execute_tool_raw(
         "agent_kill" => tool_agent_kill(input, *kernel),
 
         // Shared memory tools (peer-scoped when sender_id is present)
-        "memory_store" => tool_memory_store(input, *kernel, *sender_id),
-        "memory_recall" => tool_memory_recall(input, *kernel, *sender_id),
-        "memory_list" => tool_memory_list(*kernel, *sender_id),
+        "memory_store" => tool_memory_store(input, *kernel, *caller_agent_id, *sender_id),
+        "memory_recall" => tool_memory_recall(input, *kernel, *caller_agent_id, *sender_id),
+        "memory_list" => tool_memory_list(*kernel, *caller_agent_id, *sender_id),
 
         // Collaboration tools
         "agent_find" => tool_agent_find(input, *kernel),
@@ -299,17 +299,19 @@ pub async fn execute_tool_raw(
         "task_claim" => tool_task_claim(*kernel, *caller_agent_id).await,
         "task_complete" => tool_task_complete(input, *kernel).await,
         "task_list" => tool_task_list(input, *kernel).await,
-        "event_publish" => tool_event_publish(input, *kernel).await,
+        "event_publish" => tool_event_publish(input, *kernel, *caller_agent_id).await,
 
         // Scheduling tools (delegate to CronScheduler via kernel handle)
         "schedule_create" => tool_schedule_create(input, *kernel, *caller_agent_id).await,
         "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
-        "schedule_delete" => tool_schedule_delete(input, *kernel).await,
+        "schedule_delete" => tool_schedule_delete(input, *kernel, *caller_agent_id).await,
 
         // Knowledge graph tools
-        "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel).await,
-        "knowledge_add_relation" => tool_knowledge_add_relation(input, *kernel).await,
-        "knowledge_query" => tool_knowledge_query(input, *kernel).await,
+        "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel, *caller_agent_id).await,
+        "knowledge_add_relation" => {
+            tool_knowledge_add_relation(input, *kernel, *caller_agent_id).await
+        }
+        "knowledge_query" => tool_knowledge_query(input, *kernel, *caller_agent_id).await,
 
         // Image analysis tool
         "image_analyze" => tool_image_analyze(input, *workspace_root).await,
@@ -319,7 +321,16 @@ pub async fn execute_tool_raw(
         "media_transcribe" => tool_media_transcribe(input, *media_engine, *workspace_root).await,
 
         // Media generation tools (MediaDriver-based)
-        "image_generate" => tool_image_generate(input, *media_drivers, *workspace_root).await,
+        "image_generate" => {
+            tool_image_generate(
+                input,
+                *media_drivers,
+                *workspace_root,
+                *kernel,
+                *caller_agent_id,
+            )
+            .await
+        }
         "video_generate" => tool_video_generate(input, *media_drivers).await,
         "video_status" => tool_video_status(input, *media_drivers).await,
         "music_generate" => tool_music_generate(input, *media_drivers, *workspace_root).await,
@@ -367,7 +378,7 @@ pub async fn execute_tool_raw(
         "a2a_send" => tool_a2a_send(input, *kernel).await,
 
         // Goal tracking tool
-        "goal_update" => tool_goal_update(input, *kernel),
+        "goal_update" => tool_goal_update(input, *kernel, *caller_agent_id),
 
         // Browser automation tools
         "browser_navigate" => {
@@ -901,7 +912,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Shared memory tools ---
         ToolDefinition {
             name: "memory_store".to_string(),
-            description: "Store a value in shared memory accessible by all agents. Use for cross-agent coordination and data sharing.".to_string(),
+            description: "Store a value in shared memory scoped to the caller's tenant and optional sender/peer context. Use for coordination and data sharing within that boundary.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -913,7 +924,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "memory_recall".to_string(),
-            description: "Recall a value from shared memory by key.".to_string(),
+            description: "Recall a value from tenant-scoped shared memory by key.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -924,7 +935,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "memory_list".to_string(),
-            description: "List all keys stored in shared memory.".to_string(),
+            description: "List keys stored in tenant-scoped shared memory for the current caller and optional sender/peer context.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -2093,23 +2104,29 @@ fn tool_agent_kill(
 fn tool_memory_store(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for memory_store".to_string())?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
     let value = input.get("value").ok_or("Missing 'value' parameter")?;
-    kh.memory_store(key, value.clone(), peer_id)?;
+    kh.memory_store(caller_agent_id, key, value.clone(), peer_id)?;
     Ok(format!("Stored value under key '{key}'."))
 }
 
 fn tool_memory_recall(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for memory_recall".to_string())?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    match kh.memory_recall(key, peer_id)? {
+    match kh.memory_recall(caller_agent_id, key, peer_id)? {
         Some(val) => Ok(serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())),
         None => Ok(format!("No value found for key '{key}'.")),
     }
@@ -2117,10 +2134,12 @@ fn tool_memory_recall(
 
 fn tool_memory_list(
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let keys = kh.memory_list(peer_id)?;
+    let caller_agent_id = caller_agent_id.ok_or("Agent ID required for memory_list".to_string())?;
+    let keys = kh.memory_list(caller_agent_id, peer_id)?;
     if keys.is_empty() {
         return Ok("No entries found in shared memory.".to_string());
     }
@@ -2220,8 +2239,11 @@ async fn tool_task_list(
 async fn tool_event_publish(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for event_publish".to_string())?;
     let event_type = input["event_type"]
         .as_str()
         .ok_or("Missing 'event_type' parameter")?;
@@ -2229,7 +2251,8 @@ async fn tool_event_publish(
         .get("payload")
         .cloned()
         .unwrap_or(serde_json::json!({}));
-    kh.publish_event(event_type, payload).await?;
+    kh.publish_event_for_agent(caller_agent_id, event_type, payload)
+        .await?;
     Ok(format!("Event '{event_type}' published successfully."))
 }
 
@@ -2240,6 +2263,7 @@ async fn tool_event_publish(
 fn tool_goal_update(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     // Validate input before touching the kernel
     let goal_id = input["goal_id"]
@@ -2261,8 +2285,9 @@ fn tool_goal_update(
         }
     }
 
+    let caller_agent_id = caller_agent_id.ok_or("Agent ID required for goal_update".to_string())?;
     let kh = require_kernel(kernel)?;
-    let updated = kh.goal_update(goal_id, status, progress)?;
+    let updated = kh.goal_update(caller_agent_id, goal_id, status, progress)?;
     Ok(serde_json::to_string_pretty(&updated).unwrap_or_else(|_| updated.to_string()))
 }
 
@@ -2305,8 +2330,11 @@ fn parse_relation_type(s: &str) -> librefang_types::memory::RelationType {
 async fn tool_knowledge_add_entity(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for knowledge_add_entity".to_string())?;
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
     let entity_type_str = input["entity_type"]
         .as_str()
@@ -2326,15 +2354,18 @@ async fn tool_knowledge_add_entity(
         updated_at: chrono::Utc::now(),
     };
 
-    let id = kh.knowledge_add_entity(entity).await?;
+    let id = kh.knowledge_add_entity(caller_agent_id, entity).await?;
     Ok(format!("Entity '{name}' added with ID: {id}"))
 }
 
 async fn tool_knowledge_add_relation(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for knowledge_add_relation".to_string())?;
     let source = input["source"]
         .as_str()
         .ok_or("Missing 'source' parameter")?;
@@ -2360,7 +2391,7 @@ async fn tool_knowledge_add_relation(
         created_at: chrono::Utc::now(),
     };
 
-    let id = kh.knowledge_add_relation(relation).await?;
+    let id = kh.knowledge_add_relation(caller_agent_id, relation).await?;
     Ok(format!(
         "Relation '{source}' --[{relation_str}]--> '{target}' added with ID: {id}"
     ))
@@ -2369,8 +2400,11 @@ async fn tool_knowledge_add_relation(
 async fn tool_knowledge_query(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let caller_agent_id =
+        caller_agent_id.ok_or("Agent ID required for knowledge_query".to_string())?;
     let source = input["source"].as_str().map(|s| s.to_string());
     let target = input["target"].as_str().map(|s| s.to_string());
     let relation = input["relation"].as_str().map(parse_relation_type);
@@ -2390,7 +2424,7 @@ async fn tool_knowledge_query(
         max_depth,
     };
 
-    let matches = kh.knowledge_query(pattern).await?;
+    let matches = kh.knowledge_query(caller_agent_id, pattern).await?;
     if matches.is_empty() {
         return Ok("No matching knowledge graph entries found.".to_string());
     }
@@ -2618,14 +2652,16 @@ async fn tool_schedule_list(
 async fn tool_schedule_delete(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_delete")?;
     // Accept either "id" or "job_id" for backward compatibility
     let id = input["id"]
         .as_str()
         .or_else(|| input["job_id"].as_str())
         .ok_or("Missing 'id' parameter")?;
-    kh.cron_cancel(id).await?;
+    kh.cron_cancel(agent_id, id).await?;
     Ok(format!("Schedule '{id}' deleted."))
 }
 
@@ -2663,22 +2699,7 @@ async fn tool_cron_cancel(
         .as_str()
         .ok_or("Missing 'job_id' parameter")?;
     let agent_id = caller_agent_id.ok_or("Agent ID required for cron_cancel")?;
-    // Authorize: the caller may only cancel jobs that belong to them.
-    // Otherwise an agent with the cron_cancel tool could delete any other
-    // agent's jobs as long as it learns their UUID (via side-channel or
-    // social engineering).
-    let owned = kh.cron_list(agent_id).await?;
-    let owns_job = owned.iter().any(|job| {
-        job.get("id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|id| id == job_id)
-    });
-    if !owns_job {
-        return Err(format!(
-            "Cron job '{job_id}' not found or not owned by this agent"
-        ));
-    }
-    kh.cron_cancel(job_id).await?;
+    kh.cron_cancel(agent_id, job_id).await?;
     Ok(format!("Cron job '{job_id}' cancelled."))
 }
 
@@ -3315,6 +3336,8 @@ async fn tool_image_generate(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
     workspace_root: Option<&Path>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let prompt = input["prompt"]
         .as_str()
@@ -3327,6 +3350,17 @@ async fn tool_image_generate(
     let height = input["height"].as_u64().map(|v| v as u32);
     let quality = input["quality"].as_str().map(|s| s.to_string());
     let count = input["count"].as_u64().unwrap_or(1).min(9) as u8;
+
+    let owner_account_id = match (kernel, caller_agent_id) {
+        (Some(kh), Some(agent_id)) => match kh.caller_account_id(agent_id) {
+            Ok(account_id) => account_id,
+            Err(e) => {
+                warn!(agent_id, error = %e, "Failed to resolve caller account for generated uploads");
+                None
+            }
+        },
+        _ => None,
+    };
 
     // Use MediaDriverCache if available (multi-provider), fall back to old OpenAI-only path.
     if let Some(cache) = media_drivers {
@@ -3358,7 +3392,7 @@ async fn tool_image_generate(
 
         // Save images to workspace and uploads dir
         let saved_paths = save_media_images_to_workspace(&result.images, workspace_root);
-        let image_urls = save_media_images_to_uploads(&result.images);
+        let image_urls = save_media_images_to_uploads(&result.images, owner_account_id.as_deref());
 
         let response = serde_json::json!({
             "model": result.model,
@@ -3412,22 +3446,8 @@ async fn tool_image_generate(
         Vec::new()
     };
 
-    let mut image_urls: Vec<String> = Vec::new();
-    {
-        use base64::Engine;
-        let upload_dir = std::env::temp_dir().join("librefang_uploads");
-        let _ = std::fs::create_dir_all(&upload_dir);
-        for img in &result.images {
-            let file_id = uuid::Uuid::new_v4().to_string();
-            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&img.data_base64)
-            {
-                let path = upload_dir.join(&file_id);
-                if std::fs::write(&path, &decoded).is_ok() {
-                    image_urls.push(format!("/api/uploads/{file_id}"));
-                }
-            }
-        }
-    }
+    let image_urls =
+        save_media_images_to_uploads_legacy(&result.images, owner_account_id.as_deref());
 
     let response = serde_json::json!({
         "model": result.model,
@@ -3468,7 +3488,35 @@ fn save_media_images_to_workspace(
 }
 
 /// Save MediaImageResult images to uploads temp dir, returning /api/uploads/... URLs.
-fn save_media_images_to_uploads(images: &[librefang_types::media::GeneratedImage]) -> Vec<String> {
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UploadSidecarMeta {
+    content_type: String,
+    account_id: Option<String>,
+}
+
+fn upload_sidecar_path(file_id: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join("librefang_uploads")
+        .join(format!("{file_id}.meta.json"))
+}
+
+fn write_upload_sidecar(
+    file_id: &str,
+    content_type: &str,
+    account_id: Option<&str>,
+) -> Result<(), String> {
+    let sidecar = UploadSidecarMeta {
+        content_type: content_type.to_string(),
+        account_id: account_id.map(str::to_string),
+    };
+    let bytes = serde_json::to_vec(&sidecar).map_err(|e| format!("Serialize error: {e}"))?;
+    std::fs::write(upload_sidecar_path(file_id), bytes).map_err(|e| format!("Write error: {e}"))
+}
+
+fn save_media_images_to_uploads(
+    images: &[librefang_types::media::GeneratedImage],
+    account_id: Option<&str>,
+) -> Vec<String> {
     use base64::Engine;
     let upload_dir = std::env::temp_dir().join("librefang_uploads");
     let _ = std::fs::create_dir_all(&upload_dir);
@@ -3486,8 +3534,30 @@ fn save_media_images_to_uploads(images: &[librefang_types::media::GeneratedImage
             if !decoded.is_empty() {
                 let path = upload_dir.join(&file_id);
                 if std::fs::write(&path, &decoded).is_ok() {
+                    let _ = write_upload_sidecar(&file_id, "image/png", account_id);
                     urls.push(format!("/api/uploads/{file_id}"));
                 }
+            }
+        }
+    }
+    urls
+}
+
+fn save_media_images_to_uploads_legacy(
+    images: &[librefang_types::media::GeneratedImage],
+    account_id: Option<&str>,
+) -> Vec<String> {
+    use base64::Engine;
+    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+    let _ = std::fs::create_dir_all(&upload_dir);
+    let mut urls = Vec::new();
+    for img in images {
+        let file_id = uuid::Uuid::new_v4().to_string();
+        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&img.data_base64) {
+            let path = upload_dir.join(&file_id);
+            if std::fs::write(&path, &decoded).is_ok() {
+                let _ = write_upload_sidecar(&file_id, "image/png", account_id);
+                urls.push(format!("/api/uploads/{file_id}"));
             }
         }
     }
@@ -4166,6 +4236,7 @@ mod tests {
 
         fn memory_store(
             &self,
+            _caller_agent_id: &str,
             _key: &str,
             _value: serde_json::Value,
             _peer_id: Option<&str>,
@@ -4175,13 +4246,18 @@ mod tests {
 
         fn memory_recall(
             &self,
+            _caller_agent_id: &str,
             _key: &str,
             _peer_id: Option<&str>,
         ) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
 
-        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+        fn memory_list(
+            &self,
+            _caller_agent_id: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
 
@@ -4229,6 +4305,7 @@ mod tests {
 
         async fn knowledge_add_entity(
             &self,
+            _caller_agent_id: &str,
             _entity: librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
@@ -4236,6 +4313,7 @@ mod tests {
 
         async fn knowledge_add_relation(
             &self,
+            _caller_agent_id: &str,
             _relation: librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
@@ -4243,6 +4321,7 @@ mod tests {
 
         async fn knowledge_query(
             &self,
+            _caller_agent_id: &str,
             _pattern: librefang_types::memory::GraphPattern,
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
@@ -5359,6 +5438,17 @@ mod tests {
         // Parent only has file_read, but child requests shell_exec.
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: true,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
         });
         let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
         let result = execute_tool(
@@ -5405,6 +5495,17 @@ mod tests {
         // Sub-agent requests only capabilities the parent has — should succeed.
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
         });
         let parent_allowed = vec![
             "file_read".to_string(),
@@ -5785,7 +5886,7 @@ mod tests {
             "status": "in_progress",
             "progress": 50
         });
-        let result = tool_goal_update(&input, None);
+        let result = tool_goal_update(&input, None, Some("agent-1"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Kernel handle"));
     }
@@ -5795,7 +5896,7 @@ mod tests {
         let input = serde_json::json!({
             "status": "in_progress"
         });
-        let result = tool_goal_update(&input, None);
+        let result = tool_goal_update(&input, None, Some("agent-1"));
         assert!(result.is_err());
     }
 
@@ -5804,7 +5905,7 @@ mod tests {
         let input = serde_json::json!({
             "goal_id": "some-uuid"
         });
-        let result = tool_goal_update(&input, None);
+        let result = tool_goal_update(&input, None, Some("agent-1"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("At least one"));
     }
@@ -5815,14 +5916,36 @@ mod tests {
             "goal_id": "some-uuid",
             "status": "done"
         });
-        let result = tool_goal_update(&input, None);
+        let result = tool_goal_update(&input, None, Some("agent-1"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid status"));
+    }
+
+    #[test]
+    fn test_goal_update_requires_calling_agent_context() {
+        let input = serde_json::json!({
+            "goal_id": "some-uuid",
+            "status": "in_progress"
+        });
+        let result = tool_goal_update(&input, None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Agent ID required"));
     }
 
     /// Mock kernel that validates capability inheritance in spawn_agent_checked.
     struct SpawnCheckKernel {
         should_fail_escalation: bool,
+        expected_event_publish_caller: Option<String>,
+        expected_goal_update_caller: Option<String>,
+        expected_knowledge_entity_caller: Option<String>,
+        expected_knowledge_relation_caller: Option<String>,
+        expected_knowledge_query_caller: Option<String>,
+        expected_memory_store_caller: Option<String>,
+        expected_memory_store_peer: Option<String>,
+        expected_memory_recall_caller: Option<String>,
+        expected_memory_recall_peer: Option<String>,
+        expected_memory_list_caller: Option<String>,
+        expected_memory_list_peer: Option<String>,
     }
 
     #[async_trait]
@@ -5873,23 +5996,47 @@ mod tests {
 
         fn memory_store(
             &self,
+            caller_agent_id: &str,
             _key: &str,
             _value: serde_json::Value,
-            _peer_id: Option<&str>,
+            peer_id: Option<&str>,
         ) -> Result<(), String> {
-            Err("not used".to_string())
+            if let Some(expected) = &self.expected_memory_store_caller {
+                assert_eq!(caller_agent_id, expected);
+            }
+            if let Some(expected) = &self.expected_memory_store_peer {
+                assert_eq!(peer_id, Some(expected.as_str()));
+            }
+            Ok(())
         }
 
         fn memory_recall(
             &self,
+            caller_agent_id: &str,
             _key: &str,
-            _peer_id: Option<&str>,
+            peer_id: Option<&str>,
         ) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            if let Some(expected) = &self.expected_memory_recall_caller {
+                assert_eq!(caller_agent_id, expected);
+            }
+            if let Some(expected) = &self.expected_memory_recall_peer {
+                assert_eq!(peer_id, Some(expected.as_str()));
+            }
+            Ok(Some(serde_json::json!({"ok": true})))
         }
 
-        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
-            Err("not used".to_string())
+        fn memory_list(
+            &self,
+            caller_agent_id: &str,
+            peer_id: Option<&str>,
+        ) -> Result<Vec<String>, String> {
+            if let Some(expected) = &self.expected_memory_list_caller {
+                assert_eq!(caller_agent_id, expected);
+            }
+            if let Some(expected) = &self.expected_memory_list_peer {
+                assert_eq!(peer_id, Some(expected.as_str()));
+            }
+            Ok(vec!["user_name".to_string()])
         }
 
         fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
@@ -5934,25 +6081,355 @@ mod tests {
             Err("not used".to_string())
         }
 
+        async fn publish_event_for_agent(
+            &self,
+            caller_agent_id: &str,
+            event_type: &str,
+            payload: serde_json::Value,
+        ) -> Result<(), String> {
+            if let Some(expected) = &self.expected_event_publish_caller {
+                assert_eq!(caller_agent_id, expected);
+                assert_eq!(event_type, "tenant.alert");
+                assert_eq!(payload, serde_json::json!({"ok": true}));
+                Ok(())
+            } else {
+                Err("not used".to_string())
+            }
+        }
+
         async fn knowledge_add_entity(
             &self,
+            caller_agent_id: &str,
             _entity: librefang_types::memory::Entity,
         ) -> Result<String, String> {
-            Err("not used".to_string())
+            if let Some(expected) = &self.expected_knowledge_entity_caller {
+                assert_eq!(caller_agent_id, expected);
+                Ok("entity-123".to_string())
+            } else {
+                Err("not used".to_string())
+            }
         }
 
         async fn knowledge_add_relation(
             &self,
+            caller_agent_id: &str,
             _relation: librefang_types::memory::Relation,
         ) -> Result<String, String> {
-            Err("not used".to_string())
+            if let Some(expected) = &self.expected_knowledge_relation_caller {
+                assert_eq!(caller_agent_id, expected);
+                Ok("relation-123".to_string())
+            } else {
+                Err("not used".to_string())
+            }
         }
 
         async fn knowledge_query(
             &self,
+            caller_agent_id: &str,
             _pattern: librefang_types::memory::GraphPattern,
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
-            Err("not used".to_string())
+            if let Some(expected) = &self.expected_knowledge_query_caller {
+                assert_eq!(caller_agent_id, expected);
+                Ok(Vec::new())
+            } else {
+                Err("not used".to_string())
+            }
         }
+
+        fn goal_update(
+            &self,
+            caller_agent_id: &str,
+            goal_id: &str,
+            status: Option<&str>,
+            progress: Option<u8>,
+        ) -> Result<serde_json::Value, String> {
+            if let Some(expected) = &self.expected_goal_update_caller {
+                assert_eq!(caller_agent_id, expected);
+                assert_eq!(goal_id, "goal-123");
+                assert_eq!(status, Some("in_progress"));
+                assert_eq!(progress, Some(25));
+                Ok(serde_json::json!({
+                    "goal_id": goal_id,
+                    "status": status,
+                    "progress": progress,
+                }))
+            } else {
+                Err("goal_update not expected".to_string())
+            }
+        }
+    }
+
+    #[test]
+    fn test_goal_update_passes_caller_agent_context() {
+        let input = serde_json::json!({
+            "goal_id": "goal-123",
+            "status": "in_progress",
+            "progress": 25
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: Some("agent-123".to_string()),
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_goal_update(&input, Some(&kernel), Some("agent-123"));
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("\"goal_id\": \"goal-123\""));
+    }
+
+    #[tokio::test]
+    async fn test_event_publish_passes_caller_agent_context() {
+        let input = serde_json::json!({
+            "event_type": "tenant.alert",
+            "payload": {"ok": true}
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: Some("agent-123".to_string()),
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+
+        let result = tool_event_publish(&input, Some(&kernel), Some("agent-123")).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_add_entity_requires_calling_agent_context() {
+        let input = serde_json::json!({
+            "name": "Alice",
+            "entity_type": "person"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_knowledge_add_entity(&input, Some(&kernel), None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Agent ID required"));
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_add_entity_passes_caller_agent_context() {
+        let input = serde_json::json!({
+            "name": "Alice",
+            "entity_type": "person"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: Some("agent-123".to_string()),
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_knowledge_add_entity(&input, Some(&kernel), Some("agent-123")).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("entity-123"));
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_query_requires_calling_agent_context() {
+        let input = serde_json::json!({
+            "source": "Alice",
+            "relation": "works_at"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_knowledge_query(&input, Some(&kernel), None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Agent ID required"));
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_add_relation_passes_caller_agent_context() {
+        let input = serde_json::json!({
+            "source": "Alice",
+            "relation": "works_at",
+            "target": "Acme"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: Some("agent-123".to_string()),
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_knowledge_add_relation(&input, Some(&kernel), Some("agent-123")).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("relation-123"));
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_query_passes_caller_agent_context() {
+        let input = serde_json::json!({
+            "source": "Alice",
+            "relation": "works_at"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: Some("agent-123".to_string()),
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_knowledge_query(&input, Some(&kernel), Some("agent-123")).await;
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            "No matching knowledge graph entries found."
+        );
+    }
+
+    #[test]
+    fn test_memory_store_requires_calling_agent_context() {
+        let input = serde_json::json!({
+            "key": "user_name",
+            "value": "Alice"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_memory_store(&input, Some(&kernel), None, Some("sender-1"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Agent ID required"));
+    }
+
+    #[test]
+    fn test_memory_store_passes_caller_agent_and_peer_context() {
+        let input = serde_json::json!({
+            "key": "user_name",
+            "value": "Alice"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: Some("agent-123".to_string()),
+            expected_memory_store_peer: Some("sender-1".to_string()),
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_memory_store(&input, Some(&kernel), Some("agent-123"), Some("sender-1"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_memory_recall_passes_caller_agent_and_peer_context() {
+        let input = serde_json::json!({
+            "key": "user_name"
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: Some("agent-123".to_string()),
+            expected_memory_recall_peer: Some("sender-1".to_string()),
+            expected_memory_list_caller: None,
+            expected_memory_list_peer: None,
+        });
+        let result = tool_memory_recall(&input, Some(&kernel), Some("agent-123"), Some("sender-1"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "{\n  \"ok\": true\n}");
+    }
+
+    #[test]
+    fn test_memory_list_passes_caller_agent_and_peer_context() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_event_publish_caller: None,
+            expected_goal_update_caller: None,
+            expected_knowledge_entity_caller: None,
+            expected_knowledge_relation_caller: None,
+            expected_knowledge_query_caller: None,
+            expected_memory_store_caller: None,
+            expected_memory_store_peer: None,
+            expected_memory_recall_caller: None,
+            expected_memory_recall_peer: None,
+            expected_memory_list_caller: Some("agent-123".to_string()),
+            expected_memory_list_peer: Some("sender-1".to_string()),
+        });
+        let result = tool_memory_list(Some(&kernel), Some("agent-123"), Some("sender-1"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "[\n  \"user_name\"\n]");
     }
 }

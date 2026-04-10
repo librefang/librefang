@@ -80,6 +80,10 @@ pub struct Workflow {
     /// Created at.
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
+    /// Owning tenant account. `None` is legacy/global data and is not part of
+    /// the Qwntik target model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     /// Optional canvas layout data (nodes, edges, positions) for the visual editor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<serde_json::Value>,
@@ -196,6 +200,10 @@ pub struct WorkflowRun {
     pub started_at: DateTime<Utc>,
     /// Completed at.
     pub completed_at: Option<DateTime<Utc>>,
+    /// Owning tenant account. `None` is legacy/global data and is not part of
+    /// the Qwntik target model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 /// Result from a single workflow step.
@@ -569,9 +577,30 @@ impl WorkflowEngine {
         self.workflows.read().await.values().cloned().collect()
     }
 
+    /// List workflows visible to a specific tenant account.
+    pub async fn list_workflows_by_account(&self, account_id: &str) -> Vec<Workflow> {
+        self.workflows
+            .read()
+            .await
+            .values()
+            .filter(|workflow| workflow.account_id.as_deref() == Some(account_id))
+            .cloned()
+            .collect()
+    }
+
     /// Get a specific workflow by ID.
     pub async fn get_workflow(&self, id: WorkflowId) -> Option<Workflow> {
         self.workflows.read().await.get(&id).cloned()
+    }
+
+    /// Get a workflow scoped to a specific tenant account.
+    pub async fn get_workflow_scoped(&self, id: WorkflowId, account_id: &str) -> Option<Workflow> {
+        self.workflows
+            .read()
+            .await
+            .get(&id)
+            .filter(|workflow| workflow.account_id.as_deref() == Some(account_id))
+            .cloned()
     }
 
     /// Update an existing workflow definition in place.
@@ -587,9 +616,41 @@ impl WorkflowEngine {
         }
     }
 
+    /// Update an existing workflow only if it belongs to the provided account.
+    pub async fn update_workflow_scoped(
+        &self,
+        id: WorkflowId,
+        account_id: &str,
+        mut workflow: Workflow,
+    ) -> bool {
+        let mut workflows = self.workflows.write().await;
+        if let std::collections::hash_map::Entry::Occupied(mut entry) = workflows.entry(id) {
+            if entry.get().account_id.as_deref() != Some(account_id) {
+                return false;
+            }
+            workflow.id = id;
+            workflow.account_id = Some(account_id.to_string());
+            entry.insert(workflow);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Remove a workflow definition.
     pub async fn remove_workflow(&self, id: WorkflowId) -> bool {
         self.workflows.write().await.remove(&id).is_some()
+    }
+
+    /// Remove a workflow only if it belongs to the provided account.
+    pub async fn remove_workflow_scoped(&self, id: WorkflowId, account_id: &str) -> bool {
+        let mut workflows = self.workflows.write().await;
+        match workflows.get(&id) {
+            Some(workflow) if workflow.account_id.as_deref() == Some(account_id) => {
+                workflows.remove(&id).is_some()
+            }
+            _ => false,
+        }
     }
 
     /// Maximum number of retained workflow runs. Oldest completed/failed
@@ -619,6 +680,7 @@ impl WorkflowEngine {
             error: None,
             started_at: Utc::now(),
             completed_at: None,
+            account_id: workflow.account_id.clone(),
         };
 
         let mut runs = self.runs.write().await;
@@ -655,6 +717,20 @@ impl WorkflowEngine {
         self.runs.read().await.get(&run_id).cloned()
     }
 
+    /// Get a workflow run scoped to a specific tenant account.
+    pub async fn get_run_scoped(
+        &self,
+        run_id: WorkflowRunId,
+        account_id: &str,
+    ) -> Option<WorkflowRun> {
+        self.runs
+            .read()
+            .await
+            .get(&run_id)
+            .filter(|run| run.account_id.as_deref() == Some(account_id))
+            .cloned()
+    }
+
     /// List all workflow runs (optionally filtered by state).
     pub async fn list_runs(&self, state_filter: Option<&str>) -> Vec<WorkflowRun> {
         self.runs
@@ -668,6 +744,32 @@ impl WorkflowEngine {
                         "running" => matches!(r.state, WorkflowRunState::Running),
                         "completed" => matches!(r.state, WorkflowRunState::Completed),
                         "failed" => matches!(r.state, WorkflowRunState::Failed),
+                        _ => true,
+                    })
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// List workflow runs for a tenant account, optionally filtered by state.
+    pub async fn list_runs_by_account(
+        &self,
+        account_id: &str,
+        state_filter: Option<&str>,
+    ) -> Vec<WorkflowRun> {
+        self.runs
+            .read()
+            .await
+            .values()
+            .filter(|run| run.account_id.as_deref() == Some(account_id))
+            .filter(|run| {
+                state_filter
+                    .map(|f| match f {
+                        "pending" => matches!(run.state, WorkflowRunState::Pending),
+                        "running" => matches!(run.state, WorkflowRunState::Running),
+                        "completed" => matches!(run.state, WorkflowRunState::Completed),
+                        "failed" => matches!(run.state, WorkflowRunState::Failed),
                         _ => true,
                     })
                     .unwrap_or(true)
@@ -1777,6 +1879,8 @@ struct WorkflowFile {
     steps: Vec<WorkflowStep>,
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    account_id: Option<String>,
 }
 
 impl From<WorkflowFile> for Workflow {
@@ -1787,6 +1891,7 @@ impl From<WorkflowFile> for Workflow {
             description: f.description,
             steps: f.steps,
             created_at: f.created_at.unwrap_or_else(Utc::now),
+            account_id: f.account_id,
             layout: None,
         }
     }
@@ -2155,6 +2260,7 @@ impl WorkflowTemplateRegistry {
             description: template.description.clone(),
             steps,
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         })
     }
@@ -2204,6 +2310,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         }
     }
@@ -2328,6 +2435,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
         let wf_id = engine.register(wf).await;
@@ -2385,6 +2493,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
         let wf_id = engine.register(wf).await;
@@ -2427,6 +2536,7 @@ mod tests {
                 depends_on: vec![],
             }],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
         let wf_id = engine.register(wf).await;
@@ -2476,6 +2586,7 @@ mod tests {
                 depends_on: vec![],
             }],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
         let wf_id = engine.register(wf).await;
@@ -2528,6 +2639,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
         let wf_id = engine.register(wf).await;
@@ -2577,6 +2689,7 @@ mod tests {
                 depends_on: vec![],
             }],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
         let wf_id = engine.register(wf).await;
@@ -2652,6 +2765,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
         let wf_id = engine.register(wf).await;
@@ -2728,6 +2842,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
         let wf_id = engine.register(wf).await;
@@ -3225,6 +3340,7 @@ prompt_template = "do {{x}}"
                 },
             ],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
         let wf_id = engine.register(wf).await;
@@ -3358,6 +3474,7 @@ prompt_template = "do {{x}}"
                 },
             ],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
         let wf_id = engine.register(wf).await;
@@ -3631,6 +3748,7 @@ prompt_template = "do {{x}}"
                 },
             ],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
 
@@ -3681,6 +3799,7 @@ prompt_template = "do {{x}}"
                 },
             ],
             created_at: Utc::now(),
+            account_id: None,
             layout: None,
         };
 
@@ -3726,6 +3845,7 @@ prompt_template = "do {{x}}"
             error: None,
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),
+            account_id: None,
         }
     }
 
@@ -3789,6 +3909,7 @@ prompt_template = "do {{x}}"
             error: None,
             started_at: Utc::now(),
             completed_at: None,
+            account_id: None,
         };
         let running_id = running.id;
 

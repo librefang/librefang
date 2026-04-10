@@ -1,16 +1,21 @@
 //! Media generation API routes — image, TTS, video, and music generation.
 
+use super::shared::require_admin;
 use super::AppState;
+use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use dashmap::DashMap;
 use librefang_runtime::media::{MediaDriverCache, MediaError};
 use librefang_types::media::{
     MediaCapability, MediaImageRequest, MediaMusicRequest, MediaTtsRequest, MediaVideoRequest,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 /// Build all routes for the Media generation domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
@@ -31,6 +36,66 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 /// Known media provider names, in preference order.
 /// Keep in sync with `librefang_runtime::media::MEDIA_PROVIDER_ORDER`.
 const KNOWN_MEDIA_PROVIDERS: &[&str] = &["openai", "gemini", "elevenlabs", "minimax", "google_tts"];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct MediaTaskMeta {
+    provider: String,
+    account_id: Option<String>,
+}
+
+static MEDIA_TASK_REGISTRY: LazyLock<DashMap<String, MediaTaskMeta>> = LazyLock::new(DashMap::new);
+
+fn media_task_meta_path_for_data_dir(
+    data_dir: &std::path::Path,
+    task_id: &str,
+) -> std::path::PathBuf {
+    use base64::Engine;
+
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(task_id.as_bytes());
+    data_dir.join("media_tasks").join(format!("{encoded}.json"))
+}
+
+fn persist_media_task_meta_for_data_dir(
+    data_dir: &std::path::Path,
+    task_id: &str,
+    meta: &MediaTaskMeta,
+) -> Result<(), String> {
+    let path = media_task_meta_path_for_data_dir(data_dir, task_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create media task directory: {e}"))?;
+    }
+    let payload = serde_json::to_vec(meta)
+        .map_err(|e| format!("Failed to serialize media task metadata: {e}"))?;
+    std::fs::write(path, payload).map_err(|e| format!("Failed to persist media task metadata: {e}"))
+}
+
+fn load_media_task_meta_for_data_dir(
+    data_dir: &std::path::Path,
+    task_id: &str,
+) -> Option<MediaTaskMeta> {
+    let path = media_task_meta_path_for_data_dir(data_dir, task_id);
+    let payload = std::fs::read(path).ok()?;
+    serde_json::from_slice(&payload).ok()
+}
+
+fn persist_media_task_meta(
+    state: &AppState,
+    task_id: &str,
+    meta: &MediaTaskMeta,
+) -> Result<(), String> {
+    persist_media_task_meta_for_data_dir(&state.kernel.config_ref().data_dir, task_id, meta)
+}
+
+fn load_media_task_meta(state: &AppState, task_id: &str) -> Option<MediaTaskMeta> {
+    if let Some(meta) = MEDIA_TASK_REGISTRY.get(task_id) {
+        return Some(meta.clone());
+    }
+
+    let meta = load_media_task_meta_for_data_dir(&state.kernel.config_ref().data_dir, task_id)?;
+    MEDIA_TASK_REGISTRY.insert(task_id.to_string(), meta.clone());
+    Some(meta)
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -76,7 +141,12 @@ fn resolve_driver(
 ///
 /// The file is registered in the shared `UPLOAD_REGISTRY` so the existing
 /// `serve_upload` handler returns the correct `Content-Type`.
-fn save_upload(data: &[u8], filename: &str, content_type: &str) -> Result<String, String> {
+fn save_upload(
+    data: &[u8],
+    filename: &str,
+    content_type: &str,
+    account_id: &Option<String>,
+) -> Result<String, String> {
     let file_id = uuid::Uuid::new_v4().to_string();
     let upload_dir = std::env::temp_dir().join("librefang_uploads");
     std::fs::create_dir_all(&upload_dir)
@@ -90,6 +160,7 @@ fn save_upload(data: &[u8], filename: &str, content_type: &str) -> Result<String
         super::agents::UploadMeta {
             filename: filename.to_string(),
             content_type: content_type.to_string(),
+            account_id: account_id.clone(),
         },
     );
 
@@ -100,6 +171,7 @@ fn save_upload(data: &[u8], filename: &str, content_type: &str) -> Result<String
 
 /// Generate one or more images from a text prompt.
 pub async fn generate_image(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaImageRequest>,
 ) -> impl IntoResponse {
@@ -141,7 +213,7 @@ pub async fn generate_image(
         };
 
         let filename = format!("image_{i}.png");
-        match save_upload(&bytes, &filename, "image/png") {
+        match save_upload(&bytes, &filename, "image/png", &account.0) {
             Ok(url) => {
                 image_urls.push(serde_json::json!({
                     "url": url,
@@ -170,6 +242,7 @@ pub async fn generate_image(
 
 /// Synthesize speech from text (TTS).
 pub async fn synthesize_speech(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaTtsRequest>,
 ) -> impl IntoResponse {
@@ -203,7 +276,7 @@ pub async fn synthesize_speech(
     };
     let filename = format!("speech.{}", result.format);
 
-    match save_upload(&result.audio_data, &filename, content_type) {
+    match save_upload(&result.audio_data, &filename, content_type, &account.0) {
         Ok(url) => Json(serde_json::json!({
             "url": url,
             "format": result.format,
@@ -221,6 +294,7 @@ pub async fn synthesize_speech(
 
 /// Submit a video generation task (async — returns a task ID for polling).
 pub async fn submit_video(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaVideoRequest>,
 ) -> impl IntoResponse {
@@ -242,6 +316,15 @@ pub async fn submit_video(
         Err(e) => return media_error_response(e).into_response(),
     };
 
+    let meta = MediaTaskMeta {
+        provider: result.provider.clone(),
+        account_id: account.0.clone(),
+    };
+    MEDIA_TASK_REGISTRY.insert(result.task_id.clone(), meta.clone());
+    if let Err(e) = persist_media_task_meta(&state, &result.task_id, &meta) {
+        return ApiErrorResponse::internal(e).into_response();
+    }
+
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
@@ -259,6 +342,7 @@ pub async fn submit_video(
 /// Query parameter `provider` is required to route the poll to the correct
 /// driver (the task ID is provider-specific).
 pub async fn poll_video_task(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -270,6 +354,22 @@ pub async fn poll_video_task(
                 .into_response();
         }
     };
+
+    match load_media_task_meta(&state, &task_id) {
+        Some(meta) => {
+            if meta.provider != provider {
+                return ApiErrorResponse::not_found("Video task not found").into_response();
+            }
+            if account.0.as_deref() != meta.account_id.as_deref() {
+                return ApiErrorResponse::not_found("Video task not found").into_response();
+            }
+        }
+        None => {
+            if account.0.is_some() {
+                return ApiErrorResponse::not_found("Video task not found").into_response();
+            }
+        }
+    }
 
     let driver = match state.media_drivers.get_or_create(&provider, None) {
         Ok(d) => d,
@@ -315,6 +415,7 @@ pub async fn poll_video_task(
 
 /// Generate music from a prompt and/or lyrics.
 pub async fn generate_music(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaMusicRequest>,
 ) -> impl IntoResponse {
@@ -346,7 +447,7 @@ pub async fn generate_music(
     };
     let filename = format!("music.{}", result.format);
 
-    match save_upload(&result.audio_data, &filename, content_type) {
+    match save_upload(&result.audio_data, &filename, content_type, &account.0) {
         Ok(url) => Json(serde_json::json!({
             "url": url,
             "format": result.format,
@@ -363,7 +464,14 @@ pub async fn generate_music(
 // ── GET /media/providers ────────────────────────────────────────────────
 
 /// List available media providers with their capabilities and config status.
-pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_media_providers(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
+
     let mut providers = Vec::new();
 
     for &name in KNOWN_MEDIA_PROVIDERS {
@@ -390,4 +498,62 @@ pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl In
     Json(serde_json::json!({
         "providers": providers,
     }))
+    .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_task_registry_enforces_owner_and_provider_match() {
+        let task_id = uuid::Uuid::new_v4().to_string();
+        MEDIA_TASK_REGISTRY.insert(
+            task_id.clone(),
+            MediaTaskMeta {
+                provider: "minimax".to_string(),
+                account_id: Some("tenant-a".to_string()),
+            },
+        );
+
+        {
+            let meta = MEDIA_TASK_REGISTRY
+                .get(&task_id)
+                .expect("task should exist");
+            assert_eq!(meta.provider, "minimax");
+            assert_eq!(meta.account_id.as_deref(), Some("tenant-a"));
+            assert_ne!(meta.account_id.as_deref(), Some("tenant-b"));
+        }
+
+        MEDIA_TASK_REGISTRY.remove(&task_id);
+    }
+
+    #[test]
+    fn media_task_metadata_persists_across_registry_reset() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let task_id = "provider-task-123";
+        let meta = MediaTaskMeta {
+            provider: "minimax".to_string(),
+            account_id: Some("tenant-a".to_string()),
+        };
+
+        persist_media_task_meta_for_data_dir(tmp.path(), task_id, &meta).expect("persist succeeds");
+        MEDIA_TASK_REGISTRY.remove(task_id);
+
+        let loaded = load_media_task_meta_for_data_dir(tmp.path(), task_id)
+            .expect("task metadata should reload from disk");
+        assert_eq!(loaded, meta);
+    }
+
+    #[test]
+    fn media_provider_list_requires_admin_for_scoped_tenants() {
+        let account = AccountId(Some("tenant-a".to_string()));
+        let admins = vec!["admin-a".to_string()];
+        let result = require_admin(&account, &admins);
+
+        assert!(result.is_err());
+        let (status, json) = result.unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json["error"], "This endpoint requires admin access");
+    }
 }

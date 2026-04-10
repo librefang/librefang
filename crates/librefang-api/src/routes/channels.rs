@@ -12,20 +12,28 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/channels/{name}/test", axum::routing::post(test_channel))
         .route("/channels/reload", axum::routing::post(reload_channels))
         .route(
-            "/channels/whatsapp/qr/start",
-            axum::routing::post(whatsapp_qr_start),
+            "/channels/whatsapp/{instance_key}/bootstrap/start",
+            axum::routing::post(whatsapp_bootstrap_start),
         )
         .route(
-            "/channels/whatsapp/qr/status",
-            axum::routing::get(whatsapp_qr_status),
+            "/channels/whatsapp/{instance_key}/bootstrap/status",
+            axum::routing::get(whatsapp_bootstrap_status),
         )
         .route(
-            "/channels/wechat/qr/start",
-            axum::routing::post(wechat_qr_start),
+            "/channels/whatsapp/{instance_key}/bootstrap/cancel",
+            axum::routing::post(whatsapp_bootstrap_cancel),
         )
         .route(
-            "/channels/wechat/qr/status",
-            axum::routing::get(wechat_qr_status),
+            "/channels/wechat/{instance_key}/bootstrap/start",
+            axum::routing::post(wechat_bootstrap_start),
+        )
+        .route(
+            "/channels/wechat/{instance_key}/bootstrap/status",
+            axum::routing::get(wechat_bootstrap_status),
+        )
+        .route(
+            "/channels/wechat/{instance_key}/bootstrap/cancel",
+            axum::routing::post(wechat_bootstrap_cancel),
         )
         .route(
             "/channels/registry",
@@ -33,11 +41,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         )
 }
 
-use super::skills::{
-    remove_channel_config, remove_secret_env, upsert_channel_config, validate_env_var,
-    write_secret_env,
-};
+use super::shared::require_admin;
+use super::skills::{remove_secret_env, validate_env_var, write_secret_env};
 use super::AppState;
+use crate::middleware::AccountId;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -794,54 +801,453 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 ];
 
 /// Check if a channel is configured (has a `[channels.xxx]` section in config).
-fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
+fn is_channel_configured(
+    config: &librefang_types::config::ChannelsConfig,
+    name: &str,
+    account_id: &str,
+) -> bool {
     match name {
-        "telegram" => config.telegram.is_some(),
-        "discord" => config.discord.is_some(),
-        "slack" => config.slack.is_some(),
-        "whatsapp" => config.whatsapp.is_some(),
-        "signal" => config.signal.is_some(),
-        "matrix" => config.matrix.is_some(),
-        "email" => config.email.is_some(),
-        "line" => config.line.is_some(),
-        "viber" => config.viber.is_some(),
-        "messenger" => config.messenger.is_some(),
-        "threema" => config.threema.is_some(),
-        "keybase" => config.keybase.is_some(),
-        "reddit" => config.reddit.is_some(),
-        "mastodon" => config.mastodon.is_some(),
-        "bluesky" => config.bluesky.is_some(),
-        "linkedin" => config.linkedin.is_some(),
-        "nostr" => config.nostr.is_some(),
-        "teams" => config.teams.is_some(),
-        "mattermost" => config.mattermost.is_some(),
-        "google_chat" => config.google_chat.is_some(),
-        "webex" => config.webex.is_some(),
-        "feishu" => config.feishu.is_some(),
-        "dingtalk" => config.dingtalk.is_some(),
-        "pumble" => config.pumble.is_some(),
-        "flock" => config.flock.is_some(),
-        "twist" => config.twist.is_some(),
-        "zulip" => config.zulip.is_some(),
-        "irc" => config.irc.is_some(),
-        "xmpp" => config.xmpp.is_some(),
-        "gitter" => config.gitter.is_some(),
-        "discourse" => config.discourse.is_some(),
-        "revolt" => config.revolt.is_some(),
-        "guilded" => config.guilded.is_some(),
-        "nextcloud" => config.nextcloud.is_some(),
-        "rocketchat" => config.rocketchat.is_some(),
-        "twitch" => config.twitch.is_some(),
-        "ntfy" => config.ntfy.is_some(),
-        "gotify" => config.gotify.is_some(),
-        "webhook" => config.webhook.is_some(),
-        "voice" => config.voice.is_some(),
-        "mumble" => config.mumble.is_some(),
-        "wechat" => config.wechat.is_some(),
-        "wecom" => config.wecom.is_some(),
-        "qq" => config.qq.is_some(),
+        "telegram" => config
+            .telegram
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "discord" => config
+            .discord
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "slack" => config
+            .slack
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "whatsapp" => config
+            .whatsapp
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "signal" => config
+            .signal
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "matrix" => config
+            .matrix
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "email" => config
+            .email
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "line" => config
+            .line
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "viber" => config
+            .viber
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "messenger" => config
+            .messenger
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "threema" => config
+            .threema
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "keybase" => config
+            .keybase
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "reddit" => config
+            .reddit
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "mastodon" => config
+            .mastodon
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "bluesky" => config
+            .bluesky
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "linkedin" => config
+            .linkedin
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "nostr" => config
+            .nostr
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "teams" => config
+            .teams
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "mattermost" => config
+            .mattermost
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "google_chat" => config
+            .google_chat
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "webex" => config
+            .webex
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "feishu" => config
+            .feishu
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "dingtalk" => config
+            .dingtalk
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "pumble" => config
+            .pumble
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "flock" => config
+            .flock
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "twist" => config
+            .twist
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "zulip" => config
+            .zulip
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "irc" => config
+            .irc
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "xmpp" => config
+            .xmpp
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "gitter" => config
+            .gitter
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "discourse" => config
+            .discourse
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "revolt" => config
+            .revolt
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "guilded" => config
+            .guilded
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "nextcloud" => config
+            .nextcloud
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "rocketchat" => config
+            .rocketchat
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "twitch" => config
+            .twitch
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "ntfy" => config
+            .ntfy
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "gotify" => config
+            .gotify
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "webhook" => config
+            .webhook
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "voice" => config
+            .voice
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "mumble" => config
+            .mumble
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "wechat" => config
+            .wechat
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "wecom" => config
+            .wecom
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "qq" => config
+            .qq
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
         _ => false,
     }
+}
+
+fn require_tenant_account_id(account: &AccountId) -> Result<&str, axum::response::Response> {
+    account.0.as_deref().ok_or_else(|| {
+        ApiErrorResponse::bad_request("X-Account-Id header required for channel operations")
+            .with_status(StatusCode::UNAUTHORIZED)
+            .into_json_tuple()
+            .into_response()
+    })
+}
+
+fn encode_account_component(account_id: &str) -> String {
+    if account_id.is_empty() {
+        return "ACCOUNT_00".to_string();
+    }
+
+    let mut out = String::with_capacity(account_id.len() * 3);
+    for byte in account_id.as_bytes() {
+        out.push('_');
+        out.push_str(&format!("{byte:02X}"));
+    }
+    format!("ACCOUNT{out}")
+}
+
+fn scoped_secret_env_var(base: &str, account_id: &str) -> String {
+    format!("{base}__{}", encode_account_component(account_id))
+}
+
+fn account_id_from_toml_table(table: &toml::map::Map<String, toml::Value>) -> Option<&str> {
+    table.get("account_id").and_then(|v| v.as_str())
+}
+
+fn build_channel_toml_table(
+    fields: &HashMap<String, (String, FieldType)>,
+    account_id: &str,
+) -> toml::map::Map<String, toml::Value> {
+    let mut ch_table = toml::map::Map::new();
+    ch_table.insert(
+        "account_id".to_string(),
+        toml::Value::String(account_id.to_string()),
+    );
+    for (k, (v, ft)) in fields {
+        let toml_val = match ft {
+            FieldType::Number => {
+                if let Ok(n) = v.parse::<i64>() {
+                    toml::Value::Integer(n)
+                } else {
+                    toml::Value::String(v.clone())
+                }
+            }
+            FieldType::List => toml::Value::Array(
+                v.split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| toml::Value::String(s.to_string()))
+                    .collect(),
+            ),
+            _ => toml::Value::String(v.clone()),
+        };
+        ch_table.insert(k.clone(), toml_val);
+    }
+    ch_table
+}
+
+fn upsert_account_channel_config(
+    config_path: &std::path::Path,
+    channel_name: &str,
+    account_id: &str,
+    fields: &HashMap<String, (String, FieldType)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let content = if config_path.exists() {
+        std::fs::read_to_string(config_path)?
+    } else {
+        String::new()
+    };
+
+    let mut doc: toml::Value = if content.trim().is_empty() {
+        toml::Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str(&content)?
+    };
+    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
+
+    if !root.contains_key("channels") {
+        root.insert(
+            "channels".to_string(),
+            toml::Value::Table(toml::map::Map::new()),
+        );
+    }
+    let channels_table = root
+        .get_mut("channels")
+        .and_then(|v| v.as_table_mut())
+        .ok_or("channels is not a table")?;
+
+    let new_entry = toml::Value::Table(build_channel_toml_table(fields, account_id));
+    match channels_table.get_mut(channel_name) {
+        Some(existing) if existing.is_table() => {
+            let table = existing
+                .as_table()
+                .ok_or("channel config entry is not a TOML table")?;
+            if account_id_from_toml_table(table) == Some(account_id) {
+                *existing = new_entry;
+            } else {
+                let legacy = existing.clone();
+                *existing = toml::Value::Array(vec![legacy, new_entry]);
+            }
+        }
+        Some(toml::Value::Array(entries)) => {
+            for entry in entries.iter_mut() {
+                if let Some(table) = entry.as_table() {
+                    if account_id_from_toml_table(table) == Some(account_id) {
+                        *entry = new_entry.clone();
+                        if let Some(parent) = config_path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+                        return Ok(());
+                    }
+                }
+            }
+            entries.push(new_entry);
+        }
+        Some(_) => return Err("channel config entry is not a TOML table or array".into()),
+        None => {
+            channels_table.insert(channel_name.to_string(), new_entry);
+        }
+    }
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
+fn remove_account_channel_config(
+    config_path: &std::path::Path,
+    channel_name: &str,
+    account_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(config_path)?;
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut doc: toml::Value = toml::from_str(&content)?;
+    if let Some(channels) = doc
+        .as_table_mut()
+        .and_then(|r| r.get_mut("channels"))
+        .and_then(|c| c.as_table_mut())
+    {
+        let mut remove_key = false;
+        if let Some(value) = channels.get_mut(channel_name) {
+            match value {
+                toml::Value::Table(table) => {
+                    if account_id_from_toml_table(table) == Some(account_id) {
+                        remove_key = true;
+                    }
+                }
+                toml::Value::Array(entries) => {
+                    entries.retain(|entry| {
+                        entry
+                            .as_table()
+                            .map(|table| account_id_from_toml_table(table) != Some(account_id))
+                            .unwrap_or(true)
+                    });
+                    match entries.len() {
+                        0 => remove_key = true,
+                        1 => *value = entries[0].clone(),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        if remove_key {
+            channels.remove(channel_name);
+        }
+    }
+
+    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
+fn stored_secret_env_name_for_field(
+    config_values: Option<&serde_json::Value>,
+    field: &ChannelField,
+) -> Option<String> {
+    config_values
+        .and_then(|v| v.as_object())
+        .and_then(|obj| obj.get(field.key))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn configured_secret_env_names(
+    meta: &ChannelMeta,
+    config_values: Option<&serde_json::Value>,
+) -> Vec<String> {
+    meta.fields
+        .iter()
+        .filter_map(|field| stored_secret_env_name_for_field(config_values, field))
+        .collect()
+}
+
+fn existing_field_value_as_string(
+    config_values: &serde_json::Value,
+    field: &ChannelField,
+) -> Option<String> {
+    let value = config_values.as_object()?.get(field.key)?;
+    match field.field_type {
+        FieldType::List => value.as_array().map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.as_str()
+                        .map(ToOwned::to_owned)
+                        .or_else(|| Some(item.to_string()))
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }),
+        FieldType::Number => value
+            .as_i64()
+            .map(|v| v.to_string())
+            .or_else(|| value.as_u64().map(|v| v.to_string()))
+            .or_else(|| value.as_f64().map(|v| v.to_string()))
+            .or_else(|| value.as_str().map(ToOwned::to_owned)),
+        _ => value.as_str().map(ToOwned::to_owned),
+    }
+}
+
+fn merged_channel_config_fields(
+    meta: &ChannelMeta,
+    existing_config: Option<&serde_json::Value>,
+    request_fields: &serde_json::Map<String, serde_json::Value>,
+) -> HashMap<String, (String, FieldType)> {
+    let mut merged = HashMap::new();
+
+    if let Some(existing_config) = existing_config {
+        for field in meta.fields {
+            if let Some(value) = existing_field_value_as_string(existing_config, field) {
+                merged.insert(field.key.to_string(), (value, field.field_type));
+            }
+        }
+    }
+
+    for field in meta.fields {
+        let value = request_fields
+            .get(field.key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if value.is_empty() {
+            continue;
+        }
+        merged.insert(field.key.to_string(), (value.to_string(), field.field_type));
+    }
+
+    merged
 }
 
 /// Build a JSON field descriptor, checking env var presence but never exposing secrets.
@@ -850,9 +1256,8 @@ fn build_field_json(
     f: &ChannelField,
     config_values: Option<&serde_json::Value>,
 ) -> serde_json::Value {
-    let has_value = f
-        .env_var
-        .map(|ev| std::env::var(ev).map(|v| !v.is_empty()).unwrap_or(false))
+    let has_value = stored_secret_env_name_for_field(config_values, f)
+        .map(|ev| std::env::var(&ev).map(|v| !v.is_empty()).unwrap_or(false))
         .unwrap_or(false);
     let mut field = serde_json::json!({
         "key": f.key,
@@ -959,183 +1364,228 @@ fn find_channel_meta(name: &str) -> Option<&'static ChannelMeta> {
 fn channel_config_values(
     config: &librefang_types::config::ChannelsConfig,
     name: &str,
+    account_id: &str,
 ) -> Option<serde_json::Value> {
     match name {
         "telegram" => config
             .telegram
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "discord" => config
             .discord
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "slack" => config
             .slack
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "whatsapp" => config
             .whatsapp
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "signal" => config
             .signal
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "matrix" => config
             .matrix
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "email" => config
             .email
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "teams" => config
             .teams
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "mattermost" => config
             .mattermost
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "irc" => config
             .irc
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "google_chat" => config
             .google_chat
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "twitch" => config
             .twitch
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "rocketchat" => config
             .rocketchat
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "zulip" => config
             .zulip
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "xmpp" => config
             .xmpp
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "line" => config
             .line
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "viber" => config
             .viber
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "messenger" => config
             .messenger
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "reddit" => config
             .reddit
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "mastodon" => config
             .mastodon
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "bluesky" => config
             .bluesky
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "feishu" => config
             .feishu
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "revolt" => config
             .revolt
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "nextcloud" => config
             .nextcloud
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "guilded" => config
             .guilded
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "keybase" => config
             .keybase
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "threema" => config
             .threema
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "nostr" => config
             .nostr
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "webex" => config
             .webex
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "pumble" => config
             .pumble
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "flock" => config
             .flock
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "twist" => config
             .twist
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "mumble" => config
             .mumble
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "dingtalk" => config
             .dingtalk
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "discourse" => config
             .discourse
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "gitter" => config
             .gitter
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "ntfy" => config
             .ntfy
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "gotify" => config
             .gotify
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "webhook" => config
             .webhook
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "voice" => config
             .voice
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "linkedin" => config
             .linkedin
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "wechat" => config
             .wechat
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "wecom" => config
             .wecom
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "qq" => config
             .qq
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
     }
@@ -1150,7 +1600,14 @@ fn channel_config_values(
         (status = 200, description = "List configured channels", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_channels(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> axum::response::Response {
+    let account_id = match require_tenant_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
     // Read the live channels config (updated on every hot-reload) instead of the
     // stale boot-time kernel.config, so newly configured channels show correctly.
     let live_channels = state.channels_config.read().await;
@@ -1158,7 +1615,8 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let mut configured_count = 0u32;
 
     for meta in CHANNEL_REGISTRY {
-        let configured = is_channel_configured(&live_channels, meta.name);
+        let config_vals = channel_config_values(&live_channels, meta.name, account_id);
+        let configured = is_channel_configured(&live_channels, meta.name, account_id);
         if configured {
             configured_count += 1;
         }
@@ -1169,12 +1627,11 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
             .iter()
             .filter(|f| f.required && f.env_var.is_some())
             .all(|f| {
-                f.env_var
+                stored_secret_env_name_for_field(config_vals.as_ref(), f)
                     .map(|ev| std::env::var(ev).map(|v| !v.is_empty()).unwrap_or(false))
-                    .unwrap_or(true)
+                    .unwrap_or(false)
             });
 
-        let config_vals = channel_config_values(&live_channels, meta.name);
         let mut fields: Vec<serde_json::Value> = meta
             .fields
             .iter()
@@ -1209,6 +1666,7 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "total": channels.len(),
         "configured_count": configured_count,
     }))
+    .into_response()
 }
 
 /// GET /api/channels/{name} — Return a single channel's config, status, and field metadata.
@@ -1226,30 +1684,36 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
 )]
 pub async fn get_channel(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = match require_tenant_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
             return ApiErrorResponse::not_found(format!("Unknown channel: {name}"))
                 .into_json_tuple()
+                .into_response()
         }
     };
 
     let live_channels = state.channels_config.read().await;
-    let configured = is_channel_configured(&live_channels, meta.name);
+    let config_vals = channel_config_values(&live_channels, meta.name, account_id);
+    let configured = is_channel_configured(&live_channels, meta.name, account_id);
 
     let has_token = meta
         .fields
         .iter()
         .filter(|f| f.required && f.env_var.is_some())
         .all(|f| {
-            f.env_var
+            stored_secret_env_name_for_field(config_vals.as_ref(), f)
                 .map(|ev| std::env::var(ev).map(|v| !v.is_empty()).unwrap_or(false))
-                .unwrap_or(true)
+                .unwrap_or(false)
         });
 
-    let config_vals = channel_config_values(&live_channels, meta.name);
     let mut fields: Vec<serde_json::Value> = meta
         .fields
         .iter()
@@ -1277,7 +1741,7 @@ pub async fn get_channel(
         detail["webhook_endpoint"] = serde_json::Value::String(endpoint);
     }
 
-    (StatusCode::OK, Json(detail))
+    (StatusCode::OK, Json(detail)).into_response()
 }
 
 #[utoipa::path(
@@ -1297,23 +1761,39 @@ pub async fn get_channel(
 /// POST /api/channels/{name}/configure — Save channel secrets + config fields.
 pub async fn configure_channel(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = match require_tenant_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
-        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::not_found("Unknown channel")
+                .into_json_tuple()
+                .into_response()
+        }
     };
 
     let fields = match body.get("fields").and_then(|v| v.as_object()) {
         Some(f) => f,
-        None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::bad_request("Missing 'fields' object")
+                .into_json_tuple()
+                .into_response()
+        }
     };
 
-    let home = librefang_kernel::config::librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
-    let mut config_fields: HashMap<String, (String, FieldType)> = HashMap::new();
+    let live_channels = state.channels_config.read().await;
+    let existing_config = channel_config_values(&live_channels, meta.name, account_id);
+    drop(live_channels);
+    let mut config_fields = merged_channel_config_fields(meta, existing_config.as_ref(), fields);
 
     for field_def in meta.fields {
         let value = fields
@@ -1325,44 +1805,45 @@ pub async fn configure_channel(
         }
 
         if let Some(env_var) = field_def.env_var {
+            let scoped_env_var = scoped_secret_env_var(env_var, account_id);
             // Validate env var name and value before writing
-            if let Err(msg) = validate_env_var(env_var, value) {
-                return ApiErrorResponse::bad_request(msg).into_json_tuple();
+            if let Err(msg) = validate_env_var(&scoped_env_var, value) {
+                return ApiErrorResponse::bad_request(msg)
+                    .into_json_tuple()
+                    .into_response();
             }
             // Secret field — write to secrets.env and set in process
-            if let Err(e) = write_secret_env(&secrets_path, env_var, value) {
+            if let Err(e) = write_secret_env(&secrets_path, &scoped_env_var, value) {
                 return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
-                    .into_json_tuple();
+                    .into_json_tuple()
+                    .into_response();
             }
             // SAFETY: We are the only writer; this is a single-threaded config operation
             unsafe {
-                std::env::set_var(env_var, value);
+                std::env::set_var(&scoped_env_var, value);
             }
             // Also write the env var NAME to config.toml so the channel section
             // is not empty and the kernel knows which env var to read.
-            config_fields.insert(
-                field_def.key.to_string(),
-                (env_var.to_string(), FieldType::Text),
-            );
+            config_fields.insert(field_def.key.to_string(), (scoped_env_var, FieldType::Text));
         } else {
-            // Config field — collect for TOML write with type info
-            config_fields.insert(
-                field_def.key.to_string(),
-                (value.to_string(), field_def.field_type),
-            );
+            // Non-secret fields are already merged from existing config above.
         }
     }
 
     // Write config.toml section
-    if let Err(e) = upsert_channel_config(&config_path, &name, &config_fields) {
+    if let Err(e) = upsert_account_channel_config(&config_path, &name, account_id, &config_fields) {
         return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Hot-reload: activate the channel immediately
     match crate::channel_bridge::reload_channels_from_disk(&state).await {
         Ok(started) => {
-            let activated = started.iter().any(|s| s.eq_ignore_ascii_case(&name));
+            let expected_started_key = format!("{name}:{account_id}");
+            let activated = started
+                .iter()
+                .any(|started_name| started_name.eq_ignore_ascii_case(&expected_started_key));
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -1377,6 +1858,7 @@ pub async fn configure_channel(
                     }
                 })),
             )
+                .into_response()
         }
         Err(e) => {
             tracing::warn!(error = %e, "Channel hot-reload failed after configure");
@@ -1388,7 +1870,7 @@ pub async fn configure_channel(
                     "activated": false,
                     "note": format!("Configured, but hot-reload failed: {e}. Restart daemon to activate.")
                 })),
-            )
+            ).into_response()
         }
     }
 }
@@ -1408,34 +1890,45 @@ pub async fn configure_channel(
 /// DELETE /api/channels/{name}/configure — Remove channel secrets + config section.
 pub async fn remove_channel(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = match require_tenant_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
-        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::not_found("Unknown channel")
+                .into_json_tuple()
+                .into_response()
+        }
     };
 
-    let home = librefang_kernel::config::librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
+    let live_channels = state.channels_config.read().await;
+    let config_vals = channel_config_values(&live_channels, meta.name, account_id);
 
-    // Remove all secret env vars for this channel
-    for field_def in meta.fields {
-        if let Some(env_var) = field_def.env_var {
-            if let Err(e) = remove_secret_env(&secrets_path, env_var) {
-                tracing::warn!("Failed to remove secret env var: {e}");
-            }
-            // SAFETY: Single-threaded config operation
-            unsafe {
-                std::env::remove_var(env_var);
-            }
+    // Remove only this account's secret env vars for this channel.
+    for env_var in configured_secret_env_names(meta, config_vals.as_ref()) {
+        if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
+            tracing::warn!("Failed to remove secret env var: {e}");
+        }
+        // SAFETY: Single-threaded config operation
+        unsafe {
+            std::env::remove_var(&env_var);
         }
     }
+    drop(live_channels);
 
-    // Remove config section
-    if let Err(e) = remove_channel_config(&config_path, &name) {
+    // Remove only this account's config entry.
+    if let Err(e) = remove_account_channel_config(&config_path, &name, account_id) {
         return ApiErrorResponse::internal(format!("Failed to remove config: {e}"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Hot-reload: deactivate the channel immediately
@@ -1448,7 +1941,8 @@ pub async fn remove_channel(
                 "remaining_channels": started,
                 "note": format!("{} deactivated.", name)
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "Channel hot-reload failed after remove");
             (
@@ -1458,7 +1952,7 @@ pub async fn remove_channel(
                     "channel": name,
                     "note": format!("Removed, but hot-reload failed: {e}. Restart daemon to fully deactivate.")
                 })),
-            )
+            ).into_response()
         }
     }
 }
@@ -1481,9 +1975,15 @@ pub async fn remove_channel(
 /// (for Telegram). When provided, sends a real test message to verify the bot can
 /// post to that channel.
 pub async fn test_channel(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     raw_body: axum::body::Bytes,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = match require_tenant_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
@@ -1491,17 +1991,28 @@ pub async fn test_channel(
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"status": "error", "message": "Unknown channel"})),
             )
+                .into_response()
         }
     };
+    let live_channels = state.channels_config.read().await;
+    let config_vals = channel_config_values(&live_channels, meta.name, account_id);
+    drop(live_channels);
 
     // Check all required env vars are set
     let mut missing = Vec::new();
     for field_def in meta.fields {
         if field_def.required {
-            if let Some(env_var) = field_def.env_var {
-                if std::env::var(env_var).map(|v| v.is_empty()).unwrap_or(true) {
-                    missing.push(env_var);
+            match stored_secret_env_name_for_field(config_vals.as_ref(), field_def) {
+                Some(env_var) => {
+                    if std::env::var(&env_var)
+                        .map(|v| v.is_empty())
+                        .unwrap_or(true)
+                    {
+                        missing.push(env_var);
+                    }
                 }
+                None if field_def.env_var.is_some() => missing.push(field_def.key.to_string()),
+                None => {}
             }
         }
     }
@@ -1513,7 +2024,8 @@ pub async fn test_channel(
                 "status": "error",
                 "message": format!("Missing required env vars: {}", missing.join(", "))
             })),
-        );
+        )
+            .into_response();
     }
 
     // If a target channel/chat ID is provided, send a real test message
@@ -1529,7 +2041,7 @@ pub async fn test_channel(
         .map(|s| s.to_string());
 
     if let Some(target_id) = target {
-        match send_channel_test_message(&name, &target_id).await {
+        match send_channel_test_message(&name, &target_id, config_vals.as_ref()).await {
             Ok(()) => {
                 return (
                     StatusCode::OK,
@@ -1537,7 +2049,7 @@ pub async fn test_channel(
                         "status": "ok",
                         "message": format!("Test message sent to {} channel {}.", meta.display_name, target_id)
                     })),
-                );
+                ).into_response();
             }
             Err(e) => {
                 return (
@@ -1546,7 +2058,8 @@ pub async fn test_channel(
                         "status": "error",
                         "message": format!("Credentials valid but failed to send test message: {e}")
                     })),
-                );
+                )
+                    .into_response();
             }
         }
     }
@@ -1557,18 +2070,25 @@ pub async fn test_channel(
             "status": "ok",
             "message": format!("All required credentials for {} are set. Provide channel_id or chat_id to send a test message.", meta.display_name)
         })),
-    )
+    ).into_response()
 }
 
 /// Send a real test message to a specific channel/chat on the given platform.
-async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Result<(), String> {
+async fn send_channel_test_message(
+    channel_name: &str,
+    target_id: &str,
+    config_values: Option<&serde_json::Value>,
+) -> Result<(), String> {
     let client = librefang_runtime::http_client::proxied_client();
     let test_msg = "LibreFang test message — your channel is connected!";
 
     match channel_name {
         "discord" => {
-            let token = std::env::var("DISCORD_BOT_TOKEN")
-                .map_err(|_| "DISCORD_BOT_TOKEN not set".to_string())?;
+            let token_env = config_values
+                .and_then(|v| v.get("bot_token_env"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("DISCORD_BOT_TOKEN");
+            let token = std::env::var(token_env).map_err(|_| format!("{token_env} not set"))?;
             let url = format!("https://discord.com/api/v10/channels/{target_id}/messages");
             let resp = client
                 .post(&url)
@@ -1583,8 +2103,11 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
             }
         }
         "telegram" => {
-            let token = std::env::var("TELEGRAM_BOT_TOKEN")
-                .map_err(|_| "TELEGRAM_BOT_TOKEN not set".to_string())?;
+            let token_env = config_values
+                .and_then(|v| v.get("bot_token_env"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("TELEGRAM_BOT_TOKEN");
+            let token = std::env::var(token_env).map_err(|_| format!("{token_env} not set"))?;
             let url = format!("https://api.telegram.org/bot{token}/sendMessage");
             let resp = client
                 .post(&url)
@@ -1598,8 +2121,11 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
             }
         }
         "slack" => {
-            let token = std::env::var("SLACK_BOT_TOKEN")
-                .map_err(|_| "SLACK_BOT_TOKEN not set".to_string())?;
+            let token_env = config_values
+                .and_then(|v| v.get("bot_token_env"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("SLACK_BOT_TOKEN");
+            let token = std::env::var(token_env).map_err(|_| format!("{token_env} not set"))?;
             let url = "https://slack.com/api/chat.postMessage";
             let resp = client
                 .post(url)
@@ -1621,6 +2147,775 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        merged_channel_config_fields, remove_account_channel_config, router, scoped_secret_env_var,
+        stored_secret_env_name_for_field, upsert_account_channel_config, ChannelField, FieldType,
+    };
+    use crate::routes::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use librefang_kernel::LibreFangKernel;
+    use librefang_types::config::{
+        ChannelsConfig, DefaultModelConfig, KernelConfig, WeChatConfig, WhatsAppConfig,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    use tower::ServiceExt;
+
+    #[test]
+    fn scoped_secret_env_var_encodes_account_id_without_collisions() {
+        assert_eq!(
+            scoped_secret_env_var("TELEGRAM_BOT_TOKEN", "acct-prod/us-east-1"),
+            "TELEGRAM_BOT_TOKEN__ACCOUNT_61_63_63_74_2D_70_72_6F_64_2F_75_73_2D_65_61_73_74_2D_31"
+        );
+        assert_ne!(
+            scoped_secret_env_var("TELEGRAM_BOT_TOKEN", "acct-prod/us-east-1"),
+            scoped_secret_env_var("TELEGRAM_BOT_TOKEN", "acct_prod_us-east-1")
+        );
+    }
+
+    #[test]
+    fn upsert_account_channel_config_preserves_other_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut acct_a = HashMap::new();
+        acct_a.insert(
+            "bot_token_env".to_string(),
+            ("TELEGRAM_BOT_TOKEN__A".to_string(), FieldType::Text),
+        );
+        acct_a.insert(
+            "default_agent".to_string(),
+            ("assistant-a".to_string(), FieldType::Text),
+        );
+        upsert_account_channel_config(&path, "telegram", "acct_a", &acct_a).unwrap();
+
+        let mut acct_b = HashMap::new();
+        acct_b.insert(
+            "bot_token_env".to_string(),
+            ("TELEGRAM_BOT_TOKEN__B".to_string(), FieldType::Text),
+        );
+        acct_b.insert(
+            "default_agent".to_string(),
+            ("assistant-b".to_string(), FieldType::Text),
+        );
+        upsert_account_channel_config(&path, "telegram", "acct_b", &acct_b).unwrap();
+
+        let parsed: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let entries = parsed["channels"]["telegram"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["account_id"].as_str(), Some("acct_a"));
+        assert_eq!(entries[1]["account_id"].as_str(), Some("acct_b"));
+    }
+
+    #[test]
+    fn remove_account_channel_config_only_removes_target_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut acct_a = HashMap::new();
+        acct_a.insert(
+            "bot_token_env".to_string(),
+            ("TELEGRAM_BOT_TOKEN__A".to_string(), FieldType::Text),
+        );
+        upsert_account_channel_config(&path, "telegram", "acct_a", &acct_a).unwrap();
+
+        let mut acct_b = HashMap::new();
+        acct_b.insert(
+            "bot_token_env".to_string(),
+            ("TELEGRAM_BOT_TOKEN__B".to_string(), FieldType::Text),
+        );
+        upsert_account_channel_config(&path, "telegram", "acct_b", &acct_b).unwrap();
+
+        remove_account_channel_config(&path, "telegram", "acct_a").unwrap();
+
+        let parsed: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let entry = &parsed["channels"]["telegram"];
+        assert_eq!(entry["account_id"].as_str(), Some("acct_b"));
+        assert_eq!(
+            entry["bot_token_env"].as_str(),
+            Some("TELEGRAM_BOT_TOKEN__B")
+        );
+    }
+
+    #[test]
+    fn stored_secret_env_name_requires_persisted_mapping() {
+        let field = ChannelField {
+            key: "bot_token_env",
+            label: "Bot Token",
+            field_type: FieldType::Secret,
+            env_var: Some("TELEGRAM_BOT_TOKEN"),
+            required: true,
+            placeholder: "",
+            advanced: false,
+            options: None,
+            show_when: None,
+            readonly: false,
+        };
+
+        assert_eq!(stored_secret_env_name_for_field(None, &field), None);
+    }
+
+    #[test]
+    fn partial_update_preserves_existing_scoped_secret_mapping() {
+        let meta = super::find_channel_meta("telegram").unwrap();
+        let existing = serde_json::json!({
+            "account_id": "acct_a",
+            "bot_token_env": "TELEGRAM_BOT_TOKEN__ACCT_A",
+            "default_agent": "support"
+        });
+        let request = serde_json::json!({
+            "default_agent": "ops"
+        });
+
+        let merged =
+            merged_channel_config_fields(meta, Some(&existing), request.as_object().unwrap());
+
+        assert_eq!(
+            merged.get("bot_token_env").map(|v| v.0.as_str()),
+            Some("TELEGRAM_BOT_TOKEN__ACCT_A")
+        );
+        assert_eq!(
+            merged.get("default_agent").map(|v| v.0.as_str()),
+            Some("ops")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wechat_bootstrap_start_persists_owned_session_for_target_instance() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let ilink = spawn_wechat_ilink_stub(vec![(
+            "/ilink/bot/get_bot_qrcode?bot_type=3".to_string(),
+            StatusCode::OK,
+            serde_json::json!({
+                "qrcode": "provider-qr-handle",
+                "qrcode_img_content": "https://stub.example/qr.png"
+            }),
+        )])
+        .await;
+        // SAFETY: test-scoped environment mutation.
+        unsafe {
+            std::env::set_var("LIBREFANG_WECHAT_ILINK_BASE", &ilink);
+        }
+        let state = build_wechat_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/wechat/wechat:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+
+        assert_eq!(body["instance_key"].as_str(), Some("wechat:tenant-a"));
+        assert_eq!(body["account_id"].as_str(), Some("tenant-a"));
+        assert_eq!(body["status"].as_str(), Some("pending"));
+        assert_eq!(body["qr_url"].as_str(), Some("https://stub.example/qr.png"));
+        assert!(body.get("qr_code").is_none());
+
+        let store = crate::channel_bootstrap::ChannelBootstrapStore::new(temp.path());
+        store.load().unwrap();
+        let session = store
+            .get_pending_by_instance("wechat", "wechat:tenant-a")
+            .await
+            .unwrap();
+        assert_eq!(session.account_id, "tenant-a");
+        assert_eq!(
+            session.provider_handle.as_deref(),
+            Some("provider-qr-handle")
+        );
+
+        // SAFETY: test cleanup for process-global environment.
+        unsafe {
+            std::env::remove_var("LIBREFANG_WECHAT_ILINK_BASE");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wechat_bootstrap_status_confirms_owned_session_and_persists_token_to_owner_slot() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let ilink = spawn_wechat_ilink_stub(vec![
+            (
+                "/ilink/bot/get_bot_qrcode?bot_type=3".to_string(),
+                StatusCode::OK,
+                serde_json::json!({
+                    "qrcode": "provider-qr-handle",
+                    "qrcode_img_content": "https://stub.example/qr.png"
+                }),
+            ),
+            (
+                "/ilink/bot/get_qrcode_status?qrcode=provider-qr-handle".to_string(),
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "confirmed",
+                    "bot_token": "ilink_bot_token_123"
+                }),
+            ),
+        ])
+        .await;
+        // SAFETY: test-scoped environment mutation.
+        unsafe {
+            std::env::set_var("LIBREFANG_WECHAT_ILINK_BASE", &ilink);
+        }
+        let state = build_wechat_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/wechat/wechat:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/channels/wechat/wechat:tenant-a/bootstrap/status")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+
+        assert_eq!(body["connected"].as_bool(), Some(true));
+        assert_eq!(body["status"].as_str(), Some("confirmed"));
+        assert!(body.get("bot_token").is_none());
+
+        let store = crate::channel_bootstrap::ChannelBootstrapStore::new(temp.path());
+        store.load().unwrap();
+        let session = store
+            .get_by_bootstrap_id(body["bootstrap_id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            session.status,
+            crate::channel_bootstrap::BootstrapStatus::Confirmed
+        );
+
+        let token_env = scoped_secret_env_var("WECHAT_BOT_TOKEN", "tenant-a");
+        let secrets = std::fs::read_to_string(temp.path().join("secrets.env")).unwrap();
+        assert!(secrets.contains(&token_env));
+        assert!(secrets.contains("ilink_bot_token_123"));
+        assert_eq!(
+            std::env::var(&token_env).ok().as_deref(),
+            Some("ilink_bot_token_123")
+        );
+
+        // SAFETY: test cleanup for process-global environment.
+        unsafe {
+            std::env::remove_var("LIBREFANG_WECHAT_ILINK_BASE");
+            std::env::remove_var(&token_env);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wechat_bootstrap_cancel_marks_owned_session_cancelled() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let ilink = spawn_wechat_ilink_stub(vec![(
+            "/ilink/bot/get_bot_qrcode?bot_type=3".to_string(),
+            StatusCode::OK,
+            serde_json::json!({
+                "qrcode": "provider-qr-handle",
+                "qrcode_img_content": "https://stub.example/qr.png"
+            }),
+        )])
+        .await;
+        // SAFETY: test-scoped environment mutation.
+        unsafe {
+            std::env::set_var("LIBREFANG_WECHAT_ILINK_BASE", &ilink);
+        }
+        let state = build_wechat_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/wechat/wechat:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/wechat/wechat:tenant-a/bootstrap/cancel")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["status"].as_str(), Some("cancelled"));
+
+        let store = crate::channel_bootstrap::ChannelBootstrapStore::new(temp.path());
+        store.load().unwrap();
+        let session = store
+            .get_by_bootstrap_id(body["bootstrap_id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            session.status,
+            crate::channel_bootstrap::BootstrapStatus::Cancelled
+        );
+
+        // SAFETY: test cleanup for process-global environment.
+        unsafe {
+            std::env::remove_var("LIBREFANG_WECHAT_ILINK_BASE");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn whatsapp_bootstrap_start_persists_owned_session_for_target_instance() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let gateway = spawn_gateway_stub(vec![(
+            "POST".to_string(),
+            "/login/start".to_string(),
+            StatusCode::OK,
+            serde_json::json!({
+                "session_id": "wa-session-1",
+                "qr_data_url": "data:image/png;base64,abc",
+                "message": "Scan with WhatsApp",
+                "connected": false
+            }),
+        )])
+        .await;
+        unsafe {
+            std::env::set_var(
+                "WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61",
+                &gateway,
+            );
+        }
+        let state = build_whatsapp_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/whatsapp/whatsapp:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["instance_key"].as_str(), Some("whatsapp:tenant-a"));
+        assert_eq!(body["account_id"].as_str(), Some("tenant-a"));
+        assert_eq!(body["status"].as_str(), Some("pending"));
+        assert_eq!(body["qr_url"].as_str(), Some("data:image/png;base64,abc"));
+
+        let store = crate::channel_bootstrap::ChannelBootstrapStore::new(temp.path());
+        store.load().unwrap();
+        let session = store
+            .get_pending_by_instance("whatsapp", "whatsapp:tenant-a")
+            .await
+            .unwrap();
+        assert_eq!(session.account_id, "tenant-a");
+        assert_eq!(session.provider_handle.as_deref(), Some("wa-session-1"));
+
+        unsafe {
+            std::env::remove_var("WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn whatsapp_bootstrap_status_confirms_owned_session() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let gateway = spawn_gateway_stub(vec![
+            (
+                "POST".to_string(),
+                "/login/start".to_string(),
+                StatusCode::OK,
+                serde_json::json!({
+                    "session_id": "wa-session-2",
+                    "qr_data_url": "data:image/png;base64,def",
+                    "message": "Scan with WhatsApp",
+                    "connected": false
+                }),
+            ),
+            (
+                "GET".to_string(),
+                "/login/status?instance_key=whatsapp%3Atenant-a".to_string(),
+                StatusCode::OK,
+                serde_json::json!({
+                    "instance_key": "whatsapp:tenant-a",
+                    "connected": true,
+                    "message": "Connected to WhatsApp",
+                    "session_id": "wa-session-2",
+                    "expired": false
+                }),
+            ),
+        ])
+        .await;
+        unsafe {
+            std::env::set_var(
+                "WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61",
+                &gateway,
+            );
+        }
+        let state = build_whatsapp_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/whatsapp/whatsapp:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/channels/whatsapp/whatsapp:tenant-a/bootstrap/status")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["status"].as_str(), Some("confirmed"));
+        assert_eq!(body["connected"].as_bool(), Some(true));
+
+        let store = crate::channel_bootstrap::ChannelBootstrapStore::new(temp.path());
+        store.load().unwrap();
+        let session = store
+            .get_latest_by_instance("whatsapp", "whatsapp:tenant-a")
+            .await
+            .unwrap();
+        assert_eq!(
+            session.status,
+            crate::channel_bootstrap::BootstrapStatus::Confirmed
+        );
+
+        unsafe {
+            std::env::remove_var("WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn whatsapp_bootstrap_cancel_marks_owned_session_cancelled() {
+        let _guard = wechat_test_guard().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let gateway = spawn_gateway_stub(vec![(
+            "POST".to_string(),
+            "/login/start".to_string(),
+            StatusCode::OK,
+            serde_json::json!({
+                "session_id": "wa-session-3",
+                "qr_data_url": "data:image/png;base64,ghi",
+                "message": "Scan with WhatsApp",
+                "connected": false
+            }),
+        )])
+        .await;
+        unsafe {
+            std::env::set_var(
+                "WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61",
+                &gateway,
+            );
+        }
+        let state = build_whatsapp_test_state(temp.path(), "tenant-admin", "tenant-a").await;
+        let app = router().with_state(state.clone());
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/whatsapp/whatsapp:tenant-a/bootstrap/start")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/channels/whatsapp/whatsapp:tenant-a/bootstrap/cancel")
+                    .header("X-Account-Id", "tenant-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["status"].as_str(), Some("cancelled"));
+        assert_eq!(body["connected"].as_bool(), Some(false));
+
+        unsafe {
+            std::env::remove_var("WHATSAPP_GATEWAY_URL__ACCOUNT_74_65_6E_61_6E_74_2D_61");
+        }
+    }
+
+    async fn read_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn wechat_test_guard() -> &'static Mutex<()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD.get_or_init(|| Mutex::new(()))
+    }
+
+    async fn build_wechat_test_state(
+        home_dir: &std::path::Path,
+        admin_account_id: &str,
+        wechat_account_id: &str,
+    ) -> Arc<AppState> {
+        librefang_runtime::registry_sync::sync_registry(
+            home_dir,
+            librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+            "",
+        );
+
+        let mut config = KernelConfig {
+            home_dir: home_dir.to_path_buf(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig {
+                provider: "ollama".to_string(),
+                model: "test-model".to_string(),
+                api_key_env: "OLLAMA_API_KEY".to_string(),
+                base_url: None,
+                message_timeout_secs: 300,
+            },
+            ..KernelConfig::default()
+        };
+        config.admin_accounts = vec![admin_account_id.to_string()];
+        std::fs::write(
+            home_dir.join("config.toml"),
+            toml::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).unwrap());
+        kernel.set_self_handle();
+
+        let wechat_config = WeChatConfig {
+            bot_token_env: scoped_secret_env_var("WECHAT_BOT_TOKEN", wechat_account_id),
+            account_id: Some(wechat_account_id.to_string()),
+            default_agent: Some("assistant".to_string()),
+            ..WeChatConfig::default()
+        };
+        let mut channels = ChannelsConfig::default();
+        channels.wechat.0.push(wechat_config);
+
+        Arc::new(AppState {
+            kernel,
+            started_at: Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(channels),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(
+                home_dir.join("test-webhooks.json"),
+            ),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        })
+    }
+
+    async fn build_whatsapp_test_state(
+        home_dir: &std::path::Path,
+        admin_account_id: &str,
+        whatsapp_account_id: &str,
+    ) -> Arc<AppState> {
+        librefang_runtime::registry_sync::sync_registry(
+            home_dir,
+            librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+            "",
+        );
+
+        let mut config = KernelConfig {
+            home_dir: home_dir.to_path_buf(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig {
+                provider: "ollama".to_string(),
+                model: "test-model".to_string(),
+                api_key_env: "OLLAMA_API_KEY".to_string(),
+                base_url: None,
+                message_timeout_secs: 300,
+            },
+            ..KernelConfig::default()
+        };
+        config.admin_accounts = vec![admin_account_id.to_string()];
+        std::fs::write(
+            home_dir.join("config.toml"),
+            toml::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).unwrap());
+        kernel.set_self_handle();
+
+        let whatsapp_config = WhatsAppConfig {
+            gateway_url_env: scoped_secret_env_var("WHATSAPP_GATEWAY_URL", whatsapp_account_id),
+            account_id: Some(whatsapp_account_id.to_string()),
+            default_agent: Some("assistant".to_string()),
+            ..WhatsAppConfig::default()
+        };
+        let mut channels = ChannelsConfig::default();
+        channels.whatsapp.0.push(whatsapp_config);
+
+        Arc::new(AppState {
+            kernel,
+            started_at: Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(channels),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(
+                home_dir.join("test-webhooks.json"),
+            ),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        })
+    }
+
+    async fn spawn_wechat_ilink_stub(
+        routes: Vec<(String, StatusCode, serde_json::Value)>,
+    ) -> String {
+        let routes = Arc::new(routes);
+        let app = axum::Router::new().fallback({
+            let routes = routes.clone();
+            axum::routing::any(move |uri: axum::http::Uri| {
+                let routes = routes.clone();
+                async move {
+                    let path = uri
+                        .path_and_query()
+                        .map(|value| value.as_str())
+                        .unwrap_or(uri.path());
+                    let (status, body) = routes
+                        .iter()
+                        .find(|(expected, _, _)| expected == path)
+                        .map(|(_, status, body)| (*status, body.clone()))
+                        .unwrap_or_else(|| {
+                            (
+                                StatusCode::NOT_FOUND,
+                                serde_json::json!({ "message": format!("unexpected path: {path}") }),
+                            )
+                        });
+                    (status, axum::Json(body))
+                }
+            })
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{}", addr)
+    }
+
+    async fn spawn_gateway_stub(
+        routes: Vec<(String, String, StatusCode, serde_json::Value)>,
+    ) -> String {
+        let routes = Arc::new(routes);
+        let app = axum::Router::new().fallback({
+            let routes = routes.clone();
+            axum::routing::any(move |method: axum::http::Method, uri: axum::http::Uri| {
+                let routes = routes.clone();
+                async move {
+                    let path = uri
+                        .path_and_query()
+                        .map(|value| value.as_str())
+                        .unwrap_or(uri.path());
+                    let (status, body) = routes
+                        .iter()
+                        .find(|(expected_method, expected_path, _, _)| {
+                            expected_method == method.as_str() && expected_path == path
+                        })
+                        .map(|(_, _, status, body)| (*status, body.clone()))
+                        .unwrap_or_else(|| {
+                            (
+                                StatusCode::NOT_FOUND,
+                                serde_json::json!({
+                                    "message": format!("unexpected route: {} {}", method, path)
+                                }),
+                            )
+                        });
+                    (status, axum::Json(body))
+                }
+            })
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{}", addr)
+    }
+}
 #[utoipa::path(
     post,
     path = "/api/channels/reload",
@@ -1631,7 +2926,13 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
     )
 )]
 /// POST /api/channels/reload — Manually trigger a channel hot-reload from disk config.
-pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn reload_channels(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match crate::channel_bridge::reload_channels_from_disk(&state).await {
         Ok(started) => (
             StatusCode::OK,
@@ -1639,141 +2940,391 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
                 "status": "ok",
                 "started": started,
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "status": "error",
                 "error": e,
             })),
-        ),
+        )
+            .into_response(),
     }
 }
 
 // ---------------------------------------------------------------------------
-// WhatsApp QR login flow (OpenClaw-style)
+// WhatsApp QR login flow (owned bootstrap)
 // ---------------------------------------------------------------------------
 #[utoipa::path(
     post,
-    path = "/api/channels/whatsapp/qr/start",
-    tag = "channels",
-    responses(
-        (status = 200, description = "WhatsApp QR session started", body = serde_json::Value)
-    )
-)]
-/// POST /api/channels/whatsapp/qr/start — Start a WhatsApp Web QR login session.
-///
-/// If a WhatsApp Web gateway is available (e.g. a Baileys-based bridge process),
-/// this proxies the request and returns a base64 QR code data URL. If no gateway
-/// is running, it returns instructions to set one up.
-pub async fn whatsapp_qr_start() -> impl IntoResponse {
-    // Check for WhatsApp Web gateway URL in config or env
-    let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
-
-    if gateway_url.is_empty() {
-        return Json(serde_json::json!({
-            "available": false,
-            "message": "WhatsApp Web gateway not running. Start the gateway or use Business API mode.",
-            "help": "The WhatsApp Web gateway auto-starts with the daemon when configured. Ensure Node.js >= 18 is installed and WhatsApp is configured in config.toml. Set WHATSAPP_WEB_GATEWAY_URL to use an external gateway."
-        }));
-    }
-
-    // Try to reach the gateway and start a QR session.
-    // Uses a raw HTTP request via tokio TcpStream to avoid adding reqwest as a runtime dep.
-    let start_url = format!("{}/login/start", gateway_url.trim_end_matches('/'));
-    match gateway_http_post(&start_url).await {
-        Ok(body) => {
-            let qr_url = body
-                .get("qr_data_url")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let sid = body
-                .get("session_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let msg = body
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Scan this QR code with WhatsApp → Linked Devices");
-            let connected = body
-                .get("connected")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            Json(serde_json::json!({
-                "available": true,
-                "qr_data_url": qr_url,
-                "session_id": sid,
-                "message": msg,
-                "connected": connected,
-            }))
-        }
-        Err(e) => Json(serde_json::json!({
-            "available": false,
-            "message": format!("Could not reach WhatsApp Web gateway: {e}"),
-            "help": "Make sure the gateway is running at the configured URL"
-        })),
-    }
-}
-#[utoipa::path(
-    get,
-    path = "/api/channels/whatsapp/qr/status",
+    path = "/api/channels/whatsapp/{instance_key}/bootstrap/start",
     tag = "channels",
     params(
-        ("session_id" = Option<String>, Query, description = "WhatsApp login session ID")
+        ("instance_key" = String, Path, description = "Owned WhatsApp instance key, e.g. whatsapp:tenant-a")
     ),
     responses(
-        (status = 200, description = "WhatsApp QR scan status", body = serde_json::Value)
+        (status = 200, description = "WhatsApp bootstrap session created", body = serde_json::Value),
+        (status = 404, description = "Owned WhatsApp instance not found", body = serde_json::Value)
     )
 )]
-/// GET /api/channels/whatsapp/qr/status — Poll for QR scan completion.
-///
-/// After calling `/qr/start`, the frontend polls this to check if the user
-/// has scanned the QR code and the WhatsApp Web session is connected.
-pub async fn whatsapp_qr_status(
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
-
-    if gateway_url.is_empty() {
-        return Json(serde_json::json!({
-            "connected": false,
-            "message": "Gateway not available"
-        }));
-    }
-
-    let session_id = params.get("session_id").cloned().unwrap_or_default();
-    let status_url = format!(
-        "{}/login/status?session_id={}",
-        gateway_url.trim_end_matches('/'),
-        session_id
-    );
-
-    match gateway_http_get(&status_url).await {
-        Ok(body) => {
-            let connected = body
-                .get("connected")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let msg = body
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Waiting for scan...");
-            let expired = body
-                .get("expired")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            Json(serde_json::json!({
-                "connected": connected,
-                "message": msg,
-                "expired": expired,
-            }))
+pub async fn whatsapp_bootstrap_start(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(instance_key): Path<String>,
+) -> axum::response::Response {
+    let created_by =
+        match require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts) {
+            Ok(account_id) => account_id,
+            Err(response) => return response,
+        };
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_whatsapp_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WhatsApp instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
         }
-        Err(_) => Json(serde_json::json!({ "connected": false, "message": "Gateway unreachable" })),
+    };
+
+    let start_url = format!("{}/login/start", target.gateway_url.trim_end_matches('/'));
+    let body = match gateway_http_post_json(
+        &start_url,
+        &serde_json::json!({ "instance_key": target.instance_key }),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("Could not reach WhatsApp gateway: {e}"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+
+    let provider_handle = body
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if provider_handle.is_empty() {
+        return ApiErrorResponse::internal("WhatsApp gateway returned empty session_id")
+            .into_json_tuple()
+            .into_response();
     }
+
+    let now = chrono::Utc::now();
+    let session = crate::channel_bootstrap::ChannelBootstrapSession {
+        bootstrap_id: uuid::Uuid::new_v4().to_string(),
+        channel_type: "whatsapp".to_string(),
+        instance_key: target.instance_key.clone(),
+        account_id: target.account_id.clone(),
+        bootstrap_kind: crate::channel_bootstrap::BootstrapKind::QrLogin,
+        provider_handle: Some(provider_handle.to_string()),
+        provider_qr_payload: body
+            .get("qr_data_url")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        provider_qr_url: body
+            .get("qr_data_url")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        provider_pairing_code: None,
+        status: crate::channel_bootstrap::BootstrapStatus::Pending,
+        created_at: now,
+        updated_at: now,
+        expires_at: Some(now + chrono::Duration::minutes(5)),
+        created_by,
+        last_error: None,
+    };
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    if let Err(e) = store.create(session.clone()).await {
+        return ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(bootstrap_session_view(
+            &session,
+            body.get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Scan this QR code with WhatsApp → Linked Devices"),
+            body.get("connected")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        )),
+    )
+        .into_response()
 }
 
-/// Lightweight HTTP POST to a gateway URL. Returns parsed JSON body.
-async fn gateway_http_post(url_with_path: &str) -> Result<serde_json::Value, String> {
+#[utoipa::path(
+    get,
+    path = "/api/channels/whatsapp/{instance_key}/bootstrap/status",
+    tag = "channels",
+    params(
+        ("instance_key" = String, Path, description = "Owned WhatsApp instance key, e.g. whatsapp:tenant-a")
+    ),
+    responses(
+        (status = 200, description = "WhatsApp bootstrap status", body = serde_json::Value),
+        (status = 404, description = "Owned WhatsApp bootstrap session not found", body = serde_json::Value)
+    )
+)]
+pub async fn whatsapp_bootstrap_status(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(instance_key): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) =
+        require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
+    {
+        return response;
+    }
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_whatsapp_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WhatsApp instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
+        }
+    };
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    let session = match store
+        .get_latest_by_instance("whatsapp", &target.instance_key)
+        .await
+    {
+        Some(session) => session,
+        None => {
+            return ApiErrorResponse::not_found("Owned WhatsApp bootstrap session not found")
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+
+    if session.status != crate::channel_bootstrap::BootstrapStatus::Pending {
+        let connected = session.status == crate::channel_bootstrap::BootstrapStatus::Confirmed;
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &session,
+                "Owned bootstrap status loaded",
+                connected,
+            )),
+        )
+            .into_response();
+    }
+
+    if session
+        .expires_at
+        .map(|expires_at| chrono::Utc::now() >= expires_at)
+        .unwrap_or(false)
+    {
+        let expired = match store
+            .expire(&session.bootstrap_id, chrono::Utc::now())
+            .await
+        {
+            Ok(expired) => expired,
+            Err(e) => {
+                return ApiErrorResponse::internal(e)
+                    .into_json_tuple()
+                    .into_response()
+            }
+        };
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &expired,
+                "QR code expired — click Start to get a new one",
+                false,
+            )),
+        )
+            .into_response();
+    }
+
+    let status_url = format!(
+        "{}/login/status?instance_key={}",
+        target.gateway_url.trim_end_matches('/'),
+        url::form_urlencoded::byte_serialize(target.instance_key.as_bytes()).collect::<String>()
+    );
+    let body = match gateway_http_get(&status_url).await {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::OK,
+                Json(bootstrap_session_view(
+                    &session,
+                    "Waiting for scan...",
+                    false,
+                )),
+            )
+                .into_response()
+        }
+    };
+
+    let connected = body
+        .get("connected")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if connected {
+        let confirmed = match store
+            .confirm(&session.bootstrap_id, chrono::Utc::now())
+            .await
+        {
+            Ok(confirmed) => confirmed,
+            Err(e) => {
+                return ApiErrorResponse::internal(e)
+                    .into_json_tuple()
+                    .into_response()
+            }
+        };
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &confirmed,
+                body.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("WhatsApp login successful"),
+                true,
+            )),
+        )
+            .into_response();
+    }
+
+    let expired = body
+        .get("expired")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if expired {
+        let expired = match store
+            .expire(&session.bootstrap_id, chrono::Utc::now())
+            .await
+        {
+            Ok(expired) => expired,
+            Err(e) => {
+                return ApiErrorResponse::internal(e)
+                    .into_json_tuple()
+                    .into_response()
+            }
+        };
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &expired,
+                body.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("QR code expired — click Start to get a new one"),
+                false,
+            )),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(bootstrap_session_view(
+            &session,
+            body.get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Waiting for scan..."),
+            false,
+        )),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/channels/whatsapp/{instance_key}/bootstrap/cancel",
+    tag = "channels",
+    params(
+        ("instance_key" = String, Path, description = "Owned WhatsApp instance key, e.g. whatsapp:tenant-a")
+    ),
+    responses(
+        (status = 200, description = "WhatsApp bootstrap session cancelled", body = serde_json::Value),
+        (status = 404, description = "Owned WhatsApp bootstrap session not found", body = serde_json::Value)
+    )
+)]
+pub async fn whatsapp_bootstrap_cancel(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(instance_key): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) =
+        require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
+    {
+        return response;
+    }
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_whatsapp_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WhatsApp instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
+        }
+    };
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    let session = match store
+        .get_pending_by_instance("whatsapp", &target.instance_key)
+        .await
+    {
+        Some(session) => session,
+        None => {
+            return ApiErrorResponse::not_found("Owned WhatsApp bootstrap session not found")
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    let cancelled = match store
+        .cancel(&session.bootstrap_id, chrono::Utc::now())
+        .await
+    {
+        Ok(cancelled) => cancelled,
+        Err(e) => {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(bootstrap_session_view(
+            &cancelled,
+            "WhatsApp bootstrap session cancelled",
+            false,
+        )),
+    )
+        .into_response()
+}
+
+async fn gateway_http_post_json(
+    url_with_path: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Split into base URL + path from the full URL like "http://127.0.0.1:3009/login/start"
@@ -1796,8 +3347,11 @@ async fn gateway_http_post(url_with_path: &str) -> Result<serde_json::Value, Str
         .await
         .map_err(|e| format!("Connect failed: {e}"))?;
 
+    let body_str = serde_json::to_string(body).map_err(|e| format!("Encode failed: {e}"))?;
     let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body_str.len(),
+        body_str
     );
     stream
         .write_all(req.as_bytes())
@@ -1871,6 +3425,601 @@ async fn gateway_http_get(url_with_path: &str) -> Result<serde_json::Value, Stri
 /// iLink API base URL used by the WeChat adapter.
 const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
 
+struct WhatsAppBootstrapTarget {
+    account_id: String,
+    instance_key: String,
+    gateway_url: String,
+}
+
+struct WeChatBootstrapTarget {
+    account_id: String,
+    instance_key: String,
+    bot_token_env: String,
+}
+
+fn require_admin_account_id(
+    account: &AccountId,
+    admin_accounts: &[String],
+) -> Result<String, axum::response::Response> {
+    let account_id = require_tenant_account_id(account)?.to_string();
+    if let Err((code, json)) = require_admin(account, admin_accounts) {
+        return Err((code, json).into_response());
+    }
+    Ok(account_id)
+}
+
+fn wechat_ilink_base() -> String {
+    std::env::var("LIBREFANG_WECHAT_ILINK_BASE").unwrap_or_else(|_| WECHAT_ILINK_BASE.to_string())
+}
+
+fn wechat_instance_key(account_id: &str) -> String {
+    format!("wechat:{account_id}")
+}
+
+fn channel_bootstrap_store(
+    home_dir: &std::path::Path,
+) -> crate::channel_bootstrap::ChannelBootstrapStore {
+    crate::channel_bootstrap::ChannelBootstrapStore::new(home_dir)
+}
+
+fn whatsapp_instance_key(account_id: &str) -> String {
+    format!("whatsapp:{account_id}")
+}
+
+fn resolve_whatsapp_bootstrap_target(
+    channels: &librefang_types::config::ChannelsConfig,
+    instance_key: &str,
+) -> Option<WhatsAppBootstrapTarget> {
+    channels.whatsapp.iter().find_map(|entry| {
+        let account_id = entry.account_id.as_deref()?.trim();
+        if account_id.is_empty() {
+            return None;
+        }
+        let derived_instance_key = whatsapp_instance_key(account_id);
+        if derived_instance_key != instance_key {
+            return None;
+        }
+        let gateway_url = std::env::var(&entry.gateway_url_env)
+            .ok()?
+            .trim()
+            .to_string();
+        if gateway_url.is_empty() {
+            return None;
+        }
+        Some(WhatsAppBootstrapTarget {
+            account_id: account_id.to_string(),
+            instance_key: derived_instance_key,
+            gateway_url,
+        })
+    })
+}
+
+fn resolve_wechat_bootstrap_target(
+    config: &librefang_types::config::ChannelsConfig,
+    instance_key: &str,
+) -> Option<WeChatBootstrapTarget> {
+    config.wechat.iter().find_map(|entry| {
+        let account_id = entry.account_id.as_deref()?.trim();
+        if account_id.is_empty() {
+            return None;
+        }
+        let derived_instance_key = wechat_instance_key(account_id);
+        if derived_instance_key != instance_key {
+            return None;
+        }
+        let bot_token_env = entry.bot_token_env.trim();
+        if bot_token_env.is_empty() {
+            return None;
+        }
+        Some(WeChatBootstrapTarget {
+            account_id: account_id.to_string(),
+            instance_key: derived_instance_key,
+            bot_token_env: bot_token_env.to_string(),
+        })
+    })
+}
+
+async fn persist_wechat_owned_bot_token(
+    home_dir: &std::path::Path,
+    token_env_name: &str,
+    bot_token: &str,
+) -> Result<(), String> {
+    validate_env_var(token_env_name, bot_token)?;
+    write_secret_env(&home_dir.join("secrets.env"), token_env_name, bot_token)
+        .map_err(|e| format!("Failed to persist WeChat bot token: {e}"))?;
+    // SAFETY: configuration mutation during explicit admin bootstrap flow.
+    unsafe {
+        std::env::set_var(token_env_name, bot_token);
+    }
+    Ok(())
+}
+
+fn bootstrap_session_view(
+    session: &crate::channel_bootstrap::ChannelBootstrapSession,
+    message: &str,
+    connected: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "bootstrap_id": session.bootstrap_id,
+        "channel_type": session.channel_type,
+        "instance_key": session.instance_key,
+        "account_id": session.account_id,
+        "status": serde_json::to_value(session.status).unwrap_or(serde_json::Value::Null),
+        "qr_url": session.provider_qr_url,
+        "qr_payload": session.provider_qr_payload,
+        "expires_at": session.expires_at,
+        "connected": connected,
+        "message": message,
+        "last_error": session.last_error,
+    })
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/channels/wechat/{instance_key}/bootstrap/start",
+    tag = "channels",
+    params(
+        ("instance_key" = String, Path, description = "Owned WeChat instance key, e.g. wechat:tenant-a")
+    ),
+    responses(
+        (status = 200, description = "WeChat bootstrap session created", body = serde_json::Value),
+        (status = 404, description = "Owned WeChat instance not found", body = serde_json::Value)
+    )
+)]
+pub async fn wechat_bootstrap_start(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(instance_key): Path<String>,
+) -> axum::response::Response {
+    let created_by =
+        match require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts) {
+            Ok(account_id) => account_id,
+            Err(response) => return response,
+        };
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_wechat_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WeChat instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
+        }
+    };
+
+    let client = match librefang_runtime::http_client::client_builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("HTTP client error: {e}"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+
+    let url = format!(
+        "{}/ilink/bot/get_bot_qrcode?bot_type=3",
+        wechat_ilink_base()
+    );
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("Could not reach iLink API: {e}"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return ApiErrorResponse::internal(format!("iLink QR request failed ({status}): {body}"))
+            .into_json_tuple()
+            .into_response();
+    }
+    let body = match response.json::<serde_json::Value>().await {
+        Ok(body) => body,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("Failed to parse iLink response: {e}"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    let provider_handle = body
+        .get("qrcode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    if provider_handle.is_empty() {
+        return ApiErrorResponse::internal("iLink returned empty qrcode")
+            .into_json_tuple()
+            .into_response();
+    }
+
+    let now = chrono::Utc::now();
+    let session = crate::channel_bootstrap::ChannelBootstrapSession {
+        bootstrap_id: uuid::Uuid::new_v4().to_string(),
+        channel_type: "wechat".to_string(),
+        instance_key: target.instance_key.clone(),
+        account_id: target.account_id.clone(),
+        bootstrap_kind: crate::channel_bootstrap::BootstrapKind::QrLogin,
+        provider_handle: Some(provider_handle.to_string()),
+        provider_qr_payload: body
+            .get("qrcode_img_content")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        provider_qr_url: body
+            .get("qrcode_img_content")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        provider_pairing_code: None,
+        status: crate::channel_bootstrap::BootstrapStatus::Pending,
+        created_at: now,
+        updated_at: now,
+        expires_at: Some(now + chrono::Duration::minutes(5)),
+        created_by,
+        last_error: None,
+    };
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    if let Err(e) = store.create(session.clone()).await {
+        return ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(bootstrap_session_view(
+            &session,
+            "Scan this QR code with your WeChat app to log in",
+            false,
+        )),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/channels/wechat/{instance_key}/bootstrap/status",
+    tag = "channels",
+    params(
+        ("instance_key" = String, Path, description = "Owned WeChat instance key, e.g. wechat:tenant-a")
+    ),
+    responses(
+        (status = 200, description = "WeChat bootstrap status", body = serde_json::Value),
+        (status = 404, description = "Owned WeChat bootstrap session not found", body = serde_json::Value)
+    )
+)]
+pub async fn wechat_bootstrap_status(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(instance_key): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) =
+        require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
+    {
+        return response;
+    }
+
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_wechat_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WeChat instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
+        }
+    };
+
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    let session = match store
+        .get_latest_by_instance("wechat", &target.instance_key)
+        .await
+    {
+        Some(session) => session,
+        None => {
+            return ApiErrorResponse::not_found("Owned WeChat bootstrap session not found")
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+
+    if session.status != crate::channel_bootstrap::BootstrapStatus::Pending {
+        let connected = session.status == crate::channel_bootstrap::BootstrapStatus::Confirmed;
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &session,
+                "Owned bootstrap status loaded",
+                connected,
+            )),
+        )
+            .into_response();
+    }
+
+    if session
+        .expires_at
+        .map(|expires_at| chrono::Utc::now() >= expires_at)
+        .unwrap_or(false)
+    {
+        let expired = match store
+            .expire(&session.bootstrap_id, chrono::Utc::now())
+            .await
+        {
+            Ok(expired) => expired,
+            Err(e) => {
+                return ApiErrorResponse::internal(e)
+                    .into_json_tuple()
+                    .into_response()
+            }
+        };
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &expired,
+                "QR code expired — click Start to get a new one",
+                false,
+            )),
+        )
+            .into_response();
+    }
+
+    let provider_handle = match session.provider_handle.as_deref() {
+        Some(handle) if !handle.is_empty() => handle,
+        _ => {
+            return ApiErrorResponse::internal(
+                "Owned WeChat bootstrap session is missing provider handle",
+            )
+            .into_json_tuple()
+            .into_response()
+        }
+    };
+
+    let client = match librefang_runtime::http_client::client_builder()
+        .timeout(std::time::Duration::from_secs(35))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("HTTP client error: {e}"))
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    let encoded: String =
+        url::form_urlencoded::byte_serialize(provider_handle.as_bytes()).collect();
+    let url = format!(
+        "{}/ilink/bot/get_qrcode_status?qrcode={encoded}",
+        wechat_ilink_base()
+    );
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(_) => {
+            return (
+                StatusCode::OK,
+                Json(bootstrap_session_view(
+                    &session,
+                    "Waiting for scan...",
+                    false,
+                )),
+            )
+                .into_response()
+        }
+    };
+    if !response.status().is_success() {
+        return (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &session,
+                "Waiting for scan...",
+                false,
+            )),
+        )
+            .into_response();
+    }
+    let body = match response.json::<serde_json::Value>().await {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::OK,
+                Json(bootstrap_session_view(
+                    &session,
+                    "Failed to parse status response",
+                    false,
+                )),
+            )
+                .into_response()
+        }
+    };
+
+    match body
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("pending")
+    {
+        "confirmed" => {
+            let bot_token = body
+                .get("bot_token")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if bot_token.is_empty() {
+                let failed = match store
+                    .fail(
+                        &session.bootstrap_id,
+                        chrono::Utc::now(),
+                        "WeChat confirmation response did not include bot_token".to_string(),
+                    )
+                    .await
+                {
+                    Ok(failed) => failed,
+                    Err(e) => {
+                        return ApiErrorResponse::internal(e)
+                            .into_json_tuple()
+                            .into_response()
+                    }
+                };
+                return (
+                    StatusCode::OK,
+                    Json(bootstrap_session_view(
+                        &failed,
+                        "WeChat confirmation failed",
+                        false,
+                    )),
+                )
+                    .into_response();
+            }
+            if let Err(e) = persist_wechat_owned_bot_token(
+                state.kernel.home_dir(),
+                &target.bot_token_env,
+                bot_token,
+            )
+            .await
+            {
+                return ApiErrorResponse::internal(e)
+                    .into_json_tuple()
+                    .into_response();
+            }
+            let confirmed = match store
+                .confirm(&session.bootstrap_id, chrono::Utc::now())
+                .await
+            {
+                Ok(confirmed) => confirmed,
+                Err(e) => {
+                    return ApiErrorResponse::internal(e)
+                        .into_json_tuple()
+                        .into_response()
+                }
+            };
+            (
+                StatusCode::OK,
+                Json(bootstrap_session_view(
+                    &confirmed,
+                    "WeChat login successful",
+                    true,
+                )),
+            )
+                .into_response()
+        }
+        "expired" => {
+            let expired = match store
+                .expire(&session.bootstrap_id, chrono::Utc::now())
+                .await
+            {
+                Ok(expired) => expired,
+                Err(e) => {
+                    return ApiErrorResponse::internal(e)
+                        .into_json_tuple()
+                        .into_response()
+                }
+            };
+            (
+                StatusCode::OK,
+                Json(bootstrap_session_view(
+                    &expired,
+                    "QR code expired — click Start to get a new one",
+                    false,
+                )),
+            )
+                .into_response()
+        }
+        _ => (
+            StatusCode::OK,
+            Json(bootstrap_session_view(
+                &session,
+                "Waiting for scan...",
+                false,
+            )),
+        )
+            .into_response(),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/channels/wechat/{instance_key}/bootstrap/cancel",
+    tag = "channels",
+    params(
+        ("instance_key" = String, Path, description = "Owned WeChat instance key, e.g. wechat:tenant-a")
+    ),
+    responses(
+        (status = 200, description = "WeChat bootstrap session cancelled", body = serde_json::Value),
+        (status = 404, description = "Owned WeChat bootstrap session not found", body = serde_json::Value)
+    )
+)]
+pub async fn wechat_bootstrap_cancel(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Path(instance_key): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) =
+        require_admin_account_id(&account, &state.kernel.config_ref().admin_accounts).map(|_| ())
+    {
+        return response;
+    }
+    let target = {
+        let live_channels = state.channels_config.read().await;
+        match resolve_wechat_bootstrap_target(&live_channels, &instance_key) {
+            Some(target) => target,
+            None => {
+                return ApiErrorResponse::not_found("Owned WeChat instance not found")
+                    .into_json_tuple()
+                    .into_response()
+            }
+        }
+    };
+    let store = channel_bootstrap_store(state.kernel.home_dir());
+    if let Err(e) = store.load() {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    let session = match store
+        .get_pending_by_instance("wechat", &target.instance_key)
+        .await
+    {
+        Some(session) => session,
+        None => {
+            return ApiErrorResponse::not_found("Owned WeChat bootstrap session not found")
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    let cancelled = match store
+        .cancel(&session.bootstrap_id, chrono::Utc::now())
+        .await
+    {
+        Ok(cancelled) => cancelled,
+        Err(e) => {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(bootstrap_session_view(
+            &cancelled,
+            "WeChat bootstrap session cancelled",
+            false,
+        )),
+    )
+        .into_response()
+}
+
 #[utoipa::path(
     post,
     path = "/api/channels/wechat/qr/start",
@@ -1880,7 +4029,13 @@ const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
     )
 )]
 /// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
-pub async fn wechat_qr_start() -> impl IntoResponse {
+pub async fn wechat_qr_start(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -1890,7 +4045,8 @@ pub async fn wechat_qr_start() -> impl IntoResponse {
             return Json(serde_json::json!({
                 "available": false,
                 "message": format!("HTTP client error: {e}")
-            }));
+            }))
+            .into_response();
         }
     };
 
@@ -1904,7 +4060,8 @@ pub async fn wechat_qr_start() -> impl IntoResponse {
                     return Json(serde_json::json!({
                         "available": false,
                         "message": "iLink returned empty qrcode"
-                    }));
+                    }))
+                    .into_response();
                 }
                 Json(serde_json::json!({
                     "available": true,
@@ -1912,11 +4069,13 @@ pub async fn wechat_qr_start() -> impl IntoResponse {
                     "qr_url": qrcode_url,
                     "message": "Scan this QR code with your WeChat app to log in",
                 }))
+                .into_response()
             }
             Err(e) => Json(serde_json::json!({
                 "available": false,
                 "message": format!("Failed to parse iLink response: {e}")
-            })),
+            }))
+            .into_response(),
         },
         Ok(resp) => {
             let status = resp.status();
@@ -1925,11 +4084,13 @@ pub async fn wechat_qr_start() -> impl IntoResponse {
                 "available": false,
                 "message": format!("iLink QR request failed ({status}): {body}")
             }))
+            .into_response()
         }
         Err(e) => Json(serde_json::json!({
             "available": false,
             "message": format!("Could not reach iLink API: {e}")
-        })),
+        }))
+        .into_response(),
     }
 }
 
@@ -1946,15 +4107,21 @@ pub async fn wechat_qr_start() -> impl IntoResponse {
 )]
 /// GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.
 pub async fn wechat_qr_status(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let qr_code = params.get("qr_code").cloned().unwrap_or_default();
     if qr_code.is_empty() {
         return Json(serde_json::json!({
             "connected": false,
             "expired": false,
             "message": "Missing qr_code parameter"
-        }));
+        }))
+        .into_response();
     }
 
     // iLink uses long-polling: the request hangs until the user scans or it
@@ -1970,7 +4137,8 @@ pub async fn wechat_qr_status(
                 "connected": false,
                 "expired": false,
                 "message": "HTTP client error"
-            }));
+            }))
+            .into_response();
         }
     };
 
@@ -1990,31 +4158,36 @@ pub async fn wechat_qr_status(
                             "message": "WeChat login successful",
                             "bot_token": bot_token,
                         }))
+                        .into_response()
                     }
                     "expired" => Json(serde_json::json!({
                         "connected": false,
                         "expired": true,
                         "message": "QR code expired — click Start to get a new one"
-                    })),
+                    }))
+                    .into_response(),
                     _ => Json(serde_json::json!({
                         "connected": false,
                         "expired": false,
                         "message": "Waiting for scan..."
-                    })),
+                    }))
+                    .into_response(),
                 }
             }
             Err(_) => Json(serde_json::json!({
                 "connected": false,
                 "expired": false,
                 "message": "Failed to parse status response"
-            })),
+            }))
+            .into_response(),
         },
         // Timeout is normal for long-poll — treat as "still waiting"
         _ => Json(serde_json::json!({
             "connected": false,
             "expired": false,
             "message": "Waiting for scan..."
-        })),
+        }))
+        .into_response(),
     }
 }
 
@@ -2033,8 +4206,14 @@ pub async fn wechat_qr_status(
         (status = 200, description = "Channel metadata from registry", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_channel_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_channel_registry(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let channels_dir = state.kernel.home_dir().join("channels");
     let metadata = librefang_runtime::channel_registry::load_channel_metadata(&channels_dir);
-    Json(serde_json::to_value(&metadata).unwrap_or_default())
+    Json(serde_json::to_value(&metadata).unwrap_or_default()).into_response()
 }

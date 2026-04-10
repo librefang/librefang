@@ -39,7 +39,7 @@ pub use librefang_types::memory::{
 };
 
 // Re-export proactive memory store
-pub use proactive::{MemoryExportItem, MemoryStats, ProactiveMemoryStore};
+pub use proactive::{MemoryExportItem, MemoryScope, MemoryStats, ProactiveMemoryStore};
 pub use prompt::PromptStore;
 
 // Re-export vector store implementations

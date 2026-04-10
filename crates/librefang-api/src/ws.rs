@@ -12,6 +12,8 @@
 //! Server → Client: `{"type":"silent_complete"}` (agent chose NO_REPLY)
 //! Server → Client: `{"type":"canvas","canvas_id":"...","html":"...","title":"..."}`
 
+use crate::middleware::AccountId;
+use crate::routes::shared::check_account;
 use crate::routes::AppState;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
@@ -130,6 +132,7 @@ pub async fn agent_ws(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(id): Path<String>,
+    account: AccountId,
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
@@ -195,14 +198,25 @@ pub async fn agent_ws(
         }
     };
 
-    // Verify agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return axum::http::StatusCode::NOT_FOUND.into_response();
+    // Verify agent exists AND belongs to the requesting tenant.
+    // This MUST happen before ws.on_upgrade() — once the WebSocket
+    // handshake completes we can no longer return HTTP error codes.
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (axum::http::StatusCode::NOT_FOUND, "Agent not found").into_response();
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (axum::http::StatusCode::NOT_FOUND, "Agent not found").into_response();
     }
 
+    let account_id = account.0.clone();
     let id_str = id.clone();
-    ws.on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, ip, guard))
-        .into_response()
+    ws.on_upgrade(move |socket| {
+        handle_agent_ws(socket, state, agent_id, id_str, ip, guard, account_id)
+    })
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +234,7 @@ async fn handle_agent_ws(
     id_str: String,
     client_ip: IpAddr,
     _guard: WsConnectionGuard,
+    account_id: Option<String>,
 ) {
     info!(agent_id = %id_str, "WebSocket connected");
 
@@ -242,15 +257,21 @@ async fn handle_agent_ws(
     // Spawn background task: periodic agent list updates with change detection
     let sender_clone = Arc::clone(&sender);
     let state_clone = Arc::clone(&state);
+    let ws_account_id = account_id.clone();
     let update_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         let mut last_hash: u64 = 0;
         loop {
             interval.tick().await;
-            let agents: Vec<serde_json::Value> = state_clone
-                .kernel
-                .agent_registry()
-                .list()
+            // Tenant-scoped agent list: only broadcast agents belonging to
+            // the same account as the WebSocket owner. An unscoped account is
+            // legacy compatibility state and should not occur on normal
+            // tenant-facing WebSocket traffic.
+            let mut entries = state_clone.kernel.agent_registry().list();
+            if let Some(ref owner_id) = ws_account_id {
+                entries.retain(|e| e.account_id.as_deref() == Some(owner_id.as_str()));
+            }
+            let agents: Vec<serde_json::Value> = entries
                 .into_iter()
                 .map(|e| {
                     serde_json::json!({
@@ -366,7 +387,16 @@ async fn handle_agent_ws(
                 }
                 msg_times.push(now);
 
-                handle_text_message(&sender, &state, agent_id, &text, &verbose, client_ip).await;
+                handle_text_message(
+                    &sender,
+                    &state,
+                    agent_id,
+                    &text,
+                    &verbose,
+                    client_ip,
+                    &account_id,
+                )
+                .await;
             }
             Message::Close(_) => {
                 info!(agent_id = %id_str, "WebSocket closed by client");
@@ -398,6 +428,7 @@ async fn handle_text_message(
     text: &str,
     verbose: &Arc<AtomicU8>,
     client_ip: IpAddr,
+    account_id: &Option<String>,
 ) {
     // Parse the message
     let parsed: serde_json::Value = match serde_json::from_str(text) {
@@ -495,14 +526,16 @@ async fn handle_text_message(
                     .filter_map(|a| serde_json::from_value(a.clone()).ok())
                     .collect();
                 if !refs.is_empty() {
-                    let image_blocks = crate::routes::resolve_attachments(&refs);
-                    if !image_blocks.is_empty() {
-                        has_images = true;
-                        crate::routes::inject_attachments_into_session(
-                            &state.kernel,
-                            agent_id,
-                            image_blocks,
-                        );
+                    if let Some(account_id) = account_id.as_deref() {
+                        let image_blocks = crate::routes::resolve_attachments(&refs, account_id);
+                        if !image_blocks.is_empty() {
+                            has_images = true;
+                            crate::routes::inject_attachments_into_session(
+                                &state.kernel,
+                                agent_id,
+                                image_blocks,
+                            );
+                        }
                     }
                 }
             }
@@ -559,7 +592,7 @@ async fn handle_text_message(
                 is_group: false,
                 was_mentioned: false,
                 thread_id: None,
-                account_id: None,
+                account_id: account_id.clone(),
             };
             match state
                 .kernel

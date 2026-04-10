@@ -41,6 +41,7 @@ use librefang_types::tool::{AgentLoopSignal, ToolApprovalSubmission, ToolDefinit
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use librefang_channels::types::ChannelAdapter;
 use librefang_channels::types::SenderContext;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -341,6 +342,10 @@ pub struct LibreFangKernel {
     pub(crate) delivery_tracker: DeliveryTracker,
     /// Cron job scheduler.
     pub(crate) cron_scheduler: crate::cron::CronScheduler,
+    /// Tenant-owned goal store.
+    pub(crate) goals: crate::goals::GoalStore,
+    /// Tenant-owned provider settings and defaults.
+    pub(crate) provider_accounts: crate::provider_accounts::ProviderAccountStore,
     /// Execution approval manager.
     pub(crate) approval_manager: crate::approval::ApprovalManager,
     /// Agent bindings for multi-account routing (Mutex for runtime add/remove).
@@ -658,7 +663,7 @@ fn init_git_if_missing(home_dir: &Path) {
             "commit",
             "-q",
             "-m",
-            "chore: initial librefang config",
+            "chore(kernel): initial librefang config",
         ])
         .current_dir(home_dir)
         .status();
@@ -1228,6 +1233,18 @@ impl LibreFangKernel {
         &self.cron_scheduler
     }
 
+    /// Tenant-owned goal store.
+    #[inline]
+    pub fn goal_store(&self) -> &crate::goals::GoalStore {
+        &self.goals
+    }
+
+    /// Tenant-owned provider settings and defaults.
+    #[inline]
+    pub fn provider_store(&self) -> &crate::provider_accounts::ProviderAccountStore {
+        &self.provider_accounts
+    }
+
     /// Execution approval manager.
     #[inline]
     pub fn approvals(&self) -> &crate::approval::ApprovalManager {
@@ -1360,6 +1377,45 @@ impl LibreFangKernel {
         &self,
     ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>> {
         &self.channel_adapters
+    }
+
+    fn resolve_channel_adapter(
+        &self,
+        channel: &str,
+    ) -> Result<Arc<dyn librefang_channels::types::ChannelAdapter>, String> {
+        if let Some(adapter) = self.channel_adapters.get(channel) {
+            return Ok(adapter.clone());
+        }
+
+        let prefix = format!("{channel}:");
+        let matches: Vec<(String, Arc<dyn ChannelAdapter>)> = self
+            .channel_adapters
+            .iter()
+            .filter(|entry| entry.key() == channel || entry.key().starts_with(&prefix))
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+
+        match matches.len() {
+            1 => Ok(matches.into_iter().next().unwrap().1),
+            0 => {
+                let available: Vec<String> = self
+                    .channel_adapters
+                    .iter()
+                    .map(|e| e.key().clone())
+                    .collect();
+                Err(format!(
+                    "Channel '{}' not found. Available channels: {:?}",
+                    channel, available
+                ))
+            }
+            _ => {
+                let available: Vec<String> = matches.into_iter().map(|(key, _)| key).collect();
+                Err(format!(
+                    "Channel '{}' is ambiguous. Use a tenant-qualified channel key. Matches: {:?}",
+                    channel, available
+                ))
+            }
+        }
     }
 
     /// Agent bindings for multi-account routing.
@@ -1698,9 +1754,12 @@ impl LibreFangKernel {
                             "vector_backend = \"supabase\" requires env var {key_env} to be set"
                         ))
                     })?;
-                    let store = std::sync::Arc::new(librefang_memory::SupabaseVectorStore::new(
-                        url, api_key,
-                    ));
+                    let mut store = librefang_memory::SupabaseVectorStore::new(url, api_key);
+                    if let Some(dims) = config.memory.vector_dimensions {
+                        store = store.with_expected_dimensions(dims);
+                        tracing::info!("Vector store dimensions: {dims}");
+                    }
+                    let store = std::sync::Arc::new(store);
                     substrate.set_vector_store(store);
                     tracing::info!("Vector store backend: supabase ({})", url);
                 }
@@ -2303,6 +2362,27 @@ impl LibreFangKernel {
             }
         }
 
+        let goal_store = crate::goals::GoalStore::new(&config.home_dir);
+        match goal_store.load() {
+            Ok(count) => {
+                if count > 0 {
+                    info!("Loaded {count} goal(s) from disk");
+                }
+            }
+            Err(e) => warn!("Failed to load goals: {e}"),
+        }
+
+        let provider_account_store =
+            crate::provider_accounts::ProviderAccountStore::new(&config.home_dir);
+        match provider_account_store.load() {
+            Ok(count) => {
+                if count > 0 {
+                    info!("Loaded {count} tenant provider record(s) from disk");
+                }
+            }
+            Err(e) => warn!("Failed to load tenant provider records: {e}"),
+        }
+
         // Initialize execution approval manager
         let approval_manager = crate::approval::ApprovalManager::new_with_db(
             config.approval.clone(),
@@ -2408,6 +2488,8 @@ impl LibreFangKernel {
             effective_mcp_servers: std::sync::RwLock::new(all_mcp_servers),
             delivery_tracker: DeliveryTracker::new(),
             cron_scheduler,
+            goals: goal_store,
+            provider_accounts: provider_account_store,
             approval_manager,
             bindings: std::sync::Mutex::new(initial_bindings),
             broadcast: initial_broadcast,
@@ -2648,7 +2730,6 @@ impl LibreFangKernel {
                     // 3. Agent named "assistant" (auto-spawned) → update to match
                     //    default_model so config.toml changes take effect on restart
                     {
-                        let dm = &cfg.default_model;
                         let is_default_provider = restored_entry.manifest.model.provider.is_empty()
                             || restored_entry.manifest.model.provider == "default";
                         let is_default_model = restored_entry.manifest.model.model.is_empty()
@@ -2675,23 +2756,10 @@ impl LibreFangKernel {
                             || toml_says_default
                             || is_auto_spawned
                         {
-                            if !dm.provider.is_empty() {
-                                restored_entry.manifest.model.provider = dm.provider.clone();
-                            }
-                            if !dm.model.is_empty() {
-                                restored_entry.manifest.model.model = dm.model.clone();
-                            }
-                            if !dm.api_key_env.is_empty() {
-                                restored_entry.manifest.model.api_key_env =
-                                    Some(dm.api_key_env.clone());
-                            }
-                            if dm.base_url.is_some() {
-                                restored_entry
-                                    .manifest
-                                    .model
-                                    .base_url
-                                    .clone_from(&dm.base_url);
-                            }
+                            let _ = kernel.apply_effective_default_model(
+                                &mut restored_entry.manifest,
+                                restored_entry.account_id.as_deref(),
+                            );
                         }
                     }
 
@@ -2800,6 +2868,15 @@ system_prompt = "You are a helpful assistant."
         self.spawn_agent_with_source(manifest, None)
     }
 
+    /// Spawn a new tenant-owned agent from a manifest.
+    pub fn spawn_agent_owned(
+        &self,
+        manifest: AgentManifest,
+        account_id: impl Into<String>,
+    ) -> KernelResult<AgentId> {
+        self.spawn_agent_owned_with_source(manifest, account_id, None)
+    }
+
     /// Spawn a new agent from a manifest and record its source TOML path.
     pub fn spawn_agent_with_source(
         &self,
@@ -2807,6 +2884,21 @@ system_prompt = "You are a helpful assistant."
         source_toml_path: Option<PathBuf>,
     ) -> KernelResult<AgentId> {
         self.spawn_agent_with_parent_and_source(manifest, None, source_toml_path)
+    }
+
+    /// Spawn a new tenant-owned agent from a manifest and record its source TOML path.
+    pub fn spawn_agent_owned_with_source(
+        &self,
+        manifest: AgentManifest,
+        account_id: impl Into<String>,
+        source_toml_path: Option<PathBuf>,
+    ) -> KernelResult<AgentId> {
+        self.spawn_agent_with_parent_source_and_owner(
+            manifest,
+            None,
+            source_toml_path,
+            Some(account_id.into()),
+        )
     }
 
     /// Spawn a new agent with an optional parent for lineage tracking.
@@ -2825,7 +2917,17 @@ system_prompt = "You are a helpful assistant."
         parent: Option<AgentId>,
         source_toml_path: Option<PathBuf>,
     ) -> KernelResult<AgentId> {
-        self.spawn_agent_inner(manifest, parent, source_toml_path, None)
+        self.spawn_agent_with_parent_source_and_owner(manifest, parent, source_toml_path, None)
+    }
+
+    fn spawn_agent_with_parent_source_and_owner(
+        &self,
+        manifest: AgentManifest,
+        parent: Option<AgentId>,
+        source_toml_path: Option<PathBuf>,
+        account_id: Option<String>,
+    ) -> KernelResult<AgentId> {
+        self.spawn_agent_inner(manifest, parent, source_toml_path, None, account_id)
     }
 
     /// Spawn a new agent with all options including a predetermined ID.
@@ -2835,6 +2937,7 @@ system_prompt = "You are a helpful assistant."
         parent: Option<AgentId>,
         source_toml_path: Option<PathBuf>,
         predetermined_id: Option<AgentId>,
+        account_id: Option<String>,
     ) -> KernelResult<AgentId> {
         let agent_id = predetermined_id.unwrap_or_default();
         let session_id = SessionId::new();
@@ -2928,6 +3031,7 @@ system_prompt = "You are a helpful assistant."
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand,
+            account_id,
         };
         self.registry
             .register(entry.clone())
@@ -2965,7 +3069,8 @@ system_prompt = "You are a helpful assistant."
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
-                    self.triggers.register(agent_id, pattern, prompt, 0);
+                    self.triggers
+                        .register(entry.account_id.clone(), agent_id, pattern, prompt, 0);
                 }
             }
         }
@@ -2978,7 +3083,8 @@ system_prompt = "You are a helpful assistant."
                 agent_id,
                 name: name.clone(),
             }),
-        );
+        )
+        .with_account_id(entry.account_id.clone());
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
         let _triggered = self.triggers.evaluate(&event);
 
@@ -3138,12 +3244,15 @@ system_prompt = "You are a helpful assistant."
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
-            let user_name = self
-                .memory
-                .structured_get(shared_id, "user_name")
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(String::from));
+            let user_name =
+                tenant_shared_memory_lookup_key(entry.account_id.as_deref(), "user_name", None)
+                    .and_then(|scoped| {
+                        self.memory
+                            .structured_get(shared_id, &scoped)
+                            .ok()
+                            .flatten()
+                            .and_then(|v| v.as_str().map(String::from))
+                    });
 
             let peer_agents: Vec<(String, String, String)> = self
                 .registry
@@ -3206,7 +3315,12 @@ system_prompt = "You are a helpful assistant."
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
         }
 
-        let driver = self.resolve_driver(&manifest)?;
+        let account_id = self
+            .registry
+            .get(agent_id)
+            .and_then(|entry| entry.account_id.clone());
+        self.apply_effective_default_model(&mut manifest, account_id.as_deref())?;
+        let driver = self.resolve_driver(&manifest, account_id.as_deref())?;
 
         let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
             cat.find_model(&manifest.model.model)
@@ -3683,7 +3797,7 @@ system_prompt = "You are a helpful assistant."
 
         let tools = self.available_tools(agent_id);
         let tools = entry.mode.filter_tools((*tools).clone());
-        let driver = self.resolve_driver(&entry.manifest)?;
+        let driver = self.resolve_driver(&entry.manifest, entry.account_id.as_deref())?;
 
         // Look up model's actual context window from the catalog
         let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
@@ -3720,12 +3834,18 @@ system_prompt = "You are a helpful assistant."
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
             let stable_prefix_mode = cfg.stable_prefix_mode;
-            let user_name = self
-                .memory
-                .structured_get(shared_id, "user_name")
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(String::from));
+            let user_name = tenant_shared_memory_lookup_key(
+                entry.account_id.as_deref(),
+                "user_name",
+                sender_context.map(|s| s.user_id.as_str()),
+            )
+            .and_then(|scoped| {
+                self.memory
+                    .structured_get(shared_id, &scoped)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_str().map(String::from))
+            });
 
             let peer_agents: Vec<(String, String, String)> = self
                 .registry
@@ -4657,11 +4777,8 @@ system_prompt = "You are a helpful assistant."
         let mut manifest = entry.manifest.clone();
 
         // Resolve "default" provider/model to the current effective default.
-        // This covers three cases:
-        // 1. New agents stored as "default"/"default" (post-fix spawn behavior)
-        // 2. The auto-spawned "assistant" agent that may have a stale concrete
-        //    provider/model in DB from before a provider switch
-        // 3. TOML agents with provider="default" that got a concrete value baked in
+        // Tenant-bound agents use tenant-owned provider defaults; unowned agents
+        // use the daemon default model.
         {
             let is_default_provider =
                 manifest.model.provider.is_empty() || manifest.model.provider == "default";
@@ -4672,23 +4789,7 @@ system_prompt = "You are a helpful assistant."
                     .description
                     .starts_with("General-purpose assistant");
             if (is_default_provider && is_default_model) || is_auto_spawned {
-                let override_guard = self
-                    .default_model_override
-                    .read()
-                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-                let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
-                if !dm.provider.is_empty() {
-                    manifest.model.provider = dm.provider.clone();
-                }
-                if !dm.model.is_empty() {
-                    manifest.model.model = dm.model.clone();
-                }
-                if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
-                    manifest.model.api_key_env = Some(dm.api_key_env.clone());
-                }
-                if dm.base_url.is_some() && manifest.model.base_url.is_none() {
-                    manifest.model.base_url.clone_from(&dm.base_url);
-                }
+                self.apply_effective_default_model(&mut manifest, entry.account_id.as_deref())?;
             }
         }
 
@@ -4719,12 +4820,18 @@ system_prompt = "You are a helpful assistant."
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
             let stable_prefix_mode = cfg.stable_prefix_mode;
-            let user_name = self
-                .memory
-                .structured_get(shared_id, "user_name")
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(String::from));
+            let user_name = tenant_shared_memory_lookup_key(
+                entry.account_id.as_deref(),
+                "user_name",
+                sender_context.map(|s| s.user_id.as_str()),
+            )
+            .and_then(|scoped| {
+                self.memory
+                    .structured_get(shared_id, &scoped)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_str().map(String::from))
+            });
 
             let peer_agents: Vec<(String, String, String)> = self
                 .registry
@@ -4908,7 +5015,7 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        let driver = self.resolve_driver(&manifest)?;
+        let driver = self.resolve_driver(&manifest, entry.account_id.as_deref())?;
 
         // Look up model's actual context window from the catalog
         let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
@@ -6109,7 +6216,7 @@ system_prompt = "You are a helpful assistant."
             ));
         }
 
-        let driver = self.resolve_driver(&entry.manifest)?;
+        let driver = self.resolve_driver(&entry.manifest, entry.account_id.as_deref())?;
         // Strip provider prefix so the model name is valid for the upstream API.
         let model = librefang_runtime::agent_loop::strip_provider_prefix(
             &entry.manifest.model.model,
@@ -6546,6 +6653,7 @@ system_prompt = "You are a helpful assistant."
                 None,
                 Some(hand_toml_path),
                 Some(deterministic_id),
+                None,
             )?;
 
             agent_ids_map.insert(role.clone(), agent_id);
@@ -7016,6 +7124,15 @@ system_prompt = "You are a helpful assistant."
     /// Returns the list of (agent_id, message) pairs that were triggered.
     /// Includes depth limiting to prevent circular trigger chains.
     pub async fn publish_event(&self, event: Event) -> Vec<(AgentId, String)> {
+        let event = if event.account_id.is_none() {
+            let inferred_account_id = self
+                .registry
+                .get(event.source)
+                .and_then(|entry| entry.account_id.clone());
+            event.with_account_id(inferred_account_id)
+        } else {
+            event
+        };
         let cfg = self.config.load_full();
         // Depth guard: prevent circular trigger chains
         static TRIGGER_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -7067,12 +7184,20 @@ system_prompt = "You are a helpful assistant."
     /// Register a trigger for an agent.
     pub fn register_trigger(
         &self,
+        account_id: Option<String>,
         agent_id: AgentId,
         pattern: TriggerPattern,
         prompt_template: String,
         max_fires: u64,
     ) -> KernelResult<TriggerId> {
-        self.register_trigger_with_target(agent_id, pattern, prompt_template, max_fires, None)
+        self.register_trigger_with_target(
+            account_id,
+            agent_id,
+            pattern,
+            prompt_template,
+            max_fires,
+            None,
+        )
     }
 
     /// Register a trigger with an optional cross-session target agent.
@@ -7081,27 +7206,35 @@ system_prompt = "You are a helpful assistant."
     /// agent instead of the owner. Both owner and target must exist.
     pub fn register_trigger_with_target(
         &self,
+        account_id: Option<String>,
         agent_id: AgentId,
         pattern: TriggerPattern,
         prompt_template: String,
         max_fires: u64,
         target_agent: Option<AgentId>,
     ) -> KernelResult<TriggerId> {
-        // Verify owner agent exists
-        if self.registry.get(agent_id).is_none() {
-            return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
-                agent_id.to_string(),
-            )));
+        let owner = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        if let Some(account_id) = account_id.as_deref() {
+            if owner.account_id.as_deref() != Some(account_id) {
+                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                    "Trigger owner must belong to the provided account".to_string(),
+                )));
+            }
         }
-        // Verify target agent exists (if specified)
         if let Some(target) = target_agent {
-            if self.registry.get(target).is_none() {
-                return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
-                    target.to_string(),
+            let target_entry = self.registry.get(target).ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::AgentNotFound(target.to_string()))
+            })?;
+            if target_entry.account_id != owner.account_id {
+                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                    "Trigger target must remain within the owning account".to_string(),
                 )));
             }
         }
         Ok(self.triggers.register_with_target(
+            account_id,
             agent_id,
             pattern,
             prompt_template,
@@ -7128,9 +7261,64 @@ system_prompt = "You are a helpful assistant."
         }
     }
 
+    /// List triggers scoped to a tenant account, optionally filtered by agent.
+    pub fn list_triggers_scoped(
+        &self,
+        account_id: &str,
+        agent_id: Option<AgentId>,
+    ) -> Vec<crate::triggers::Trigger> {
+        let triggers = self.triggers.list_by_account(account_id);
+        match agent_id {
+            Some(agent_id) => triggers
+                .into_iter()
+                .filter(|trigger| trigger.agent_id == agent_id)
+                .collect(),
+            None => triggers,
+        }
+    }
+
     /// Register a workflow definition.
     pub async fn register_workflow(&self, workflow: Workflow) -> WorkflowId {
         self.workflows.register(workflow).await
+    }
+
+    /// Resolve a workflow reference by UUID or name, optionally scoped to a tenant account.
+    pub async fn resolve_workflow_reference_scoped(
+        &self,
+        workflow_ref: &str,
+        account_id: Option<&str>,
+    ) -> Option<WorkflowId> {
+        if let Ok(uuid) = uuid::Uuid::parse_str(workflow_ref) {
+            let workflow_id = WorkflowId(uuid);
+            return match account_id {
+                Some(account_id) => self
+                    .workflows
+                    .get_workflow_scoped(workflow_id, account_id)
+                    .await
+                    .map(|workflow| workflow.id),
+                None => self
+                    .workflows
+                    .get_workflow(workflow_id)
+                    .await
+                    .filter(|workflow| workflow.account_id.is_none())
+                    .map(|workflow| workflow.id),
+            };
+        }
+
+        let workflows = match account_id {
+            Some(account_id) => self.workflows.list_workflows_by_account(account_id).await,
+            None => self
+                .workflows
+                .list_workflows()
+                .await
+                .into_iter()
+                .filter(|workflow| workflow.account_id.is_none())
+                .collect(),
+        };
+        workflows
+            .into_iter()
+            .find(|workflow| workflow.name == workflow_ref)
+            .map(|workflow| workflow.id)
     }
 
     /// Run a workflow pipeline end-to-end.
@@ -7139,10 +7327,35 @@ system_prompt = "You are a helpful assistant."
         workflow_id: WorkflowId,
         input: String,
     ) -> KernelResult<(WorkflowRunId, String)> {
+        self.run_workflow_scoped(workflow_id, input, None).await
+    }
+
+    /// Run a workflow pipeline end-to-end, optionally scoped to a tenant account.
+    pub async fn run_workflow_scoped(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+        account_id: Option<&str>,
+    ) -> KernelResult<(WorkflowRunId, String)> {
         let cfg = self.config.load_full();
+        let workflow = match account_id {
+            Some(account_id) => {
+                self.workflows
+                    .get_workflow_scoped(workflow_id, account_id)
+                    .await
+            }
+            None => self
+                .workflows
+                .get_workflow(workflow_id)
+                .await
+                .filter(|workflow| workflow.account_id.is_none()),
+        }
+        .ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::Internal("Workflow not found".to_string()))
+        })?;
         let run_id = self
             .workflows
-            .create_run(workflow_id, input)
+            .create_run(workflow.id, input)
             .await
             .ok_or_else(|| {
                 KernelError::LibreFang(LibreFangError::Internal("Workflow not found".to_string()))
@@ -7155,11 +7368,34 @@ system_prompt = "You are a helpful assistant."
                 StepAgent::ById { id } => {
                     let agent_id: AgentId = id.parse().ok()?;
                     let entry = self.registry.get(agent_id)?;
+                    match account_id {
+                        Some(account_id) => {
+                            if entry.account_id.as_deref() != Some(account_id) {
+                                return None;
+                            }
+                        }
+                        None => {
+                            if entry.account_id.is_some() {
+                                return None;
+                            }
+                        }
+                    }
                     let inherit = entry.manifest.inherit_parent_context;
                     Some((agent_id, entry.name.clone(), inherit))
                 }
                 StepAgent::ByName { name } => {
-                    let entry = self.registry.find_by_name(name)?;
+                    let entry = match account_id {
+                        Some(account_id) => self
+                            .registry
+                            .list_by_account(account_id)
+                            .into_iter()
+                            .find(|entry| entry.name == *name)?,
+                        None => self
+                            .registry
+                            .list()
+                            .into_iter()
+                            .find(|entry| entry.account_id.is_none() && entry.name == *name)?,
+                    };
                     let inherit = entry.manifest.inherit_parent_context;
                     Some((entry.id, entry.name.clone(), inherit))
                 }
@@ -7208,17 +7444,72 @@ system_prompt = "You are a helpful assistant."
         workflow_id: WorkflowId,
         input: String,
     ) -> KernelResult<Vec<DryRunStep>> {
+        self.dry_run_workflow_scoped(workflow_id, input, None).await
+    }
+
+    /// Dry-run a workflow with optional tenant account scoping.
+    pub async fn dry_run_workflow_scoped(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+        account_id: Option<&str>,
+    ) -> KernelResult<Vec<DryRunStep>> {
+        match account_id {
+            Some(account_id) => {
+                self.workflows
+                    .get_workflow_scoped(workflow_id, account_id)
+                    .await
+                    .ok_or_else(|| {
+                        KernelError::LibreFang(LibreFangError::Internal(
+                            "Workflow not found".to_string(),
+                        ))
+                    })?;
+            }
+            None => {
+                self.workflows
+                    .get_workflow(workflow_id)
+                    .await
+                    .filter(|workflow| workflow.account_id.is_none())
+                    .ok_or_else(|| {
+                        KernelError::LibreFang(LibreFangError::Internal(
+                            "Workflow not found".to_string(),
+                        ))
+                    })?;
+            }
+        }
         let resolver =
             |agent_ref: &StepAgent| -> Option<(librefang_types::agent::AgentId, String, bool)> {
                 match agent_ref {
                     StepAgent::ById { id } => {
                         let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
                         let entry = self.registry.get(agent_id)?;
+                        match account_id {
+                            Some(account_id) => {
+                                if entry.account_id.as_deref() != Some(account_id) {
+                                    return None;
+                                }
+                            }
+                            None => {
+                                if entry.account_id.is_some() {
+                                    return None;
+                                }
+                            }
+                        }
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((agent_id, entry.name.clone(), inherit))
                     }
                     StepAgent::ByName { name } => {
-                        let entry = self.registry.find_by_name(name)?;
+                        let entry =
+                            match account_id {
+                                Some(account_id) => self
+                                    .registry
+                                    .list_by_account(account_id)
+                                    .into_iter()
+                                    .find(|entry| entry.name == *name)?,
+                                None => self.registry.list().into_iter().find(|entry| {
+                                    entry.account_id.is_none() && entry.name == *name
+                                })?,
+                            };
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
                     }
@@ -7251,6 +7542,7 @@ system_prompt = "You are a helpful assistant."
             info!("Restoring {} persisted hand(s)", saved_hands.len());
             for saved_hand in saved_hands {
                 let hand_id = saved_hand.hand_id;
+                let account_id = saved_hand.account_id;
                 let config = saved_hand.config;
                 let old_agent_id = saved_hand.old_agent_ids;
                 let status = saved_hand.status;
@@ -7274,6 +7566,38 @@ system_prompt = "You are a helpful assistant."
                 }
                 match self.activate_hand_with_id(&hand_id, config, persisted_instance_id) {
                     Ok(inst) => {
+                        if let Some(account_id) = account_id.as_ref() {
+                            if let Err(e) = self
+                                .hand_registry
+                                .set_account_id(inst.instance_id, Some(account_id.clone()))
+                            {
+                                warn!(
+                                    hand = %hand_id,
+                                    instance = %inst.instance_id,
+                                    error = %e,
+                                    "Failed to restore hand owner"
+                                );
+                            }
+                            for agent_id in inst.agent_ids.values() {
+                                if let Err(e) = self
+                                    .registry
+                                    .set_account_id(*agent_id, Some(account_id.clone()))
+                                {
+                                    warn!(
+                                        hand = %hand_id,
+                                        agent = %agent_id,
+                                        error = %e,
+                                        "Failed to restore hand agent owner"
+                                    );
+                                }
+                            }
+                        } else {
+                            warn!(
+                                hand = %hand_id,
+                                instance = %inst.instance_id,
+                                "Restored legacy hand state without account_id; tenant-facing routes will not expose it"
+                            );
+                        }
                         if matches!(status, librefang_hands::HandStatus::Paused) {
                             if let Err(e) = self.pause_hand(inst.instance_id) {
                                 warn!(hand = %hand_id, error = %e, "Failed to restore paused state");
@@ -7770,140 +8094,7 @@ system_prompt = "You are a helpful assistant."
                         break;
                     }
 
-                    let due = kernel.cron_scheduler.due_jobs();
-                    for job in due {
-                        let job_id = job.id;
-                        let agent_id = job.agent_id;
-                        let job_name = job.name.clone();
-
-                        match &job.action {
-                            librefang_types::scheduler::CronAction::SystemEvent { text } => {
-                                tracing::debug!(job = %job_name, "Cron: firing system event");
-                                let payload_bytes = serde_json::to_vec(&serde_json::json!({
-                                    "type": format!("cron.{}", job_name),
-                                    "text": text,
-                                    "job_id": job_id.to_string(),
-                                }))
-                                .unwrap_or_default();
-                                let event = Event::new(
-                                    AgentId::new(), // system-originated
-                                    EventTarget::Broadcast,
-                                    EventPayload::Custom(payload_bytes),
-                                );
-                                kernel.publish_event(event).await;
-                                kernel.cron_scheduler.record_success(job_id);
-                            }
-                            librefang_types::scheduler::CronAction::AgentTurn {
-                                message,
-                                timeout_secs,
-                                ..
-                            } => {
-                                tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
-                                let timeout_s = timeout_secs.unwrap_or(120);
-                                let timeout = std::time::Duration::from_secs(timeout_s);
-                                let delivery = job.delivery.clone();
-                                let kh: std::sync::Arc<
-                                    dyn librefang_runtime::kernel_handle::KernelHandle,
-                                > = kernel.clone();
-                                match tokio::time::timeout(
-                                    timeout,
-                                    kernel.send_message_with_handle(agent_id, message, Some(kh)),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(result)) => {
-                                        tracing::info!(job = %job_name, "Cron job completed successfully");
-                                        kernel.cron_scheduler.record_success(job_id);
-                                        // Deliver response to configured channel
-                                        cron_deliver_response(
-                                            &kernel,
-                                            agent_id,
-                                            &result.response,
-                                            &delivery,
-                                        )
-                                        .await;
-                                    }
-                                    Ok(Err(e)) => {
-                                        let err_msg = format!("{e}");
-                                        tracing::warn!(job = %job_name, error = %err_msg, "Cron job failed");
-                                        kernel.cron_scheduler.record_failure(job_id, &err_msg);
-                                    }
-                                    Err(_) => {
-                                        tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");
-                                        kernel.cron_scheduler.record_failure(
-                                            job_id,
-                                            &format!("timed out after {timeout_s}s"),
-                                        );
-                                    }
-                                }
-                            }
-                            librefang_types::scheduler::CronAction::Workflow {
-                                workflow_id,
-                                input,
-                                timeout_secs,
-                            } => {
-                                tracing::debug!(job = %job_name, workflow = %workflow_id, "Cron: firing workflow");
-                                let input_text = input.clone().unwrap_or_default();
-                                let delivery = job.delivery.clone();
-                                let timeout_s = timeout_secs.unwrap_or(300);
-                                let timeout = std::time::Duration::from_secs(timeout_s);
-
-                                // Resolve workflow by UUID first, then by name
-                                let resolved_id =
-                                    if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id) {
-                                        Some(crate::workflow::WorkflowId(uuid))
-                                    } else {
-                                        // Search by name
-                                        let workflows = kernel.workflows.list_workflows().await;
-                                        workflows
-                                            .iter()
-                                            .find(|w| w.name == *workflow_id)
-                                            .map(|w| w.id)
-                                    };
-
-                                match resolved_id {
-                                    Some(wf_id) => {
-                                        match tokio::time::timeout(
-                                            timeout,
-                                            kernel.run_workflow(wf_id, input_text),
-                                        )
-                                        .await
-                                        {
-                                            Ok(Ok((_run_id, output))) => {
-                                                tracing::info!(job = %job_name, "Cron workflow completed successfully");
-                                                kernel.cron_scheduler.record_success(job_id);
-                                                cron_deliver_response(
-                                                    &kernel, agent_id, &output, &delivery,
-                                                )
-                                                .await;
-                                            }
-                                            Ok(Err(e)) => {
-                                                let err_msg = format!("{e}");
-                                                tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow failed");
-                                                kernel
-                                                    .cron_scheduler
-                                                    .record_failure(job_id, &err_msg);
-                                            }
-                                            Err(_) => {
-                                                tracing::warn!(job = %job_name, timeout_s, "Cron workflow timed out");
-                                                kernel.cron_scheduler.record_failure(
-                                                    job_id,
-                                                    &format!(
-                                                        "workflow timed out after {timeout_s}s"
-                                                    ),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    None => {
-                                        let err_msg = format!("workflow not found: {workflow_id}");
-                                        tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow lookup failed");
-                                        kernel.cron_scheduler.record_failure(job_id, &err_msg);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    kernel.process_due_cron_jobs_once().await;
 
                     // Persist every ~5 minutes (20 ticks * 15s)
                     persist_counter += 1;
@@ -7949,6 +8140,120 @@ system_prompt = "You are a helpful assistant."
             tokio::spawn(async move {
                 crate::whatsapp_gateway::start_whatsapp_gateway(&kernel).await;
             });
+        }
+    }
+
+    async fn process_due_cron_jobs_once(self: &Arc<Self>) {
+        let due = self.cron_scheduler.due_jobs();
+        for job in due {
+            let job_id = job.id;
+            let agent_id = job.agent_id;
+            let job_name = job.name.clone();
+
+            match &job.action {
+                librefang_types::scheduler::CronAction::SystemEvent { text } => {
+                    tracing::debug!(job = %job_name, "Cron: firing system event");
+                    let payload_bytes = serde_json::to_vec(&serde_json::json!({
+                        "type": format!("cron.{}", job_name),
+                        "text": text,
+                        "job_id": job_id.to_string(),
+                    }))
+                    .unwrap_or_default();
+                    let event = Event::new(
+                        AgentId::new(),
+                        EventTarget::Broadcast,
+                        EventPayload::Custom(payload_bytes),
+                    )
+                    .with_account_id(job.account_id.clone());
+                    self.publish_event(event).await;
+                    self.cron_scheduler.record_success(job_id);
+                }
+                librefang_types::scheduler::CronAction::AgentTurn {
+                    message,
+                    timeout_secs,
+                    ..
+                } => {
+                    tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
+                    let timeout_s = timeout_secs.unwrap_or(120);
+                    let timeout = std::time::Duration::from_secs(timeout_s);
+                    let delivery = job.delivery.clone();
+                    let kh: std::sync::Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
+                        self.clone();
+                    match tokio::time::timeout(
+                        timeout,
+                        self.send_message_with_handle(agent_id, message, Some(kh)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(result)) => {
+                            tracing::info!(job = %job_name, "Cron job completed successfully");
+                            self.cron_scheduler.record_success(job_id);
+                            cron_deliver_response(self, agent_id, &result.response, &delivery)
+                                .await;
+                        }
+                        Ok(Err(e)) => {
+                            let err_msg = format!("{e}");
+                            tracing::warn!(job = %job_name, error = %err_msg, "Cron job failed");
+                            self.cron_scheduler.record_failure(job_id, &err_msg);
+                        }
+                        Err(_) => {
+                            tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");
+                            self.cron_scheduler
+                                .record_failure(job_id, &format!("timed out after {timeout_s}s"));
+                        }
+                    }
+                }
+                librefang_types::scheduler::CronAction::Workflow {
+                    workflow_id,
+                    input,
+                    timeout_secs,
+                } => {
+                    tracing::debug!(job = %job_name, workflow = %workflow_id, "Cron: firing workflow");
+                    let input_text = input.clone().unwrap_or_default();
+                    let delivery = job.delivery.clone();
+                    let timeout_s = timeout_secs.unwrap_or(300);
+                    let timeout = std::time::Duration::from_secs(timeout_s);
+
+                    let workflow_account_id = job.account_id.as_deref();
+                    let resolved_id = self
+                        .resolve_workflow_reference_scoped(workflow_id, workflow_account_id)
+                        .await;
+
+                    match resolved_id {
+                        Some(wf_id) => {
+                            match tokio::time::timeout(
+                                timeout,
+                                self.run_workflow_scoped(wf_id, input_text, workflow_account_id),
+                            )
+                            .await
+                            {
+                                Ok(Ok((_run_id, output))) => {
+                                    tracing::info!(job = %job_name, "Cron workflow completed successfully");
+                                    self.cron_scheduler.record_success(job_id);
+                                    cron_deliver_response(self, agent_id, &output, &delivery).await;
+                                }
+                                Ok(Err(e)) => {
+                                    let err_msg = format!("{e}");
+                                    tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow failed");
+                                    self.cron_scheduler.record_failure(job_id, &err_msg);
+                                }
+                                Err(_) => {
+                                    tracing::warn!(job = %job_name, timeout_s, "Cron workflow timed out");
+                                    self.cron_scheduler.record_failure(
+                                        job_id,
+                                        &format!("workflow timed out after {timeout_s}s"),
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            let err_msg = format!("workflow not found: {workflow_id}");
+                            tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow lookup failed");
+                            self.cron_scheduler.record_failure(job_id, &err_msg);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -8103,7 +8408,7 @@ system_prompt = "You are a helpful assistant."
                                     unresponsive_secs: status.inactive_secs as u64,
                                 }),
                             );
-                            kernel.event_bus.publish(event).await;
+                            kernel.publish_event(event).await;
                         }
                     } else {
                         // Agent recovered — remove from known-unresponsive set
@@ -8130,13 +8435,18 @@ system_prompt = "You are a helpful assistant."
     ) {
         // For proactive agents, auto-register triggers from conditions
         if let ScheduleMode::Proactive { conditions } = schedule {
+            let account_id = self
+                .registry
+                .get(agent_id)
+                .and_then(|entry| entry.account_id.clone());
             for condition in conditions {
                 if let Some(pattern) = background::parse_condition(condition) {
                     let prompt = format!(
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
-                    self.triggers.register(agent_id, pattern, prompt, 0);
+                    self.triggers
+                        .register(account_id.clone(), agent_id, pattern, prompt, 0);
                 }
             }
             info!(agent = %name, id = %agent_id, "Registered proactive triggers");
@@ -8247,23 +8557,52 @@ system_prompt = "You are a helpful assistant."
         None
     }
 
-    fn resolve_driver(&self, manifest: &AgentManifest) -> KernelResult<Arc<dyn LlmDriver>> {
+    fn resolve_driver(
+        &self,
+        manifest: &AgentManifest,
+        account_id: Option<&str>,
+    ) -> KernelResult<Arc<dyn LlmDriver>> {
         let cfg = self.config.load();
         let agent_provider = &manifest.model.provider;
-
-        // Use the effective default model: hot-reloaded override takes priority
-        // over the boot-time config. This ensures that when a user saves a new
-        // API key via the dashboard and the default provider is switched,
-        // resolve_driver sees the updated provider/model/api_key_env.
-        let override_guard = self
-            .default_model_override
-            .read()
-            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-        let effective_default = override_guard.as_ref().unwrap_or(&cfg.default_model);
+        let account_default = self.effective_default_model_for_account(account_id);
+        let effective_default = account_default.as_ref().unwrap_or(&cfg.default_model);
         let default_provider = &effective_default.provider;
 
         let has_custom_key = manifest.model.api_key_env.is_some();
         let has_custom_url = manifest.model.base_url.is_some();
+        let tenant_provider =
+            account_id.and_then(|account_id| match tokio::runtime::Handle::try_current() {
+                Ok(handle) => tokio::task::block_in_place(|| {
+                    handle.block_on(
+                        self.provider_accounts
+                            .get_scoped(account_id, agent_provider),
+                    )
+                }),
+                Err(_) => self
+                    .provider_accounts
+                    .get_scoped_blocking(account_id, agent_provider),
+            });
+        if account_id.is_some() && !has_custom_key {
+            let key_required = self
+                .model_catalog
+                .read()
+                .ok()
+                .and_then(|catalog| {
+                    catalog
+                        .get_provider(agent_provider)
+                        .map(|provider| provider.key_required)
+                })
+                .unwrap_or(true);
+            let tenant_has_key = tenant_provider
+                .as_ref()
+                .and_then(|provider| provider.api_key_env.as_ref())
+                .is_some();
+            if key_required && !tenant_has_key {
+                return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Tenant provider '{agent_provider}' is not configured"
+                ))));
+            }
+        }
 
         // Always create a fresh driver by reading current env vars.
         // This ensures API keys saved at runtime (via dashboard POST
@@ -8278,6 +8617,14 @@ system_prompt = "You are a helpful assistant."
                     .api_key_env
                     .as_ref()
                     .and_then(|env| std::env::var(env).ok())
+            } else if let Some(ref tenant_provider) = tenant_provider {
+                tenant_provider
+                    .api_key_env
+                    .as_ref()
+                    .and_then(|env| std::env::var(env).ok())
+                    .filter(|value| !value.trim().is_empty())
+            } else if account_id.is_some() {
+                None
             } else if agent_provider == default_provider {
                 // Same provider as effective default — use its env var
                 if !effective_default.api_key_env.is_empty() {
@@ -8300,6 +8647,14 @@ system_prompt = "You are a helpful assistant."
             // (which only update the catalog, not self.config) are found (#494).
             let base_url = if has_custom_url {
                 manifest.model.base_url.clone()
+            } else if let Some(ref tenant_provider) = tenant_provider {
+                tenant_provider.base_url.clone()
+            } else if account_id.is_some() {
+                if agent_provider == default_provider {
+                    effective_default.base_url.clone()
+                } else {
+                    None
+                }
             } else if agent_provider == default_provider {
                 effective_default
                     .base_url
@@ -9159,38 +9514,102 @@ system_prompt = "You are a helpful assistant."
     /// Load active goals (pending/in_progress) as (title, status, progress) tuples
     /// for injection into the agent system prompt.
     fn active_goals_for_prompt(&self, agent_id: Option<AgentId>) -> Vec<(String, String, u8)> {
-        let shared_id = shared_memory_agent_id();
-        let goals: Vec<serde_json::Value> =
-            match self.memory.structured_get(shared_id, "__librefang_goals") {
-                Ok(Some(serde_json::Value::Array(arr))) => arr,
-                _ => return Vec::new(),
-            };
+        let account_id =
+            agent_id.and_then(|aid| self.registry.get(aid).and_then(|entry| entry.account_id));
+        let goals = match account_id {
+            Some(ref account_id) => self.list_active_goals_sync(account_id, None),
+            None => Vec::new(),
+        };
         goals
             .into_iter()
-            .filter(|g| {
-                let status = g["status"].as_str().unwrap_or("");
-                let is_active = status == "pending" || status == "in_progress";
-                if !is_active {
-                    return false;
-                }
-                match agent_id {
-                    Some(aid) => {
-                        // Include goals assigned to this agent OR unassigned goals
-                        match g["agent_id"].as_str() {
-                            Some(gid) => gid == aid.to_string(),
-                            None => true,
-                        }
-                    }
-                    None => true,
-                }
+            .filter(|goal| match agent_id {
+                Some(agent_id) => goal.agent_id.is_none() || goal.agent_id == Some(agent_id),
+                None => true,
             })
-            .map(|g| {
-                let title = g["title"].as_str().unwrap_or("").to_string();
-                let status = g["status"].as_str().unwrap_or("pending").to_string();
-                let progress = g["progress"].as_u64().unwrap_or(0) as u8;
-                (title, status, progress)
-            })
+            .map(|goal| (goal.title, goal.status.to_string(), goal.progress))
             .collect()
+    }
+
+    fn list_active_goals_sync(
+        &self,
+        account_id: &str,
+        agent_id_filter: Option<&str>,
+    ) -> Vec<librefang_types::goal::Goal> {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(
+                    self.goals
+                        .list_active_for_account(account_id, agent_id_filter),
+                )
+            }),
+            Err(_) => self
+                .goals
+                .list_active_for_account_blocking(account_id, agent_id_filter),
+        }
+    }
+
+    fn effective_default_model_for_account(
+        &self,
+        account_id: Option<&str>,
+    ) -> Option<librefang_types::config::DefaultModelConfig> {
+        match account_id {
+            Some(account_id) => match tokio::runtime::Handle::try_current() {
+                Ok(handle) => tokio::task::block_in_place(|| {
+                    handle.block_on(
+                        self.provider_accounts
+                            .effective_default_for_account_async(account_id),
+                    )
+                }),
+                Err(_) => self
+                    .provider_accounts
+                    .effective_default_for_account(account_id),
+            },
+            None => {
+                let guard = self
+                    .default_model_override
+                    .read()
+                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                Some(
+                    guard
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(|| self.config.load().default_model.clone()),
+                )
+            }
+        }
+    }
+
+    fn apply_effective_default_model(
+        &self,
+        manifest: &mut AgentManifest,
+        account_id: Option<&str>,
+    ) -> KernelResult<()> {
+        let is_default_provider =
+            manifest.model.provider.is_empty() || manifest.model.provider == "default";
+        let is_default_model = manifest.model.model.is_empty() || manifest.model.model == "default";
+        if !is_default_provider && !is_default_model {
+            return Ok(());
+        }
+        let dm = self
+            .effective_default_model_for_account(account_id)
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::Internal(
+                    "Tenant default provider not configured".to_string(),
+                ))
+            })?;
+        if is_default_provider {
+            manifest.model.provider = dm.provider.clone();
+            if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
+                manifest.model.api_key_env = Some(dm.api_key_env.clone());
+            }
+            if dm.base_url.is_some() && manifest.model.base_url.is_none() {
+                manifest.model.base_url.clone_from(&dm.base_url);
+            }
+        }
+        if is_default_model {
+            manifest.model.model = dm.model;
+        }
+        Ok(())
     }
 
     /// Build a compact skill summary for the system prompt so the agent knows
@@ -9554,8 +9973,8 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
     }
 }
 
-/// A well-known agent ID used for shared memory operations across agents.
-/// This is a fixed UUID so all agents read/write to the same namespace.
+/// A fixed backing agent ID used for shared memory persistence.
+/// Tenant and optional peer isolation are enforced in the key namespace.
 /// Parse an agent.toml string and return true if `enabled` is explicitly set
 /// to `false`. Uses proper TOML parsing to handle all valid whitespace variants
 /// and avoid false positives from commented-out lines.
@@ -9577,14 +9996,32 @@ pub fn shared_memory_agent_id() -> AgentId {
     ]))
 }
 
-/// Namespace a memory key by peer ID for per-user isolation.
-/// When `peer_id` is `Some`, returns `"peer:{peer_id}:{key}"`.
-/// When `None`, returns the key unchanged (global scope).
-fn peer_scoped_key(key: &str, peer_id: Option<&str>) -> String {
+/// Namespace shared memory by tenant, then optionally peer within that tenant.
+fn tenant_shared_memory_key(account_id: &str, key: &str, peer_id: Option<&str>) -> String {
     match peer_id {
-        Some(pid) => format!("peer:{pid}:{key}"),
-        None => key.to_string(),
+        Some(pid) => format!("acct:{account_id}:peer:{pid}:{key}"),
+        None => format!("acct:{account_id}:global:{key}"),
     }
+}
+
+fn tenant_shared_memory_lookup_key(
+    account_id: Option<&str>,
+    key: &str,
+    peer_id: Option<&str>,
+) -> Option<String> {
+    account_id.map(|account_id| tenant_shared_memory_key(account_id, key, peer_id))
+}
+
+fn strip_tenant_shared_memory_prefix(
+    key: &str,
+    account_id: &str,
+    peer_id: Option<&str>,
+) -> Option<String> {
+    let prefix = match peer_id {
+        Some(pid) => format!("acct:{account_id}:peer:{pid}:"),
+        None => format!("acct:{account_id}:global:"),
+    };
+    key.strip_prefix(&prefix).map(|s| s.to_string())
 }
 
 /// Deliver a cron job's agent response to the configured delivery target.
@@ -9717,6 +10154,41 @@ impl LibreFangKernel {
                         let _ = self.memory.save_agent(&e);
                     }
                 } else if let Some(e) = self.registry.get(entry.id) {
+                    let _ = self.memory.save_agent(&e);
+                }
+            }
+        }
+    }
+
+    pub fn sync_account_default_model_agents(
+        &self,
+        account_id: &str,
+        old_provider: &str,
+        dm: &librefang_types::config::DefaultModelConfig,
+    ) {
+        for entry in self.registry.list_by_account(account_id) {
+            let is_default_provider = entry.manifest.model.provider.is_empty()
+                || entry.manifest.model.provider == "default";
+            let is_default_model =
+                entry.manifest.model.model.is_empty() || entry.manifest.model.model == "default";
+            let is_stale_dashboard_default = entry.source_toml_path.is_none()
+                && entry.manifest.model.api_key_env.is_none()
+                && entry.manifest.model.base_url.is_none()
+                && entry.manifest.model.provider == old_provider;
+
+            if (is_default_provider && is_default_model) || is_stale_dashboard_default {
+                let _ = self.registry.update_model_and_provider(
+                    entry.id,
+                    dm.model.clone(),
+                    dm.provider.clone(),
+                );
+                if let Some(mut e) = self.registry.get(entry.id) {
+                    if e.manifest.model.api_key_env.is_none() && !dm.api_key_env.is_empty() {
+                        e.manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                    }
+                    if dm.base_url.is_some() && e.manifest.model.base_url.is_none() {
+                        e.manifest.model.base_url.clone_from(&dm.base_url);
+                    }
                     let _ = self.memory.save_agent(&e);
                 }
             }
@@ -9859,6 +10331,38 @@ impl LibreFangKernel {
     /// On miss, the error lists every currently-registered agent so the
     /// caller (typically an LLM) can recover without an extra agent_list
     /// round trip.
+    fn caller_account_id_for_shared_memory(&self, caller_agent_id: &str) -> Result<String, String> {
+        let caller_agent_id = caller_agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let entry = self
+            .registry
+            .get(caller_agent_id)
+            .ok_or_else(|| format!("Agent not found: {caller_agent_id}"))?;
+        entry
+            .account_id
+            .clone()
+            .ok_or_else(|| "Shared memory requires a tenant-owned caller".to_string())
+    }
+
+    fn caller_account_id_for_cron(
+        &self,
+        caller_agent_id: &str,
+    ) -> Result<(AgentId, String), String> {
+        let caller_agent_id = caller_agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let entry = self
+            .registry
+            .get(caller_agent_id)
+            .ok_or_else(|| format!("Agent not found: {caller_agent_id}"))?;
+        let account_id = entry
+            .account_id
+            .clone()
+            .ok_or_else(|| "Cron scheduling requires a tenant-owned caller".to_string())?;
+        Ok((caller_agent_id, account_id))
+    }
+
     fn resolve_agent_identifier(&self, agent_id: &str) -> Result<AgentId, String> {
         if let Ok(uid) = agent_id.parse::<AgentId>() {
             if self.registry.get(uid).is_some() {
@@ -9943,14 +10447,24 @@ impl KernelHandle for LibreFangKernel {
         LibreFangKernel::kill_agent(self, id).map_err(|e| format!("Kill failed: {e}"))
     }
 
+    fn caller_account_id(&self, caller_agent_id: &str) -> Result<Option<String>, String> {
+        let id = self.resolve_agent_identifier(caller_agent_id)?;
+        Ok(self
+            .registry
+            .get(id)
+            .and_then(|entry| entry.account_id.clone()))
+    }
+
     fn memory_store(
         &self,
+        caller_agent_id: &str,
         key: &str,
         value: serde_json::Value,
         peer_id: Option<&str>,
     ) -> Result<(), String> {
+        let account_id = self.caller_account_id_for_shared_memory(caller_agent_id)?;
         let agent_id = shared_memory_agent_id();
-        let scoped = peer_scoped_key(key, peer_id);
+        let scoped = tenant_shared_memory_key(&account_id, key, peer_id);
         self.memory
             .structured_set(agent_id, &scoped, value)
             .map_err(|e| format!("Memory store failed: {e}"))
@@ -9958,38 +10472,33 @@ impl KernelHandle for LibreFangKernel {
 
     fn memory_recall(
         &self,
+        caller_agent_id: &str,
         key: &str,
         peer_id: Option<&str>,
     ) -> Result<Option<serde_json::Value>, String> {
+        let account_id = self.caller_account_id_for_shared_memory(caller_agent_id)?;
         let agent_id = shared_memory_agent_id();
-        let scoped = peer_scoped_key(key, peer_id);
+        let scoped = tenant_shared_memory_key(&account_id, key, peer_id);
         self.memory
             .structured_get(agent_id, &scoped)
             .map_err(|e| format!("Memory recall failed: {e}"))
     }
 
-    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String> {
+    fn memory_list(
+        &self,
+        caller_agent_id: &str,
+        peer_id: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let account_id = self.caller_account_id_for_shared_memory(caller_agent_id)?;
         let agent_id = shared_memory_agent_id();
         let all_keys = self
             .memory
             .list_keys(agent_id)
             .map_err(|e| format!("Memory list failed: {e}"))?;
-        match peer_id {
-            Some(pid) => {
-                let prefix = format!("peer:{pid}:");
-                Ok(all_keys
-                    .into_iter()
-                    .filter_map(|k| k.strip_prefix(&prefix).map(|s| s.to_string()))
-                    .collect())
-            }
-            None => {
-                // When no peer context, return only non-peer-scoped keys
-                Ok(all_keys
-                    .into_iter()
-                    .filter(|k| !k.starts_with("peer:"))
-                    .collect())
-            }
-        }
+        Ok(all_keys
+            .into_iter()
+            .filter_map(|k| strip_tenant_shared_memory_prefix(&k, &account_id, peer_id))
+            .collect())
     }
 
     fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {
@@ -10075,6 +10584,15 @@ impl KernelHandle for LibreFangKernel {
         event_type: &str,
         payload: serde_json::Value,
     ) -> Result<(), String> {
+        self.publish_event_scoped(event_type, payload, None).await
+    }
+
+    async fn publish_event_scoped(
+        &self,
+        event_type: &str,
+        payload: serde_json::Value,
+        account_id: Option<&str>,
+    ) -> Result<(), String> {
         let system_agent = AgentId::new();
         let payload_bytes =
             serde_json::to_vec(&serde_json::json!({"type": event_type, "data": payload}))
@@ -10083,37 +10601,94 @@ impl KernelHandle for LibreFangKernel {
             system_agent,
             EventTarget::Broadcast,
             EventPayload::Custom(payload_bytes),
-        );
+        )
+        .with_account_id(account_id.map(str::to_string));
         LibreFangKernel::publish_event(self, event).await;
         Ok(())
     }
 
+    async fn publish_event_for_agent(
+        &self,
+        caller_agent_id: &str,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), String> {
+        let caller_agent_id = caller_agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let account_id = self
+            .registry
+            .get(caller_agent_id)
+            .ok_or_else(|| format!("Agent not found: {caller_agent_id}"))?
+            .account_id
+            .clone()
+            .ok_or_else(|| "Event publishing requires a tenant-owned caller".to_string())?;
+        self.publish_event_scoped(event_type, payload, Some(account_id.as_str()))
+            .await
+    }
+
     async fn knowledge_add_entity(
         &self,
+        caller_agent_id: &str,
         entity: librefang_types::memory::Entity,
     ) -> Result<String, String> {
+        let caller_agent_id = caller_agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let entry = self
+            .registry
+            .get(caller_agent_id)
+            .ok_or_else(|| format!("Agent not found: {caller_agent_id}"))?;
+        let account_id = entry
+            .account_id
+            .clone()
+            .ok_or_else(|| "Knowledge graph requires a tenant-owned caller".to_string())?;
         self.memory
-            .add_entity(entity)
+            .add_entity(caller_agent_id, &account_id, entity)
             .await
             .map_err(|e| format!("Knowledge add entity failed: {e}"))
     }
 
     async fn knowledge_add_relation(
         &self,
+        caller_agent_id: &str,
         relation: librefang_types::memory::Relation,
     ) -> Result<String, String> {
+        let caller_agent_id = caller_agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let entry = self
+            .registry
+            .get(caller_agent_id)
+            .ok_or_else(|| format!("Agent not found: {caller_agent_id}"))?;
+        let account_id = entry
+            .account_id
+            .clone()
+            .ok_or_else(|| "Knowledge graph requires a tenant-owned caller".to_string())?;
         self.memory
-            .add_relation(relation)
+            .add_relation(caller_agent_id, &account_id, relation)
             .await
             .map_err(|e| format!("Knowledge add relation failed: {e}"))
     }
 
     async fn knowledge_query(
         &self,
+        caller_agent_id: &str,
         pattern: librefang_types::memory::GraphPattern,
     ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+        let caller_agent_id = caller_agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let entry = self
+            .registry
+            .get(caller_agent_id)
+            .ok_or_else(|| format!("Agent not found: {caller_agent_id}"))?;
+        let account_id = entry
+            .account_id
+            .clone()
+            .ok_or_else(|| "Knowledge graph requires a tenant-owned caller".to_string())?;
         self.memory
-            .query_graph(pattern)
+            .query_graph(caller_agent_id, &account_id, pattern)
             .await
             .map_err(|e| format!("Knowledge query failed: {e}"))
     }
@@ -10146,13 +10721,12 @@ impl KernelHandle for LibreFangKernel {
         };
         let one_shot = job_json["one_shot"].as_bool().unwrap_or(false);
 
-        let aid = librefang_types::agent::AgentId(
-            uuid::Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?,
-        );
+        let (aid, account_id) = self.caller_account_id_for_cron(agent_id)?;
 
         let job = CronJob {
             id: CronJobId::new(),
             agent_id: aid,
+            account_id: Some(account_id),
             name,
             schedule,
             action,
@@ -10181,10 +10755,8 @@ impl KernelHandle for LibreFangKernel {
     }
 
     async fn cron_list(&self, agent_id: &str) -> Result<Vec<serde_json::Value>, String> {
-        let aid = librefang_types::agent::AgentId(
-            uuid::Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?,
-        );
-        let jobs = self.cron_scheduler.list_jobs(aid);
+        let (_aid, account_id) = self.caller_account_id_for_cron(agent_id)?;
+        let jobs = self.cron_scheduler.list_jobs_by_account(&account_id);
         let json_jobs: Vec<serde_json::Value> = jobs
             .into_iter()
             .map(|j| serde_json::to_value(&j).unwrap_or_default())
@@ -10192,12 +10764,13 @@ impl KernelHandle for LibreFangKernel {
         Ok(json_jobs)
     }
 
-    async fn cron_cancel(&self, job_id: &str) -> Result<(), String> {
+    async fn cron_cancel(&self, agent_id: &str, job_id: &str) -> Result<(), String> {
+        let (_aid, account_id) = self.caller_account_id_for_cron(agent_id)?;
         let id = librefang_types::scheduler::CronJobId(
             uuid::Uuid::parse_str(job_id).map_err(|e| format!("Invalid job ID: {e}"))?,
         );
         self.cron_scheduler
-            .remove_job(id)
+            .remove_job_scoped(id, &account_id)
             .map_err(|e| format!("{e}"))?;
 
         // Persist after removal
@@ -10393,7 +10966,7 @@ impl KernelHandle for LibreFangKernel {
                     risk_level: format!("{:?}", risk_level),
                 }),
             );
-            self.event_bus.publish(event).await;
+            self.publish_event(event).await;
         }
 
         // Push approval notification to configured channels.
@@ -10468,7 +11041,7 @@ impl KernelHandle for LibreFangKernel {
                     decided_by: None,
                 }),
             );
-            self.event_bus.publish(event).await;
+            self.publish_event(event).await;
         }
 
         Ok(decision)
@@ -10538,7 +11111,7 @@ impl KernelHandle for LibreFangKernel {
                     risk_level: format!("{:?}", risk_level),
                 }),
             );
-            self.event_bus.publish(event).await;
+            self.publish_event(event).await;
         }
         {
             use librefang_types::capability::glob_matches;
@@ -10674,21 +11247,8 @@ impl KernelHandle for LibreFangKernel {
         thread_id: Option<&str>,
     ) -> Result<String, String> {
         let cfg = self.config.load_full();
-        let adapter = self
-            .channel_adapters
-            .get(channel)
-            .ok_or_else(|| {
-                let available: Vec<String> = self
-                    .channel_adapters
-                    .iter()
-                    .map(|e| e.key().clone())
-                    .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
-            })?
-            .clone();
+        let adapter = self.resolve_channel_adapter(channel)?;
+        let channel_base = channel.split(':').next().unwrap_or(channel);
 
         let user = librefang_channels::types::ChannelUser {
             platform_id: recipient.to_string(),
@@ -10697,8 +11257,8 @@ impl KernelHandle for LibreFangKernel {
         };
 
         let default_format =
-            librefang_channels::formatter::default_output_format_for_channel(channel);
-        let formatted = if channel == "wecom" {
+            librefang_channels::formatter::default_output_format_for_channel(channel_base);
+        let formatted = if channel_base == "wecom" {
             let output_format = cfg
                 .channels
                 .wecom
@@ -10737,21 +11297,7 @@ impl KernelHandle for LibreFangKernel {
         filename: Option<&str>,
         thread_id: Option<&str>,
     ) -> Result<String, String> {
-        let adapter = self
-            .channel_adapters
-            .get(channel)
-            .ok_or_else(|| {
-                let available: Vec<String> = self
-                    .channel_adapters
-                    .iter()
-                    .map(|e| e.key().clone())
-                    .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
-            })?
-            .clone();
+        let adapter = self.resolve_channel_adapter(channel)?;
 
         let user = librefang_channels::types::ChannelUser {
             platform_id: recipient.to_string(),
@@ -10803,21 +11349,7 @@ impl KernelHandle for LibreFangKernel {
         mime_type: &str,
         thread_id: Option<&str>,
     ) -> Result<String, String> {
-        let adapter = self
-            .channel_adapters
-            .get(channel)
-            .ok_or_else(|| {
-                let available: Vec<String> = self
-                    .channel_adapters
-                    .iter()
-                    .map(|e| e.key().clone())
-                    .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
-            })?
-            .clone();
+        let adapter = self.resolve_channel_adapter(channel)?;
 
         let user = librefang_channels::types::ChannelUser {
             platform_id: recipient.to_string(),
@@ -11136,72 +11668,74 @@ impl KernelHandle for LibreFangKernel {
 
     fn goal_list_active(
         &self,
+        caller_agent_id: &str,
         agent_id_filter: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, String> {
-        let shared_id = shared_memory_agent_id();
-        let goals: Vec<serde_json::Value> =
-            match self.memory.structured_get(shared_id, "__librefang_goals") {
-                Ok(Some(serde_json::Value::Array(arr))) => arr,
-                Ok(_) => return Ok(Vec::new()),
-                Err(e) => return Err(format!("Failed to load goals: {e}")),
-            };
-        let active: Vec<serde_json::Value> = goals
+        let caller_agent_id: AgentId = caller_agent_id
+            .parse()
+            .map_err(|e| format!("Invalid caller agent_id: {e}"))?;
+        let caller_account_id = self
+            .registry
+            .get(caller_agent_id)
+            .and_then(|entry| entry.account_id)
+            .ok_or_else(|| "Goal system requires a tenant-bound agent".to_string())?;
+        let scoped_agent_filter = match agent_id_filter {
+            Some(agent_id) => {
+                let agent_id: AgentId = agent_id
+                    .parse()
+                    .map_err(|e| format!("Invalid agent_id: {e}"))?;
+                let target_entry = self
+                    .registry
+                    .get(agent_id)
+                    .ok_or_else(|| "Agent not found".to_string())?;
+                if target_entry.account_id.as_deref() != Some(caller_account_id.as_str()) {
+                    return Ok(Vec::new());
+                }
+                Some(agent_id.to_string())
+            }
+            None => Some(caller_agent_id.to_string()),
+        };
+        self.list_active_goals_sync(&caller_account_id, scoped_agent_filter.as_deref())
             .into_iter()
-            .filter(|g| {
-                let status = g["status"].as_str().unwrap_or("");
-                let is_active = status == "pending" || status == "in_progress";
-                if !is_active {
-                    return false;
-                }
-                match agent_id_filter {
-                    Some(aid) => g["agent_id"].as_str() == Some(aid),
-                    None => true,
-                }
-            })
-            .collect();
-        Ok(active)
+            .map(|goal| serde_json::to_value(goal).map_err(|e| e.to_string()))
+            .collect()
     }
 
     fn goal_update(
         &self,
+        caller_agent_id: &str,
         goal_id: &str,
         status: Option<&str>,
         progress: Option<u8>,
     ) -> Result<serde_json::Value, String> {
-        let shared_id = shared_memory_agent_id();
-        let mut goals: Vec<serde_json::Value> =
-            match self.memory.structured_get(shared_id, "__librefang_goals") {
-                Ok(Some(serde_json::Value::Array(arr))) => arr,
-                Ok(_) => return Err(format!("Goal '{}' not found", goal_id)),
-                Err(e) => return Err(format!("Failed to load goals: {e}")),
-            };
-
-        let mut updated_goal = None;
-        for g in goals.iter_mut() {
-            if g["id"].as_str() == Some(goal_id) {
-                if let Some(s) = status {
-                    g["status"] = serde_json::Value::String(s.to_string());
-                }
-                if let Some(p) = progress {
-                    g["progress"] = serde_json::json!(p);
-                }
-                g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
-                updated_goal = Some(g.clone());
-                break;
-            }
-        }
-
-        let result = updated_goal.ok_or_else(|| format!("Goal '{}' not found", goal_id))?;
-
-        self.memory
-            .structured_set(
-                shared_id,
-                "__librefang_goals",
-                serde_json::Value::Array(goals),
-            )
-            .map_err(|e| format!("Failed to save goals: {e}"))?;
-
-        Ok(result)
+        let caller_agent_id: AgentId = caller_agent_id
+            .parse()
+            .map_err(|e| format!("Invalid caller agent_id: {e}"))?;
+        let caller_account_id = self
+            .registry
+            .get(caller_agent_id)
+            .and_then(|entry| entry.account_id)
+            .ok_or_else(|| "Goal system requires a tenant-bound agent".to_string())?;
+        let goal_id: librefang_types::goal::GoalId = goal_id
+            .parse()
+            .map_err(|e| format!("Invalid goal_id: {e}"))?;
+        let status = match status {
+            Some("pending") => Some(librefang_types::goal::GoalStatus::Pending),
+            Some("in_progress") => Some(librefang_types::goal::GoalStatus::InProgress),
+            Some("completed") => Some(librefang_types::goal::GoalStatus::Completed),
+            Some("cancelled") => Some(librefang_types::goal::GoalStatus::Cancelled),
+            Some(other) => return Err(format!("Invalid status '{other}'")),
+            None => None,
+        };
+        let updated = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.goals.update_status_scoped(
+                goal_id,
+                &caller_account_id,
+                status,
+                progress,
+            ))
+        })?;
+        serde_json::to_value(updated).map_err(|e| e.to_string())
     }
 }
 
@@ -11689,6 +12223,7 @@ mod tests {
         AgentNotificationRule, ApprovalRequest, NotificationConfig, NotificationTarget, RiskLevel,
     };
     use librefang_types::config::DefaultModelConfig;
+    use librefang_types::goal::{Goal, GoalId, GoalStatus};
     use std::collections::HashMap;
     use std::pin::Pin;
 
@@ -11759,6 +12294,59 @@ mod tests {
     fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
         std::env::set_var(key, value);
         EnvVarGuard { key }
+    }
+
+    fn test_kernel_config(home_dir: &std::path::Path) -> KernelConfig {
+        KernelConfig {
+            home_dir: home_dir.to_path_buf(),
+            data_dir: home_dir.join("data"),
+            multi_tenant: true,
+            default_model: DefaultModelConfig {
+                provider: "ollama".to_string(),
+                model: "test-model".to_string(),
+                api_key_env: "OLLAMA_API_KEY".to_string(),
+                base_url: None,
+                message_timeout_secs: 300,
+            },
+            ..KernelConfig::default()
+        }
+    }
+
+    fn test_agent_entry(name: &str, account_id: &str) -> AgentEntry {
+        AgentEntry {
+            id: AgentId::new(),
+            account_id: Some(account_id.to_string()),
+            name: name.to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        }
+    }
+
+    fn test_goal(account_id: &str, title: &str, agent_id: Option<AgentId>) -> Goal {
+        Goal {
+            id: GoalId::new(),
+            title: title.to_string(),
+            description: String::new(),
+            parent_id: None,
+            status: GoalStatus::InProgress,
+            progress: 25,
+            agent_id,
+            account_id: account_id.to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
     }
 
     #[test]
@@ -11968,6 +12556,7 @@ mod tests {
             onboarding_completed_at: None,
             source_toml_path: None,
             is_hand: false,
+            account_id: None,
         };
         registry.register(entry).unwrap();
 
@@ -12007,6 +12596,7 @@ mod tests {
             onboarding_completed_at: None,
             source_toml_path: None,
             is_hand: false,
+            account_id: None,
         };
         registry.register(e1).unwrap();
 
@@ -12032,6 +12622,7 @@ mod tests {
             onboarding_completed_at: None,
             source_toml_path: None,
             is_hand: false,
+            account_id: None,
         };
         registry.register(e2).unwrap();
 
@@ -12133,6 +12724,7 @@ mod tests {
                     },
                     ..Default::default()
                 },
+                None,
                 None,
                 None,
                 None,
@@ -12312,6 +12904,107 @@ mod tests {
         assert!(!LibreFangKernel::should_reuse_cached_route(
             "please write the API design for this service"
         ));
+    }
+
+    #[test]
+    fn test_spawn_agent_owned_registers_account_id_atomically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-owned-spawn-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+        let manifest = AgentManifest {
+            name: "owned-spawn".to_string(),
+            description: "tenant-owned spawn".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            ..Default::default()
+        };
+
+        let agent_id = kernel
+            .spawn_agent_owned(manifest, "tenant-a")
+            .expect("owned spawn should succeed");
+        let entry = kernel
+            .agent_registry()
+            .get(agent_id)
+            .expect("owned agent should be registered");
+
+        assert_eq!(entry.account_id.as_deref(), Some("tenant-a"));
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn test_spawn_agent_owned_lifecycle_event_stays_tenant_scoped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-owned-spawn-trigger-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        let tenant_a_target = test_agent_entry("tenant-a-target", "tenant-a");
+        let tenant_b_target = test_agent_entry("tenant-b-target", "tenant-b");
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        kernel.registry.register(tenant_a_target).unwrap();
+        kernel.registry.register(tenant_b_target).unwrap();
+
+        let tenant_a_trigger = kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                TriggerPattern::Lifecycle,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_b_trigger = kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                TriggerPattern::Lifecycle,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let manifest = AgentManifest {
+            name: "owned-spawn-trigger".to_string(),
+            description: "tenant-owned spawn lifecycle test".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            ..Default::default()
+        };
+
+        kernel
+            .spawn_agent_owned(manifest, "tenant-a")
+            .expect("owned spawn should succeed");
+
+        let tenant_a_state = kernel
+            .triggers
+            .get(tenant_a_trigger)
+            .expect("tenant-a trigger");
+        let tenant_b_state = kernel
+            .triggers
+            .get(tenant_b_trigger)
+            .expect("tenant-b trigger");
+
+        assert_eq!(tenant_a_state.fire_count, 1);
+        assert_eq!(tenant_b_state.fire_count, 0);
+
+        kernel.shutdown();
     }
 
     #[test]
@@ -12499,19 +13192,1014 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_scoped_key() {
-        // With peer_id: key is namespaced
+    fn test_tenant_shared_memory_key() {
         assert_eq!(
-            peer_scoped_key("car", Some("user-123")),
-            "peer:user-123:car"
+            tenant_shared_memory_key("tenant-a", "car", Some("user-123")),
+            "acct:tenant-a:peer:user-123:car"
         );
         assert_eq!(
-            peer_scoped_key("prefs.color", Some("u:456")),
-            "peer:u:456:prefs.color"
+            tenant_shared_memory_key("tenant-a", "prefs.color", Some("u:456")),
+            "acct:tenant-a:peer:u:456:prefs.color"
+        );
+        assert_eq!(
+            tenant_shared_memory_key("tenant-a", "car", None),
+            "acct:tenant-a:global:car"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_goal_update_requires_same_tenant_as_calling_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_a_agent = test_agent_entry("tenant-a-agent", "tenant-a");
+        let tenant_b_agent = test_agent_entry("tenant-b-agent", "tenant-b");
+        let tenant_a_agent_id = tenant_a_agent.id;
+        let tenant_b_agent_id = tenant_b_agent.id;
+        kernel.registry.register(tenant_a_agent).unwrap();
+        kernel.registry.register(tenant_b_agent).unwrap();
+
+        let goal_a = test_goal("tenant-a", "Goal A", Some(tenant_a_agent_id));
+        let goal_b = test_goal("tenant-b", "Goal B", Some(tenant_b_agent_id));
+        let goal_a_id = goal_a.id;
+        let goal_b_id = goal_b.id;
+        kernel.goal_store().create(goal_a).await.unwrap();
+        kernel.goal_store().create(goal_b).await.unwrap();
+
+        let denied = KernelHandle::goal_update(
+            &kernel,
+            &tenant_a_agent_id.to_string(),
+            &goal_b_id.to_string(),
+            Some("completed"),
+            Some(100),
+        );
+        assert!(denied.is_err());
+        assert!(denied.unwrap_err().contains("not found"));
+
+        let updated = KernelHandle::goal_update(
+            &kernel,
+            &tenant_a_agent_id.to_string(),
+            &goal_a_id.to_string(),
+            Some("completed"),
+            Some(100),
+        )
+        .unwrap();
+        assert_eq!(updated["account_id"], "tenant-a");
+        assert_eq!(updated["status"], "completed");
+        assert_eq!(updated["progress"], 100);
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_publish_event_only_triggers_same_tenant() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_a_source = test_agent_entry("tenant-a-source", "tenant-a");
+        let tenant_a_target = test_agent_entry("tenant-a-target", "tenant-a");
+        let tenant_b_target = test_agent_entry("tenant-b-target", "tenant-b");
+        let tenant_a_source_id = tenant_a_source.id;
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        kernel.registry.register(tenant_a_source).unwrap();
+        kernel.registry.register(tenant_a_target).unwrap();
+        kernel.registry.register(tenant_b_target).unwrap();
+
+        kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                TriggerPattern::System,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                TriggerPattern::System,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let triggered = kernel
+            .publish_event(Event::new(
+                tenant_a_source_id,
+                EventTarget::Broadcast,
+                EventPayload::System(SystemEvent::KernelStarted),
+            ))
+            .await;
+
+        assert_eq!(
+            triggered.len(),
+            1,
+            "tenant-a event should not wake tenant-b triggers"
+        );
+        assert_eq!(triggered[0].0, tenant_a_target_id);
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_publish_event_preserves_same_tenant_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_a_source = test_agent_entry("tenant-a-source", "tenant-a");
+        let tenant_a_target = test_agent_entry("tenant-a-target", "tenant-a");
+        let tenant_a_source_id = tenant_a_source.id;
+        let tenant_a_target_id = tenant_a_target.id;
+        kernel.registry.register(tenant_a_source).unwrap();
+        kernel.registry.register(tenant_a_target).unwrap();
+
+        kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                TriggerPattern::SystemKeyword {
+                    keyword: "started".to_string(),
+                },
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let triggered = kernel
+            .publish_event(Event::new(
+                tenant_a_source_id,
+                EventTarget::Broadcast,
+                EventPayload::System(SystemEvent::KernelStarted),
+            ))
+            .await;
+
+        assert_eq!(triggered.len(), 1);
+        assert_eq!(triggered[0].0, tenant_a_target_id);
+        assert!(triggered[0].1.contains("Kernel started"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_submit_tool_approval_keeps_approval_events_tenant_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_a_agent = test_agent_entry("tenant-a-source", "tenant-a");
+        let tenant_a_target = test_agent_entry("tenant-a-target", "tenant-a");
+        let tenant_b_target = test_agent_entry("tenant-b-target", "tenant-b");
+        let tenant_a_source_id = tenant_a_agent.id;
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        kernel.registry.register(tenant_a_agent).unwrap();
+        kernel.registry.register(tenant_a_target).unwrap();
+        kernel.registry.register(tenant_b_target).unwrap();
+
+        let tenant_a_trigger = kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                TriggerPattern::All,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_b_trigger = kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                TriggerPattern::All,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let deferred = librefang_types::tool::DeferredToolExecution {
+            agent_id: tenant_a_source_id.to_string(),
+            tool_use_id: "tool-use-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"command": "echo hi"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+
+        let submission = KernelHandle::submit_tool_approval(
+            &kernel,
+            &tenant_a_source_id.to_string(),
+            "shell_exec",
+            "run shell command",
+            deferred,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            submission,
+            librefang_types::tool::ToolApprovalSubmission::Pending { .. }
+        ));
+
+        let tenant_a = kernel
+            .trigger_engine()
+            .get(tenant_a_trigger)
+            .expect("tenant-a trigger");
+        let tenant_b = kernel
+            .trigger_engine()
+            .get(tenant_b_trigger)
+            .expect("tenant-b trigger");
+        assert_eq!(tenant_a.fire_count, 1);
+        assert_eq!(tenant_b.fire_count, 0);
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_goal_helpers_and_prompt_enrichment_stay_tenant_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_a_agent = test_agent_entry("tenant-a-agent", "tenant-a");
+        let tenant_b_agent = test_agent_entry("tenant-b-agent", "tenant-b");
+        let tenant_a_agent_id = tenant_a_agent.id;
+        let tenant_b_agent_id = tenant_b_agent.id;
+        kernel.registry.register(tenant_a_agent).unwrap();
+        kernel.registry.register(tenant_b_agent).unwrap();
+
+        kernel
+            .goal_store()
+            .create(test_goal(
+                "tenant-a",
+                "Tenant A scoped goal",
+                Some(tenant_a_agent_id),
+            ))
+            .await
+            .unwrap();
+        kernel
+            .goal_store()
+            .create(test_goal("tenant-a", "Tenant A shared goal", None))
+            .await
+            .unwrap();
+        kernel
+            .goal_store()
+            .create(test_goal(
+                "tenant-b",
+                "Tenant B scoped goal",
+                Some(tenant_b_agent_id),
+            ))
+            .await
+            .unwrap();
+
+        let cross_tenant = KernelHandle::goal_list_active(
+            &kernel,
+            &tenant_a_agent_id.to_string(),
+            Some(&tenant_b_agent_id.to_string()),
+        )
+        .unwrap();
+        assert!(cross_tenant.is_empty());
+
+        let own_goals =
+            KernelHandle::goal_list_active(&kernel, &tenant_a_agent_id.to_string(), None).unwrap();
+        assert_eq!(own_goals.len(), 1);
+        assert_eq!(own_goals[0]["account_id"], "tenant-a");
+        assert_eq!(own_goals[0]["title"], "Tenant A scoped goal");
+
+        let prompt_goals = kernel.active_goals_for_prompt(Some(tenant_a_agent_id));
+        assert_eq!(prompt_goals.len(), 2);
+        assert!(
+            prompt_goals
+                .iter()
+                .all(|(title, _, _)| title.starts_with("Tenant A")),
+            "prompt enrichment should only include tenant A goals"
         );
 
-        // Without peer_id: key is unchanged
-        assert_eq!(peer_scoped_key("car", None), "car");
-        assert_eq!(peer_scoped_key("global_setting", None), "global_setting");
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_knowledge_query_rejects_invalid_caller_agent_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let err = KernelHandle::knowledge_query(
+            &kernel,
+            "not-a-uuid",
+            librefang_types::memory::GraphPattern {
+                source: Some("Alice".to_string()),
+                relation: None,
+                target: None,
+                max_depth: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Invalid agent ID"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_knowledge_query_rejects_unknown_caller_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let unknown = AgentId::new();
+        let err = KernelHandle::knowledge_query(
+            &kernel,
+            &unknown.to_string(),
+            librefang_types::memory::GraphPattern {
+                source: Some("Alice".to_string()),
+                relation: None,
+                target: None,
+                max_depth: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Agent not found"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_knowledge_query_rejects_unowned_caller_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let unowned = AgentEntry {
+            id: AgentId::new(),
+            account_id: None,
+            name: "unowned-agent".to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        };
+        let unowned_id = unowned.id;
+        kernel.registry.register(unowned).unwrap();
+
+        let err = KernelHandle::knowledge_query(
+            &kernel,
+            &unowned_id.to_string(),
+            librefang_types::memory::GraphPattern {
+                source: Some("Alice".to_string()),
+                relation: None,
+                target: None,
+                max_depth: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("tenant-owned caller"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_knowledge_graph_kernel_handle_stays_tenant_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_a_agent = test_agent_entry("tenant-a-agent", "tenant-a");
+        let tenant_b_agent = test_agent_entry("tenant-b-agent", "tenant-b");
+        let tenant_a_id = tenant_a_agent.id;
+        let tenant_b_id = tenant_b_agent.id;
+        kernel.registry.register(tenant_a_agent).unwrap();
+        kernel.registry.register(tenant_b_agent).unwrap();
+
+        let alice_a = KernelHandle::knowledge_add_entity(
+            &kernel,
+            &tenant_a_id.to_string(),
+            librefang_types::memory::Entity {
+                id: String::new(),
+                entity_type: librefang_types::memory::EntityType::Person,
+                name: "Alice".to_string(),
+                properties: std::collections::HashMap::new(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        let acme_a = KernelHandle::knowledge_add_entity(
+            &kernel,
+            &tenant_a_id.to_string(),
+            librefang_types::memory::Entity {
+                id: String::new(),
+                entity_type: librefang_types::memory::EntityType::Organization,
+                name: "Acme".to_string(),
+                properties: std::collections::HashMap::new(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        KernelHandle::knowledge_add_relation(
+            &kernel,
+            &tenant_a_id.to_string(),
+            librefang_types::memory::Relation {
+                source: alice_a,
+                relation: librefang_types::memory::RelationType::WorksAt,
+                target: acme_a,
+                properties: std::collections::HashMap::new(),
+                confidence: 1.0,
+                created_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let tenant_a_matches = KernelHandle::knowledge_query(
+            &kernel,
+            &tenant_a_id.to_string(),
+            librefang_types::memory::GraphPattern {
+                source: Some("Alice".to_string()),
+                relation: Some(librefang_types::memory::RelationType::WorksAt),
+                target: None,
+                max_depth: 1,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(tenant_a_matches.len(), 1);
+
+        let tenant_b_matches = KernelHandle::knowledge_query(
+            &kernel,
+            &tenant_b_id.to_string(),
+            librefang_types::memory::GraphPattern {
+                source: Some("Alice".to_string()),
+                relation: Some(librefang_types::memory::RelationType::WorksAt),
+                target: None,
+                max_depth: 1,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(tenant_b_matches.is_empty());
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_shared_memory_rejects_invalid_caller_agent_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let err = KernelHandle::memory_store(
+            &kernel,
+            "not-a-uuid",
+            "user_name",
+            serde_json::json!("Alice"),
+            Some("sender-1"),
+        )
+        .unwrap_err();
+        assert!(err.contains("Invalid agent ID"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_shared_memory_rejects_unowned_caller_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let unowned = AgentEntry {
+            id: AgentId::new(),
+            account_id: None,
+            name: "unowned-agent".to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        };
+        let unowned_id = unowned.id;
+        kernel.registry.register(unowned).unwrap();
+
+        let err = KernelHandle::memory_list(&kernel, &unowned_id.to_string(), Some("sender-1"))
+            .unwrap_err();
+        assert!(err.contains("tenant-owned caller"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_shared_memory_stays_tenant_scoped_even_with_same_sender_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_a_agent = test_agent_entry("tenant-a-agent", "tenant-a");
+        let tenant_b_agent = test_agent_entry("tenant-b-agent", "tenant-b");
+        let tenant_a_id = tenant_a_agent.id;
+        let tenant_b_id = tenant_b_agent.id;
+        kernel.registry.register(tenant_a_agent).unwrap();
+        kernel.registry.register(tenant_b_agent).unwrap();
+
+        KernelHandle::memory_store(
+            &kernel,
+            &tenant_a_id.to_string(),
+            "user_name",
+            serde_json::json!("Alice"),
+            Some("shared-user"),
+        )
+        .unwrap();
+
+        let tenant_a_value = KernelHandle::memory_recall(
+            &kernel,
+            &tenant_a_id.to_string(),
+            "user_name",
+            Some("shared-user"),
+        )
+        .unwrap();
+        assert_eq!(tenant_a_value, Some(serde_json::json!("Alice")));
+
+        let tenant_b_value = KernelHandle::memory_recall(
+            &kernel,
+            &tenant_b_id.to_string(),
+            "user_name",
+            Some("shared-user"),
+        )
+        .unwrap();
+        assert_eq!(tenant_b_value, None);
+
+        let tenant_a_keys =
+            KernelHandle::memory_list(&kernel, &tenant_a_id.to_string(), Some("shared-user"))
+                .unwrap();
+        assert_eq!(tenant_a_keys, vec!["user_name".to_string()]);
+
+        let tenant_b_keys =
+            KernelHandle::memory_list(&kernel, &tenant_b_id.to_string(), Some("shared-user"))
+                .unwrap();
+        assert!(tenant_b_keys.is_empty());
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_resolve_workflow_reference_none_hides_tenant_owned_workflows() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_workflow = crate::workflow::Workflow {
+            id: crate::workflow::WorkflowId::new(),
+            name: "tenant-only-flow".to_string(),
+            description: String::new(),
+            steps: vec![],
+            created_at: chrono::Utc::now(),
+            account_id: Some("tenant-a".to_string()),
+            layout: None,
+        };
+        let tenant_workflow_id = tenant_workflow.id;
+        let global_workflow = crate::workflow::Workflow {
+            id: crate::workflow::WorkflowId::new(),
+            name: "global-flow".to_string(),
+            description: String::new(),
+            steps: vec![],
+            created_at: chrono::Utc::now(),
+            account_id: None,
+            layout: None,
+        };
+        let global_workflow_id = global_workflow.id;
+
+        kernel.workflow_engine().register(tenant_workflow).await;
+        kernel.workflow_engine().register(global_workflow).await;
+
+        assert_eq!(
+            kernel
+                .resolve_workflow_reference_scoped("tenant-only-flow", None)
+                .await,
+            None
+        );
+        assert_eq!(
+            kernel
+                .resolve_workflow_reference_scoped(&tenant_workflow_id.0.to_string(), None)
+                .await,
+            None
+        );
+        assert_eq!(
+            kernel
+                .resolve_workflow_reference_scoped("global-flow", None)
+                .await,
+            Some(global_workflow_id)
+        );
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_run_workflow_none_rejects_tenant_owned_step_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_agent = test_agent_entry("tenant-agent", "tenant-a");
+        let tenant_agent_id = tenant_agent.id;
+        kernel.registry.register(tenant_agent).unwrap();
+
+        let global_workflow = crate::workflow::Workflow {
+            id: crate::workflow::WorkflowId::new(),
+            name: "global-flow".to_string(),
+            description: String::new(),
+            steps: vec![crate::workflow::WorkflowStep {
+                name: "step-1".to_string(),
+                agent: crate::workflow::StepAgent::ById {
+                    id: tenant_agent_id.to_string(),
+                },
+                prompt_template: "hello".to_string(),
+                mode: crate::workflow::StepMode::Sequential,
+                timeout_secs: 30,
+                error_mode: crate::workflow::ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+            }],
+            created_at: chrono::Utc::now(),
+            account_id: None,
+            layout: None,
+        };
+        let workflow_id = global_workflow.id;
+        kernel.workflow_engine().register(global_workflow).await;
+
+        let err = kernel
+            .run_workflow_scoped(workflow_id, "hello".to_string(), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Workflow failed"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cron_list_rejects_unowned_caller_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let unowned = AgentEntry {
+            id: AgentId::new(),
+            account_id: None,
+            name: "unowned-agent".to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        };
+        let unowned_id = unowned.id;
+        kernel.registry.register(unowned).unwrap();
+
+        let err = KernelHandle::cron_list(&kernel, &unowned_id.to_string())
+            .await
+            .unwrap_err();
+        assert!(err.contains("tenant-owned caller"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cron_create_rejects_unowned_caller_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let unowned = AgentEntry {
+            id: AgentId::new(),
+            account_id: None,
+            name: "unowned-agent".to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        };
+        let unowned_id = unowned.id;
+        kernel.registry.register(unowned).unwrap();
+
+        let err = KernelHandle::cron_create(
+            &kernel,
+            &unowned_id.to_string(),
+            serde_json::json!({
+                "name": "unowned job",
+                "schedule": { "kind": "every", "every_secs": 60 },
+                "action": { "kind": "agent_turn", "message": "ping" },
+                "delivery": { "kind": "none" }
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("tenant-owned caller"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_publish_event_for_agent_rejects_unowned_caller_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let unowned = AgentEntry {
+            id: AgentId::new(),
+            account_id: None,
+            name: "unowned-agent".to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        };
+        let unowned_id = unowned.id;
+        kernel.registry.register(unowned).unwrap();
+
+        let err = KernelHandle::publish_event_for_agent(
+            &kernel,
+            &unowned_id.to_string(),
+            "tenant.alert",
+            serde_json::json!({"ok": true}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("tenant-owned caller"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cron_cancel_stays_tenant_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_a_agent = test_agent_entry("tenant-a-agent", "tenant-a");
+        let tenant_b_agent = test_agent_entry("tenant-b-agent", "tenant-b");
+        let tenant_a_id = tenant_a_agent.id;
+        let tenant_b_id = tenant_b_agent.id;
+        kernel.registry.register(tenant_a_agent).unwrap();
+        kernel.registry.register(tenant_b_agent).unwrap();
+
+        let create_result = KernelHandle::cron_create(
+            &kernel,
+            &tenant_a_id.to_string(),
+            serde_json::json!({
+                "name": "tenant-a job",
+                "schedule": { "kind": "every", "every_secs": 60 },
+                "action": { "kind": "agent_turn", "message": "ping" },
+                "delivery": { "kind": "none" }
+            }),
+        )
+        .await
+        .unwrap();
+        let job_id = serde_json::from_str::<serde_json::Value>(&create_result).unwrap()["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let err = KernelHandle::cron_cancel(&kernel, &tenant_b_id.to_string(), &job_id)
+            .await
+            .unwrap_err();
+        assert!(err.contains("not found"));
+
+        let tenant_a_jobs = KernelHandle::cron_list(&kernel, &tenant_a_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(tenant_a_jobs.len(), 1);
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cron_background_system_event_stays_tenant_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel = Arc::new(
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel"),
+        );
+
+        let tenant_a_source = test_agent_entry("tenant-a-source", "tenant-a");
+        let tenant_a_target = test_agent_entry("tenant-a-target", "tenant-a");
+        let tenant_b_target = test_agent_entry("tenant-b-target", "tenant-b");
+        let tenant_a_source_id = tenant_a_source.id;
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        kernel.registry.register(tenant_a_source).unwrap();
+        kernel.registry.register(tenant_a_target).unwrap();
+        kernel.registry.register(tenant_b_target).unwrap();
+
+        let tenant_a_trigger = kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                TriggerPattern::All,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_b_trigger = kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                TriggerPattern::All,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        KernelHandle::cron_create(
+            kernel.as_ref(),
+            &tenant_a_source_id.to_string(),
+            serde_json::json!({
+                "name": "tenant-a system event",
+                "schedule": { "kind": "every", "every_secs": 60 },
+                "action": { "kind": "system_event", "text": "tenant-a cron event" },
+                "delivery": { "kind": "none" }
+            }),
+        )
+        .await
+        .unwrap();
+
+        kernel
+            .cron_scheduler
+            .mark_due_now_by_agent(tenant_a_source_id);
+        kernel.process_due_cron_jobs_once().await;
+
+        let tenant_a_state = kernel
+            .triggers
+            .get(tenant_a_trigger)
+            .expect("tenant-a trigger");
+        let tenant_b_state = kernel
+            .triggers
+            .get(tenant_b_trigger)
+            .expect("tenant-b trigger");
+
+        assert_eq!(tenant_a_state.fire_count, 1);
+        assert_eq!(tenant_b_state.fire_count, 0);
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn test_tenant_provider_resolution_requires_tenant_owned_config() {
+        let _global_key = set_test_env("GLOBAL_OPENAI_KEY", "global-secret");
+        let _tenant_key = set_test_env("OPENAI_API_KEY__ACCT_TENANT_A", "tenant-secret");
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            multi_tenant: true,
+            default_model: DefaultModelConfig {
+                provider: "openai".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                api_key_env: "GLOBAL_OPENAI_KEY".to_string(),
+                base_url: None,
+                message_timeout_secs: 300,
+            },
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("boot kernel");
+
+        let manifest = AgentManifest {
+            model: librefang_types::agent::ModelConfig {
+                provider: "default".to_string(),
+                model: "default".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut unresolved = manifest.clone();
+        let apply_without_tenant_default =
+            kernel.apply_effective_default_model(&mut unresolved, Some("tenant-a"));
+        assert!(apply_without_tenant_default.is_err());
+
+        let explicit_provider = AgentManifest {
+            model: librefang_types::agent::ModelConfig {
+                provider: "openai".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let no_fallback = kernel.resolve_driver(&explicit_provider, Some("tenant-a"));
+        assert!(no_fallback.is_err(), "tenant resolution should fail closed");
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(kernel.provider_store().upsert_scoped(
+                "tenant-a",
+                "openai",
+                crate::provider_accounts::TenantProviderUpdate {
+                    api_key_env: Some(Some("OPENAI_API_KEY__ACCT_TENANT_A".to_string())),
+                    base_url: None,
+                },
+            ))
+            .unwrap();
+        runtime
+            .block_on(kernel.provider_store().set_default_scoped(
+                "tenant-a",
+                "openai",
+                "gpt-4o-mini".to_string(),
+            ))
+            .unwrap();
+
+        let mut resolved = manifest;
+        kernel
+            .apply_effective_default_model(&mut resolved, Some("tenant-a"))
+            .unwrap();
+        assert_eq!(resolved.model.provider, "openai");
+        assert_eq!(
+            resolved.model.api_key_env.as_deref(),
+            Some("OPENAI_API_KEY__ACCT_TENANT_A")
+        );
+        let driver = kernel.resolve_driver(&resolved, Some("tenant-a"));
+        assert!(
+            driver.is_ok(),
+            "tenant resolution should use scoped provider config"
+        );
+
+        kernel.shutdown();
     }
 }

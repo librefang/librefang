@@ -43,6 +43,7 @@ zip = { workspace = true }
 walkdir = { workspace = true }
 dirs = { workspace = true }
 jsonwebtoken = { workspace = true }
+hex = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 argon2 = "0.5"
@@ -143,3 +144,4 @@ tokio-test = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }
 http-body-util = "0.1"
+tokio-tungstenite = { workspace = true }

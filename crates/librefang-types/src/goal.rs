@@ -104,6 +104,8 @@ pub struct Goal {
     /// Optional agent assigned to this goal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
+    /// Owning tenant account.
+    pub account_id: String,
     /// When the goal was created.
     pub created_at: DateTime<Utc>,
     /// When the goal was last updated.
@@ -152,6 +154,7 @@ mod tests {
             status: GoalStatus::Pending,
             progress: 0,
             agent_id: None,
+            account_id: "tenant-a".into(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

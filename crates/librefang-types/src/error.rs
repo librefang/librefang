@@ -99,6 +99,10 @@ pub enum LibreFangError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    /// A requested resource was not found.
+    #[error("Not found: {0}")]
+    NotFound(String),
+
     /// The agent loop exited because tools failed in N consecutive iterations.
     #[error(
         "Repeated tool failures: {iterations} consecutive iterations with {error_count} errors"

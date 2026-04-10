@@ -158,7 +158,7 @@ impl WhatsAppAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/message/send", gateway_url.trim_end_matches('/'));
-        let body = serde_json::json!({ "to": to, "text": text });
+        let body = self.gateway_send_body(to, text);
 
         let resp = self.client.post(&url).json(&body).send().await?;
 
@@ -182,6 +182,21 @@ impl WhatsAppAdapter {
     #[allow(dead_code)]
     pub fn is_gateway_mode(&self) -> bool {
         self.gateway_url.is_some()
+    }
+
+    fn gateway_send_body(&self, to: &str, text: &str) -> serde_json::Value {
+        let mut body = serde_json::json!({ "to": to, "text": text });
+        if let Some(instance_key) = self.gateway_instance_key() {
+            body["instance_key"] = serde_json::Value::String(instance_key);
+        }
+        body
+    }
+
+    fn gateway_instance_key(&self) -> Option<String> {
+        self.account_id
+            .as_deref()
+            .filter(|account_id| !account_id.is_empty())
+            .map(|account_id| format!("whatsapp:{account_id}"))
     }
 }
 
@@ -371,5 +386,23 @@ mod tests {
             vec![],
         );
         assert!(open.is_allowed("+anything"));
+    }
+
+    #[test]
+    fn test_gateway_send_body_includes_instance_key_when_account_scoped() {
+        let adapter = WhatsAppAdapter::new(
+            "12345".to_string(),
+            "token".to_string(),
+            "verify".to_string(),
+            8443,
+            vec![],
+        )
+        .with_account_id(Some("tenant-a".to_string()));
+
+        let body = adapter.gateway_send_body("+1234567890", "hello");
+
+        assert_eq!(body["to"].as_str(), Some("+1234567890"));
+        assert_eq!(body["text"].as_str(), Some("hello"));
+        assert_eq!(body["instance_key"].as_str(), Some("whatsapp:tenant-a"));
     }
 }

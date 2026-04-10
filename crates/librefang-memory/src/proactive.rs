@@ -54,6 +54,34 @@ pub mod categories {
     pub const RELATIONSHIP: &str = "relationship";
 }
 
+/// Tenant scope for memory operations.
+///
+/// Used by multi-tenant API handlers to restrict memory queries and writes
+/// to a specific account. `None` means admin/global access (no filtering).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemoryScope<'a> {
+    pub account_id: Option<&'a str>,
+}
+
+impl<'a> MemoryScope<'a> {
+    /// Create a global (admin) scope — no account filtering.
+    pub fn global() -> Self {
+        Self { account_id: None }
+    }
+
+    /// Create a tenant-scoped view restricted to a single account.
+    pub fn tenant(account_id: &'a str) -> Self {
+        Self {
+            account_id: Some(account_id),
+        }
+    }
+
+    /// Returns `true` when this scope imposes no account restriction.
+    pub fn is_global(&self) -> bool {
+        self.account_id.is_none()
+    }
+}
+
 /// Proactive memory store - implements mem0-style API on top of MemorySubstrate.
 ///
 /// This wraps the existing MemorySubstrate with a simpler, user-friendly API:
@@ -610,6 +638,137 @@ impl ProactiveMemoryStore {
         Ok(imported)
     }
 
+    /// Import memories with tenant tagging (scoped variant).
+    ///
+    /// Behaves identically to [`import_memories`] but stamps `account_id` into
+    /// each item's metadata **before** persisting. If the scope carries an
+    /// `account_id`, any pre-existing `account_id` in the imported metadata is
+    /// **overridden** to prevent a tenant-poisoning attack (e.g. tenant-B
+    /// importing records that claim to belong to tenant-A).
+    ///
+    /// When the scope is global, this delegates directly to `import_memories`.
+    pub async fn import_memories_scoped(
+        &self,
+        agent_id: &str,
+        items: Vec<MemoryExportItem>,
+        scope: MemoryScope<'_>,
+    ) -> LibreFangResult<usize> {
+        let acct = match scope.account_id {
+            Some(a) => a,
+            None => return self.import_memories(agent_id, items).await,
+        };
+
+        let aid = Self::parse_agent_id(agent_id)?;
+        let mut imported = 0usize;
+
+        for item in items {
+            let level = MemoryLevel::from(item.level.as_str());
+            let scope_str = level.scope_str();
+
+            // Skip duplicates — scope to same tenant to avoid cross-tenant
+            // side channels where tenant B's import is skipped because tenant A
+            // already has similar content.
+            let filter = Some({
+                let mut f = MemoryFilter::agent(aid);
+                f.metadata.insert(
+                    "account_id".to_string(),
+                    serde_json::Value::String(acct.to_string()),
+                );
+                f
+            });
+            let existing = self.semantic.recall(&item.content, 5, filter)?;
+            let is_duplicate = existing.iter().any(|frag| {
+                let sim =
+                    text_similarity(&item.content.to_lowercase(), &frag.content.to_lowercase());
+                sim > 0.9
+            });
+            if is_duplicate {
+                tracing::debug!(
+                    "Skipping duplicate import: {}",
+                    truncate_for_log(&item.content, 80)
+                );
+                continue;
+            }
+
+            let mut metadata: HashMap<String, serde_json::Value> = if item.metadata.is_object() {
+                serde_json::from_value(item.metadata).unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
+
+            if !item.category.is_empty() {
+                metadata.insert("category".to_string(), serde_json::json!(item.category));
+            }
+            metadata.insert("imported".to_string(), serde_json::json!(true));
+            if let Some(ref updated_at) = item.updated_at {
+                metadata.insert(
+                    "original_updated_at".to_string(),
+                    serde_json::json!(updated_at),
+                );
+            }
+
+            // ---- SECURITY: stamp (or override) account_id ----
+            metadata.insert(
+                "account_id".to_string(),
+                serde_json::Value::String(acct.to_string()),
+            );
+
+            // Generate embedding if driver available
+            let embedding = if let Some(ref emb) = self.embedding {
+                emb.embed_one(&item.content).await.ok()
+            } else {
+                None
+            };
+
+            let mem_id = self.semantic.remember_with_embedding(
+                aid,
+                &item.content,
+                MemorySource::System,
+                scope_str,
+                metadata,
+                embedding.as_deref(),
+                None,
+                None,
+                Default::default(),
+            )?;
+
+            // Also store in KV for consistency — include account_id in the value
+            let mut mem_item = MemoryItem::new(item.content, level);
+            mem_item
+                .metadata
+                .insert("account_id".to_string(), serde_json::json!(acct));
+            if let Ok(json) = serde_json::to_value(&mem_item) {
+                if let Err(e) = self
+                    .structured
+                    .set(aid, &format!("memory:{}", mem_id), json)
+                {
+                    tracing::warn!(
+                        "Failed to set KV entry for imported memory {}: {}",
+                        mem_id,
+                        e
+                    );
+                }
+            }
+
+            imported += 1;
+        }
+
+        // Enforce per-agent memory cap after import
+        if imported > 0 {
+            if let Err(e) = self.evict_if_over_cap(aid, 0) {
+                tracing::warn!("import_memories_scoped eviction check failed: {}", e);
+            }
+        }
+
+        tracing::info!(
+            "Imported {} memories for agent {} (account={})",
+            imported,
+            agent_id,
+            acct
+        );
+        Ok(imported)
+    }
+
     /// Parse user_id string into AgentId.
     fn parse_agent_id(user_id: &str) -> LibreFangResult<AgentId> {
         user_id
@@ -699,6 +858,21 @@ impl ProactiveMemoryStore {
         item: &MemoryItem,
         peer_id: Option<&str>,
     ) -> LibreFangResult<Option<MemoryAddResult>> {
+        self.add_with_decision_meta(agent_id, item, peer_id, None)
+            .await
+    }
+
+    /// Core decision logic for adding/updating a memory. When `extra_metadata`
+    /// is provided, its entries are merged into the metadata written to both
+    /// the semantic and KV stores. This is the injection point for
+    /// `account_id` in the tenant-scoped write path.
+    async fn add_with_decision_meta(
+        &self,
+        agent_id: AgentId,
+        item: &MemoryItem,
+        peer_id: Option<&str>,
+        extra_metadata: Option<&HashMap<String, serde_json::Value>>,
+    ) -> LibreFangResult<Option<MemoryAddResult>> {
         // Generate embedding for the new memory (if driver available)
         let query_embedding = if let Some(ref emb) = self.embedding {
             emb.embed_one(&item.content).await.ok()
@@ -708,9 +882,16 @@ impl ProactiveMemoryStore {
 
         // Search for similar existing memories (top 5 candidates).
         // Use vector search if embedding available, otherwise keyword LIKE.
+        // When extra_metadata contains account_id, scope the candidate search
+        // to the same tenant to prevent cross-tenant dedup/update.
         let filter = Some({
             let mut f = MemoryFilter::agent(agent_id);
             f.peer_id = peer_id.map(String::from);
+            if let Some(extra) = extra_metadata {
+                for (k, v) in extra {
+                    f.metadata.insert(k.clone(), v.clone());
+                }
+            }
             f
         });
         let existing = if let Some(ref qe) = query_embedding {
@@ -758,6 +939,12 @@ impl ProactiveMemoryStore {
             MemoryAction::Add => {
                 let mut metadata = item.metadata.clone();
                 metadata.insert("category".to_string(), serde_json::json!(&item.category));
+                // Merge extra metadata (e.g. account_id for tenant scoping)
+                if let Some(extra) = extra_metadata {
+                    for (k, v) in extra {
+                        metadata.insert(k.clone(), v.clone());
+                    }
+                }
                 // Store with embedding if available
                 let mem_id = self.semantic.remember_with_embedding_and_peer(
                     agent_id,
@@ -771,9 +958,15 @@ impl ProactiveMemoryStore {
                     Default::default(),
                     peer_id,
                 )?;
-                // Also store in KV using the semantic store's ID for consistency
+                // Also store in KV using the semantic store's ID for consistency.
+                // Inject extra_metadata so KV-based reads see the tenant tag.
                 let mut kv_item = item.clone();
                 kv_item.id = mem_id.0.to_string();
+                if let Some(extra) = extra_metadata {
+                    for (k, v) in extra {
+                        kv_item.metadata.insert(k.clone(), v.clone());
+                    }
+                }
                 if let Ok(json) = serde_json::to_value(&kv_item) {
                     if let Err(e) =
                         self.structured
@@ -813,6 +1006,12 @@ impl ProactiveMemoryStore {
 
                 let mut metadata = item.metadata.clone();
                 metadata.insert("category".to_string(), serde_json::json!(&item.category));
+                // Merge extra metadata (e.g. account_id for tenant scoping)
+                if let Some(extra) = extra_metadata {
+                    for (k, v) in extra {
+                        metadata.insert(k.clone(), v.clone());
+                    }
+                }
                 metadata.insert("updated_from".to_string(), serde_json::json!(existing_id));
                 metadata.insert(
                     "previous_content".to_string(),
@@ -853,8 +1052,16 @@ impl ProactiveMemoryStore {
                 // Update content in-place (preserves ID, agent, scope, access stats)
                 self.semantic
                     .update_content(old_mid, &item.content, Some(metadata))?;
-                // Also update in KV so get()/list() reflect the change
-                if let Ok(json) = serde_json::to_value(item) {
+                // Also update in KV so get()/list() reflect the change.
+                // Inject extra_metadata (e.g. account_id) into the KV item
+                // so KV-based reads also see the tenant tag.
+                let mut kv_item = item.clone();
+                if let Some(extra) = extra_metadata {
+                    for (k, v) in extra {
+                        kv_item.metadata.insert(k.clone(), v.clone());
+                    }
+                }
+                if let Ok(json) = serde_json::to_value(&kv_item) {
                     if let Err(e) =
                         self.structured
                             .set(agent_id, &format!("memory:{}", existing_id), json)
@@ -958,6 +1165,34 @@ impl ProactiveMemoryStore {
     ///
     /// Deduplicates: skips if an identical (source, relation, target) already exists.
     pub fn store_relations(&self, triples: &[RelationTriple], agent_id: &str) {
+        self.store_relations_internal(triples, agent_id, None);
+    }
+
+    pub fn store_relations_scoped(
+        &self,
+        triples: &[RelationTriple],
+        agent_id: &str,
+        account_id: &str,
+    ) -> LibreFangResult<()> {
+        if agent_id.trim().is_empty() || account_id.trim().is_empty() {
+            return Err(LibreFangError::Memory(
+                "knowledge graph writes require concrete agent_id and account_id".to_string(),
+            ));
+        }
+        self.store_relations_internal(triples, agent_id, Some(account_id));
+        Ok(())
+    }
+
+    fn store_relations_internal(
+        &self,
+        triples: &[RelationTriple],
+        agent_id: &str,
+        account_id: Option<&str>,
+    ) {
+        if agent_id.trim().is_empty() {
+            tracing::warn!("Refusing to store knowledge graph relations without agent ownership");
+            return;
+        }
         for triple in triples {
             let source_type = parse_entity_type(&triple.subject_type);
             let target_type = parse_entity_type(&triple.object_type);
@@ -965,7 +1200,7 @@ impl ProactiveMemoryStore {
             // Upsert source entity
             let source_id = match self.knowledge.add_entity(
                 Entity {
-                    id: normalize_entity_id(&triple.subject),
+                    id: scoped_entity_id(agent_id, &triple.subject),
                     entity_type: source_type,
                     name: triple.subject.clone(),
                     properties: HashMap::new(),
@@ -973,6 +1208,7 @@ impl ProactiveMemoryStore {
                     updated_at: chrono::Utc::now(),
                 },
                 agent_id,
+                account_id,
             ) {
                 Ok(id) => id,
                 Err(e) => {
@@ -984,7 +1220,7 @@ impl ProactiveMemoryStore {
             // Upsert target entity
             let target_id = match self.knowledge.add_entity(
                 Entity {
-                    id: normalize_entity_id(&triple.object),
+                    id: scoped_entity_id(agent_id, &triple.object),
                     entity_type: target_type,
                     name: triple.object.clone(),
                     properties: HashMap::new(),
@@ -992,6 +1228,7 @@ impl ProactiveMemoryStore {
                     updated_at: chrono::Utc::now(),
                 },
                 agent_id,
+                account_id,
             ) {
                 Ok(id) => id,
                 Err(e) => {
@@ -1002,10 +1239,13 @@ impl ProactiveMemoryStore {
 
             // Add relation (skip if already exists)
             let relation_type = parse_relation_type(&triple.relation);
-            match self
-                .knowledge
-                .has_relation(&source_id, &relation_type, &target_id)
-            {
+            match self.knowledge.has_relation_scoped(
+                &source_id,
+                &relation_type,
+                &target_id,
+                Some(agent_id),
+                account_id,
+            ) {
                 Ok(true) => {
                     tracing::debug!(
                         "Skipping duplicate relation: {} -> {} -> {}",
@@ -1025,6 +1265,7 @@ impl ProactiveMemoryStore {
                             created_at: chrono::Utc::now(),
                         },
                         agent_id,
+                        account_id,
                     ) {
                         tracing::warn!(
                             "Failed to add relation '{}' -> '{}': {}",
@@ -1045,7 +1286,7 @@ impl ProactiveMemoryStore {
     ///
     /// Extracts candidate entity names from the query, then does targeted
     /// graph lookups instead of loading all relations.
-    fn graph_context(&self, query: &str) -> Option<String> {
+    fn graph_context(&self, agent_id: &str, query: &str) -> Option<String> {
         // Extract capitalized words and significant terms as entity candidates
         let candidates = extract_entity_candidates(query);
         if candidates.is_empty() {
@@ -1057,12 +1298,16 @@ impl ProactiveMemoryStore {
 
         for candidate in &candidates {
             // Query as source
-            if let Ok(matches) = self.knowledge.query_graph(GraphPattern {
-                source: Some(candidate.clone()),
-                relation: None,
-                target: None,
-                max_depth: 1,
-            }) {
+            if let Ok(matches) = self.knowledge.query_graph_scoped(
+                GraphPattern {
+                    source: Some(candidate.clone()),
+                    relation: None,
+                    target: None,
+                    max_depth: 1,
+                },
+                Some(agent_id),
+                None,
+            ) {
                 for m in matches {
                     let key = format!("{}-{:?}-{}", m.source.id, m.relation.relation, m.target.id);
                     if seen.insert(key) {
@@ -1071,12 +1316,16 @@ impl ProactiveMemoryStore {
                 }
             }
             // Query as target
-            if let Ok(matches) = self.knowledge.query_graph(GraphPattern {
-                source: None,
-                relation: None,
-                target: Some(candidate.clone()),
-                max_depth: 1,
-            }) {
+            if let Ok(matches) = self.knowledge.query_graph_scoped(
+                GraphPattern {
+                    source: None,
+                    relation: None,
+                    target: Some(candidate.clone()),
+                    max_depth: 1,
+                },
+                Some(agent_id),
+                None,
+            ) {
                 for m in matches {
                     let key = format!("{}-{:?}-{}", m.source.id, m.relation.relation, m.target.id);
                     if seen.insert(key) {
@@ -1112,9 +1361,18 @@ impl ProactiveMemoryStore {
         let mut context = self.extractor.format_context(memories);
 
         // Append knowledge graph context if relevant
-        if let Some(graph_ctx) = self.graph_context(query) {
-            context.push('\n');
-            context.push_str(&graph_ctx);
+        if let Ok(agent_id) = memories
+            .iter()
+            .find_map(|m| m.agent_id.as_deref())
+            .map(Self::parse_agent_id)
+            .transpose()
+        {
+            if let Some(graph_ctx) =
+                agent_id.and_then(|id| self.graph_context(&id.to_string(), query))
+            {
+                context.push('\n');
+                context.push_str(&graph_ctx);
+            }
         }
 
         context
@@ -1449,6 +1707,21 @@ impl ProactiveMemoryStore {
         self.knowledge.query_graph(pattern)
     }
 
+    pub fn query_relations_scoped(
+        &self,
+        pattern: GraphPattern,
+        agent_id: &str,
+        account_id: &str,
+    ) -> LibreFangResult<Vec<librefang_types::memory::GraphMatch>> {
+        if agent_id.trim().is_empty() || account_id.trim().is_empty() {
+            return Err(LibreFangError::Memory(
+                "knowledge graph queries require concrete agent_id and account_id".to_string(),
+            ));
+        }
+        self.knowledge
+            .query_graph_scoped(pattern, Some(agent_id), Some(account_id))
+    }
+
     /// Find duplicate/near-duplicate memories for a user/agent.
     ///
     /// Uses a tiered similarity strategy (mem0-style):
@@ -1565,6 +1838,589 @@ impl ProactiveMemoryStore {
 
         Ok(groups)
     }
+
+    // ── Multi-tenant scoped helpers ────────────────────────────────────
+
+    /// Build a [`MemoryFilter`] with optional account-id scope applied.
+    ///
+    /// When `scope` carries an `account_id`, it is injected into the filter's
+    /// metadata map so that downstream stores can restrict results to that
+    /// tenant.  When the scope is global the returned filter only contains
+    /// the (optional) agent-id constraint.
+    fn scoped_filter(&self, agent_id: Option<AgentId>, scope: MemoryScope<'_>) -> MemoryFilter {
+        let mut filter = match agent_id {
+            Some(aid) => MemoryFilter::agent(aid),
+            None => MemoryFilter::default(),
+        };
+        if let Some(acct) = scope.account_id {
+            filter.metadata.insert(
+                "account_id".to_string(),
+                serde_json::Value::String(acct.to_string()),
+            );
+        }
+        filter
+    }
+
+    /// Inject `account_id` into a metadata map so that stored memories carry
+    /// the tenant tag.  Returns a new map (the original is not mutated).
+    ///
+    /// Currently unused — reserved for Phase 3 when writes pass metadata
+    /// directly through the remember path instead of post-stamping.
+    #[allow(dead_code)]
+    fn scoped_metadata(
+        &self,
+        base: HashMap<String, serde_json::Value>,
+        scope: MemoryScope<'_>,
+    ) -> HashMap<String, serde_json::Value> {
+        let mut meta = base;
+        if let Some(acct) = scope.account_id {
+            meta.insert(
+                "account_id".to_string(),
+                serde_json::Value::String(acct.to_string()),
+            );
+        }
+        meta
+    }
+
+    // ── Multi-tenant scoped public API ─────────────────────────────────
+
+    /// Semantic search restricted to a single tenant scope.
+    ///
+    /// When the scope carries an `account_id`, results whose `metadata`
+    /// does not contain a matching `account_id` are filtered out.  A global
+    /// scope behaves identically to [`search_all`].
+    pub async fn search_scoped(
+        &self,
+        query: &str,
+        scope: MemoryScope<'_>,
+        limit: usize,
+    ) -> LibreFangResult<Vec<MemoryItem>> {
+        self.maybe_run_maintenance();
+
+        let filter = self.scoped_filter(None, scope);
+
+        let results = if let Some(ref emb) = self.embedding {
+            if let Ok(qe) = emb.embed_one(query).await {
+                self.semantic
+                    .recall_with_embedding(query, limit, Some(filter), Some(&qe))?
+            } else {
+                self.semantic.recall(query, limit, Some(filter))?
+            }
+        } else {
+            self.semantic.recall(query, limit, Some(filter))?
+        };
+
+        let items: Vec<MemoryItem> = results
+            .into_iter()
+            .map(MemoryItem::from_fragment)
+            .filter(|item| {
+                // Post-filter: if scope has an account_id, only keep items whose
+                // metadata contains a matching account_id.
+                match scope.account_id {
+                    Some(acct) => {
+                        item.metadata.get("account_id").and_then(|v| v.as_str()) == Some(acct)
+                    }
+                    None => true,
+                }
+            })
+            .take(limit)
+            .collect();
+
+        Ok(items)
+    }
+
+    /// List all memories belonging to a specific account, optionally filtered
+    /// by category.
+    ///
+    /// This queries all memories (up to 10 000) and retains only those whose
+    /// metadata contains `account_id == account_id`.
+    /// List memories belonging to an account with pagination.
+    ///
+    /// Returns `(page_items, total_count)` where `total_count` is the true
+    /// number of memories for the tenant (via SQL COUNT, not capped).
+    pub async fn list_by_account(
+        &self,
+        account_id: &str,
+        category: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> LibreFangResult<(Vec<MemoryItem>, usize)> {
+        // True total via SQL COUNT — never truncated.
+        let total = self.semantic.count_by_account(account_id, None)? as usize;
+
+        // Fetch only the rows needed for the requested page.
+        // We ask for offset+limit rows and skip the first `offset` in Rust,
+        // since semantic.recall doesn't support SQL OFFSET directly.
+        let fetch = offset.saturating_add(limit);
+        let filter = self.scoped_filter(None, MemoryScope::tenant(account_id));
+        let results = self.semantic.recall("", fetch, Some(filter))?;
+
+        let items: Vec<MemoryItem> = results
+            .into_iter()
+            .filter(|frag| {
+                // Defense-in-depth: post-filter by account_id
+                frag.metadata.get("account_id").and_then(|v| v.as_str()) == Some(account_id)
+            })
+            .filter(|frag| {
+                if let Some(target_cat) = category {
+                    frag.metadata.get("category").and_then(|v| v.as_str()) == Some(target_cat)
+                } else {
+                    true
+                }
+            })
+            .map(MemoryItem::from_fragment)
+            .skip(offset)
+            .take(limit)
+            .collect();
+
+        Ok((items, total))
+    }
+
+    /// Retrieve user-level memories scoped to a tenant.
+    ///
+    /// Behaves like [`ProactiveMemory::get`] but additionally filters by
+    /// account when the scope is not global.
+    pub async fn get_scoped(
+        &self,
+        user_id: &str,
+        scope: MemoryScope<'_>,
+    ) -> LibreFangResult<Vec<MemoryItem>> {
+        let agent_id = Self::parse_agent_id(user_id)?;
+        let mut items = self.retrieve_memory_items(agent_id, Some(MemoryLevel::User), None)?;
+
+        // Post-filter by account_id when scoped
+        if let Some(acct) = scope.account_id {
+            items.retain(|item| {
+                item.metadata.get("account_id").and_then(|v| v.as_str()) == Some(acct)
+            });
+        }
+
+        Ok(items)
+    }
+
+    /// Memory statistics scoped to a tenant.
+    ///
+    /// When the scope carries an `account_id`, counts are computed only for
+    /// memories whose metadata matches the tenant.  A global scope returns
+    /// the same result as [`stats`].
+    /// Return memory statistics for a tenant scope.
+    ///
+    /// When the scope is global, returns all-agents stats via the unscoped
+    /// `stats_all()`.  When scoped to an account, queries all memories
+    /// belonging to that tenant (pre-filtered at the DB level) and computes
+    /// aggregate counts.
+    pub async fn stats_scoped(&self, scope: MemoryScope<'_>) -> LibreFangResult<MemoryStats> {
+        if scope.is_global() {
+            return self.stats_all().await;
+        }
+
+        let acct = scope.account_id.unwrap(); // safe: not global
+
+        // Use SQL COUNT via json_extract — no row fetch, no cap.
+        let user_count = self.semantic.count_by_account(acct, Some(scopes::USER))? as usize;
+        let session_count = self
+            .semantic
+            .count_by_account(acct, Some(scopes::SESSION))? as usize;
+        let agent_count = self.semantic.count_by_account(acct, Some(scopes::AGENT))? as usize;
+        let total_all = self.semantic.count_by_account(acct, None)? as usize;
+        let total = std::cmp::max(total_all, user_count + session_count + agent_count);
+
+        let categories = self.semantic.count_by_category_and_account(acct, None)?;
+
+        let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+        Ok(MemoryStats {
+            total,
+            user_count,
+            session_count,
+            agent_count,
+            categories,
+            enabled: cfg.enabled,
+            auto_memorize_enabled: cfg.auto_memorize,
+            auto_retrieve_enabled: cfg.auto_retrieve,
+            llm_extraction: cfg.extraction_model.is_some(),
+        })
+    }
+
+    /// Return memory statistics for a specific agent within a tenant scope.
+    ///
+    /// When global, returns the unscoped per-agent stats. When scoped,
+    /// retrieves the agent's memories and post-filters by account_id.
+    pub async fn stats_agent_scoped(
+        &self,
+        user_id: &str,
+        scope: MemoryScope<'_>,
+    ) -> LibreFangResult<MemoryStats> {
+        if scope.is_global() {
+            return self.stats(user_id).await;
+        }
+
+        let agent_id = Self::parse_agent_id(user_id)?;
+        let acct = scope.account_id.unwrap(); // safe: not global
+
+        // Use SQL COUNT via json_extract — no row fetch, no cap.
+        let user_count =
+            self.semantic
+                .count_by_agent_and_account(agent_id, acct, Some(scopes::USER))?
+                as usize;
+        let session_count =
+            self.semantic
+                .count_by_agent_and_account(agent_id, acct, Some(scopes::SESSION))?
+                as usize;
+        let agent_scope_count =
+            self.semantic
+                .count_by_agent_and_account(agent_id, acct, Some(scopes::AGENT))?
+                as usize;
+        let total_all = self
+            .semantic
+            .count_by_agent_and_account(agent_id, acct, None)? as usize;
+        let total = std::cmp::max(total_all, user_count + session_count + agent_scope_count);
+
+        let categories = self
+            .semantic
+            .count_by_category_and_account(acct, Some(agent_id))?;
+
+        let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+        Ok(MemoryStats {
+            total,
+            user_count,
+            session_count,
+            agent_count: agent_scope_count,
+            categories,
+            enabled: cfg.enabled,
+            auto_memorize_enabled: cfg.auto_memorize,
+            auto_retrieve_enabled: cfg.auto_retrieve,
+            llm_extraction: cfg.extraction_model.is_some(),
+        })
+    }
+
+    /// Add memories with tenant tagging.
+    ///
+    /// Delegates to the trait [`ProactiveMemory::add`] implementation and
+    /// then stamps `account_id` into each returned item's metadata so that
+    /// future scoped queries can filter by tenant.
+    ///
+    /// When the scope is global, no metadata tagging occurs.
+    pub async fn add_scoped(
+        &self,
+        messages: &[serde_json::Value],
+        user_id: &str,
+        scope: MemoryScope<'_>,
+    ) -> LibreFangResult<Vec<MemoryItem>> {
+        if scope.is_global() {
+            // No tenant scoping — delegate to the unscoped trait method
+            return <Self as ProactiveMemory>::add(self, messages, user_id).await;
+        }
+
+        // Build the extra metadata map that will be injected into every
+        // semantic-store write (ADD and UPDATE arms of add_with_decision_meta).
+        let mut extra = HashMap::new();
+        if let Some(acct) = scope.account_id {
+            extra.insert(
+                "account_id".to_string(),
+                serde_json::Value::String(acct.to_string()),
+            );
+        }
+
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let agent_id = Self::parse_agent_id(user_id)?;
+
+        // Step 1: Extract structured memories
+        let extraction = self.extractor.extract_memories(messages).await?;
+        if !extraction.has_content {
+            // Fallback: store raw message content as session memory
+            let content = messages
+                .iter()
+                .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            if content.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            self.evict_if_over_cap(agent_id, 1)?;
+
+            // Inject account_id into fallback metadata
+            let mut fallback_meta: HashMap<String, serde_json::Value> = HashMap::new();
+            for (k, v) in &extra {
+                fallback_meta.insert(k.clone(), v.clone());
+            }
+
+            let mem_id = self.semantic.remember(
+                agent_id,
+                &content,
+                MemorySource::Conversation,
+                scopes::SESSION,
+                fallback_meta,
+            )?;
+
+            let mut item = MemoryItem::new(content, MemoryLevel::Session);
+            item.id = mem_id.0.to_string();
+            // Stamp KV with account_id too
+            for (k, v) in &extra {
+                item.metadata.insert(k.clone(), v.clone());
+            }
+            if let Ok(json) = serde_json::to_value(&item) {
+                let _ = self
+                    .structured
+                    .set(agent_id, &format!("memory:{}", mem_id), json);
+            }
+            return Ok(vec![item]);
+        }
+
+        // Step 2-4: For each extracted memory, decide and execute with
+        // account_id injected into the metadata at write time.
+        let mut results = Vec::new();
+        for item in &extraction.memories {
+            let result = self
+                .add_with_decision_meta(agent_id, item, None, Some(&extra))
+                .await?;
+            if let Some(r) = result {
+                results.push(r.item);
+            }
+        }
+
+        self.evict_if_over_cap(agent_id, 0)?;
+
+        if !extraction.relations.is_empty() {
+            self.store_relations(&extraction.relations, user_id);
+        }
+
+        Ok(results)
+    }
+
+    /// Delete a memory, but only if it belongs to the given tenant scope.
+    ///
+    /// When the scope is global, any memory may be deleted (admin).
+    /// When scoped to an account, the memory's metadata must contain a
+    /// matching `account_id` or the delete is silently skipped (returns `Ok(())`).
+    pub async fn delete_scoped(
+        &self,
+        memory_id: &str,
+        scope: MemoryScope<'_>,
+    ) -> LibreFangResult<()> {
+        let uuid = uuid::Uuid::parse_str(memory_id)
+            .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
+        let mid = MemoryId(uuid);
+
+        // Look up the memory first (before deleting) so we can verify ownership
+        // and capture the agent_id for KV cleanup.
+        let frag = match self.semantic.get_by_id(mid, false)? {
+            Some(f) => f,
+            None => return Ok(()), // Memory not found — nothing to delete
+        };
+
+        // Check ownership when scoped to a tenant
+        if let Some(acct) = scope.account_id {
+            let frag_acct = frag.metadata.get("account_id").and_then(|v| v.as_str());
+            if frag_acct != Some(acct) {
+                // Memory does not belong to this account — return NotFound
+                // so the handler can map it to 404.
+                return Err(LibreFangError::NotFound(format!(
+                    "Memory {} not found for account",
+                    memory_id
+                )));
+            }
+        }
+
+        let owning_agent_id = frag.agent_id;
+
+        // Perform the actual delete
+        self.semantic.forget(mid)?;
+
+        // Clean up KV entry
+        if let Err(e) = self
+            .structured
+            .delete(owning_agent_id, &format!("memory:{}", memory_id))
+        {
+            tracing::warn!("Failed to delete KV entry for memory {}: {}", memory_id, e);
+        }
+
+        Ok(())
+    }
+
+    /// Consolidate duplicate memories, restricted to a tenant scope.
+    ///
+    /// When the scope is global, this behaves like [`consolidate`].
+    /// When scoped, only memories belonging to the account are considered
+    /// for deduplication.
+    pub async fn consolidate_scoped(
+        &self,
+        user_id: &str,
+        scope: MemoryScope<'_>,
+    ) -> LibreFangResult<u64> {
+        if scope.is_global() {
+            return self.consolidate(user_id).await;
+        }
+
+        self.maybe_run_maintenance();
+        let agent_id = Self::parse_agent_id(user_id)?;
+        let groups = self.find_duplicates(user_id, None).await?;
+        let mut merged_count = 0u64;
+        let acct = scope.account_id.unwrap(); // safe: not global
+
+        for group in groups {
+            // Only consider memories belonging to this account
+            let scoped_group: Vec<&MemoryItem> = group
+                .iter()
+                .filter(|m| m.metadata.get("account_id").and_then(|v| v.as_str()) == Some(acct))
+                .collect();
+
+            if scoped_group.len() < 2 {
+                continue;
+            }
+
+            let Some(winner) = scoped_group.iter().max_by_key(|m| m.created_at) else {
+                continue;
+            };
+
+            for item in &scoped_group {
+                if item.id != winner.id {
+                    if let Ok(uuid) = uuid::Uuid::parse_str(&item.id) {
+                        let mid = MemoryId(uuid);
+                        if self.semantic.forget(mid).is_ok() {
+                            if let Err(e) = self
+                                .structured
+                                .delete(agent_id, &format!("memory:{}", item.id))
+                            {
+                                tracing::warn!(
+                                    "Failed to delete KV entry during scoped consolidation for memory {}: {}",
+                                    item.id,
+                                    e
+                                );
+                            }
+                            merged_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            "Scoped memory consolidation for {} (account={}): merged {} duplicates",
+            user_id,
+            acct,
+            merged_count
+        );
+        Ok(merged_count)
+    }
+
+    /// Auto-memorize with tenant tagging (scoped variant).
+    ///
+    /// Delegates to the trait [`ProactiveMemoryHooks::auto_memorize`] and then
+    /// stamps `account_id` into each stored memory's KV metadata — the same
+    /// pattern used by [`add_scoped`].
+    ///
+    /// When the scope is global, this delegates directly to `auto_memorize`
+    /// with no extra tagging.
+    pub async fn auto_memorize_scoped(
+        &self,
+        user_id: &str,
+        conversation: &[serde_json::Value],
+        peer_id: Option<&str>,
+        scope: MemoryScope<'_>,
+    ) -> LibreFangResult<ExtractionResult> {
+        if scope.is_global() {
+            return <Self as ProactiveMemoryHooks>::auto_memorize(
+                self,
+                user_id,
+                conversation,
+                peer_id,
+            )
+            .await;
+        }
+
+        // Build extra metadata for tenant scoping
+        let mut extra = HashMap::new();
+        if let Some(acct) = scope.account_id {
+            extra.insert(
+                "account_id".to_string(),
+                serde_json::Value::String(acct.to_string()),
+            );
+        }
+
+        let cfg = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if !cfg.enabled || !cfg.auto_memorize || conversation.is_empty() {
+            return Ok(ExtractionResult {
+                memories: Vec::new(),
+                relations: Vec::new(),
+                has_content: false,
+                trigger: "auto_memorize_disabled".to_string(),
+                conflicts: Vec::new(),
+            });
+        }
+
+        let agent_id = Self::parse_agent_id(user_id)?;
+
+        let extraction_result = self.extractor.extract_memories(conversation).await?;
+
+        let mut stored_memories = Vec::new();
+        let mut conflicts = Vec::new();
+        for item in &extraction_result.memories {
+            if !cfg.extract_categories.is_empty() {
+                let cat = item.category.as_deref().unwrap_or("");
+                if !cat.is_empty() && !cfg.extract_categories.iter().any(|c| c == cat) {
+                    continue;
+                }
+            }
+
+            let confidence = item
+                .metadata
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0) as f32;
+            if confidence < cfg.extraction_threshold {
+                continue;
+            }
+
+            let mut enriched = item.clone();
+            enriched
+                .metadata
+                .insert("auto_memorize".to_string(), serde_json::json!(true));
+
+            // Use add_with_decision_meta so account_id flows into semantic metadata
+            match self
+                .add_with_decision_meta(agent_id, &enriched, peer_id, Some(&extra))
+                .await
+            {
+                Ok(Some(result)) => {
+                    if let Some(conflict) = result.conflict {
+                        conflicts.push(conflict);
+                    }
+                    stored_memories.push(result.item);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("auto_memorize_scoped decision failed for memory: {}", e);
+                }
+            }
+        }
+
+        if !stored_memories.is_empty() {
+            if let Err(e) = self.evict_if_over_cap(agent_id, 0) {
+                tracing::warn!("auto_memorize_scoped eviction check failed: {}", e);
+            }
+        }
+
+        if !extraction_result.relations.is_empty() {
+            self.store_relations(&extraction_result.relations, user_id);
+        }
+
+        Ok(ExtractionResult {
+            memories: stored_memories,
+            relations: extraction_result.relations,
+            has_content: extraction_result.has_content,
+            trigger: "auto_memorize_scoped".to_string(),
+            conflicts,
+        })
+    }
 }
 
 /// A flat, JSON-serializable representation of a memory for import/export.
@@ -1636,7 +2492,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
         // Enrich with knowledge graph: if entities in query match graph nodes,
         // synthesize a context memory from graph relations.
         if items.len() < limit {
-            if let Some(graph_ctx) = self.graph_context(query) {
+            if let Some(graph_ctx) = self.graph_context(&agent_id.to_string(), query) {
                 items.push(
                     MemoryItem::new(graph_ctx, MemoryLevel::Agent).with_category("knowledge_graph"),
                 );
@@ -1991,6 +2847,10 @@ fn normalize_entity_id(name: &str) -> String {
     name.to_lowercase().replace(' ', "_")
 }
 
+fn scoped_entity_id(agent_id: &str, name: &str) -> String {
+    format!("kg:{agent_id}:{}", normalize_entity_id(name))
+}
+
 /// Parse entity type string from LLM into EntityType enum.
 fn parse_entity_type(s: &str) -> EntityType {
     match s.to_lowercase().as_str() {
@@ -2291,6 +3151,26 @@ mod tests {
         // Search
         let results = store.search("dark mode", &agent_id, 10).await.unwrap();
         assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_store_relations_scoped_rejects_blank_ownership() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let triples = vec![RelationTriple {
+            subject: "Alice".to_string(),
+            subject_type: "person".to_string(),
+            relation: "works_at".to_string(),
+            object: "Acme".to_string(),
+            object_type: "organization".to_string(),
+        }];
+
+        assert!(store
+            .store_relations_scoped(&triples, "", "tenant-a")
+            .is_err());
+        assert!(store
+            .store_relations_scoped(&triples, "agent-a", "")
+            .is_err());
     }
 
     #[tokio::test]

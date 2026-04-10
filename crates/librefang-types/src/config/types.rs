@@ -1974,6 +1974,37 @@ pub struct KernelConfig {
     /// Individual endpoints may enforce tighter limits.
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// Maximum age (in seconds) for HMAC-signed account requests.
+    /// Timestamps older than this are rejected as expired (replay protection).
+    /// Default: 300 (5 minutes). Set to 0 to disable staleness checks.
+    #[serde(default = "default_hmac_max_age_secs")]
+    pub hmac_max_age_secs: u64,
+    /// Enable config-driven API multi-tenant enforcement.
+    ///
+    /// When `true`, the API requires `X-Account-Id` on all non-exempt
+    /// requests so tenant-scoped handlers cannot fall back to the legacy
+    /// `AccountId(None)` bypass.
+    #[serde(default)]
+    pub multi_tenant: bool,
+    /// HMAC-SHA256 secret for verifying `X-Account-Sig` headers on
+    /// multi-tenant requests.  When set (non-empty), any request carrying
+    /// `X-Account-Id` must also include a valid `X-Account-Sig` computed as
+    /// `HMAC-SHA256(secret, account_id)` in hex.  When absent or empty, the
+    /// signature check is skipped (backward-compatible single-tenant mode).
+    ///
+    /// Generate with: `openssl rand -hex 32`
+    #[serde(default)]
+    pub account_sig_secret: Option<String>,
+    /// Account IDs that are granted admin privileges in multi-tenant mode.
+    ///
+    /// When `require_admin()` is called, requests from these concrete accounts
+    /// are allowed through. Missing `X-Account-Id` is rejected, so admin-only
+    /// endpoints remain reachable in multi-tenant mode only through explicit
+    /// configured admin account identities.
+    ///
+    /// Example: `["admin-account-001", "ops-team"]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admin_accounts: Vec<String>,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2466,6 +2497,10 @@ fn default_max_request_body_bytes() -> usize {
     1_024 * 1_024
 }
 
+fn default_hmac_max_age_secs() -> u64 {
+    300
+}
+
 /// Audit log configuration.
 ///
 /// Configure in config.toml:
@@ -2923,6 +2958,10 @@ impl Default for KernelConfig {
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
+            hmac_max_age_secs: default_hmac_max_age_secs(),
+            multi_tenant: false,
+            account_sig_secret: None,
+            admin_accounts: Vec::new(),
         }
     }
 }
@@ -3162,6 +3201,11 @@ pub struct MemoryConfig {
     /// (used when `vector_backend = "supabase"`). Defaults to `"SUPABASE_ANON_KEY"`.
     #[serde(default)]
     pub vector_store_api_key_env: Option<String>,
+    /// Expected embedding dimensions (e.g. 384 for all-MiniLM-L6-v2).
+    /// When set, the Supabase vector store validates every embedding
+    /// before sending it over the wire.
+    #[serde(default)]
+    pub vector_dimensions: Option<usize>,
 }
 
 /// Configuration for splitting long documents into overlapping chunks.
@@ -3207,6 +3251,7 @@ impl Default for MemoryConfig {
             vector_backend: None,
             vector_store_url: None,
             vector_store_api_key_env: None,
+            vector_dimensions: None,
         }
     }
 }

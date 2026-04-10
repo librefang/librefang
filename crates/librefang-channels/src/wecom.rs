@@ -9,7 +9,8 @@
 //!   callback payload, or the bot's webhook send endpoint.
 
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    split_message, ChannelAdapter, ChannelAdapterMultiplicity, ChannelContent, ChannelMessage,
+    ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
 use axum::response::IntoResponse;
@@ -1039,6 +1040,16 @@ impl ChannelAdapter for WeComAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Custom("wecom".to_string())
+    }
+
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        match &self.mode {
+            Mode::Callback { .. } => ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+                reason:
+                    "wecom callback mode uses a fixed shared callback route on the main API server",
+            },
+            Mode::Websocket { .. } => ChannelAdapterMultiplicity::MultiInstanceSafe,
+        }
     }
 
     async fn create_webhook_routes(

@@ -8,8 +8,8 @@ use crate::rate_limiter::ChannelRateLimiter;
 use crate::router::AgentRouter;
 use crate::sanitizer::{InputSanitizer, SanitizeResult};
 use crate::types::{
-    default_phase_emoji, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser,
-    LifecycleReaction, SenderContext,
+    default_phase_emoji, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType,
+    ChannelUser, LifecycleReaction, SenderContext,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -212,14 +212,46 @@ pub trait ChannelBridgeHandle: Send + Sync {
         "Workflows not available.".to_string()
     }
 
+    /// List workflows scoped to a tenant account when one is present.
+    async fn list_workflows_text_scoped(&self, account_id: Option<&str>) -> String {
+        if account_id.is_some() {
+            return "Tenant-scoped workflow listing is not available on this channel bridge."
+                .to_string();
+        }
+        self.list_workflows_text().await
+    }
+
     /// Run a workflow by name with the given input text.
     async fn run_workflow_text(&self, _name: &str, _input: &str) -> String {
         "Workflows not available.".to_string()
     }
 
+    /// Run a workflow scoped to a tenant account when one is present.
+    async fn run_workflow_text_scoped(
+        &self,
+        account_id: Option<&str>,
+        name: &str,
+        input: &str,
+    ) -> String {
+        if account_id.is_some() {
+            return "Tenant-scoped workflow execution is not available on this channel bridge."
+                .to_string();
+        }
+        self.run_workflow_text(name, input).await
+    }
+
     /// List all registered triggers as formatted text.
     async fn list_triggers_text(&self) -> String {
         "Triggers not available.".to_string()
+    }
+
+    /// List triggers scoped to a tenant account when one is present.
+    async fn list_triggers_text_scoped(&self, account_id: Option<&str>) -> String {
+        if account_id.is_some() {
+            return "Tenant-scoped trigger listing is not available on this channel bridge."
+                .to_string();
+        }
+        self.list_triggers_text().await
     }
 
     /// Create a trigger for an agent with the given pattern and prompt.
@@ -232,9 +264,37 @@ pub trait ChannelBridgeHandle: Send + Sync {
         "Triggers not available.".to_string()
     }
 
+    /// Create a trigger scoped to a tenant account when one is present.
+    async fn create_trigger_text_scoped(
+        &self,
+        account_id: Option<&str>,
+        agent_name: &str,
+        pattern: &str,
+        prompt: &str,
+    ) -> String {
+        if account_id.is_some() {
+            return "Tenant-scoped trigger creation is not available on this channel bridge."
+                .to_string();
+        }
+        self.create_trigger_text(agent_name, pattern, prompt).await
+    }
+
     /// Delete a trigger by UUID prefix.
     async fn delete_trigger_text(&self, _id_prefix: &str) -> String {
         "Triggers not available.".to_string()
+    }
+
+    /// Delete a trigger scoped to a tenant account when one is present.
+    async fn delete_trigger_text_scoped(
+        &self,
+        account_id: Option<&str>,
+        id_prefix: &str,
+    ) -> String {
+        if account_id.is_some() {
+            return "Tenant-scoped trigger deletion is not available on this channel bridge."
+                .to_string();
+        }
+        self.delete_trigger_text(id_prefix).await
     }
 
     /// List all cron jobs as formatted text.
@@ -242,9 +302,32 @@ pub trait ChannelBridgeHandle: Send + Sync {
         "Schedules not available.".to_string()
     }
 
+    /// List cron jobs scoped to a tenant account when one is present.
+    async fn list_schedules_text_scoped(&self, account_id: Option<&str>) -> String {
+        if account_id.is_some() {
+            return "Tenant-scoped schedule listing is not available on this channel bridge."
+                .to_string();
+        }
+        self.list_schedules_text().await
+    }
+
     /// Manage a cron job: add, del, or run.
     async fn manage_schedule_text(&self, _action: &str, _args: &[String]) -> String {
         "Schedules not available.".to_string()
+    }
+
+    /// Manage a cron job scoped to a tenant account when one is present.
+    async fn manage_schedule_text_scoped(
+        &self,
+        account_id: Option<&str>,
+        action: &str,
+        args: &[String],
+    ) -> String {
+        if account_id.is_some() {
+            return "Tenant-scoped schedule management is not available on this channel bridge."
+                .to_string();
+        }
+        self.manage_schedule_text(action, args).await
     }
 
     /// List pending approval requests as formatted text.
@@ -1385,6 +1468,29 @@ fn sender_user_id(message: &ChannelMessage) -> &str {
         .unwrap_or(&message.sender.platform_id)
 }
 
+fn ingress_binding_account_id<'a>(message: &'a ChannelMessage) -> Result<&'a str, &'static str> {
+    match message.channel {
+        ChannelType::CLI => Ok("cli"),
+        _ => message
+            .metadata
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .filter(|value| !value.is_empty())
+            .ok_or("This channel integration is not bound to a tenant."),
+    }
+}
+
+fn account_scoped_user_key(account_id: &str, user_key: &str) -> String {
+    format!("{account_id}:{user_key}")
+}
+
+fn account_scoped_channel_key(channel_key: &str, account_id: Option<&str>) -> String {
+    match account_id {
+        Some(account_id) if !account_id.is_empty() => format!("{channel_key}:{account_id}"),
+        _ => channel_key.to_string(),
+    }
+}
+
 /// Send a response, applying output formatting and optional threading.
 async fn send_response(
     adapter: &dyn ChannelAdapter,
@@ -1562,7 +1668,7 @@ async fn handle_send_error<F, Fut>(
 /// context, and fallback logic. Returns `Some(agent_id)` or `None` if no agents exist.
 ///
 /// Shared by `dispatch_message` and `dispatch_with_blocks` to ensure consistent routing.
-async fn resolve_or_fallback(
+async fn resolve_bound_agent(
     message: &ChannelMessage,
     handle: &Arc<dyn ChannelBridgeHandle>,
     router: &Arc<AgentRouter>,
@@ -1599,10 +1705,9 @@ async fn resolve_or_fallback(
             channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(
                 &message.channel,
             )),
-            account_id: message
-                .metadata
-                .get("account_id")
-                .and_then(|v| v.as_str())
+            account_id: ingress_binding_account_id(message)
+                .ok()
+                .filter(|account_id| *account_id != "cli")
                 .map(std::borrow::Cow::Borrowed),
             peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
             guild_id: message
@@ -1623,22 +1728,18 @@ async fn resolve_or_fallback(
     if let Some(id) = agent_id {
         return Some(id);
     }
-
-    // Fallback: try "assistant" agent, then first available agent
-    let fallback = handle.find_agent_by_name("assistant").await.ok().flatten();
-    let fallback = match fallback {
-        Some(id) => Some(id),
-        None => handle
-            .list_agents()
-            .await
-            .ok()
-            .and_then(|agents| agents.first().map(|(id, _)| *id)),
-    };
-    if let Some(id) = fallback {
-        // Auto-set this as the user's default so future messages route directly
-        router.set_user_default(message.sender.platform_id.clone(), id);
+    if matches!(message.channel, ChannelType::CLI) {
+        let fallback = handle.find_agent_by_name("assistant").await.ok().flatten();
+        return match fallback {
+            Some(id) => Some(id),
+            None => handle
+                .list_agents()
+                .await
+                .ok()
+                .and_then(|agents| agents.first().map(|(id, _)| *id)),
+        };
     }
-    fallback
+    None
 }
 
 /// Dispatch a single incoming message — handles bot commands or routes to an agent.
@@ -1697,11 +1798,31 @@ async fn dispatch_message(
         }
     }
 
+    let ingress_account_id = match ingress_binding_account_id(message) {
+        Ok(account_id) => account_id,
+        Err(error_message) => {
+            warn!(
+                channel = ct_str,
+                sender = %message.sender.platform_id,
+                "Rejected inbound channel event without tenant binding"
+            );
+            send_response(
+                adapter,
+                &message.sender,
+                format!("{error_message} Contact support."),
+                None,
+                default_output_format_for_channel(ct_str),
+            )
+            .await;
+            return;
+        }
+    };
+
     // Fetch per-channel overrides (if configured)
     let overrides = handle
         .channel_overrides(
             ct_str,
-            message.metadata.get("account_id").and_then(|v| v.as_str()),
+            (ingress_account_id != "cli").then_some(ingress_account_id),
         )
         .await;
     let channel_default_format = default_output_format_for_channel(ct_str);
@@ -1769,6 +1890,7 @@ async fn dispatch_message(
                 router,
                 &message.sender,
                 &message.channel,
+                (ingress_account_id != "cli").then_some(ingress_account_id),
             )
             .await;
             send_response(adapter, &message.sender, result, thread_id, output_format).await;
@@ -1931,6 +2053,7 @@ async fn dispatch_message(
                     router,
                     &message.sender,
                     &message.channel,
+                    (ingress_account_id != "cli").then_some(ingress_account_id),
                 )
                 .await;
                 send_response(adapter, &message.sender, result, thread_id, output_format).await;
@@ -2023,14 +2146,18 @@ async fn dispatch_message(
         }
     }
 
-    let agent_id = match resolve_or_fallback(message, handle, router).await {
+    let agent_id = match resolve_bound_agent(message, handle, router).await {
         Some(id) => id,
         None => {
             send_response(
                 adapter,
                 &message.sender,
-                "No agents available. Start the dashboard at http://127.0.0.1:4545 to create one."
-                    .to_string(),
+                if ingress_account_id == "cli" {
+                    "No agents available. Start the dashboard at http://127.0.0.1:4545 to create one."
+                        .to_string()
+                } else {
+                    "No agent is bound for this tenant channel integration.".to_string()
+                },
                 thread_id,
                 output_format,
             )
@@ -2038,7 +2165,10 @@ async fn dispatch_message(
             return;
         }
     };
-    let channel_key = format!("{:?}", message.channel);
+    let channel_key = account_scoped_channel_key(
+        &format!("{:?}", message.channel),
+        (ingress_account_id != "cli").then_some(ingress_account_id),
+    );
 
     // RBAC: authorize the user before forwarding to agent
     if let Err(denied) = handle
@@ -2089,7 +2219,7 @@ async fn dispatch_message(
             updated_at: chrono::Utc::now(),
             is_group: message.is_group,
             thread_id: thread_id.map(|s| s.to_string()),
-            metadata: std::collections::HashMap::new(),
+            metadata: message.metadata.clone(),
         };
         j.record(entry).await;
     }
@@ -2460,14 +2590,18 @@ async fn dispatch_with_blocks(
     output_format: OutputFormat,
     journal: Option<&crate::message_journal::MessageJournal>,
 ) {
-    let agent_id = match resolve_or_fallback(message, handle, router).await {
-        Some(id) => id,
-        None => {
+    let ingress_account_id = match ingress_binding_account_id(message) {
+        Ok(account_id) => account_id,
+        Err(error_message) => {
+            warn!(
+                channel = ct_str,
+                sender = %message.sender.platform_id,
+                "Rejected inbound multimodal channel event without tenant binding"
+            );
             send_response(
                 adapter,
                 &message.sender,
-                "No agents available. Start the dashboard at http://127.0.0.1:4545 to create one."
-                    .to_string(),
+                format!("{error_message} Contact support."),
                 thread_id,
                 output_format,
             )
@@ -2475,7 +2609,30 @@ async fn dispatch_with_blocks(
             return;
         }
     };
-    let channel_key = format!("{:?}", message.channel);
+
+    let agent_id = match resolve_bound_agent(message, handle, router).await {
+        Some(id) => id,
+        None => {
+            send_response(
+                adapter,
+                &message.sender,
+                if ingress_account_id == "cli" {
+                    "No agents available. Start the dashboard at http://127.0.0.1:4545 to create one."
+                        .to_string()
+                } else {
+                    "No agent is bound for this tenant channel integration.".to_string()
+                },
+                thread_id,
+                output_format,
+            )
+            .await;
+            return;
+        }
+    };
+    let channel_key = account_scoped_channel_key(
+        &format!("{:?}", message.channel),
+        (ingress_account_id != "cli").then_some(ingress_account_id),
+    );
 
     // RBAC check
     if let Err(denied) = handle
@@ -2510,7 +2667,7 @@ async fn dispatch_with_blocks(
             updated_at: chrono::Utc::now(),
             is_group: message.is_group,
             thread_id: thread_id.map(|s| s.to_string()),
-            metadata: std::collections::HashMap::new(),
+            metadata: message.metadata.clone(),
         };
         j.record(entry).await;
     }
@@ -2596,7 +2753,23 @@ async fn handle_command(
     router: &Arc<AgentRouter>,
     sender: &ChannelUser,
     channel_type: &crate::types::ChannelType,
+    account_id: Option<&str>,
 ) -> String {
+    let resolve_current_agent = || {
+        let ctx = crate::router::BindingContext {
+            channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(channel_type)),
+            account_id: account_id.map(std::borrow::Cow::Borrowed),
+            peer_id: std::borrow::Cow::Borrowed(&sender.platform_id),
+            guild_id: None,
+            roles: smallvec::SmallVec::new(),
+        };
+        router.resolve_with_context(
+            channel_type,
+            &sender.platform_id,
+            sender.librefang_user.as_deref(),
+            &ctx,
+        )
+    };
     match name {
         "start" => {
             let agents = handle.list_agents().await.unwrap_or_default();
@@ -2677,14 +2850,26 @@ async fn handle_command(
             let agent_name = &args[0];
             match handle.find_agent_by_name(agent_name).await {
                 Ok(Some(agent_id)) => {
-                    router.set_user_default(sender.platform_id.clone(), agent_id);
+                    let user_key = match account_id {
+                        Some(account_id) => {
+                            account_scoped_user_key(account_id, &sender.platform_id)
+                        }
+                        None => sender.platform_id.clone(),
+                    };
+                    router.set_user_default(user_key, agent_id);
                     format!("Now talking to agent: {agent_name}")
                 }
                 Ok(None) => {
                     // Try to spawn it
                     match handle.spawn_agent_by_name(agent_name).await {
                         Ok(agent_id) => {
-                            router.set_user_default(sender.platform_id.clone(), agent_id);
+                            let user_key = match account_id {
+                                Some(account_id) => {
+                                    account_scoped_user_key(account_id, &sender.platform_id)
+                                }
+                                None => sender.platform_id.clone(),
+                            };
+                            router.set_user_default(user_key, agent_id);
                             format!("Spawned and connected to agent: {agent_name}")
                         }
                         Err(e) => {
@@ -2700,11 +2885,7 @@ async fn handle_command(
                 return "Usage: /btw <question> — ask a side question without affecting session history".to_string();
             }
             let question = args.join(" ");
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_current_agent();
             match agent_id {
                 Some(aid) => handle
                     .send_message_ephemeral(aid, &question)
@@ -2715,11 +2896,7 @@ async fn handle_command(
         }
         "new" => {
             // Need to resolve the user's current agent
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_current_agent();
             match agent_id {
                 Some(aid) => handle
                     .reset_session(aid)
@@ -2729,11 +2906,7 @@ async fn handle_command(
             }
         }
         "reboot" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_current_agent();
             match agent_id {
                 Some(aid) => handle
                     .reboot_session(aid)
@@ -2743,11 +2916,7 @@ async fn handle_command(
             }
         }
         "compact" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_current_agent();
             match agent_id {
                 Some(aid) => handle
                     .compact_session(aid)
@@ -2757,11 +2926,7 @@ async fn handle_command(
             }
         }
         "model" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_current_agent();
             match agent_id {
                 Some(aid) => {
                     if args.is_empty() {
@@ -2781,11 +2946,7 @@ async fn handle_command(
             }
         }
         "stop" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_current_agent();
             match agent_id {
                 Some(aid) => handle
                     .stop_run(aid)
@@ -2795,11 +2956,7 @@ async fn handle_command(
             }
         }
         "usage" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_current_agent();
             match agent_id {
                 Some(aid) => handle
                     .session_usage(aid)
@@ -2809,11 +2966,7 @@ async fn handle_command(
             }
         }
         "think" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_current_agent();
             match agent_id {
                 Some(aid) => {
                     let on = args.first().map(|a| a == "on").unwrap_or(true);
@@ -2831,7 +2984,7 @@ async fn handle_command(
         "hands" => handle.list_hands_text().await,
 
         // ── Automation: workflows, triggers, schedules, approvals ──
-        "workflows" => handle.list_workflows_text().await,
+        "workflows" => handle.list_workflows_text_scoped(account_id).await,
         "workflow" => {
             if args.len() >= 2 && args[0] == "run" {
                 let wf_name = &args[1];
@@ -2840,28 +2993,32 @@ async fn handle_command(
                 } else {
                     String::new()
                 };
-                handle.run_workflow_text(wf_name, &input).await
+                handle
+                    .run_workflow_text_scoped(account_id, wf_name, &input)
+                    .await
             } else {
                 "Usage: /workflow run <name> [input]".to_string()
             }
         }
-        "triggers" => handle.list_triggers_text().await,
+        "triggers" => handle.list_triggers_text_scoped(account_id).await,
         "trigger" => {
             if args.len() >= 4 && args[0] == "add" {
                 let agent_name = &args[1];
                 let pattern = &args[2];
                 let prompt = args[3..].join(" ");
                 handle
-                    .create_trigger_text(agent_name, pattern, &prompt)
+                    .create_trigger_text_scoped(account_id, agent_name, pattern, &prompt)
                     .await
             } else if args.len() >= 2 && args[0] == "del" {
-                handle.delete_trigger_text(&args[1]).await
+                handle
+                    .delete_trigger_text_scoped(account_id, &args[1])
+                    .await
             } else {
                 "Usage:\n  /trigger add <agent> <pattern> <prompt>\n  /trigger del <id-prefix>"
                     .to_string()
             }
         }
-        "schedules" => handle.list_schedules_text().await,
+        "schedules" => handle.list_schedules_text_scoped(account_id).await,
         "schedule" => {
             if args.is_empty() {
                 return "Usage:\n  /schedule add <agent> <cron-5-fields> <message>\n  /schedule del <id-prefix>\n  /schedule run <id-prefix>".to_string();
@@ -2869,7 +3026,9 @@ async fn handle_command(
             let action = args[0].as_str();
             match action {
                 "add" | "del" | "run" => {
-                    handle.manage_schedule_text(action, &args[1..]).await
+                    handle
+                        .manage_schedule_text_scoped(account_id, action, &args[1..])
+                        .await
                 }
                 _ => "Usage:\n  /schedule add <agent> <cron-5-fields> <message>\n  /schedule del <id-prefix>\n  /schedule run <id-prefix>".to_string(),
             }
@@ -2903,6 +3062,7 @@ async fn handle_command(
 mod tests {
     use super::*;
     use crate::types::ChannelType;
+    use futures::stream;
     use std::sync::Mutex;
 
     #[test]
@@ -3016,11 +3176,71 @@ mod tests {
     /// Mock kernel handle for testing.
     struct MockHandle {
         agents: Mutex<Vec<(AgentId, String)>>,
+        sender_contexts: Mutex<Vec<SenderContext>>,
+        delivered_messages: Mutex<Vec<(AgentId, String)>>,
+        scoped_calls: Mutex<Vec<String>>,
+    }
+
+    struct MockAdapter {
+        sent_texts: Mutex<Vec<String>>,
+    }
+
+    struct FallbackScopeHandle {
+        unscoped_calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ChannelAdapter for MockAdapter {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn channel_type(&self) -> ChannelType {
+            ChannelType::Telegram
+        }
+
+        async fn start(
+            &self,
+        ) -> Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = ChannelMessage> + Send>>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn send(
+            &self,
+            _user: &ChannelUser,
+            content: ChannelContent,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.sent_texts
+                .lock()
+                .unwrap()
+                .push(content_to_text(&content));
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
     }
 
     #[async_trait]
     impl ChannelBridgeHandle for MockHandle {
         async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
+            Ok(format!("Echo: {message}"))
+        }
+        async fn send_message_with_sender(
+            &self,
+            agent_id: AgentId,
+            message: &str,
+            sender: &SenderContext,
+        ) -> Result<String, String> {
+            self.sender_contexts.lock().unwrap().push(sender.clone());
+            self.delivered_messages
+                .lock()
+                .unwrap()
+                .push((agent_id, message.to_string()));
             Ok(format!("Echo: {message}"))
         }
         async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
@@ -3032,6 +3252,156 @@ mod tests {
         }
         async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
             Err("spawn not implemented in mock".to_string())
+        }
+        async fn list_workflows_text_scoped(&self, account_id: Option<&str>) -> String {
+            self.scoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("workflows:{:?}", account_id));
+            "scoped workflows".to_string()
+        }
+        async fn run_workflow_text_scoped(
+            &self,
+            account_id: Option<&str>,
+            name: &str,
+            input: &str,
+        ) -> String {
+            self.scoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("workflow-run:{:?}:{name}:{input}", account_id));
+            "scoped workflow run".to_string()
+        }
+        async fn list_triggers_text_scoped(&self, account_id: Option<&str>) -> String {
+            self.scoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("triggers:{:?}", account_id));
+            "scoped triggers".to_string()
+        }
+        async fn create_trigger_text_scoped(
+            &self,
+            account_id: Option<&str>,
+            agent_name: &str,
+            pattern: &str,
+            prompt: &str,
+        ) -> String {
+            self.scoped_calls.lock().unwrap().push(format!(
+                "trigger-add:{:?}:{agent_name}:{pattern}:{prompt}",
+                account_id
+            ));
+            "scoped trigger add".to_string()
+        }
+        async fn delete_trigger_text_scoped(
+            &self,
+            account_id: Option<&str>,
+            id_prefix: &str,
+        ) -> String {
+            self.scoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("trigger-del:{:?}:{id_prefix}", account_id));
+            "scoped trigger del".to_string()
+        }
+        async fn list_schedules_text_scoped(&self, account_id: Option<&str>) -> String {
+            self.scoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("schedules:{:?}", account_id));
+            "scoped schedules".to_string()
+        }
+        async fn manage_schedule_text_scoped(
+            &self,
+            account_id: Option<&str>,
+            action: &str,
+            args: &[String],
+        ) -> String {
+            self.scoped_calls.lock().unwrap().push(format!(
+                "schedule:{:?}:{action}:{}",
+                account_id,
+                args.join("|")
+            ));
+            "scoped schedule".to_string()
+        }
+    }
+
+    #[async_trait]
+    impl ChannelBridgeHandle for FallbackScopeHandle {
+        async fn send_message(&self, _agent_id: AgentId, _message: &str) -> Result<String, String> {
+            Err("send_message not implemented in fallback mock".to_string())
+        }
+
+        async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+            Ok(None)
+        }
+
+        async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+            Ok(Vec::new())
+        }
+
+        async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+            Err("spawn not implemented in fallback mock".to_string())
+        }
+
+        async fn list_workflows_text(&self) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push("workflows".to_string());
+            "unscoped workflows".to_string()
+        }
+
+        async fn run_workflow_text(&self, name: &str, input: &str) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("workflow-run:{name}:{input}"));
+            "unscoped workflow run".to_string()
+        }
+
+        async fn list_triggers_text(&self) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push("triggers".to_string());
+            "unscoped triggers".to_string()
+        }
+
+        async fn create_trigger_text(
+            &self,
+            agent_name: &str,
+            pattern: &str,
+            prompt: &str,
+        ) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("trigger:{agent_name}:{pattern}:{prompt}"));
+            "unscoped trigger add".to_string()
+        }
+
+        async fn delete_trigger_text(&self, id_prefix: &str) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("trigger-del:{id_prefix}"));
+            "unscoped trigger del".to_string()
+        }
+
+        async fn list_schedules_text(&self) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push("schedules".to_string());
+            "unscoped schedules".to_string()
+        }
+
+        async fn manage_schedule_text(&self, action: &str, args: &[String]) -> String {
+            self.unscoped_calls
+                .lock()
+                .unwrap()
+                .push(format!("schedule:{action}:{}", args.join("|")));
+            "unscoped schedule".to_string()
         }
     }
 
@@ -3056,6 +3426,9 @@ mod tests {
         let agent_id = AgentId::new();
         let mock = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "test-agent".to_string())]),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
         });
 
         let handle: Arc<dyn ChannelBridgeHandle> = mock;
@@ -3077,6 +3450,9 @@ mod tests {
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
         });
         let router = Arc::new(AgentRouter::new());
         let sender = ChannelUser {
@@ -3085,12 +3461,28 @@ mod tests {
             librefang_user: None,
         };
 
-        let result =
-            handle_command("agents", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "agents",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("coder"));
 
-        let result =
-            handle_command("help", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "help",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("/agents"));
     }
 
@@ -3099,6 +3491,9 @@ mod tests {
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
         });
         let router = Arc::new(AgentRouter::new());
         let sender = ChannelUser {
@@ -3115,6 +3510,7 @@ mod tests {
             &router,
             &sender,
             &ChannelType::CLI,
+            None,
         )
         .await;
         assert!(result.contains("Now talking to agent: coder"));
@@ -3122,6 +3518,382 @@ mod tests {
         // Verify router was updated
         let resolved = router.resolve(&ChannelType::Telegram, "user1", None);
         assert_eq!(resolved, Some(agent_id));
+    }
+
+    fn direct_text_message(account_id: Option<&str>, text: &str) -> ChannelMessage {
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(account_id) = account_id {
+            metadata.insert(
+                "account_id".to_string(),
+                serde_json::Value::String(account_id.to_string()),
+            );
+        }
+        ChannelMessage {
+            channel: ChannelType::Telegram,
+            platform_message_id: "msg-1".to_string(),
+            sender: ChannelUser {
+                platform_id: "user-1".to_string(),
+                display_name: "User One".to_string(),
+                librefang_user: None,
+            },
+            content: ChannelContent::Text(text.to_string()),
+            target_agent: None,
+            timestamp: chrono::Utc::now(),
+            is_group: false,
+            thread_id: None,
+            metadata,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_message_rejects_unbound_ingress() {
+        let agent_id = AgentId::new();
+        let mock = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "assistant".to_string())]),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
+        });
+        let handle: Arc<dyn ChannelBridgeHandle> = mock.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("Telegram:tenant-a".to_string(), agent_id);
+        let adapter = MockAdapter {
+            sent_texts: Mutex::new(Vec::new()),
+        };
+
+        dispatch_message(
+            &direct_text_message(None, "hello"),
+            &handle,
+            &router,
+            &adapter,
+            &ChannelRateLimiter::default(),
+            &InputSanitizer::from_config(&librefang_types::config::SanitizeConfig::default()),
+            None,
+        )
+        .await;
+
+        assert!(mock.sender_contexts.lock().unwrap().is_empty());
+        let sent = adapter.sent_texts.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("not bound to a tenant"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_message_bound_ingress_resolves_account_scoped_agent() {
+        let tenant_a_agent = AgentId::new();
+        let tenant_b_agent = AgentId::new();
+        let mock = Arc::new(MockHandle {
+            agents: Mutex::new(vec![
+                (tenant_a_agent, "assistant-a".to_string()),
+                (tenant_b_agent, "assistant-b".to_string()),
+            ]),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
+        });
+        let handle: Arc<dyn ChannelBridgeHandle> = mock.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("Telegram:tenant-a".to_string(), tenant_a_agent);
+        router.set_channel_default("Telegram:tenant-b".to_string(), tenant_b_agent);
+        let adapter = MockAdapter {
+            sent_texts: Mutex::new(Vec::new()),
+        };
+
+        dispatch_message(
+            &direct_text_message(Some("tenant-a"), "hello"),
+            &handle,
+            &router,
+            &adapter,
+            &ChannelRateLimiter::default(),
+            &InputSanitizer::from_config(&librefang_types::config::SanitizeConfig::default()),
+            None,
+        )
+        .await;
+
+        let sender_contexts = mock.sender_contexts.lock().unwrap().clone();
+        assert_eq!(sender_contexts.len(), 1);
+        assert_eq!(sender_contexts[0].account_id.as_deref(), Some("tenant-a"));
+
+        let delivered = mock.delivered_messages.lock().unwrap().clone();
+        assert_eq!(delivered, vec![(tenant_a_agent, "hello".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn test_account_scoped_command_selection_does_not_fallback_across_tenants() {
+        let tenant_a_agent = AgentId::new();
+        let tenant_b_agent = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![
+                (tenant_a_agent, "coder-a".to_string()),
+                (tenant_b_agent, "coder-b".to_string()),
+            ]),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let sender = ChannelUser {
+            platform_id: "shared-user".to_string(),
+            display_name: "Shared User".to_string(),
+            librefang_user: None,
+        };
+
+        let result = handle_command(
+            "agent",
+            &["coder-a".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("tenant-a"),
+        )
+        .await;
+        assert!(result.contains("Now talking to agent: coder-a"));
+
+        let tenant_a_ctx = crate::router::BindingContext {
+            channel: std::borrow::Cow::Borrowed("telegram"),
+            account_id: Some(std::borrow::Cow::Borrowed("tenant-a")),
+            peer_id: std::borrow::Cow::Borrowed("shared-user"),
+            guild_id: None,
+            roles: smallvec::SmallVec::new(),
+        };
+        let tenant_b_ctx = crate::router::BindingContext {
+            channel: std::borrow::Cow::Borrowed("telegram"),
+            account_id: Some(std::borrow::Cow::Borrowed("tenant-b")),
+            peer_id: std::borrow::Cow::Borrowed("shared-user"),
+            guild_id: None,
+            roles: smallvec::SmallVec::new(),
+        };
+
+        assert_eq!(
+            router.resolve_with_context(&ChannelType::Telegram, "shared-user", None, &tenant_a_ctx),
+            Some(tenant_a_agent)
+        );
+        assert_eq!(
+            router.resolve_with_context(&ChannelType::Telegram, "shared-user", None, &tenant_b_ctx),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workflow_commands_use_account_scope() {
+        let mock = Arc::new(MockHandle {
+            agents: Mutex::new(Vec::new()),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
+        });
+        let handle: Arc<dyn ChannelBridgeHandle> = mock.clone();
+        let router = Arc::new(AgentRouter::new());
+        let sender = ChannelUser {
+            platform_id: "user1".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        let _ = handle_command(
+            "workflows",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("tenant-a"),
+        )
+        .await;
+        let _ = handle_command(
+            "workflow",
+            &["run".to_string(), "daily".to_string(), "hello".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("tenant-a"),
+        )
+        .await;
+
+        let calls = mock.scoped_calls.lock().unwrap().clone();
+        assert!(calls.contains(&"workflows:Some(\"tenant-a\")".to_string()));
+        assert!(calls.contains(&"workflow-run:Some(\"tenant-a\"):daily:hello".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_trigger_and_schedule_commands_use_account_scope() {
+        let mock = Arc::new(MockHandle {
+            agents: Mutex::new(Vec::new()),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
+        });
+        let handle: Arc<dyn ChannelBridgeHandle> = mock.clone();
+        let router = Arc::new(AgentRouter::new());
+        let sender = ChannelUser {
+            platform_id: "user1".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        let _ = handle_command(
+            "triggers",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("tenant-a"),
+        )
+        .await;
+        let _ = handle_command(
+            "trigger",
+            &[
+                "add".to_string(),
+                "agent-a".to_string(),
+                "system".to_string(),
+                "wake".to_string(),
+            ],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("tenant-a"),
+        )
+        .await;
+        let _ = handle_command(
+            "schedules",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("tenant-a"),
+        )
+        .await;
+        let _ = handle_command(
+            "schedule",
+            &["run".to_string(), "abc123".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("tenant-a"),
+        )
+        .await;
+
+        let calls = mock.scoped_calls.lock().unwrap().clone();
+        assert!(calls.contains(&"triggers:Some(\"tenant-a\")".to_string()));
+        assert!(calls.contains(&"trigger-add:Some(\"tenant-a\"):agent-a:system:wake".to_string()));
+        assert!(calls.contains(&"schedules:Some(\"tenant-a\")".to_string()));
+        assert!(calls.contains(&"schedule:Some(\"tenant-a\"):run:abc123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_scoped_trigger_default_fails_closed_with_account_scope() {
+        let handle = FallbackScopeHandle {
+            unscoped_calls: Mutex::new(Vec::new()),
+        };
+
+        let result = handle
+            .create_trigger_text_scoped(Some("tenant-a"), "agent-a", "system", "wake")
+            .await;
+
+        assert_eq!(
+            result,
+            "Tenant-scoped trigger creation is not available on this channel bridge."
+        );
+        assert!(handle.unscoped_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scoped_schedule_default_fails_closed_with_account_scope() {
+        let handle = FallbackScopeHandle {
+            unscoped_calls: Mutex::new(Vec::new()),
+        };
+
+        let result = handle
+            .manage_schedule_text_scoped(Some("tenant-a"), "run", &["abc123".to_string()])
+            .await;
+
+        assert_eq!(
+            result,
+            "Tenant-scoped schedule management is not available on this channel bridge."
+        );
+        assert!(handle.unscoped_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scoped_read_defaults_fail_closed_with_account_scope() {
+        let handle = FallbackScopeHandle {
+            unscoped_calls: Mutex::new(Vec::new()),
+        };
+
+        let workflows = handle.list_workflows_text_scoped(Some("tenant-a")).await;
+        let workflow_run = handle
+            .run_workflow_text_scoped(Some("tenant-a"), "daily", "hello")
+            .await;
+        let triggers = handle.list_triggers_text_scoped(Some("tenant-a")).await;
+        let trigger_delete = handle
+            .delete_trigger_text_scoped(Some("tenant-a"), "abc123")
+            .await;
+        let schedules = handle.list_schedules_text_scoped(Some("tenant-a")).await;
+
+        assert_eq!(
+            workflows,
+            "Tenant-scoped workflow listing is not available on this channel bridge."
+        );
+        assert_eq!(
+            workflow_run,
+            "Tenant-scoped workflow execution is not available on this channel bridge."
+        );
+        assert_eq!(
+            triggers,
+            "Tenant-scoped trigger listing is not available on this channel bridge."
+        );
+        assert_eq!(
+            trigger_delete,
+            "Tenant-scoped trigger deletion is not available on this channel bridge."
+        );
+        assert_eq!(
+            schedules,
+            "Tenant-scoped schedule listing is not available on this channel bridge."
+        );
+        assert!(handle.unscoped_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scoped_defaults_fallback_without_account_scope() {
+        let handle = FallbackScopeHandle {
+            unscoped_calls: Mutex::new(Vec::new()),
+        };
+
+        let workflows_result = handle.list_workflows_text_scoped(None).await;
+        let workflow_run_result = handle
+            .run_workflow_text_scoped(None, "daily", "hello")
+            .await;
+        let triggers_result = handle.list_triggers_text_scoped(None).await;
+        let trigger_result = handle
+            .create_trigger_text_scoped(None, "agent-a", "system", "wake")
+            .await;
+        let trigger_delete_result = handle.delete_trigger_text_scoped(None, "abc123").await;
+        let schedules_result = handle.list_schedules_text_scoped(None).await;
+        let schedule_result = handle
+            .manage_schedule_text_scoped(None, "run", &["abc123".to_string()])
+            .await;
+
+        assert_eq!(workflows_result, "unscoped workflows");
+        assert_eq!(workflow_run_result, "unscoped workflow run");
+        assert_eq!(triggers_result, "unscoped triggers");
+        assert_eq!(trigger_result, "unscoped trigger add");
+        assert_eq!(trigger_delete_result, "unscoped trigger del");
+        assert_eq!(schedules_result, "unscoped schedules");
+        assert_eq!(schedule_result, "unscoped schedule");
+        let calls = handle.unscoped_calls.lock().unwrap().clone();
+        assert!(calls.contains(&"workflows".to_string()));
+        assert!(calls.contains(&"workflow-run:daily:hello".to_string()));
+        assert!(calls.contains(&"triggers".to_string()));
+        assert!(calls.contains(&"trigger:agent-a:system:wake".to_string()));
+        assert!(calls.contains(&"trigger-del:abc123".to_string()));
+        assert!(calls.contains(&"schedules".to_string()));
+        assert!(calls.contains(&"schedule:run:abc123".to_string()));
     }
 
     #[test]
@@ -3320,6 +4092,9 @@ mod tests {
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "vision-agent".to_string())]),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
         });
 
         let blocks = vec![
@@ -3347,6 +4122,9 @@ mod tests {
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "vision-agent".to_string())]),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
         });
 
         let blocks = vec![ContentBlock::Image {
@@ -3405,6 +4183,9 @@ mod tests {
     async fn test_handle_command_btw_no_args() {
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![]),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
         });
         let router = Arc::new(AgentRouter::new());
         let sender = ChannelUser {
@@ -3413,7 +4194,16 @@ mod tests {
             librefang_user: None,
         };
 
-        let result = handle_command("btw", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "btw",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("Usage:"));
     }
 
@@ -3422,6 +4212,9 @@ mod tests {
         let agent_id = AgentId::new();
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
         });
         let router = Arc::new(AgentRouter::new());
         let sender = ChannelUser {
@@ -3438,6 +4231,7 @@ mod tests {
             &router,
             &sender,
             &ChannelType::CLI,
+            None,
         )
         .await;
         assert!(result.contains("No agent selected"));
@@ -3447,6 +4241,9 @@ mod tests {
     async fn test_help_includes_btw_command() {
         let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
             agents: Mutex::new(vec![]),
+            sender_contexts: Mutex::new(Vec::new()),
+            delivered_messages: Mutex::new(Vec::new()),
+            scoped_calls: Mutex::new(Vec::new()),
         });
         let router = Arc::new(AgentRouter::new());
         let sender = ChannelUser {
@@ -3455,8 +4252,16 @@ mod tests {
             librefang_user: None,
         };
 
-        let result =
-            handle_command("help", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "help",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("/btw"));
     }
 

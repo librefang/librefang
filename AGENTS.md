@@ -3,91 +3,116 @@
 ## Project Overview
 
 LibreFang is an open-source **Agent Operating System** written in Rust.
-It manages AI agents (LLM-backed), their tools, memory, messaging channels, and inter-agent networking.
+Manages AI agents (LLM-backed), their tools, memory, messaging channels, and inter-agent networking.
 
 - **Language**: Rust (edition 2021, MSRV 1.75)
 - **Async runtime**: tokio
 - **Web framework**: axum 0.8 (HTTP + WebSocket)
-- **Database**: SQLite via rusqlite (bundled)
+- **Database**: SQLite via rusqlite (bundled), Supabase for vector store
 - **Config**: TOML (`~/.librefang/config.toml`)
-- **Default API address**: `http://127.0.0.1:4545`
+- **Default API**: `http://127.0.0.1:4545`
 
 ## Workspace Structure
 
-The workspace contains 15 crates under `crates/` plus an `xtask` crate:
-
 | Crate | Purpose |
 |---|---|
-| `librefang-types` | Core types, traits, and data models shared across all crates |
-| `librefang-kernel` | Central kernel: agent registry, scheduling, orchestration, event bus, metering |
-| `librefang-runtime` | Agent execution: LLM drivers, tool runner, MCP client, context engine, A2A protocol |
+| `librefang-types` | Core types, traits, data models shared across all crates |
+| `librefang-kernel` | Central kernel: agent registry, scheduling, orchestration, event bus |
+| `librefang-runtime` | Agent execution: LLM drivers, tool runner, MCP client, context engine |
 | `librefang-api` | HTTP/WebSocket API server, route handlers, middleware, dashboard |
-| `librefang-channels` | Channel bridge layer: 40+ messaging integrations (Discord, Slack, Telegram, WeCom, etc.) |
+| `librefang-channels` | Channel bridge: 40+ messaging integrations (Discord, Slack, Telegram, etc.) |
 | `librefang-memory` | Memory substrate: conversation history, vector search, knowledge storage |
 | `librefang-wire` | OFP (Open Fang Protocol): agent-to-agent P2P networking |
 | `librefang-skills` | Skill system: registry, loader, marketplace, WASM sandbox |
 | `librefang-hands` | Hands system: curated autonomous capability packages |
-| `librefang-extensions` | Extension system: MCP server setup, credential vault, OAuth2 PKCE |
+| `librefang-extensions` | Extension system: MCP server setup, credential vault, OAuth2 |
 | `librefang-cli` | CLI binary (interactive TUI with ratatui) |
 | `librefang-desktop` | Native desktop app (Tauri 2.0) |
-| `librefang-migrate` | Migration engine: import from other agent frameworks |
+| `librefang-migrate` | Migration engine: import from other frameworks |
 | `librefang-telemetry` | OpenTelemetry + Prometheus metrics instrumentation |
-| `librefang-testing` | Test infrastructure: mock kernel, mock LLM driver, API route test utilities |
+| `librefang-testing` | Test infrastructure: mock kernel, mock LLM driver, test utilities |
+| `ruvector-*` | PostgreSQL vector extension, solver, attention modules |
 | `xtask` | Development task runner |
 
 ## Build Commands
 
 ```bash
 cargo build --workspace              # Full build
-cargo build --workspace --lib        # Build libraries only (use when CLI binary is locked)
+cargo build --workspace --lib        # Build libraries only
 cargo test --workspace               # Run all tests
-cargo clippy --workspace --all-targets -- -D warnings  # Lint (zero warnings policy)
+cargo clippy --workspace --all-targets -- -D warnings  # Lint
+cargo xtask release                  # Release flow
+cargo xtask ci                       # Local CI
 ```
 
 ## Key Architecture Patterns
 
 ### KernelHandle trait
-Defined in `librefang-runtime`, this trait abstracts the kernel interface to avoid circular
-dependencies between `librefang-runtime` and `librefang-kernel`. The kernel implements it;
-the runtime and API consume it.
+Defined in `librefang-runtime`, abstracts kernel interface to avoid circular deps.
+Kernel implements it; runtime and API consume it.
 
 ### AppState bridge
-In `librefang-api/src/server.rs`, `AppState` bridges the kernel to API route handlers.
-New routes must be registered in the `server.rs` router AND implemented in the corresponding
-file under `librefang-api/src/routes/`.
+In `librefang-api/src/server.rs`, bridges kernel to API route handlers.
+New routes register in router AND implement in `librefang-api/src/routes/`.
 
 ### Dashboard
-The web dashboard is a React + TypeScript SPA built with Vite, located at
-`crates/librefang-api/dashboard/`. Source files are in `dashboard/src/` with pages under
-`dashboard/src/pages/` and shared components under `dashboard/src/components/`.
+React + TypeScript SPA built with Vite at `crates/librefang-api/dashboard/`.
 
 ### Agent manifests
-Agent definitions live in `agents/` as directories containing `agent.toml` files.
+Agent definitions in `agents/` as directories with `agent.toml` files.
 
-### Config pattern
-Adding a config field requires: struct field with `#[serde(default)]`, a `Default` impl
-entry, and `Serialize`/`Deserialize` derives. Fields go in `KernelConfig` in `librefang-kernel`.
+### Multi-Tenant
+- AccountId middleware extracts from `X-Account-Id`
+- Routes check `entry.account_id` against AccountId
+- Supabase RLS for vector memory isolation
+- Admin endpoints use `require_admin()` helper
 
 ## API Route Modules
 
-Routes are organized by domain in `crates/librefang-api/src/routes/`:
-
-`agents`, `budget`, `channels`, `config`, `goals`, `inbox`, `media`, `memory`,
-`network`, `plugins`, `prompts`, `providers`, `skills`, `system`, `workflows`
+Routes in `crates/librefang-api/src/routes/`:
+`agents`, `budget`, `channels`, `config`, `goals`, `inbox`, `media`,
+`memory`, `network`, `plugins`, `prompts`, `providers`, `skills`,
+`system`, `workflows`
 
 ## Code Conventions
 
-- **Error handling**: `thiserror` for library errors, `anyhow` for application-level errors
-- **Serialization**: `serde` with JSON (`serde_json`) and TOML (`toml`)
-- **Naming**: Follow Rust standard conventions (snake_case for functions/variables, PascalCase for types)
-- **Async**: Use `async fn` with tokio; `async-trait` where trait methods need to be async
-- **Testing**: Tests live alongside source code in `#[cfg(test)]` modules; integration test helpers in `librefang-testing`
-- **Commits**: Conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
+- **Error handling**: `thiserror` for libraries, `anyhow` for applications
+- **Serialization**: `serde` with JSON and TOML
+- **Naming**: snake_case functions/variables, PascalCase types
+- **Async**: `async fn` with tokio; `async-trait` for trait methods
+- **Testing**: Tests in `#[cfg(test)]` modules; integration helpers in `librefang-testing`
+- **Commits**: Conventional (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `test:`)
 
 ## Important Notes
 
-- **Do not modify `librefang-cli`** without explicit instruction -- it is under active development.
-- `PeerRegistry` is `Option<PeerRegistry>` on the kernel but `Option<Arc<PeerRegistry>>` on `AppState`.
-- Config fields added to `KernelConfig` MUST also be added to its `Default` impl.
-- The `AgentLoopResult` response field is `.response`, not `.response_text`.
-- The CLI daemon command is `start` (not `daemon`).
+- Do not modify `librefang-cli` without explicit instruction
+- `PeerRegistry` is `Option<Arc<PeerRegistry>>` on AppState
+- Config fields added to `KernelConfig` MUST add to Default impl
+- CLI daemon command is `start` (not `daemon`)
+- Dashboard at `http://127.0.0.1:4545` by default
+
+<!-- caliber:managed:pre-commit -->
+## Before Committing
+
+**IMPORTANT:** Before every git commit, you MUST ensure Caliber syncs agent configs with the latest code changes.
+
+First, check if the pre-commit hook is already installed:
+```bash
+grep -q "caliber" .git/hooks/pre-commit 2>/dev/null && echo "hook-active" || echo "no-hook"
+```
+
+- If **hook-active**: the hook handles sync automatically — just commit normally. Tell the user: "Caliber will sync your agent configs automatically via the pre-commit hook."
+- If **no-hook**: run Caliber manually before committing:
+  1. Tell the user: "Caliber: Syncing agent configs with your latest changes..."
+  2. Run: `caliber refresh && git add CLAUDE.md .claude/ .cursor/ .cursorrules .github/copilot-instructions.md .github/instructions/ AGENTS.md CALIBER_LEARNINGS.md .agents/ .opencode/ 2>/dev/null`
+  3. After it completes, briefly tell the user what Caliber updated. Then proceed with the commit.
+
+If `caliber` is not found, read `.agents/skills/setup-caliber/SKILL.md` and follow its instructions to install Caliber.
+<!-- /caliber:managed:pre-commit -->
+
+<!-- caliber:managed:learnings -->
+## Session Learnings
+
+Read `CALIBER_LEARNINGS.md` for patterns and anti-patterns learned from previous sessions.
+These are auto-extracted from real tool usage — treat them as project-specific rules.
+<!-- /caliber:managed:learnings -->

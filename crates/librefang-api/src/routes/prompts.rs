@@ -11,6 +11,8 @@ use super::AppState;
 use librefang_runtime::kernel_handle::KernelHandle;
 use std::sync::Arc;
 
+use crate::middleware::ConcreteAccountId;
+use crate::routes::shared::check_account;
 use crate::types::ApiErrorResponse;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -49,8 +51,27 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
 }
 
+#[allow(clippy::result_large_err)]
+fn require_agent_access(
+    state: &AppState,
+    account: &ConcreteAccountId,
+    agent_id: librefang_types::agent::AgentId,
+) -> Result<(), axum::response::Response> {
+    let entry = state.kernel.agent_registry().get(agent_id).ok_or_else(|| {
+        ApiErrorResponse::not_found("Agent not found")
+            .into_json_tuple()
+            .into_response()
+    })?;
+    check_account(
+        &entry,
+        &crate::middleware::AccountId(Some(account.0.clone())),
+    )
+    .map_err(|e| e.into_response())
+}
+
 async fn list_prompt_versions(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
@@ -61,6 +82,9 @@ async fn list_prompt_versions(
                 .into_response()
         }
     };
+    if let Err(resp) = require_agent_access(&state, &account, agent_id) {
+        return resp;
+    }
     match state.kernel.list_prompt_versions(agent_id) {
         Ok(versions) => Json(versions).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
@@ -71,6 +95,7 @@ async fn list_prompt_versions(
 
 async fn create_prompt_version(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
     Json(mut version): Json<PromptVersion>,
 ) -> impl IntoResponse {
@@ -82,6 +107,9 @@ async fn create_prompt_version(
                 .into_response()
         }
     };
+    if let Err(resp) = require_agent_access(&state, &account, agent_id) {
+        return resp;
+    }
     version.agent_id = agent_id;
     version.id = uuid::Uuid::new_v4();
     version.created_at = chrono::Utc::now();
@@ -99,10 +127,17 @@ async fn create_prompt_version(
 
 async fn get_prompt_version(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_prompt_version(&id) {
-        Ok(version) => Json(version).into_response(),
+        Ok(Some(version)) => {
+            if let Err(resp) = require_agent_access(&state, &account, version.agent_id) {
+                return resp;
+            }
+            Json(Some(version)).into_response()
+        }
+        Ok(None) => Json(Option::<PromptVersion>::None).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
@@ -111,8 +146,26 @@ async fn get_prompt_version(
 
 async fn delete_prompt_version(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    match state.kernel.get_prompt_version(&id) {
+        Ok(Some(version)) => {
+            if let Err(resp) = require_agent_access(&state, &account, version.agent_id) {
+                return resp;
+            }
+        }
+        Ok(None) => {
+            return ApiErrorResponse::not_found("Prompt version not found")
+                .into_json_tuple()
+                .into_response()
+        }
+        Err(e) => {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response()
+        }
+    }
     match state.kernel.delete_prompt_version(&id) {
         Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
@@ -123,6 +176,7 @@ async fn delete_prompt_version(
 
 async fn activate_prompt_version(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -134,6 +188,35 @@ async fn activate_prompt_version(
                 .into_response()
         }
     };
+    let agent_id_parsed = match agent_id.parse::<librefang_types::agent::AgentId>() {
+        Ok(id) => id,
+        Err(e) => {
+            return ApiErrorResponse::bad_request(e.to_string())
+                .into_json_tuple()
+                .into_response()
+        }
+    };
+    if let Err(resp) = require_agent_access(&state, &account, agent_id_parsed) {
+        return resp;
+    }
+    match state.kernel.get_prompt_version(&id) {
+        Ok(Some(version)) if version.agent_id != agent_id_parsed => {
+            return ApiErrorResponse::bad_request("Prompt version does not belong to agent")
+                .into_json_tuple()
+                .into_response()
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return ApiErrorResponse::not_found("Prompt version not found")
+                .into_json_tuple()
+                .into_response()
+        }
+        Err(e) => {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response()
+        }
+    }
     match state.kernel.set_active_prompt_version(&id, agent_id) {
         Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
@@ -144,6 +227,7 @@ async fn activate_prompt_version(
 
 async fn list_experiments(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
@@ -154,6 +238,9 @@ async fn list_experiments(
                 .into_response()
         }
     };
+    if let Err(resp) = require_agent_access(&state, &account, agent_id) {
+        return resp;
+    }
     match state.kernel.list_experiments(agent_id) {
         Ok(experiments) => Json(experiments).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
@@ -164,6 +251,7 @@ async fn list_experiments(
 
 async fn create_experiment(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(agent_id): Path<String>,
     Json(mut experiment): Json<PromptExperiment>,
 ) -> impl IntoResponse {
@@ -175,6 +263,9 @@ async fn create_experiment(
                 .into_response()
         }
     };
+    if let Err(resp) = require_agent_access(&state, &account, agent_id) {
+        return resp;
+    }
     experiment.agent_id = agent_id;
     experiment.id = uuid::Uuid::new_v4();
     experiment.created_at = chrono::Utc::now();
@@ -192,10 +283,17 @@ async fn create_experiment(
 
 async fn get_experiment(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_experiment(&id) {
-        Ok(experiment) => Json(experiment).into_response(),
+        Ok(Some(experiment)) => {
+            if let Err(resp) = require_agent_access(&state, &account, experiment.agent_id) {
+                return resp;
+            }
+            Json(Some(experiment)).into_response()
+        }
+        Ok(None) => Json(Option::<PromptExperiment>::None).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
@@ -204,8 +302,26 @@ async fn get_experiment(
 
 async fn start_experiment(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    match state.kernel.get_experiment(&id) {
+        Ok(Some(experiment)) => {
+            if let Err(resp) = require_agent_access(&state, &account, experiment.agent_id) {
+                return resp;
+            }
+        }
+        Ok(None) => {
+            return ApiErrorResponse::not_found("Experiment not found")
+                .into_json_tuple()
+                .into_response()
+        }
+        Err(e) => {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response()
+        }
+    }
     match state
         .kernel
         .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Running)
@@ -219,8 +335,26 @@ async fn start_experiment(
 
 async fn pause_experiment(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    match state.kernel.get_experiment(&id) {
+        Ok(Some(experiment)) => {
+            if let Err(resp) = require_agent_access(&state, &account, experiment.agent_id) {
+                return resp;
+            }
+        }
+        Ok(None) => {
+            return ApiErrorResponse::not_found("Experiment not found")
+                .into_json_tuple()
+                .into_response()
+        }
+        Err(e) => {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response()
+        }
+    }
     match state
         .kernel
         .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Paused)
@@ -234,8 +368,26 @@ async fn pause_experiment(
 
 async fn complete_experiment(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    match state.kernel.get_experiment(&id) {
+        Ok(Some(experiment)) => {
+            if let Err(resp) = require_agent_access(&state, &account, experiment.agent_id) {
+                return resp;
+            }
+        }
+        Ok(None) => {
+            return ApiErrorResponse::not_found("Experiment not found")
+                .into_json_tuple()
+                .into_response()
+        }
+        Err(e) => {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response()
+        }
+    }
     match state
         .kernel
         .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Completed)
@@ -249,8 +401,26 @@ async fn complete_experiment(
 
 async fn get_experiment_metrics(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    match state.kernel.get_experiment(&id) {
+        Ok(Some(experiment)) => {
+            if let Err(resp) = require_agent_access(&state, &account, experiment.agent_id) {
+                return resp;
+            }
+        }
+        Ok(None) => {
+            return ApiErrorResponse::not_found("Experiment not found")
+                .into_json_tuple()
+                .into_response()
+        }
+        Err(e) => {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response()
+        }
+    }
     match state.kernel.get_experiment_metrics(&id) {
         Ok(metrics) => Json(metrics).into_response(),
         Err(e) => ApiErrorResponse::internal(e)

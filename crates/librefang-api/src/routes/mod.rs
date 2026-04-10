@@ -25,6 +25,7 @@ pub mod network;
 pub mod plugins;
 pub mod prompts;
 pub mod providers;
+pub(crate) mod shared;
 pub mod skills;
 pub mod system;
 pub mod workflows;
@@ -126,4 +127,9 @@ pub struct AppState {
     /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).
     #[cfg(feature = "telemetry")]
     pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
+    /// Optional HMAC-SHA256 secret for verifying `X-Account-Sig` headers.
+    /// When `Some(secret)` (non-empty), the `account_sig_check` middleware
+    /// enforces signature verification on requests carrying `X-Account-Id`.
+    /// `None` = no enforcement (backward-compatible single-tenant mode).
+    pub account_sig_secret: Option<String>,
 }

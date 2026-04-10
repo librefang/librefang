@@ -1,6 +1,8 @@
 //! Workflow, trigger, schedule, and cron job handlers.
 
+use super::shared::require_admin;
 use super::AppState;
+use crate::middleware::{AccountId, ConcreteAccountId};
 
 /// Build routes for the workflow/trigger/schedule/cron domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
@@ -109,6 +111,13 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::types::ApiErrorResponse;
+
+fn workflow_schedule_agent_id() -> AgentId {
+    AgentId(uuid::Uuid::from_bytes([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
+    ]))
+}
 // ---------------------------------------------------------------------------
 // Helpers – parse StepMode / ErrorMode from both flat-string and nested-object
 // formats so the frontend can send either:
@@ -285,15 +294,19 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
 )]
 pub async fn create_workflow(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let name = req["name"].as_str().unwrap_or("unnamed").to_string();
     let description = req["description"].as_str().unwrap_or("").to_string();
 
     let steps_json = match req["steps"].as_array() {
         Some(s) => s,
         None => {
-            return ApiErrorResponse::bad_request("Missing 'steps' array").into_json_tuple();
+            return ApiErrorResponse::bad_request("Missing 'steps' array")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -301,17 +314,50 @@ pub async fn create_workflow(
     for s in steps_json {
         let step_name = s["name"].as_str().unwrap_or("step").to_string();
         let agent = if let Some(id) = s["agent_id"].as_str() {
-            StepAgent::ById { id: id.to_string() }
+            let agent_id = match id.parse::<AgentId>() {
+                Ok(agent_id) => agent_id,
+                Err(_) => {
+                    return ApiErrorResponse::bad_request(format!(
+                        "Step '{}' has invalid agent_id",
+                        step_name
+                    ))
+                    .into_json_tuple()
+                    .into_response();
+                }
+            };
+            match state.kernel.agent_registry().get(agent_id) {
+                Some(entry) if entry.account_id.as_deref() == Some(account_id) => {
+                    StepAgent::ById { id: id.to_string() }
+                }
+                _ => {
+                    return ApiErrorResponse::not_found(format!("Agent not found: {id}"))
+                        .into_json_tuple()
+                        .into_response();
+                }
+            }
         } else if let Some(name) = s["agent_name"].as_str() {
-            StepAgent::ByName {
-                name: name.to_string(),
+            if state
+                .kernel
+                .agent_registry()
+                .list_by_account(account_id)
+                .iter()
+                .any(|entry| entry.name == name)
+            {
+                StepAgent::ByName {
+                    name: name.to_string(),
+                }
+            } else {
+                return ApiErrorResponse::not_found(format!("Agent not found: {name}"))
+                    .into_json_tuple()
+                    .into_response();
             }
         } else {
             return ApiErrorResponse::bad_request(format!(
                 "Step '{}' needs 'agent_id' or 'agent_name'",
                 step_name
             ))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
         };
 
         let mode = parse_step_mode(&s["mode"], s);
@@ -347,6 +393,7 @@ pub async fn create_workflow(
         description,
         steps,
         created_at: chrono::Utc::now(),
+        account_id: Some(account_id.to_string()),
         layout,
     };
 
@@ -355,6 +402,7 @@ pub async fn create_workflow(
         StatusCode::CREATED,
         Json(serde_json::json!({"workflow_id": id.to_string()})),
     )
+        .into_response()
 }
 
 /// GET /api/workflows — List all workflows.
@@ -366,10 +414,14 @@ pub async fn create_workflow(
         (status = 200, description = "List workflows", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_workflows(
+    State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let engine = state.kernel.workflow_engine();
-    let workflows = engine.list_workflows().await;
-    let all_runs = engine.list_runs(None).await;
+    let workflows = engine.list_workflows_by_account(account_id).await;
+    let all_runs = engine.list_runs_by_account(account_id, None).await;
 
     // Count runs per workflow
     let mut run_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -378,7 +430,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
     }
 
     // Load cron jobs to find workflow-bound schedules
-    let all_cron_jobs = state.kernel.cron().list_all_jobs();
+    let all_cron_jobs = state.kernel.cron().list_jobs_by_account(account_id);
 
     let list: Vec<serde_json::Value> = workflows
         .iter()
@@ -410,7 +462,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
             })
         })
         .collect();
-    Json(serde_json::json!({ "workflows": list }))
+    Json(serde_json::json!({ "workflows": list })).into_response()
 }
 
 /// GET /api/workflows/:id — Get a single workflow by ID.
@@ -426,19 +478,23 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
 )]
 pub async fn get_workflow(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid workflow ID")
+                .into_json_tuple()
+                .into_response();
         }
     });
 
     match state
         .kernel
         .workflow_engine()
-        .get_workflow(workflow_id)
+        .get_workflow_scoped(workflow_id, account_id)
         .await
     {
         Some(w) => (
@@ -470,6 +526,7 @@ pub async fn get_workflow(
             ApiErrorResponse::not_found(format!("Workflow '{}' not found", id)).into_json_tuple()
         }
     }
+    .into_response()
 }
 
 /// PUT /api/workflows/:id — Update an existing workflow.
@@ -487,13 +544,17 @@ pub async fn get_workflow(
 )]
 pub async fn update_workflow(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid workflow ID")
+                .into_json_tuple()
+                .into_response();
         }
     });
 
@@ -501,12 +562,14 @@ pub async fn update_workflow(
     let existing = match state
         .kernel
         .workflow_engine()
-        .get_workflow(workflow_id)
+        .get_workflow_scoped(workflow_id, account_id)
         .await
     {
         Some(w) => w,
         None => {
-            return ApiErrorResponse::not_found("Workflow not found").into_json_tuple();
+            return ApiErrorResponse::not_found("Workflow not found")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -525,19 +588,52 @@ pub async fn update_workflow(
         for s in steps_json {
             let step_name = s["name"].as_str().unwrap_or("step").to_string();
             let agent = if let Some(aid) = s["agent_id"].as_str() {
-                StepAgent::ById {
-                    id: aid.to_string(),
+                let agent_id = match aid.parse::<AgentId>() {
+                    Ok(agent_id) => agent_id,
+                    Err(_) => {
+                        return ApiErrorResponse::bad_request(format!(
+                            "Step '{}' has invalid agent_id",
+                            step_name
+                        ))
+                        .into_json_tuple()
+                        .into_response();
+                    }
+                };
+                match state.kernel.agent_registry().get(agent_id) {
+                    Some(entry) if entry.account_id.as_deref() == Some(account_id) => {
+                        StepAgent::ById {
+                            id: aid.to_string(),
+                        }
+                    }
+                    _ => {
+                        return ApiErrorResponse::not_found(format!("Agent not found: {aid}"))
+                            .into_json_tuple()
+                            .into_response();
+                    }
                 }
             } else if let Some(aname) = s["agent_name"].as_str() {
-                StepAgent::ByName {
-                    name: aname.to_string(),
+                if state
+                    .kernel
+                    .agent_registry()
+                    .list_by_account(account_id)
+                    .iter()
+                    .any(|entry| entry.name == aname)
+                {
+                    StepAgent::ByName {
+                        name: aname.to_string(),
+                    }
+                } else {
+                    return ApiErrorResponse::not_found(format!("Agent not found: {aname}"))
+                        .into_json_tuple()
+                        .into_response();
                 }
             } else {
                 return ApiErrorResponse::bad_request(format!(
                     "Step '{}' needs 'agent_id' or 'agent_name'",
                     step_name
                 ))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
             };
 
             let mode = parse_step_mode(&s["mode"], s);
@@ -581,16 +677,19 @@ pub async fn update_workflow(
         description,
         steps,
         created_at: existing.created_at,
+        account_id: Some(account_id.to_string()),
         layout,
     };
 
     if !state
         .kernel
         .workflow_engine()
-        .update_workflow(workflow_id, updated)
+        .update_workflow_scoped(workflow_id, account_id, updated)
         .await
     {
-        return ApiErrorResponse::not_found("Workflow not found").into_json_tuple();
+        return ApiErrorResponse::not_found("Workflow not found")
+            .into_json_tuple()
+            .into_response();
     }
 
     (
@@ -600,6 +699,7 @@ pub async fn update_workflow(
             "workflow_id": id,
         })),
     )
+        .into_response()
 }
 
 /// DELETE /api/workflows/:id — Remove a workflow.
@@ -615,21 +715,36 @@ pub async fn update_workflow(
 )]
 pub async fn delete_workflow(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid workflow ID")
+                .into_json_tuple()
+                .into_response();
         }
     });
 
     if state
         .kernel
         .workflow_engine()
-        .remove_workflow(workflow_id)
+        .remove_workflow_scoped(workflow_id, account_id)
         .await
     {
+        let workflow_id_str = workflow_id.to_string();
+        for job in state.kernel.cron().list_jobs_by_account(account_id) {
+            if matches!(
+                &job.action,
+                librefang_types::scheduler::CronAction::Workflow { workflow_id, .. }
+                if workflow_id == &workflow_id_str
+            ) {
+                let _ = state.kernel.cron().remove_job_scoped(job.id, account_id);
+            }
+        }
+        let _ = state.kernel.cron().persist();
         (
             StatusCode::OK,
             Json(serde_json::json!({"status": "removed", "workflow_id": id})),
@@ -637,28 +752,41 @@ pub async fn delete_workflow(
     } else {
         ApiErrorResponse::not_found("Workflow not found").into_json_tuple()
     }
+    .into_response()
 }
 
 /// POST /api/workflows/:id/run — Execute a workflow.
 #[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "Workflow run started", body = serde_json::Value)))]
 pub async fn run_workflow(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid workflow ID")
+                .into_json_tuple()
+                .into_response();
         }
     });
 
     let input = req["input"].as_str().unwrap_or("").to_string();
 
-    match state.kernel.run_workflow(workflow_id, input).await {
+    match state
+        .kernel
+        .run_workflow_scoped(workflow_id, input, Some(account_id))
+        .await
+    {
         Ok((run_id, output)) => {
             // Include step-level detail in the response so callers can inspect I/O
-            let run = state.kernel.workflow_engine().get_run(run_id).await;
+            let run = state
+                .kernel
+                .workflow_engine()
+                .get_run_scoped(run_id, account_id)
+                .await;
             let step_results = run.as_ref().map(|r| {
                 r.step_results
                     .iter()
@@ -698,6 +826,7 @@ pub async fn run_workflow(
             )
         }
     }
+    .into_response()
 }
 
 /// POST /api/workflows/:id/dry-run — Validate and preview a workflow without executing it.
@@ -714,19 +843,27 @@ pub async fn run_workflow(
 )]
 pub async fn dry_run_workflow(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid workflow ID")
+                .into_json_tuple()
+                .into_response();
         }
     });
 
     let input = req["input"].as_str().unwrap_or("").to_string();
 
-    match state.kernel.dry_run_workflow(workflow_id, input).await {
+    match state
+        .kernel
+        .dry_run_workflow_scoped(workflow_id, input, Some(account_id))
+        .await
+    {
         Ok(steps) => {
             let all_agents_found = steps.iter().all(|s| s.agent_found);
             (
@@ -746,9 +883,10 @@ pub async fn dry_run_workflow(
         }
         Err(e) => {
             tracing::warn!("Workflow dry-run failed for {id}: {e}");
-            ApiErrorResponse::not_found(e.to_string()).into_json_tuple()
+            ApiErrorResponse::not_found("Workflow not found").into_json_tuple()
         }
     }
+    .into_response()
 }
 
 /// GET /api/workflows/runs/:run_id — Get detailed info for a single workflow run.
@@ -764,22 +902,32 @@ pub async fn dry_run_workflow(
 )]
 pub async fn get_workflow_run(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(run_id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let run_id = WorkflowRunId(match run_id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid run ID")
+                .into_json_tuple()
+                .into_response();
         }
     });
 
-    match state.kernel.workflow_engine().get_run(run_id).await {
+    match state
+        .kernel
+        .workflow_engine()
+        .get_run_scoped(run_id, account_id)
+        .await
+    {
         Some(run) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "id": run.id.to_string(),
                 "workflow_id": run.workflow_id.to_string(),
                 "workflow_name": run.workflow_name,
+                "account_id": run.account_id,
                 "input": run.input,
                 "state": serde_json::to_value(&run.state).unwrap_or_default(),
                 "output": run.output,
@@ -800,20 +948,48 @@ pub async fn get_workflow_run(
         ),
         None => ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple(),
     }
+    .into_response()
 }
 
 /// GET /api/workflows/:id/runs — List runs for a workflow.
 #[utoipa::path(get, path = "/api/workflows/{id}/runs", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "List workflow runs", body = Vec<serde_json::Value>)))]
 pub async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
-    Path(_id): Path<String>,
-) -> impl IntoResponse {
-    let runs = state.kernel.workflow_engine().list_runs(None).await;
+    account: ConcreteAccountId,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
+    let workflow_id = WorkflowId(match id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid workflow ID")
+                .into_json_tuple()
+                .into_response();
+        }
+    });
+    if state
+        .kernel
+        .workflow_engine()
+        .get_workflow_scoped(workflow_id, account_id)
+        .await
+        .is_none()
+    {
+        return ApiErrorResponse::not_found(format!("Workflow '{}' not found", id))
+            .into_json_tuple()
+            .into_response();
+    }
+    let runs = state
+        .kernel
+        .workflow_engine()
+        .list_runs_by_account(account_id, None)
+        .await;
     let list: Vec<serde_json::Value> = runs
         .iter()
+        .filter(|run| run.workflow_id == workflow_id)
         .map(|r| {
             serde_json::json!({
                 "id": r.id.to_string(),
+                "workflow_id": r.workflow_id.to_string(),
                 "workflow_name": r.workflow_name,
                 "state": serde_json::to_value(&r.state).unwrap_or_default(),
                 "steps_completed": r.step_results.len(),
@@ -822,7 +998,7 @@ pub async fn list_workflow_runs(
             })
         })
         .collect();
-    Json(list)
+    Json(list).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -842,14 +1018,20 @@ pub async fn list_workflow_runs(
 )]
 pub async fn save_workflow_as_template(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     use librefang_kernel::workflow::WorkflowEngine;
 
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid workflow ID")
+                .into_json_tuple()
+                .into_response();
         }
     });
 
@@ -862,7 +1044,8 @@ pub async fn save_workflow_as_template(
         Some(w) => w,
         None => {
             return ApiErrorResponse::not_found(format!("Workflow '{}' not found", id))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -899,6 +1082,7 @@ pub async fn save_workflow_as_template(
             "template": template,
         })),
     )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -918,32 +1102,50 @@ pub async fn save_workflow_as_template(
 )]
 pub async fn create_trigger(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let agent_id_str = match req["agent_id"].as_str() {
         Some(id) => id,
         None => {
-            return ApiErrorResponse::bad_request("Missing 'agent_id'").into_json_tuple();
+            return ApiErrorResponse::bad_request("Missing 'agent_id'")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     let agent_id: AgentId = match agent_id_str.parse() {
         Ok(id) => id,
         Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid agent_id")
+                .into_json_tuple()
+                .into_response();
         }
     };
+    match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) if entry.account_id.as_deref() == Some(account_id) => {}
+        _ => {
+            return ApiErrorResponse::not_found("Agent not found")
+                .into_json_tuple()
+                .into_response();
+        }
+    }
 
     let pattern: TriggerPattern = match req.get("pattern") {
         Some(p) => match serde_json::from_value(p.clone()) {
             Ok(pat) => pat,
             Err(e) => {
                 tracing::warn!("Invalid trigger pattern: {e}");
-                return ApiErrorResponse::bad_request("Invalid trigger pattern").into_json_tuple();
+                return ApiErrorResponse::bad_request("Invalid trigger pattern")
+                    .into_json_tuple()
+                    .into_response();
             }
         },
         None => {
-            return ApiErrorResponse::bad_request("Missing 'pattern'").into_json_tuple();
+            return ApiErrorResponse::bad_request("Missing 'pattern'")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -965,12 +1167,24 @@ pub async fn create_trigger(
                 return ApiErrorResponse::bad_request(format!(
                     "Invalid 'target_agent_id': '{s}' is not a valid UUID"
                 ))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
             }
         },
     };
+    if let Some(target_agent) = target_agent {
+        match state.kernel.agent_registry().get(target_agent) {
+            Some(entry) if entry.account_id.as_deref() == Some(account_id) => {}
+            _ => {
+                return ApiErrorResponse::not_found("Target agent not found")
+                    .into_json_tuple()
+                    .into_response();
+            }
+        }
+    }
 
     match state.kernel.register_trigger_with_target(
+        Some(account_id.to_string()),
         agent_id,
         pattern,
         prompt_template,
@@ -993,6 +1207,7 @@ pub async fn create_trigger(
                 .into_json_tuple()
         }
     }
+    .into_response()
 }
 
 /// GET /api/triggers — List all triggers (optionally filter by ?agent_id=...).
@@ -1006,13 +1221,26 @@ pub async fn create_trigger(
 )]
 pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let agent_filter = params
         .get("agent_id")
         .and_then(|id| id.parse::<AgentId>().ok());
 
-    let triggers = state.kernel.list_triggers(agent_filter);
+    if let Some(agent_id) = agent_filter {
+        match state.kernel.agent_registry().get(agent_id) {
+            Some(entry) if entry.account_id.as_deref() == Some(account_id) => {}
+            _ => {
+                return ApiErrorResponse::not_found("Agent not found")
+                    .into_json_tuple()
+                    .into_response();
+            }
+        }
+    }
+
+    let triggers = state.kernel.list_triggers_scoped(account_id, agent_filter);
     let list: Vec<serde_json::Value> = triggers
         .iter()
         .map(|t| {
@@ -1033,23 +1261,31 @@ pub async fn list_triggers(
         })
         .collect();
     let total = list.len();
-    Json(serde_json::json!({"triggers": list, "total": total}))
+    Json(serde_json::json!({"triggers": list, "total": total})).into_response()
 }
 
 /// DELETE /api/triggers/:id — Remove a trigger.
 #[utoipa::path(delete, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger deleted")))]
 pub async fn delete_trigger(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let trigger_id = TriggerId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid trigger ID").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid trigger ID")
+                .into_json_tuple()
+                .into_response();
         }
     });
 
-    if state.kernel.remove_trigger(trigger_id) {
+    if state
+        .kernel
+        .trigger_engine()
+        .remove_scoped(trigger_id, account_id)
+    {
         (
             StatusCode::OK,
             Json(serde_json::json!({"status": "removed", "trigger_id": id})),
@@ -1057,6 +1293,7 @@ pub async fn delete_trigger(
     } else {
         ApiErrorResponse::not_found("Trigger not found").into_json_tuple()
     }
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,18 +1304,26 @@ pub async fn delete_trigger(
 #[utoipa::path(put, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), request_body = serde_json::Value, responses((status = 200, description = "Trigger updated", body = serde_json::Value)))]
 pub async fn update_trigger(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let trigger_id = TriggerId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid trigger ID").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid trigger ID")
+                .into_json_tuple()
+                .into_response();
         }
     });
 
     if let Some(enabled) = req.get("enabled").and_then(|v| v.as_bool()) {
-        if state.kernel.set_trigger_enabled(trigger_id, enabled) {
+        if state
+            .kernel
+            .trigger_engine()
+            .set_enabled_scoped(trigger_id, account_id, enabled)
+        {
             (
                 StatusCode::OK,
                 Json(
@@ -1091,6 +1336,7 @@ pub async fn update_trigger(
     } else {
         ApiErrorResponse::bad_request("Missing 'enabled' field").into_json_tuple()
     }
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,6 +1387,7 @@ fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde
         "name": job.name,
         "cron": cron_expr,
         "agent_id": job.agent_id.to_string(),
+        "account_id": job.account_id,
         "workflow_id": workflow_id,
         "message": message,
         "enabled": job.enabled,
@@ -1159,27 +1406,34 @@ fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde
         (status = 200, description = "List schedules", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let jobs = state.kernel.cron().list_all_jobs();
+pub async fn list_schedules(
+    State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
+    let jobs = state.kernel.cron().list_jobs_by_account(account_id);
     let schedules: Vec<serde_json::Value> = jobs.iter().map(cron_job_to_schedule_json).collect();
     let total = schedules.len();
-    Json(serde_json::json!({"schedules": schedules, "total": total}))
+    Json(serde_json::json!({"schedules": schedules, "total": total})).into_response()
 }
 
 /// GET /api/schedules/{id} — Get a specific schedule by ID.
 #[utoipa::path(get, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule details", body = serde_json::Value)))]
 pub async fn get_schedule(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let job_id = match parse_cron_job_id(&id) {
         Ok(jid) => jid,
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
-    match state.kernel.cron().get_job(job_id) {
+    match state.kernel.cron().get_job_scoped(job_id, account_id) {
         Some(job) => (StatusCode::OK, Json(cron_job_to_schedule_json(&job))),
         None => ApiErrorResponse::not_found(format!("Schedule '{id}' not found")).into_json_tuple(),
     }
+    .into_response()
 }
 
 /// POST /api/schedules — Create a new scheduled job (backed by CronScheduler).
@@ -1195,19 +1449,25 @@ pub async fn get_schedule(
 )]
 pub async fn create_schedule(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let name = match req["name"].as_str() {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => {
-            return ApiErrorResponse::bad_request("Missing 'name' field").into_json_tuple();
+            return ApiErrorResponse::bad_request("Missing 'name' field")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     let cron = match req["cron"].as_str() {
         Some(c) if !c.is_empty() => c.to_string(),
         _ => {
-            return ApiErrorResponse::bad_request("Missing 'cron' field").into_json_tuple();
+            return ApiErrorResponse::bad_request("Missing 'cron' field")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -1217,7 +1477,8 @@ pub async fn create_schedule(
         return ApiErrorResponse::bad_request(
             "Invalid cron expression: must have 5 fields (min hour dom mon dow)",
         )
-        .into_json_tuple();
+        .into_json_tuple()
+        .into_response();
     }
 
     let agent_id_str = req["agent_id"].as_str().unwrap_or("").to_string();
@@ -1226,36 +1487,42 @@ pub async fn create_schedule(
     // Must have either agent_id or workflow_id
     if agent_id_str.is_empty() && workflow_id_str.is_empty() {
         return ApiErrorResponse::bad_request("Must provide either agent_id or workflow_id")
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
-    // Resolve agent_id to a UUID
+    // Resolve agent_id to a UUID (tenant-scoped)
     let resolved_agent_id = if !agent_id_str.is_empty() {
         if let Ok(aid) = agent_id_str.parse::<AgentId>() {
-            if state.kernel.agent_registry().get(aid).is_some() {
-                aid
+            match state.kernel.agent_registry().get(aid) {
+                Some(entry) => {
+                    if entry.account_id.as_deref() != Some(account_id) {
+                        return ApiErrorResponse::not_found(format!(
+                            "Agent not found: {agent_id_str}"
+                        ))
+                        .into_json_tuple()
+                        .into_response();
+                    }
+                    aid
+                }
+                None => {
+                    return ApiErrorResponse::not_found(format!("Agent not found: {agent_id_str}"))
+                        .into_json_tuple()
+                        .into_response();
+                }
+            }
+        } else {
+            let agent_list = state.kernel.agent_registry().list_by_account(account_id);
+            if let Some(agent) = agent_list.iter().find(|a| a.name == agent_id_str) {
+                agent.id
             } else {
                 return ApiErrorResponse::not_found(format!("Agent not found: {agent_id_str}"))
-                    .into_json_tuple();
+                    .into_json_tuple()
+                    .into_response();
             }
-        } else if let Some(agent) = state
-            .kernel
-            .agent_registry()
-            .list()
-            .iter()
-            .find(|a| a.name == agent_id_str)
-        {
-            agent.id
-        } else {
-            return ApiErrorResponse::not_found(format!("Agent not found: {agent_id_str}"))
-                .into_json_tuple();
         }
     } else {
-        // For workflow-only schedules, use a system agent ID
-        AgentId(uuid::Uuid::from_bytes([
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x01,
-        ]))
+        workflow_schedule_agent_id()
     };
 
     // Validate workflow exists if provided
@@ -1264,17 +1531,20 @@ pub async fn create_schedule(
             if state
                 .kernel
                 .workflow_engine()
-                .get_workflow(WorkflowId(wid))
+                .get_workflow_scoped(WorkflowId(wid), account_id)
                 .await
                 .is_none()
             {
                 return ApiErrorResponse::not_found(format!(
                     "Workflow not found: {workflow_id_str}"
                 ))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
             }
         } else {
-            return ApiErrorResponse::bad_request("Invalid workflow_id format").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid workflow_id format")
+                .into_json_tuple()
+                .into_response();
         }
     }
 
@@ -1307,6 +1577,7 @@ pub async fn create_schedule(
     let job = librefang_types::scheduler::CronJob {
         id: librefang_types::scheduler::CronJobId::new(),
         agent_id: resolved_agent_id,
+        account_id: Some(account_id.to_string()),
         name,
         enabled: req.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
         schedule: librefang_types::scheduler::CronSchedule::Cron {
@@ -1327,10 +1598,14 @@ pub async fn create_schedule(
             }
             let mut entry = cron_job_to_schedule_json(&job);
             entry["id"] = serde_json::Value::String(job_id.to_string());
-            (StatusCode::CREATED, Json(entry))
+            (StatusCode::CREATED, Json(entry)).into_response()
         }
         Err(e) => {
-            ApiErrorResponse::internal(format!("Failed to create schedule: {e}")).into_json_tuple()
+            tracing::warn!("Failed to create schedule: {e}");
+            ApiErrorResponse::internal("Failed to create schedule")
+                .with_code("schedule_create_failed")
+                .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -1339,12 +1614,14 @@ pub async fn create_schedule(
 #[utoipa::path(put, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), request_body = serde_json::Value, responses((status = 200, description = "Schedule updated", body = serde_json::Value)))]
 pub async fn update_schedule(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let job_id = match parse_cron_job_id(&id) {
         Ok(jid) => jid,
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
 
     // Build update payload compatible with CronScheduler::update_job
@@ -1358,22 +1635,41 @@ pub async fn update_schedule(
     if let Some(cron) = req.get("cron").and_then(|v| v.as_str()) {
         let cron_parts: Vec<&str> = cron.split_whitespace().collect();
         if cron_parts.len() != 5 {
-            return ApiErrorResponse::bad_request("Invalid cron expression").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid cron expression")
+                .into_json_tuple()
+                .into_response();
         }
         updates.insert(
             "schedule".to_string(),
             serde_json::json!({"kind": "cron", "expr": cron}),
         );
     }
-    if let Some(agent_id) = req.get("agent_id") {
-        updates.insert("agent_id".to_string(), agent_id.clone());
+    if let Some(agent_id) = req.get("agent_id").and_then(|value| value.as_str()) {
+        let parsed_agent_id = match agent_id.parse::<AgentId>() {
+            Ok(agent_id) => agent_id,
+            Err(_) => {
+                return ApiErrorResponse::bad_request("Invalid agent_id")
+                    .into_json_tuple()
+                    .into_response();
+            }
+        };
+        match state.kernel.agent_registry().get(parsed_agent_id) {
+            Some(entry) if entry.account_id.as_deref() == Some(account_id) => {
+                updates.insert("agent_id".to_string(), serde_json::json!(agent_id));
+            }
+            _ => {
+                return ApiErrorResponse::not_found("Agent not found")
+                    .into_json_tuple()
+                    .into_response();
+            }
+        }
     }
 
-    match state
-        .kernel
-        .cron()
-        .update_job(job_id, &serde_json::Value::Object(updates))
-    {
+    match state.kernel.cron().update_job_scoped(
+        job_id,
+        account_id,
+        &serde_json::Value::Object(updates),
+    ) {
         Ok(_job) => {
             if let Err(e) = state.kernel.cron().persist() {
                 tracing::warn!("Failed to persist cron jobs: {e}");
@@ -1383,22 +1679,28 @@ pub async fn update_schedule(
                 Json(serde_json::json!({"status": "updated", "schedule_id": id})),
             )
         }
-        Err(e) => ApiErrorResponse::not_found(format!("Schedule not found: {e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::warn!("Failed to update schedule {id}: {e}");
+            ApiErrorResponse::not_found("Schedule not found").into_json_tuple()
+        }
     }
+    .into_response()
 }
 
 /// DELETE /api/schedules/:id — Remove a scheduled job.
 #[utoipa::path(delete, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule deleted")))]
 pub async fn delete_schedule(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let job_id = match parse_cron_job_id(&id) {
         Ok(jid) => jid,
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
 
-    match state.kernel.cron().remove_job(job_id) {
+    match state.kernel.cron().remove_job_scoped(job_id, account_id) {
         Ok(_) => {
             if let Err(e) = state.kernel.cron().persist() {
                 tracing::warn!("Failed to persist cron jobs: {e}");
@@ -1408,25 +1710,33 @@ pub async fn delete_schedule(
                 Json(serde_json::json!({"status": "removed", "schedule_id": id})),
             )
         }
-        Err(e) => ApiErrorResponse::not_found(format!("Schedule not found: {e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::warn!("Failed to delete schedule {id}: {e}");
+            ApiErrorResponse::not_found("Schedule not found").into_json_tuple()
+        }
     }
+    .into_response()
 }
 
 /// POST /api/schedules/:id/run — Manually trigger a scheduled job now.
 #[utoipa::path(post, path = "/api/schedules/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule triggered", body = serde_json::Value)))]
 pub async fn run_schedule(
     State(state): State<Arc<AppState>>,
+    account: ConcreteAccountId,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let account_id = account.0.as_str();
     let job_id = match parse_cron_job_id(&id) {
         Ok(jid) => jid,
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
 
-    let job = match state.kernel.cron().get_job(job_id) {
+    let job = match state.kernel.cron().get_job_scoped(job_id, account_id) {
         Some(j) => j,
         None => {
-            return ApiErrorResponse::not_found("Schedule not found").into_json_tuple();
+            return ApiErrorResponse::not_found("Schedule not found")
+                .into_json_tuple()
+                .into_response();
         }
     };
 
@@ -1440,13 +1750,19 @@ pub async fn run_schedule(
             let wid = match workflow_id.parse::<uuid::Uuid>() {
                 Ok(u) => WorkflowId(u),
                 Err(_) => {
-                    return ApiErrorResponse::bad_request("Invalid workflow_id").into_json_tuple();
+                    return ApiErrorResponse::bad_request("Invalid workflow_id")
+                        .into_json_tuple()
+                        .into_response();
                 }
             };
             let wf_input = input
                 .clone()
                 .unwrap_or_else(|| format!("[Scheduled workflow '{}' triggered]", name));
-            match state.kernel.run_workflow(wid, wf_input).await {
+            match state
+                .kernel
+                .run_workflow_scoped(wid, wf_input, job.account_id.as_deref())
+                .await
+            {
                 Ok((run_id, output)) => (
                     StatusCode::OK,
                     Json(serde_json::json!({
@@ -1457,14 +1773,9 @@ pub async fn run_schedule(
                         "output": output,
                     })),
                 ),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "status": "failed",
-                        "schedule_id": id,
-                        "error": format!("{e}"),
-                    })),
-                ),
+                Err(_e) => ApiErrorResponse::internal("Workflow execution failed")
+                    .with_code("schedule_run_failed")
+                    .into_json_tuple(),
             }
         }
         librefang_types::scheduler::CronAction::AgentTurn { message, .. } => {
@@ -1484,14 +1795,9 @@ pub async fn run_schedule(
                         "response": result.response,
                     })),
                 ),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "status": "failed",
-                        "schedule_id": id,
-                        "error": format!("{e}"),
-                    })),
-                ),
+                Err(_e) => ApiErrorResponse::internal("Scheduled agent execution failed")
+                    .with_code("schedule_run_failed")
+                    .into_json_tuple(),
             }
         }
         librefang_types::scheduler::CronAction::SystemEvent { text } => {
@@ -1500,7 +1806,8 @@ pub async fn run_schedule(
                 AgentId::new(),
                 librefang_types::event::EventTarget::Broadcast,
                 librefang_types::event::EventPayload::Custom(text.as_bytes().to_vec()),
-            );
+            )
+            .with_account_id(job.account_id.clone());
             state.kernel.publish_event(event).await;
             (
                 StatusCode::OK,
@@ -1512,6 +1819,7 @@ pub async fn run_schedule(
             )
         }
     }
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1522,8 +1830,12 @@ pub async fn run_schedule(
 #[utoipa::path(get, path = "/api/cron/jobs", tag = "workflows", responses((status = 200, description = "List cron jobs", body = Vec<serde_json::Value>)))]
 pub async fn list_cron_jobs(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let jobs = if let Some(agent_id_str) = params.get("agent_id") {
         match uuid::Uuid::parse_str(agent_id_str) {
             Ok(uuid) => {
@@ -1531,7 +1843,9 @@ pub async fn list_cron_jobs(
                 state.kernel.cron().list_jobs(aid)
             }
             Err(_) => {
-                return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
+                return ApiErrorResponse::bad_request("Invalid agent_id")
+                    .into_json_tuple()
+                    .into_response();
             }
         }
     } else {
@@ -1546,14 +1860,19 @@ pub async fn list_cron_jobs(
         StatusCode::OK,
         Json(serde_json::json!({"jobs": jobs_json, "total": total})),
     )
+        .into_response()
 }
 
 /// POST /api/cron/jobs — Create a new cron job.
 #[utoipa::path(post, path = "/api/cron/jobs", tag = "workflows", request_body = serde_json::Value, responses((status = 200, description = "Cron job created", body = serde_json::Value)))]
 pub async fn create_cron_job(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let agent_id = body["agent_id"].as_str().unwrap_or("");
     match state.kernel.cron_create(agent_id, body.clone()).await {
         Ok(result) => {
@@ -1565,14 +1884,19 @@ pub async fn create_cron_job(
         }
         Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
     }
+    .into_response()
 }
 
 /// DELETE /api/cron/jobs/{id} — Delete a cron job.
 #[utoipa::path(delete, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job deleted")))]
 pub async fn delete_cron_job(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
@@ -1586,20 +1910,28 @@ pub async fn delete_cron_job(
                         Json(serde_json::json!({"status": "deleted"})),
                     )
                 }
-                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+                Err(e) => {
+                    tracing::warn!("Failed to delete cron job {id}: {e}");
+                    ApiErrorResponse::not_found("Cron job not found").into_json_tuple()
+                }
             }
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
     }
+    .into_response()
 }
 
 /// PUT /api/cron/jobs/{id} — Update a cron job's configuration.
 #[utoipa::path(put, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = serde_json::Value, responses((status = 200, description = "Cron job updated", body = serde_json::Value)))]
 pub async fn update_cron_job(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
@@ -1611,20 +1943,28 @@ pub async fn update_cron_job(
                         Json(serde_json::to_value(&job).unwrap_or_default()),
                     )
                 }
-                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+                Err(e) => {
+                    tracing::warn!("Failed to update cron job {id}: {e}");
+                    ApiErrorResponse::not_found("Cron job not found").into_json_tuple()
+                }
             }
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
     }
+    .into_response()
 }
 
 /// PUT /api/cron/jobs/{id}/enable — Enable or disable a cron job.
 #[utoipa::path(put, path = "/api/cron/jobs/{id}/enable", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = serde_json::Value, responses((status = 200, description = "Cron job toggled", body = serde_json::Value)))]
 pub async fn toggle_cron_job(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let enabled = body["enabled"].as_bool().unwrap_or(true);
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
@@ -1639,19 +1979,27 @@ pub async fn toggle_cron_job(
                         Json(serde_json::json!({"id": id, "enabled": enabled})),
                     )
                 }
-                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+                Err(e) => {
+                    tracing::warn!("Failed to toggle cron job {id}: {e}");
+                    ApiErrorResponse::not_found("Cron job not found").into_json_tuple()
+                }
             }
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
     }
+    .into_response()
 }
 
 /// GET /api/cron/jobs/{id} — Get a single cron job by ID.
 #[utoipa::path(get, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job details", body = serde_json::Value), (status = 404, description = "Job not found")))]
 pub async fn get_cron_job(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
@@ -1665,14 +2013,19 @@ pub async fn get_cron_job(
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
     }
+    .into_response()
 }
 
 /// GET /api/cron/jobs/{id}/status — Get status of a specific cron job.
 #[utoipa::path(get, path = "/api/cron/jobs/{id}/status", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job status", body = serde_json::Value)))]
 pub async fn cron_job_status(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
@@ -1686,6 +2039,7 @@ pub async fn cron_job_status(
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
     }
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1716,8 +2070,12 @@ pub struct TemplateListParams {
 )]
 pub async fn list_workflow_templates(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Query(params): Query<TemplateListParams>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let all = state.kernel.templates().list().await;
 
     let filtered: Vec<_> = all
@@ -1752,7 +2110,7 @@ pub async fn list_workflow_templates(
         .filter_map(|t| serde_json::to_value(t).ok())
         .collect();
 
-    Json(serde_json::json!({ "templates": list }))
+    Json(serde_json::json!({ "templates": list })).into_response()
 }
 
 /// GET /api/workflow-templates/:id — Get full template details.
@@ -1768,8 +2126,12 @@ pub async fn list_workflow_templates(
 )]
 pub async fn get_workflow_template(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     match state.kernel.templates().get(&id).await {
         Some(t) => (
             StatusCode::OK,
@@ -1779,6 +2141,7 @@ pub async fn get_workflow_template(
             ApiErrorResponse::not_found(format!("Template '{}' not found", id)).into_json_tuple()
         }
     }
+    .into_response()
 }
 
 /// POST /api/workflow-templates/:id/instantiate — Create a live workflow from a template.
@@ -1796,23 +2159,31 @@ pub async fn get_workflow_template(
 )]
 pub async fn instantiate_template(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(params): Json<HashMap<String, serde_json::Value>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let template = match state.kernel.templates().get(&id).await {
         Some(t) => t,
         None => {
             return ApiErrorResponse::not_found(format!("Template '{}' not found", id))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
-    let workflow = match state.kernel.templates().instantiate(&template, &params) {
+    let mut workflow = match state.kernel.templates().instantiate(&template, &params) {
         Ok(w) => w,
         Err(e) => {
-            return ApiErrorResponse::bad_request(e).into_json_tuple();
+            return ApiErrorResponse::bad_request(e)
+                .into_json_tuple()
+                .into_response();
         }
     };
+    workflow.account_id = account.0.clone();
 
     let workflow_id = state.kernel.register_workflow(workflow).await;
     (
@@ -1823,12 +2194,84 @@ pub async fn instantiate_template(
             "status": "instantiated",
         })),
     )
+        .into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode as HttpStatusCode;
+    use http_body_util::BodyExt;
+    use librefang_types::agent::{AgentEntry, AgentIdentity, AgentManifest, AgentMode, AgentState};
+    use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn test_app_state() -> (tempfile::TempDir, Arc<AppState>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..Default::default()
+        };
+        let kernel =
+            Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"));
+        let state = Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+        (tmp, state)
+    }
+
+    fn tenant_agent(name: &str, account_id: &str) -> AgentEntry {
+        AgentEntry {
+            id: AgentId::new(),
+            account_id: Some(account_id.to_string()),
+            name: name.to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        }
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        serde_json::from_slice(&body).expect("json")
+    }
 
     // -----------------------------------------------------------------------
     // parse_step_mode tests
@@ -2145,5 +2588,225 @@ mod tests {
     fn error_mode_empty_object_defaults_fail() {
         let mode = parse_error_mode(&json!({}), &json!({}));
         assert!(matches!(mode, ErrorMode::Fail));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_schedule_system_event_does_not_trigger_other_tenants() {
+        let (_tmp, state) = test_app_state();
+
+        let tenant_a_source = tenant_agent("tenant-a-source", "tenant-a");
+        let tenant_a_target = tenant_agent("tenant-a-target", "tenant-a");
+        let tenant_b_target = tenant_agent("tenant-b-target", "tenant-b");
+        let tenant_a_source_id = tenant_a_source.id;
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        state
+            .kernel
+            .agent_registry()
+            .register(tenant_a_source)
+            .unwrap();
+        state
+            .kernel
+            .agent_registry()
+            .register(tenant_a_target)
+            .unwrap();
+        state
+            .kernel
+            .agent_registry()
+            .register(tenant_b_target)
+            .unwrap();
+
+        let tenant_a_trigger = state
+            .kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                TriggerPattern::All,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_b_trigger = state
+            .kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                TriggerPattern::All,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let job = CronJob {
+            id: CronJobId::new(),
+            agent_id: tenant_a_source_id,
+            account_id: Some("tenant-a".to_string()),
+            name: "tenant-a-system-event".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 60 },
+            action: CronAction::SystemEvent {
+                text: "scheduled wake".to_string(),
+            },
+            delivery: CronDelivery::None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        };
+        let job_id = job.id;
+        state.kernel.cron().add_job(job, false).unwrap();
+
+        let response = run_schedule(
+            State(state.clone()),
+            ConcreteAccountId("tenant-a".to_string()),
+            Path(job_id.to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), HttpStatusCode::OK);
+
+        let tenant_a = state
+            .kernel
+            .trigger_engine()
+            .get(tenant_a_trigger)
+            .expect("tenant-a trigger");
+        let tenant_b = state
+            .kernel
+            .trigger_engine()
+            .get(tenant_b_trigger)
+            .expect("tenant-b trigger");
+        assert_eq!(
+            tenant_a.fire_count, 1,
+            "same-tenant trigger should still fire"
+        );
+        assert_eq!(
+            tenant_b.fire_count, 0,
+            "manual tenant-a schedule must not wake tenant-b trigger"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_schedule_sanitizes_internal_errors() {
+        let (_tmp, state) = test_app_state();
+
+        let tenant_a_source = tenant_agent("tenant-a-source", "tenant-a");
+        let tenant_a_source_id = tenant_a_source.id;
+        state
+            .kernel
+            .agent_registry()
+            .register(tenant_a_source)
+            .unwrap();
+
+        let job = CronJob {
+            id: CronJobId::new(),
+            agent_id: tenant_a_source_id,
+            account_id: Some("tenant-a".to_string()),
+            name: "tenant-a-failing-workflow".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 60 },
+            action: CronAction::Workflow {
+                workflow_id: uuid::Uuid::new_v4().to_string(),
+                input: Some("hello".to_string()),
+                timeout_secs: Some(30),
+            },
+            delivery: CronDelivery::None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        };
+        let job_id = job.id;
+        state.kernel.cron().add_job(job, false).unwrap();
+
+        let response = run_schedule(
+            State(state),
+            ConcreteAccountId("tenant-a".to_string()),
+            Path(job_id.to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), HttpStatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = response_json(response).await;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert_eq!(
+            error, "Workflow execution failed",
+            "route should return the stable sanitized execution error"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dry_run_workflow_sanitizes_internal_errors() {
+        let (_tmp, state) = test_app_state();
+
+        let response = dry_run_workflow(
+            State(state),
+            ConcreteAccountId("tenant-a".to_string()),
+            Path(uuid::Uuid::new_v4().to_string()),
+            Json(serde_json::json!({"input": "hello"})),
+        )
+        .await;
+        assert_eq!(response.status(), HttpStatusCode::NOT_FOUND);
+
+        let body = response_json(response).await;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert_eq!(
+            error, "Workflow not found",
+            "route should return the stable sanitized not-found message"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_schedule_workflow_succeeds_for_same_tenant() {
+        let (_tmp, state) = test_app_state();
+
+        let tenant_a_source = tenant_agent("tenant-a-source", "tenant-a");
+        let tenant_a_source_id = tenant_a_source.id;
+        state
+            .kernel
+            .agent_registry()
+            .register(tenant_a_source)
+            .unwrap();
+
+        let workflow = Workflow {
+            id: WorkflowId::new(),
+            name: "tenant-a-empty-workflow".to_string(),
+            description: "A workflow with no steps for deterministic testing".to_string(),
+            steps: vec![],
+            created_at: chrono::Utc::now(),
+            account_id: Some("tenant-a".to_string()),
+            layout: None,
+        };
+        let workflow_id = workflow.id;
+        state.kernel.register_workflow(workflow).await;
+
+        let job = CronJob {
+            id: CronJobId::new(),
+            agent_id: tenant_a_source_id,
+            account_id: Some("tenant-a".to_string()),
+            name: "tenant-a-scheduled-workflow".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 60 },
+            action: CronAction::Workflow {
+                workflow_id: workflow_id.to_string(),
+                input: Some("hello".to_string()),
+                timeout_secs: Some(30),
+            },
+            delivery: CronDelivery::None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        };
+        let job_id = job.id;
+        state.kernel.cron().add_job(job, false).unwrap();
+
+        let response = run_schedule(
+            State(state),
+            ConcreteAccountId("tenant-a".to_string()),
+            Path(job_id.to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), HttpStatusCode::OK);
+
+        let body = response_json(response).await;
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["workflow_id"], workflow_id.to_string());
+        assert_eq!(body["output"], "hello");
     }
 }

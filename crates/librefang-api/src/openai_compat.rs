@@ -6,6 +6,8 @@
 //!
 //! Supports both streaming (SSE) and non-streaming responses.
 
+use crate::middleware::AccountId;
+use crate::routes::shared::{check_account, require_concrete_account};
 use crate::routes::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -159,24 +161,24 @@ struct ModelListResponse {
 
 // ── Agent resolution ────────────────────────────────────────────────────────
 
-fn resolve_agent(state: &AppState, model: &str) -> Option<(AgentId, String)> {
+fn resolve_agent(state: &AppState, model: &str) -> Option<librefang_types::agent::AgentEntry> {
     // 1. "librefang:<name>" → find agent by name
     if let Some(name) = model.strip_prefix("librefang:") {
         if let Some(entry) = state.kernel.agent_registry().find_by_name(name) {
-            return Some((entry.id, entry.name.clone()));
+            return Some(entry);
         }
     }
 
     // 2. Valid UUID → find agent by ID
     if let Ok(id) = model.parse::<AgentId>() {
         if let Some(entry) = state.kernel.agent_registry().get(id) {
-            return Some((entry.id, entry.name.clone()));
+            return Some(entry);
         }
     }
 
     // 3. Plain string → try as agent name
     if let Some(entry) = state.kernel.agent_registry().find_by_name(model) {
-        return Some((entry.id, entry.name.clone()));
+        return Some(entry);
     }
 
     // No match — return None so the caller returns a proper 404
@@ -250,10 +252,11 @@ fn convert_messages(oai_messages: &[OaiMessage]) -> Vec<Message> {
 #[utoipa::path(post, path = "/v1/chat/completions", tag = "openai", request_body = serde_json::Value, responses((status = 200, description = "OpenAI-compatible chat completion", body = serde_json::Value)))]
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(req): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
-    let (agent_id, agent_name) = match resolve_agent(&state, &req.model) {
-        Some(pair) => pair,
+    let agent = match resolve_agent(&state, &req.model) {
+        Some(entry) => entry,
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -268,6 +271,21 @@ pub async fn chat_completions(
                 .into_response();
         }
     };
+    if check_account(&agent, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": {
+                    "message": format!("No agent found for model '{}'", req.model),
+                    "type": "invalid_request_error",
+                    "code": "model_not_found"
+                }
+            })),
+        )
+            .into_response();
+    }
+    let agent_id = agent.id;
+    let agent_name = agent.name.clone();
 
     // Extract the last user message as the input
     let messages = convert_messages(&req.messages);
@@ -539,8 +557,15 @@ async fn stream_response(
 
 /// GET /v1/models — List available agents as OpenAI model objects.
 #[utoipa::path(get, path = "/v1/models", tag = "openai", responses((status = 200, description = "OpenAI-compatible model list", body = serde_json::Value)))]
-pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.agent_registry().list();
+pub async fn list_models(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
+    let owner = match require_concrete_account(&account) {
+        Ok(owner) => owner,
+        Err((code, json)) => return (code, json).into_response(),
+    };
+    let agents = state.kernel.agent_registry().list_by_account(owner);
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -563,6 +588,8 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
         })
         .unwrap_or_default(),
     )
+    .into_response()
+    .into_response()
 }
 
 #[cfg(test)]

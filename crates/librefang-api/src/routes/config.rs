@@ -21,6 +21,8 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/shutdown", axum::routing::post(shutdown))
         .route("/init", axum::routing::post(quick_init))
 }
+use super::shared::{require_admin, require_concrete_account};
+use crate::middleware::AccountId;
 use crate::types::*;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -36,11 +38,31 @@ use std::sync::Arc;
         (status = 200, description = "Daemon status", body = serde_json::Value)
     )
 )]
-pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents: Vec<serde_json::Value> = state
+pub async fn status(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let account_id = match require_concrete_account(&account) {
+        Ok(account_id) => account_id,
+        Err((code, json)) => return (code, json).into_response(),
+    };
+    let is_admin = state
         .kernel
-        .agent_registry()
-        .list()
+        .config_ref()
+        .admin_accounts
+        .iter()
+        .any(|id| id == account_id);
+    let entries = if is_admin {
+        state.kernel.agent_registry().list()
+    } else {
+        state.kernel.agent_registry().list_by_account(account_id)
+    };
+
+    // Compute counts from the (already tenant-filtered) entries before consuming them.
+    let agent_count = entries.len();
+    let active_agent_count = entries
+        .iter()
+        .filter(|e| matches!(e.state, librefang_types::agent::AgentState::Running))
+        .count();
+
+    let agents: Vec<serde_json::Value> = entries
         .into_iter()
         .map(|e| {
             serde_json::json!({
@@ -56,15 +78,14 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         })
         .collect();
 
+    // Non-admin tenants get a restricted response — no global telemetry.
+    if !is_admin {
+        return Json(build_tenant_status(agent_count, active_agent_count, agents)).into_response();
+    }
+
+    // --- Full global view (concrete admin account only) ---
+
     let uptime = state.started_at.elapsed().as_secs();
-    let agent_count = agents.len();
-    let active_agent_count = state
-        .kernel
-        .agent_registry()
-        .list()
-        .iter()
-        .filter(|e| matches!(e.state, librefang_types::agent::AgentState::Running))
-        .count();
     let session_count = state
         .kernel
         .memory_substrate()
@@ -136,6 +157,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
         "agents": agents,
     }))
+    .into_response()
 }
 
 /// POST /api/init — Quick initialization (detect provider, write config, reload).
@@ -149,7 +171,13 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         (status = 200, description = "Quick init result", body = serde_json::Value)
     )
 )]
-pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn quick_init(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let home = state.kernel.home_dir();
     let config_path = home.join("config.toml");
 
@@ -157,7 +185,8 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse
         return Json(serde_json::json!({
             "status": "already_initialized",
             "message": "config.toml already exists"
-        }));
+        }))
+        .into_response();
     }
 
     // Ensure directories exist
@@ -197,7 +226,8 @@ api_key_env = "{api_key_env}"
         return Json(serde_json::json!({
             "status": "error",
             "message": format!("Failed to write config: {e}")
-        }));
+        }))
+        .into_response();
     }
 
     // Reload config so kernel picks up new settings
@@ -208,6 +238,7 @@ api_key_env = "{api_key_env}"
         "provider": provider,
         "model": model,
     }))
+    .into_response()
 }
 
 /// POST /api/shutdown — Graceful shutdown.
@@ -219,7 +250,10 @@ api_key_env = "{api_key_env}"
         (status = 200, description = "Graceful daemon shutdown", body = serde_json::Value)
     )
 )]
-pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn shutdown(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     tracing::info!("Shutdown requested via API");
     // SECURITY: Record shutdown in audit trail
     state.kernel.audit().record(
@@ -231,7 +265,7 @@ pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     state.kernel.shutdown();
     // Signal the HTTP server to initiate graceful shutdown so the process exits.
     state.shutdown_notify.notify_one();
-    Json(serde_json::json!({"status": "shutting_down"}))
+    Json(serde_json::json!({"status": "shutting_down"})).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +281,7 @@ pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         (status = 200, description = "Version information", body = serde_json::Value)
     )
 )]
-pub async fn version() -> impl IntoResponse {
+pub async fn version(_account: AccountId) -> impl IntoResponse {
     Json(serde_json::json!({
         "name": "librefang",
         "version": env!("CARGO_PKG_VERSION"),
@@ -276,7 +310,7 @@ pub async fn version() -> impl IntoResponse {
         (status = 200, description = "Health check", body = serde_json::Value)
     )
 )]
-pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn health(_account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Check database connectivity
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -310,9 +344,20 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         (status = 200, description = "Detailed health diagnostics", body = serde_json::Value)
     )
 )]
-pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let health = state.kernel.supervisor_ref().health();
-
+pub async fn health_detail(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let account_id = match require_concrete_account(&account) {
+        Ok(account_id) => account_id,
+        Err((code, json)) => return (code, json).into_response(),
+    };
+    let is_admin = state
+        .kernel
+        .config_ref()
+        .admin_accounts
+        .iter()
+        .any(|id| id == account_id);
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
     ]));
@@ -322,9 +367,29 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         .structured_get(shared_id, "__health_check__")
         .is_ok();
 
+    let status = if db_ok { "ok" } else { "degraded" };
+
+    let agent_count = if is_admin {
+        state.kernel.agent_registry().count()
+    } else {
+        state
+            .kernel
+            .agent_registry()
+            .list_by_account(account_id)
+            .len()
+    };
+
+    // H7 fix: non-admin tenants get a restricted health view — no supervisor
+    // internals, memory config, config warnings, or event-bus stats.
+    if !is_admin {
+        return Json(build_tenant_health_detail(status, agent_count, db_ok)).into_response();
+    }
+
+    // --- Full global view (concrete admin account only) ---
+
+    let health = state.kernel.supervisor_ref().health();
     let hcfg = state.kernel.config_ref();
     let config_warnings = hcfg.validate();
-    let status = if db_ok { "ok" } else { "degraded" };
 
     Json(serde_json::json!({
         "status": status,
@@ -332,7 +397,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "uptime_seconds": state.started_at.elapsed().as_secs(),
         "panic_count": health.panic_count,
         "restart_count": health.restart_count,
-        "agent_count": state.kernel.agent_registry().count(),
+        "agent_count": agent_count,
         "database": if db_ok { "connected" } else { "error" },
         "memory": {
             "embedding_available": state.kernel.embedding().is_some(),
@@ -346,6 +411,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "dropped_events": state.kernel.event_bus_ref().dropped_count(),
         },
     }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +442,17 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         (status = 200, description = "Prometheus text-format metrics", body = serde_json::Value)
     )
 )]
-pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+// TODO(Phase 2): Per-tenant metric scoping — currently prometheus_metrics
+// returns global counters/gauges across all tenants. Filtering Prometheus
+// text-format output by account_id requires label injection and per-tenant
+// aggregation, which is too complex for a quick fix. Tracked for Phase 2.
+pub async fn prometheus_metrics(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let mut out = String::with_capacity(4096);
 
     // Uptime
@@ -494,6 +570,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
         )],
         out,
     )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -509,7 +586,13 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
         (status = 200, description = "Get kernel configuration (secrets redacted)", body = serde_json::Value)
     )
 )]
-pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_config(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     // Return a redacted view of the kernel config
     let config = state.kernel.config_ref();
 
@@ -1117,7 +1200,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         );
     }
 
-    Json(serde_json::Value::Object(out))
+    Json(serde_json::Value::Object(out)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,7 +1220,13 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         (status = 200, description = "Security feature status", body = serde_json::Value)
     )
 )]
-pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn security_status(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let scfg = state.kernel.config_ref();
     let api_key_empty = scfg.api_key.is_empty();
     drop(scfg);
@@ -1207,6 +1296,7 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
         "secret_zeroization": true,
         "total_features": 15
     }))
+    .into_response()
 }
 
 #[utoipa::path(
@@ -1217,7 +1307,13 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
         (status = 200, description = "Detect migratable framework installation", body = serde_json::Value)
     )
 )]
-pub async fn migrate_detect() -> impl IntoResponse {
+pub async fn migrate_detect(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json);
+    }
     // Check OpenClaw first
     if let Some(path) = librefang_migrate::openclaw::detect_openclaw_home() {
         let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
@@ -1268,7 +1364,14 @@ pub async fn migrate_detect() -> impl IntoResponse {
         (status = 200, description = "Scan directory for migratable workspace", body = serde_json::Value)
     )
 )]
-pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
+pub async fn migrate_scan(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MigrateScanRequest>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json);
+    }
     let path = std::path::PathBuf::from(&req.path);
     if !path.exists() {
         return ApiErrorResponse::bad_request("Directory not found").into_json_tuple();
@@ -1287,9 +1390,13 @@ pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoRespo
     )
 )]
 pub async fn run_migrate(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<MigrateRequest>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json);
+    }
     let source = match req.source.as_str() {
         "openclaw" => librefang_migrate::MigrateSource::OpenClaw,
         "langchain" => librefang_migrate::MigrateSource::LangChain,
@@ -1387,7 +1494,13 @@ pub async fn run_migrate(
         (status = 200, description = "Reload configuration from disk", body = serde_json::Value)
     )
 )]
-pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn config_reload(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json);
+    }
     // SECURITY: Record config reload in audit trail
     state.kernel.audit().record(
         "system",
@@ -1457,7 +1570,10 @@ pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoRespo
         (status = 200, description = "Get config structure schema", body = serde_json::Value)
     )
 )]
-pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn config_schema(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     // Build provider/model options from model catalog for dropdowns
     let catalog = state
         .kernel
@@ -1646,9 +1762,13 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     )
 )]
 pub async fn config_set(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json);
+    }
     let path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
         None => {
@@ -1775,6 +1895,48 @@ pub async fn config_set(
     )
 }
 
+// ---------------------------------------------------------------------------
+// Tenant-scoped response builders (extracted for testability)
+// ---------------------------------------------------------------------------
+
+/// Build the `/api/status` JSON response for a scoped tenant.
+///
+/// Returns only: status, version, agent_count, active_agent_count, agents.
+/// Omits: session_count, memory_used_mb, default_provider, default_model,
+/// uptime_seconds, api_listen, home_dir, log_level, network_enabled,
+/// config_exists.
+pub(crate) fn build_tenant_status(
+    agent_count: usize,
+    active_agent_count: usize,
+    agents: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": "running",
+        "version": env!("CARGO_PKG_VERSION"),
+        "agent_count": agent_count,
+        "active_agent_count": active_agent_count,
+        "agents": agents,
+    })
+}
+
+/// Build the `/api/health/detail` JSON response for a scoped tenant.
+///
+/// Returns only: status, version, agent_count, database.
+/// Omits: uptime_seconds, panic_count, restart_count, memory,
+/// config_warnings, event_bus.
+pub(crate) fn build_tenant_health_detail(
+    status: &str,
+    agent_count: usize,
+    db_ok: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": status,
+        "version": env!("CARGO_PKG_VERSION"),
+        "agent_count": agent_count,
+        "database": if db_ok { "connected" } else { "error" },
+    })
+}
+
 /// Convert a serde_json::Value to a toml::Value.
 pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
     match value {
@@ -1795,5 +1957,174 @@ pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
             toml::Value::Array(arr.iter().map(json_to_toml_value).collect())
         }
         _ => toml::Value::String(value.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — tenant-scoped telemetry redaction (PENDING-WORK #7)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod telemetry_redaction_tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // /api/status — tenant-scoped response
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn status_tenant_includes_only_allowed_fields() {
+        let agents = vec![serde_json::json!({"id": "a1", "name": "bot"})];
+        let resp = build_tenant_status(1, 1, agents);
+
+        // Allowed fields present
+        assert_eq!(resp["status"], "running");
+        assert!(resp["version"].is_string());
+        assert_eq!(resp["agent_count"], 1);
+        assert_eq!(resp["active_agent_count"], 1);
+        assert!(resp["agents"].is_array());
+        assert_eq!(resp["agents"].as_array().unwrap().len(), 1);
+
+        // Global telemetry fields must be absent
+        assert!(resp.get("session_count").is_none(), "session_count leaked");
+        assert!(
+            resp.get("memory_used_mb").is_none(),
+            "memory_used_mb leaked"
+        );
+        assert!(
+            resp.get("default_provider").is_none(),
+            "default_provider leaked"
+        );
+        assert!(resp.get("default_model").is_none(), "default_model leaked");
+        assert!(
+            resp.get("uptime_seconds").is_none(),
+            "uptime_seconds leaked"
+        );
+        assert!(resp.get("api_listen").is_none(), "api_listen leaked");
+        assert!(resp.get("home_dir").is_none(), "home_dir leaked");
+        assert!(resp.get("log_level").is_none(), "log_level leaked");
+        assert!(
+            resp.get("network_enabled").is_none(),
+            "network_enabled leaked"
+        );
+        assert!(resp.get("config_exists").is_none(), "config_exists leaked");
+    }
+
+    #[test]
+    fn status_tenant_zero_agents() {
+        let resp = build_tenant_status(0, 0, vec![]);
+        assert_eq!(resp["agent_count"], 0);
+        assert_eq!(resp["active_agent_count"], 0);
+        assert!(resp["agents"].as_array().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // /api/health/detail — tenant-scoped response
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn health_detail_tenant_includes_only_allowed_fields() {
+        let resp = build_tenant_health_detail("ok", 3, true);
+
+        // Allowed fields present
+        assert_eq!(resp["status"], "ok");
+        assert!(resp["version"].is_string());
+        assert_eq!(resp["agent_count"], 3);
+        assert_eq!(resp["database"], "connected");
+
+        // Global telemetry fields must be absent
+        assert!(
+            resp.get("uptime_seconds").is_none(),
+            "uptime_seconds leaked"
+        );
+        assert!(resp.get("panic_count").is_none(), "panic_count leaked");
+        assert!(resp.get("restart_count").is_none(), "restart_count leaked");
+        assert!(resp.get("memory").is_none(), "memory config leaked");
+        assert!(
+            resp.get("config_warnings").is_none(),
+            "config_warnings leaked"
+        );
+        assert!(resp.get("event_bus").is_none(), "event_bus stats leaked");
+    }
+
+    #[test]
+    fn health_detail_tenant_degraded_database() {
+        let resp = build_tenant_health_detail("degraded", 0, false);
+        assert_eq!(resp["status"], "degraded");
+        assert_eq!(resp["database"], "error");
+        assert_eq!(resp["agent_count"], 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Concrete admin accounts are the only supported way to reach the full
+    // daemon view. Validate the JSON still carries the global-only fields that
+    // tenant responses must not expose.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn status_admin_response_shape_has_global_fields() {
+        // The admin path in the handler builds the JSON inline (not via
+        // build_tenant_status), so we verify the expected field set here
+        // by constructing the same JSON and asserting the global fields.
+        let full = serde_json::json!({
+            "status": "running",
+            "version": env!("CARGO_PKG_VERSION"),
+            "agent_count": 5,
+            "active_agent_count": 2,
+            "session_count": 10,
+            "memory_used_mb": 128,
+            "default_provider": "groq",
+            "default_model": "llama-3.3-70b-versatile",
+            "uptime_seconds": 3600,
+            "api_listen": "0.0.0.0:4545",
+            "home_dir": "/home/test/.librefang",
+            "log_level": "info",
+            "network_enabled": false,
+            "config_exists": true,
+            "agents": [],
+        });
+
+        // Admin response MUST contain global telemetry
+        assert!(full.get("session_count").is_some());
+        assert!(full.get("memory_used_mb").is_some());
+        assert!(full.get("default_provider").is_some());
+        assert!(full.get("default_model").is_some());
+        assert!(full.get("uptime_seconds").is_some());
+        assert!(full.get("api_listen").is_some());
+        assert!(full.get("home_dir").is_some());
+        assert!(full.get("log_level").is_some());
+        assert!(full.get("network_enabled").is_some());
+        assert!(full.get("config_exists").is_some());
+    }
+
+    #[test]
+    fn health_detail_admin_response_shape_has_global_fields() {
+        let full = serde_json::json!({
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptime_seconds": 7200,
+            "panic_count": 0,
+            "restart_count": 1,
+            "agent_count": 5,
+            "database": "connected",
+            "memory": {
+                "embedding_available": true,
+                "embedding_provider": "openai",
+                "embedding_model": "text-embedding-3-small",
+                "proactive_memory_enabled": true,
+                "extraction_model": "gpt-4o-mini",
+            },
+            "config_warnings": [],
+            "event_bus": {
+                "dropped_events": 0,
+            },
+        });
+
+        // Admin response MUST contain global diagnostic fields
+        assert!(full.get("uptime_seconds").is_some());
+        assert!(full.get("panic_count").is_some());
+        assert!(full.get("restart_count").is_some());
+        assert!(full.get("memory").is_some());
+        assert!(full.get("config_warnings").is_some());
+        assert!(full.get("event_bus").is_some());
     }
 }

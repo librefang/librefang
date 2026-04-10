@@ -898,6 +898,128 @@ impl SemanticStore {
         }
         Ok(map)
     }
+
+    /// Count non-deleted memories belonging to a specific account, optionally
+    /// filtered by scope.  Uses `json_extract` for an index-friendly COUNT.
+    pub fn count_by_account(&self, account_id: &str, scope: Option<&str>) -> LibreFangResult<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let count: i64 = if let Some(s) = scope {
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE json_extract(metadata, '$.account_id') = ?1 \
+                 AND scope = ?2 AND deleted = 0",
+                rusqlite::params![account_id, s],
+                |row| row.get(0),
+            )
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE json_extract(metadata, '$.account_id') = ?1 AND deleted = 0",
+                rusqlite::params![account_id],
+                |row| row.get(0),
+            )
+        }
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(count as u64)
+    }
+
+    /// Count non-deleted memories belonging to a specific agent AND account,
+    /// optionally filtered by scope.
+    pub fn count_by_agent_and_account(
+        &self,
+        agent_id: AgentId,
+        account_id: &str,
+        scope: Option<&str>,
+    ) -> LibreFangResult<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let count: i64 = if let Some(s) = scope {
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE agent_id = ?1 \
+                 AND json_extract(metadata, '$.account_id') = ?2 \
+                 AND scope = ?3 AND deleted = 0",
+                rusqlite::params![agent_id.0.to_string(), account_id, s],
+                |row| row.get(0),
+            )
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE agent_id = ?1 \
+                 AND json_extract(metadata, '$.account_id') = ?2 AND deleted = 0",
+                rusqlite::params![agent_id.0.to_string(), account_id],
+                |row| row.get(0),
+            )
+        }
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(count as u64)
+    }
+
+    /// Count non-deleted memories grouped by category for a specific account.
+    pub fn count_by_category_and_account(
+        &self,
+        account_id: &str,
+        agent_id: Option<AgentId>,
+    ) -> LibreFangResult<HashMap<String, usize>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
+            if let Some(aid) = agent_id {
+                (
+                    "SELECT json_extract(metadata, '$.category') AS cat, COUNT(*) \
+                     FROM memories \
+                     WHERE agent_id = ?1 \
+                     AND json_extract(metadata, '$.account_id') = ?2 \
+                     AND deleted = 0 \
+                     AND json_extract(metadata, '$.category') IS NOT NULL \
+                     GROUP BY cat"
+                        .to_string(),
+                    vec![
+                        Box::new(aid.0.to_string()) as Box<dyn rusqlite::types::ToSql>,
+                        Box::new(account_id.to_string()),
+                    ],
+                )
+            } else {
+                (
+                    "SELECT json_extract(metadata, '$.category') AS cat, COUNT(*) \
+                     FROM memories \
+                     WHERE json_extract(metadata, '$.account_id') = ?1 \
+                     AND deleted = 0 \
+                     AND json_extract(metadata, '$.category') IS NOT NULL \
+                     GROUP BY cat"
+                        .to_string(),
+                    vec![Box::new(account_id.to_string()) as Box<dyn rusqlite::types::ToSql>],
+                )
+            };
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                let cat: String = row.get(0)?;
+                let count: i64 = row.get(1)?;
+                Ok((cat, count as usize))
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let mut map = HashMap::new();
+        for row in rows {
+            let (cat, count) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            map.insert(cat, count);
+        }
+        Ok(map)
+    }
 }
 
 /// Escape LIKE special characters (`%`, `_`, `\`) in user-supplied search strings.

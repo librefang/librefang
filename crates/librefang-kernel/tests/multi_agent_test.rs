@@ -564,6 +564,7 @@ fn test_reactivation_restores_triggers_to_original_roles() {
 
     kernel
         .register_trigger(
+            None,
             analyst_id,
             TriggerPattern::System,
             "wake analyst".to_string(),

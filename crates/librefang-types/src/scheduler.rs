@@ -8,8 +8,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Maximum number of scheduled jobs per agent.
-pub const MAX_JOBS_PER_AGENT: usize = 50;
+/// Maximum number of scheduled jobs per owner.
+///
+/// In multi-tenant mode the owner is the tenant account. Legacy jobs without
+/// an `account_id` continue to be capped per agent.
+pub const MAX_JOBS_PER_OWNER: usize = 50;
 
 /// Maximum name length in characters.
 const MAX_NAME_LEN: usize = 128;
@@ -175,6 +178,10 @@ pub struct CronJob {
     pub id: CronJobId,
     /// Owning agent.
     pub agent_id: AgentId,
+    /// Owning tenant account. `None` is legacy/global data and is not part of
+    /// the Qwntik target model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     /// Human-readable name (max 128 chars, alphanumeric + spaces/hyphens/underscores).
     pub name: String,
     /// Whether the job is active.
@@ -196,14 +203,21 @@ pub struct CronJob {
 impl CronJob {
     /// Validate this job's fields.
     ///
-    /// `existing_count` is the number of jobs the owning agent already has
-    /// (excluding this job if it already exists). Returns `Ok(())` or an
-    /// error message describing the first validation failure.
+    /// `existing_count` is the number of jobs the owning owner already has
+    /// (excluding this job if it already exists). In multi-tenant mode the
+    /// owner is the account; legacy jobs without `account_id` are still capped
+    /// per agent. Returns `Ok(())` or an error message describing the first
+    /// validation failure.
     pub fn validate(&self, existing_count: usize) -> Result<(), String> {
-        // -- job count cap --
-        if existing_count >= MAX_JOBS_PER_AGENT {
+        // -- owner job count cap --
+        if existing_count >= MAX_JOBS_PER_OWNER {
+            let owner = if self.account_id.is_some() {
+                "account"
+            } else {
+                "agent"
+            };
             return Err(format!(
-                "agent already has {existing_count} jobs (max {MAX_JOBS_PER_AGENT})"
+                "{owner} already has {existing_count} jobs (max {MAX_JOBS_PER_OWNER})"
             ));
         }
 
@@ -417,6 +431,7 @@ mod tests {
         CronJob {
             id: CronJobId::new(),
             agent_id: AgentId::new(),
+            account_id: None,
             name: "daily-report".into(),
             enabled: true,
             schedule: CronSchedule::Every { every_secs: 3600 },

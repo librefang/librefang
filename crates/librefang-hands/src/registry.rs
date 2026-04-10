@@ -87,6 +87,7 @@ fn scan_hands_dir(home_dir: &Path) -> Vec<(String, String, String)> {
 #[derive(Debug, Clone)]
 pub struct HandStateEntry {
     pub hand_id: String,
+    pub account_id: Option<String>,
     pub config: HashMap<String, serde_json::Value>,
     pub old_agent_ids: BTreeMap<String, AgentId>,
     pub coordinator_role: Option<String>,
@@ -160,6 +161,7 @@ impl HandRegistry {
             .map(|e| {
                 serde_json::json!({
                     "hand_id": e.hand_id,
+                    "account_id": e.account_id,
                     "instance_id": e.instance_id.to_string(),
                     "config": e.config,
                     "agent_ids": e.agent_ids,
@@ -216,6 +218,10 @@ impl HandRegistry {
             .into_iter()
             .filter_map(|e| {
                 let hand_id = e["hand_id"].as_str()?.to_string();
+                let account_id = e
+                    .get("account_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 let status = e
                     .get("status")
                     .and_then(|v| serde_json::from_value::<HandStatus>(v.clone()).ok())
@@ -269,6 +275,7 @@ impl HandRegistry {
 
                 Some(HandStateEntry {
                     hand_id,
+                    account_id,
                     config,
                     old_agent_ids,
                     coordinator_role,
@@ -488,6 +495,17 @@ impl HandRegistry {
         entry.coordinator_role =
             HandInstance::normalize_coordinator_role(&agent_ids, coordinator_role.as_deref());
         entry.agent_ids = agent_ids;
+        entry.updated_at = chrono::Utc::now();
+        Ok(())
+    }
+
+    /// Bind a tenant owner to an instance for tenant-facing access control.
+    pub fn set_account_id(&self, instance_id: Uuid, account_id: Option<String>) -> HandResult<()> {
+        let mut entry = self
+            .instances
+            .get_mut(&instance_id)
+            .ok_or(HandError::InstanceNotFound(instance_id))?;
+        entry.account_id = account_id;
         entry.updated_at = chrono::Utc::now();
         Ok(())
     }
@@ -991,6 +1009,24 @@ system_prompt = "Test prompt"
         let saved = HandRegistry::load_state(&state_path);
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].coordinator_role.as_deref(), Some("planner"));
+    }
+
+    #[test]
+    fn persist_and_load_account_id() {
+        let reg = HandRegistry::new();
+        reg.reload_from_disk(&ensure_test_home());
+
+        let instance = reg.activate("clip", HashMap::new()).unwrap();
+        reg.set_account_id(instance.instance_id, Some("tenant-a".to_string()))
+            .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("hand_state.json");
+        reg.persist_state(&state_path).unwrap();
+
+        let saved = HandRegistry::load_state(&state_path);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].account_id.as_deref(), Some("tenant-a"));
     }
 
     #[test]
