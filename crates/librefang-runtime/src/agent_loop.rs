@@ -2001,7 +2001,12 @@ pub async fn run_agent_loop(
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
-    } = prepare_llm_messages(manifest, session, &effective_user_message, memory_context_msg);
+    } = prepare_llm_messages(
+        manifest,
+        session,
+        &effective_user_message,
+        memory_context_msg,
+    );
 
     let mut total_usage = TokenUsage::default();
     let final_response;
@@ -2898,7 +2903,12 @@ pub async fn run_agent_loop_streaming(
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
-    } = prepare_llm_messages(manifest, session, &effective_user_message, memory_context_msg);
+    } = prepare_llm_messages(
+        manifest,
+        session,
+        &effective_user_message,
+        memory_context_msg,
+    );
 
     let mut total_usage = TokenUsage::default();
     let final_response;

@@ -5161,13 +5161,11 @@ system_prompt = "You are a helpful assistant."
                     serde_json::Value::String(ctx.channel.clone()),
                 );
             }
-            if let Some(ref name) = ctx.display_name {
-                if !name.is_empty() {
-                    manifest.metadata.insert(
-                        "sender_display_name".to_string(),
-                        serde_json::Value::String(name.clone()),
-                    );
-                }
+            if !ctx.display_name.is_empty() {
+                manifest.metadata.insert(
+                    "sender_display_name".to_string(),
+                    serde_json::Value::String(ctx.display_name.clone()),
+                );
             }
             if ctx.is_group {
                 manifest
