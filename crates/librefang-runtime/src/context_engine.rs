@@ -4393,6 +4393,51 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
         assert_eq!(output["message"], "hello");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_scriptable_hook_accepts_full_runtime_path() {
+        let tmp = tempdir().unwrap();
+        let script_path = tmp.path().join("hook.sh");
+        std::fs::write(
+            &script_path,
+            r#"read _input
+printf '{"type":"ingest_result","memories":[{"content":"full-path-runtime"}]}\n'
+"#,
+        )
+        .unwrap();
+
+        let traces = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let hook_schemas = std::collections::HashMap::new();
+        let (output, _duration_ms) = ScriptableContextEngine::run_hook(
+            "ingest",
+            script_path.to_str().unwrap(),
+            crate::plugin_runtime::PluginRuntime::from_tag(Some("/bin/sh")),
+            serde_json::json!({
+                "type": "ingest",
+                "agent_id": "agent-123",
+                "message": "hello",
+            }),
+            30,
+            &[],
+            0,
+            0,
+            None,
+            true,
+            &traces,
+            &hook_schemas,
+            None,
+            None,
+            "",
+            "",
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output["type"], "ingest_result");
+        assert_eq!(output["memories"][0]["content"], "full-path-runtime");
+    }
+
     #[test]
     fn test_plugins_dir() {
         let dir = plugins_dir();

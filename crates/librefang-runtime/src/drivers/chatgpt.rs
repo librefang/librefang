@@ -866,6 +866,7 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(LlmError::RateLimited {
                 retry_after_ms: 5000,
+                message: None,
             });
         }
 

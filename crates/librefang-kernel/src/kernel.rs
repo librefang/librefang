@@ -1869,6 +1869,46 @@ impl LibreFangKernel {
             }
         }
 
+        // CLI profile rotation (Claude Code): create one driver per profile
+        // directory, wrapped in TokenRotationDriver for automatic failover.
+        if driver_chain.is_empty()
+            && !config.default_model.cli_profile_dirs.is_empty()
+            && config.default_model.provider == "claude_code"
+        {
+            let profiles = &config.default_model.cli_profile_dirs;
+            let mut profile_drivers: Vec<(Arc<dyn LlmDriver>, String)> = Vec::new();
+            for (i, profile_path) in profiles.iter().enumerate() {
+                let dir = if let Some(rest) = profile_path.strip_prefix("~/") {
+                    dirs::home_dir()
+                        .map(|h| h.join(rest))
+                        .unwrap_or_else(|| std::path::PathBuf::from(profile_path))
+                } else {
+                    std::path::PathBuf::from(profile_path)
+                };
+                let d = drivers::claude_code::ClaudeCodeDriver::with_timeout(
+                    config.default_model.base_url.clone(),
+                    true, // skip_permissions — daemon mode
+                    config.default_model.message_timeout_secs,
+                )
+                .with_config_dir(dir);
+                let name = format!("profile-{}", i + 1);
+                profile_drivers.push((Arc::new(d), name));
+            }
+            if profile_drivers.len() > 1 {
+                info!(
+                    pool_size = profile_drivers.len(),
+                    "Claude Code CLI profile rotation enabled"
+                );
+                let rotation = drivers::token_rotation::TokenRotationDriver::new(
+                    profile_drivers,
+                    config.default_model.provider.clone(),
+                );
+                driver_chain.push(Arc::new(rotation));
+            } else if let Some((d, _)) = profile_drivers.pop() {
+                driver_chain.push(d);
+            }
+        }
+
         if driver_chain.is_empty() {
             match &primary_result {
                 Ok(d) => driver_chain.push(d.clone()),
@@ -8637,6 +8677,19 @@ system_prompt = "You are a helpful assistant."
         let has_custom_key = manifest.model.api_key_env.is_some();
         let has_custom_url = manifest.model.base_url.is_some();
 
+        // CLI profile rotation: when the agent uses the default provider
+        // and CLI profiles are configured, use the boot-time
+        // TokenRotationDriver directly. The driver_cache would create a
+        // single vanilla driver without config_dir, bypassing rotation.
+        if !has_custom_key
+            && !has_custom_url
+            && (agent_provider.is_empty() || agent_provider == default_provider)
+            && effective_default.provider == "claude_code"
+            && !effective_default.cli_profile_dirs.is_empty()
+        {
+            return Ok(self.default_driver.clone());
+        }
+
         // Always create a fresh driver by reading current env vars.
         // This ensures API keys saved at runtime (via dashboard POST
         // /api/providers/{name}/key which calls std::env::set_var) are
@@ -11818,11 +11871,11 @@ impl LibreFangKernel {
             mcp_connections: Some(&self.mcp_connections),
             web_ctx: Some(&self.web_ctx),
             browser_ctx: Some(&self.browser_ctx),
-            allowed_env_vars: None,
+            allowed_env_vars: deferred.allowed_env_vars.as_deref(),
             workspace_root: deferred.workspace_root.as_deref(),
             media_engine: Some(&self.media_engine),
             media_drivers: Some(&self.media_drivers),
-            exec_policy: None,
+            exec_policy: deferred.exec_policy.as_ref(),
             tts_engine: Some(&self.tts_engine),
             docker_config: None,
             process_manager: Some(&self.process_manager),

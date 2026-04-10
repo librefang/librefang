@@ -780,6 +780,7 @@ impl LlmDriver for VertexAiDriver {
             if status.as_u16() == 429 {
                 last_error = Some(LlmError::RateLimited {
                     retry_after_ms: 1000 * (1 << attempt),
+                    message: None,
                 });
                 continue;
             }
@@ -857,6 +858,7 @@ impl LlmDriver for VertexAiDriver {
             if status.as_u16() == 429 {
                 last_error = Some(LlmError::RateLimited {
                     retry_after_ms: 1000 * (1 << attempt),
+                    message: None,
                 });
                 continue;
             }

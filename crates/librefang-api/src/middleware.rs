@@ -10,6 +10,7 @@
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
+use librefang_kernel::auth::UserRole;
 use librefang_types::i18n;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,6 +31,57 @@ pub struct AuthState {
     /// Active sessions issued by dashboard login, keyed by token string.
     pub active_sessions:
         Arc<tokio::sync::RwLock<HashMap<String, crate::password_hash::SessionToken>>>,
+    /// Whether dashboard username/password auth is configured.
+    pub dashboard_auth_enabled: bool,
+    /// Optional per-user API-key hashes used for role-based API access.
+    pub user_api_keys: Arc<Vec<ApiUserAuth>>,
+}
+
+#[derive(Clone)]
+pub struct ApiUserAuth {
+    pub name: String,
+    pub role: UserRole,
+    pub api_key_hash: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthenticatedApiUser {
+    pub name: String,
+    pub role: UserRole,
+}
+
+/// Whitelist check for per-user API-key access.
+///
+/// - `Admin` and above: full access to all methods and paths.
+/// - `User`: GET everything + POST to a limited set of endpoints
+///   (agent messages, clone, approval actions).
+/// - `Viewer`: GET only.
+/// - All other methods (`PUT`/`DELETE`/`PATCH`) require `Admin`+.
+///
+/// The `path` must already be normalized (no trailing slash, version prefix
+/// stripped) before calling this function.
+fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &str) -> bool {
+    if role >= UserRole::Admin || *method == axum::http::Method::GET {
+        return true;
+    }
+
+    if role < UserRole::User {
+        return false;
+    }
+
+    // User role: only specific POST endpoints are allowed.
+    if *method == axum::http::Method::POST {
+        let agent_message = path.starts_with("/api/agents/")
+            && (path.ends_with("/message") || path.ends_with("/message/stream"));
+        let agent_clone = path.starts_with("/api/agents/") && path.ends_with("/clone");
+        let approval_action = path == "/api/approvals/batch"
+            || path.ends_with("/approve")
+            || path.ends_with("/reject")
+            || path.ends_with("/modify");
+        return agent_message || agent_clone || approval_action;
+    }
+
+    false
 }
 
 /// Request ID header name (standard).
@@ -192,7 +244,7 @@ pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response
 /// session store, cleaning up expired sessions on each check.
 pub async fn auth(
     axum::extract::State(auth_state): axum::extract::State<AuthState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
     let api_key = auth_state.api_key_lock.read().await.clone();
@@ -203,15 +255,16 @@ pub async fn auth(
     // Normalize versioned paths: /api/v1/foo → /api/foo so public endpoint
     // checks work identically for both /api/ and /api/v1/ prefixes.
     let raw_path = request.uri().path().to_string();
-    let normalized;
-    let path: &str = if raw_path.starts_with("/api/v1/") {
-        normalized = format!("/api{}", &raw_path[7..]);
-        normalized.as_str()
+    // Normalize: strip version prefix and trailing slashes so ACL checks
+    // work consistently (e.g. "/api/v1/agents/" → "/api/agents").
+    let after_version: String = if raw_path.starts_with("/api/v1/") {
+        format!("/api{}", &raw_path[7..])
     } else if raw_path == "/api/v1" {
-        "/api"
+        "/api".to_string()
     } else {
-        &raw_path
+        raw_path.clone()
     };
+    let path: &str = after_version.strip_suffix('/').unwrap_or(&after_version);
     if path == "/api/shutdown" {
         let is_loopback = request
             .extensions()
@@ -286,7 +339,10 @@ pub async fn auth(
     // entirely. Users who don't set api_key accept that all endpoints are open.
     // To secure the dashboard, set a non-empty api_key in config.toml.
     let api_key = api_key.trim();
-    if api_key.is_empty() {
+    if api_key.is_empty()
+        && auth_state.user_api_keys.is_empty()
+        && !auth_state.dashboard_auth_enabled
+    {
         return next.run(request).await;
     }
 
@@ -347,6 +403,42 @@ pub async fn auth(
         });
         if sessions.contains_key(token_str) {
             drop(sessions);
+            return next.run(request).await;
+        }
+        drop(sessions);
+
+        if let Some(user) = auth_state
+            .user_api_keys
+            .iter()
+            .find(|user| crate::password_hash::verify_password(token_str, &user.api_key_hash))
+            .cloned()
+        {
+            if !user_role_allows_request(user.role, &method, path) {
+                let lang = request
+                    .extensions()
+                    .get::<RequestLanguage>()
+                    .map(|rl| rl.0)
+                    .unwrap_or(i18n::DEFAULT_LANGUAGE);
+                return Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .header("content-type", "application/json")
+                    .header("content-language", lang)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "error": format!(
+                                "Role '{}' is not allowed to access this endpoint",
+                                user.role
+                            )
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap_or_default();
+            }
+
+            request.extensions_mut().insert(AuthenticatedApiUser {
+                name: user.name,
+                role: user.role,
+            });
             return next.run(request).await;
         }
     }
@@ -508,6 +600,8 @@ mod tests {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(Vec::new()),
         };
         let app = Router::new()
             .route("/api/private", get(|| async { "ok" }))
@@ -526,5 +620,215 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.headers()["x-api-version"], "v1");
+    }
+
+    #[tokio::test]
+    async fn test_user_api_key_can_post_agent_messages() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![ApiUserAuth {
+                name: "Guest".to_string(),
+                role: UserRole::User,
+                api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
+            }]),
+        };
+        let app = Router::new()
+            .route(
+                "/api/agents/123/message",
+                get(|| async { "ok" }).post(|| async { "ok" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agents/123/message")
+                    .header("authorization", "Bearer user-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_user_api_key_cannot_spawn_agents() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![ApiUserAuth {
+                name: "Guest".to_string(),
+                role: UserRole::User,
+                api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
+            }]),
+        };
+        let app = Router::new()
+            .route(
+                "/api/agents",
+                get(|| async { "ok" }).post(|| async { "ok" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agents")
+                    .header("authorization", "Bearer user-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_viewer_api_key_cannot_post_anything() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![ApiUserAuth {
+                name: "ReadOnly".to_string(),
+                role: UserRole::Viewer,
+                api_key_hash: crate::password_hash::hash_password("viewer-key").unwrap(),
+            }]),
+        };
+        let app = Router::new()
+            .route(
+                "/api/agents/123/message",
+                get(|| async { "ok" }).post(|| async { "ok" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agents/123/message")
+                    .header("authorization", "Bearer viewer-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_viewer_api_key_can_get() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![ApiUserAuth {
+                name: "ReadOnly".to_string(),
+                role: UserRole::Viewer,
+                api_key_hash: crate::password_hash::hash_password("viewer-key").unwrap(),
+            }]),
+        };
+        let app = Router::new()
+            .route("/api/budget", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/budget")
+                    .header("authorization", "Bearer viewer-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_trailing_slash_does_not_bypass_acl() {
+        // Verify that a User-role key trying to POST /api/agents/ (with
+        // trailing slash) still gets FORBIDDEN, not allowed through because
+        // the path normalization strips the slash before the ACL check.
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![ApiUserAuth {
+                name: "Guest".to_string(),
+                role: UserRole::User,
+                api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
+            }]),
+        };
+        let app = Router::new()
+            .route(
+                "/api/agents",
+                get(|| async { "ok" }).post(|| async { "ok" }),
+            )
+            .route(
+                "/api/agents/",
+                get(|| async { "ok" }).post(|| async { "ok" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agents/")
+                    .header("authorization", "Bearer user-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // After normalization "/api/agents/" → "/api/agents", which User
+        // role is not allowed to POST to → FORBIDDEN.
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_forbidden_response_has_json_content_type() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![ApiUserAuth {
+                name: "Guest".to_string(),
+                role: UserRole::User,
+                api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
+            }]),
+        };
+        let app = Router::new()
+            .route(
+                "/api/agents",
+                get(|| async { "ok" }).post(|| async { "ok" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agents")
+                    .header("authorization", "Bearer user-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["content-type"], "application/json");
     }
 }
