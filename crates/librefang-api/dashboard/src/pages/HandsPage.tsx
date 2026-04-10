@@ -15,6 +15,7 @@ import {
   getHandDetail,
   getHandSettings,
   setHandSecret,
+  updateHandSettings,
   getHandSession,
   sendHandMessage,
   listCronJobs,
@@ -772,36 +773,12 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
         )}
 
         {activeTab === "settings" && (
-          settingsQuery.isLoading ? (
-            <div className="flex items-center gap-2 text-text-dim/60 text-xs py-4">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" /> {t("common.loading")}
-            </div>
-          ) : settings.settings && settings.settings.length > 0 ? (
-            <div className="rounded-xl border border-border-subtle bg-main/30 divide-y divide-border-subtle/50">
-              {settings.settings.map((s) => {
-                const currentVal = settings.current_values?.[s.key ?? ""];
-                const displayVal = currentVal !== undefined ? String(currentVal) : (s.default !== undefined ? String(s.default) : undefined);
-                const isDefault = currentVal === undefined;
-                return (
-                  <div key={s.key} className="flex items-center justify-between gap-3 px-3 py-2.5">
-                    <div className="min-w-0 flex-1">
-                      <span className="text-xs font-bold truncate block">{s.label || s.key}</span>
-                      {s.label && s.key !== s.label && (
-                        <span className="text-[10px] text-text-dim/40 font-mono">{s.key}</span>
-                      )}
-                    </div>
-                    {displayVal !== undefined && (
-                      <span className={`text-[11px] font-mono shrink-0 px-2 py-0.5 rounded-md ${isDefault ? "text-text-dim/60 bg-surface" : "text-brand bg-brand/10"}`}>
-                        {displayVal || "-"}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="text-xs text-text-dim/50 py-4 text-center">{t("hands.settings_empty")}</p>
-          )
+          <HandSettingsEditor
+            handId={hand.id}
+            settings={settings}
+            isLoading={settingsQuery.isLoading}
+            isActive={isActive}
+          />
         )}
 
         {activeTab === "requirements" && hand.requirements && (
@@ -820,6 +797,183 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
 
         {activeTab === "schedules" && (
           <HandSchedulesTab cronJobs={cronJobs} isLoading={cronJobsQuery.isLoading} onRefresh={() => cronJobsQuery.refetch()} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Settings tab content for a hand — editable form ─────── */
+
+function HandSettingsEditor({
+  handId,
+  settings,
+  isLoading,
+  isActive,
+}: {
+  handId: string;
+  settings: HandSettingsResponse;
+  isLoading: boolean;
+  isActive: boolean;
+}) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+
+  // Local draft — seeded from current_values, mutated by inputs, cleared on save.
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveOk, setSaveOk] = useState(false);
+
+  // Reset draft whenever the underlying settings change (e.g. after a refetch).
+  useEffect(() => {
+    setDraft({});
+    setSaveOk(false);
+    setSaveError(null);
+  }, [settings]);
+
+  const saveMutation = useMutation({
+    mutationFn: (payload: Record<string, unknown>) => updateHandSettings(handId, payload),
+    onSuccess: () => {
+      setSaveOk(true);
+      setSaveError(null);
+      setDraft({});
+      queryClient.invalidateQueries({ queryKey: ["hands", "settings", handId] });
+      setTimeout(() => setSaveOk(false), 2500);
+    },
+    onError: (err: Error) => {
+      setSaveError(err.message || String(err));
+      setSaveOk(false);
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 text-text-dim/60 text-xs py-4">
+        <Loader2 className="w-3.5 h-3.5 animate-spin" /> {t("common.loading")}
+      </div>
+    );
+  }
+
+  if (!settings.settings || settings.settings.length === 0) {
+    return <p className="text-xs text-text-dim/50 py-4 text-center">{t("hands.settings_empty")}</p>;
+  }
+
+  const dirty = Object.keys(draft).length > 0;
+  const canEdit = isActive;
+
+  const valueFor = (key: string): string => {
+    if (key in draft) return draft[key];
+    const cur = settings.current_values?.[key];
+    if (cur !== undefined && cur !== null) return String(cur);
+    return "";
+  };
+
+  const handleSave = () => {
+    // Only send the keys the user actually changed.
+    const payload: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(draft)) {
+      payload[k] = v;
+    }
+    saveMutation.mutate(payload);
+  };
+
+  return (
+    <div className="space-y-3">
+      {!canEdit && (
+        <div className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-warning">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span>{t("hands.settings_activate_first", { defaultValue: "Activate this hand first to edit its settings." })}</span>
+        </div>
+      )}
+
+      <div className="rounded-xl border border-border-subtle bg-main/30 divide-y divide-border-subtle/50">
+        {settings.settings.map((s) => {
+          const key = s.key ?? "";
+          const current = valueFor(key);
+          const hasOptions = s.options && s.options.length > 0;
+          const rawDefault = s.default !== undefined ? String(s.default) : "";
+          const isOverridden = settings.current_values?.[key] !== undefined;
+
+          return (
+            <div key={key} className="px-3 py-3 space-y-1.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <label htmlFor={`setting-${key}`} className="text-xs font-bold block truncate">
+                    {s.label || key}
+                  </label>
+                  {s.label && s.key !== s.label && (
+                    <span className="text-[10px] text-text-dim/40 font-mono block">{key}</span>
+                  )}
+                  {s.description && (
+                    <p className="text-[11px] text-text-dim/70 mt-0.5">{s.description}</p>
+                  )}
+                </div>
+                {!isOverridden && rawDefault && (
+                  <span className="text-[10px] font-mono shrink-0 px-1.5 py-0.5 rounded text-text-dim/50 bg-surface">
+                    {t("hands.settings_default", { defaultValue: "default" })}: {rawDefault}
+                  </span>
+                )}
+              </div>
+
+              {hasOptions ? (
+                <select
+                  id={`setting-${key}`}
+                  value={current}
+                  disabled={!canEdit || saveMutation.isPending}
+                  onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                  className="w-full rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 text-xs font-mono disabled:opacity-50 focus:outline-none focus:border-brand"
+                >
+                  {!current && <option value="">—</option>}
+                  {s.options!.map((opt) => (
+                    <option key={opt.value} value={opt.value ?? ""} disabled={opt.available === false}>
+                      {opt.label || opt.value}
+                      {opt.available === false ? " (unavailable)" : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <Input
+                  id={`setting-${key}`}
+                  value={current}
+                  disabled={!canEdit || saveMutation.isPending}
+                  placeholder={rawDefault || undefined}
+                  onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                  className="text-xs font-mono"
+                />
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          type="button"
+          disabled={!canEdit || !dirty || saveMutation.isPending}
+          onClick={handleSave}
+          className="px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-brand/90 transition-colors flex items-center gap-1.5"
+        >
+          {saveMutation.isPending && <Loader2 className="w-3 h-3 animate-spin" />}
+          {t("hands.settings_save", { defaultValue: "Save settings" })}
+        </button>
+        {dirty && !saveMutation.isPending && (
+          <button
+            type="button"
+            onClick={() => { setDraft({}); setSaveError(null); }}
+            className="px-3 py-1.5 rounded-lg border border-border-subtle text-xs text-text-dim hover:bg-main/50 transition-colors"
+          >
+            {t("common.cancel", { defaultValue: "Cancel" })}
+          </button>
+        )}
+        {saveOk && (
+          <span className="flex items-center gap-1 text-[11px] text-success">
+            <CheckCircle2 className="w-3 h-3" /> {t("hands.settings_saved", { defaultValue: "Saved" })}
+          </span>
+        )}
+        {saveError && (
+          <span className="flex items-center gap-1 text-[11px] text-error">
+            <XCircle className="w-3 h-3" /> {saveError}
+          </span>
         )}
       </div>
     </div>

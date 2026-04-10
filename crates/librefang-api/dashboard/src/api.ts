@@ -1872,6 +1872,15 @@ export async function setHandSecret(handId: string, key: string, value: string):
   return post<{ ok: boolean }>(`/api/hands/${encodeURIComponent(handId)}/secret`, { key, value });
 }
 
+/** Update mutable settings on an active hand instance. The backend returns
+ *  404 if no instance exists for the hand — callers should guard accordingly. */
+export async function updateHandSettings(
+  handId: string,
+  config: Record<string, unknown>,
+): Promise<{ status: string; hand_id: string; instance_id: string; config: Record<string, unknown> }> {
+  return put(`/api/hands/${encodeURIComponent(handId)}/settings`, config);
+}
+
 export interface HandMessageResponse {
   response: string;
   input_tokens?: number;
