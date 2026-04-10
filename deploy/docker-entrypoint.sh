@@ -1,11 +1,20 @@
 #!/bin/sh
 set -e
 
-CONFIG="${LIBREFANG_HOME:-/data}/config.toml"
+# NOTE: This script is run as root. Any files created here should have owner set to 'node'.
+
+DATA_DIR="${LIBREFANG_HOME:-/data}"
+CONFIG="$DATA_DIR/config.toml"
+
+mkdir -p "$DATA_DIR"
+
+# Fix permissions on the data directory if it is not owned by 'node' user
+if [ "$(stat -c '%U' "$DATA_DIR" 2>/dev/null)" != "node" ]; then
+  chown -R node:node "$DATA_DIR"
+fi
 
 # Auto-generate config.toml on first boot if missing
 if [ ! -f "$CONFIG" ]; then
-  mkdir -p "$(dirname "$CONFIG")"
 
   # Detect best available provider from env vars
   if [ -n "$OPENROUTER_API_KEY" ]; then
@@ -54,17 +63,18 @@ api_key_env = "$KEY_ENV"
 [memory]
 decay_rate = 0.05
 EOF
-
+  chown node:node "$CONFIG"
   echo "Generated $CONFIG (provider=$PROVIDER, model=$MODEL, port=$LISTEN_PORT)"
 fi
 
 # If PORT is set (Railway/Render), override api_listen in existing config
 if [ -n "$PORT" ]; then
   sed -i "s|^api_listen = .*|api_listen = \"0.0.0.0:${PORT}\"|" "$CONFIG"
+  chown node:node "$CONFIG"
 fi
 
 # Auto-sync registry content (agents, hands, skills, providers) on boot
 # Uses HTTP tarball download if git is unavailable
-librefang init 2>/dev/null || true
+gosu node librefang init 2>/dev/null || true
 
-exec "$@"
+exec gosu node "$@"

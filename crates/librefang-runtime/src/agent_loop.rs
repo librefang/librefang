@@ -2571,7 +2571,7 @@ async fn call_with_retry(
                 record_retry_success(provider, cooldown);
                 return Ok(response);
             }
-            Err(LlmError::RateLimited { retry_after_ms }) => {
+            Err(LlmError::RateLimited { retry_after_ms, .. }) => {
                 last_error = Some(
                     handle_retryable_llm_error(
                         attempt,
@@ -2636,7 +2636,7 @@ async fn stream_with_retry(
                 record_retry_success(provider, cooldown);
                 return Ok(response);
             }
-            Err(LlmError::RateLimited { retry_after_ms }) => {
+            Err(LlmError::RateLimited { retry_after_ms, .. }) => {
                 last_error = Some(
                     handle_retryable_llm_error(
                         attempt,

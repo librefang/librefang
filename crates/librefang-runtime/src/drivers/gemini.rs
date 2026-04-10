@@ -804,6 +804,7 @@ impl LlmDriver for GeminiDriver {
                 return Err(if status == 429 {
                     LlmError::RateLimited {
                         retry_after_ms: 5000,
+                        message: None,
                     }
                 } else {
                     LlmError::Overloaded {
@@ -893,6 +894,7 @@ impl LlmDriver for GeminiDriver {
                 return Err(if status == 429 {
                     LlmError::RateLimited {
                         retry_after_ms: 5000,
+                        message: None,
                     }
                 } else {
                     LlmError::Overloaded {
