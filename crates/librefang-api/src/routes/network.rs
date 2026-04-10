@@ -37,13 +37,20 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
 }
 
 /// Build protocol-level A2A routes (not versioned, mounted at the root path).
+///
+/// `/.well-known/agent.json` and `/a2a/agents` are **transitional global** surfaces
+/// per ADR-0014. They aggregate all agents for the entire deployment and are guarded
+/// by admin-account authentication. This is intentional: service-level A2A discovery
+/// maps to "comms topology / control plane affecting the whole deployment" in ADR-0014 —
+/// global, admin-only is correct here. Target end-state is tenant-partitioned discovery,
+/// but that requires A2A protocol-level changes that are out of scope for this release.
 pub fn protocol_router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
         .route(
             "/.well-known/agent.json",
-            axum::routing::get(a2a_agent_card),
+            axum::routing::get(a2a_agent_card), // transitional global — ADR-0014
         )
-        .route("/a2a/agents", axum::routing::get(a2a_list_agents))
+        .route("/a2a/agents", axum::routing::get(a2a_list_agents)) // transitional global — ADR-0014
         .route("/a2a/tasks/send", axum::routing::post(a2a_send_task))
         .route("/a2a/tasks/{id}", axum::routing::get(a2a_get_task))
         .route(
@@ -329,11 +336,10 @@ pub async fn a2a_send_task(
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) =
-        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
-    {
-        return (code, json).into_response();
-    }
+    let owner = match require_concrete_account(&account) {
+        Ok(owner) => owner.to_string(),
+        Err((code, json)) => return (code, json).into_response(),
+    };
     // Extract message text from A2A format
     let message_text = request["params"]["message"]["parts"]
         .as_array()
@@ -349,7 +355,7 @@ pub async fn a2a_send_task(
         .unwrap_or_else(|| "No message provided".to_string());
 
     // Find target agent (use first available or specified)
-    let agents = state.kernel.agent_registry().list();
+    let agents = state.kernel.agent_registry().list_by_account(&owner);
     if agents.is_empty() {
         return ApiErrorResponse::not_found("No agents available")
             .into_json_tuple()
@@ -363,6 +369,7 @@ pub async fn a2a_send_task(
     // Create the task in the store as Working
     let task = librefang_runtime::a2a::A2aTask {
         id: task_id.clone(),
+        account_id: Some(owner),
         session_id: session_id.clone(),
         status: librefang_runtime::a2a::A2aTaskStatus::Working.into(),
         messages: vec![librefang_runtime::a2a::A2aMessage {
@@ -400,12 +407,7 @@ pub async fn a2a_send_task(
             }
         }
         Err(e) => {
-            let error_msg = librefang_runtime::a2a::A2aMessage {
-                role: "agent".to_string(),
-                parts: vec![librefang_runtime::a2a::A2aPart::Text {
-                    text: format!("Error: {e}"),
-                }],
-            };
+            let error_msg = a2a_failed_task_message(&e);
             state.kernel.a2a_tasks().fail(&task_id, error_msg);
             match state.kernel.a2a_tasks().get(&task_id) {
                 Some(failed_task) => (
@@ -413,7 +415,7 @@ pub async fn a2a_send_task(
                     Json(serde_json::to_value(&failed_task).unwrap_or_default()),
                 )
                     .into_response(),
-                None => ApiErrorResponse::internal(format!("Agent error: {e}"))
+                None => ApiErrorResponse::internal("Task execution failed")
                     .into_json_tuple()
                     .into_response(),
             }
@@ -438,21 +440,17 @@ pub async fn a2a_get_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> axum::response::Response {
-    // A2A task store has no tenant scoping yet. Admin-only until task ownership is added.
-    if let Err((code, json)) =
-        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
-    {
-        return (code, json).into_response();
-    }
-    match state.kernel.a2a_tasks().get(&task_id) {
+    let owner = match require_concrete_account(&account) {
+        Ok(owner) => owner.to_string(),
+        Err((code, json)) => return (code, json).into_response(),
+    };
+    match state.kernel.a2a_tasks().get_scoped(&task_id, &owner) {
         Some(task) => (
             StatusCode::OK,
             Json(serde_json::to_value(&task).unwrap_or_default()),
         )
             .into_response(),
-        None => ApiErrorResponse::not_found(format!("Task '{}' not found", task_id))
-            .into_json_tuple()
-            .into_response(),
+        None => a2a_task_not_found_response(),
     }
 }
 
@@ -473,13 +471,12 @@ pub async fn a2a_cancel_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> axum::response::Response {
-    if let Err((code, json)) =
-        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
-    {
-        return (code, json).into_response();
-    }
-    if state.kernel.a2a_tasks().cancel(&task_id) {
-        match state.kernel.a2a_tasks().get(&task_id) {
+    let owner = match require_concrete_account(&account) {
+        Ok(owner) => owner.to_string(),
+        Err((code, json)) => return (code, json).into_response(),
+    };
+    if state.kernel.a2a_tasks().cancel_scoped(&task_id, &owner) {
+        match state.kernel.a2a_tasks().get_scoped(&task_id, &owner) {
             Some(task) => (
                 StatusCode::OK,
                 Json(serde_json::to_value(&task).unwrap_or_default()),
@@ -490,9 +487,7 @@ pub async fn a2a_cancel_task(
                 .into_response(),
         }
     } else {
-        ApiErrorResponse::not_found(format!("Task '{}' not found", task_id))
-            .into_json_tuple()
-            .into_response()
+        a2a_task_not_found_response()
     }
 }
 
@@ -700,6 +695,39 @@ fn is_private_ip(ip: &IpAddr) -> bool {
     }
 }
 
+fn a2a_task_not_found_response() -> axum::response::Response {
+    ApiErrorResponse::not_found("Task not found")
+        .into_json_tuple()
+        .into_response()
+}
+
+fn a2a_agent_not_found_response() -> axum::response::Response {
+    ApiErrorResponse::not_found("A2A agent not found")
+        .into_json_tuple()
+        .into_response()
+}
+
+fn external_a2a_failure_response(context: &str, error: &str) -> axum::response::Response {
+    tracing::warn!(target: "librefang_api::a2a", context, error, "External A2A request failed");
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({
+            "error": "External A2A request failed"
+        })),
+    )
+        .into_response()
+}
+
+fn a2a_failed_task_message(error: impl std::fmt::Display) -> librefang_runtime::a2a::A2aMessage {
+    tracing::warn!(error = %error, "A2A task execution failed");
+    librefang_runtime::a2a::A2aMessage {
+        role: "agent".to_string(),
+        parts: vec![librefang_runtime::a2a::A2aPart::Text {
+            text: "Task execution failed".to_string(),
+        }],
+    }
+}
+
 /// GET /api/a2a/agents/{id} — Get a specific external A2A agent by index, URL, or name.
 #[utoipa::path(
     get,
@@ -755,9 +783,7 @@ pub async fn a2a_get_external_agent(
         return (StatusCode::OK, Json(make_response(entry))).into_response();
     }
 
-    ApiErrorResponse::not_found(format!("A2A agent '{}' not found", id))
-        .into_json_tuple()
-        .into_response()
+    a2a_agent_not_found_response()
 }
 
 /// POST /api/a2a/discover — Discover a new external A2A agent by URL.
@@ -830,11 +856,7 @@ pub async fn a2a_discover_external(
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => external_a2a_failure_response("discover", &e),
     }
 }
 
@@ -897,11 +919,7 @@ pub async fn a2a_send_external(
             Json(serde_json::to_value(&task).unwrap_or_default()),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => external_a2a_failure_response("send", &e),
     }
 }
 
@@ -959,11 +977,7 @@ pub async fn a2a_external_task_status(
             Json(serde_json::to_value(&task).unwrap_or_default()),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => external_a2a_failure_response("task_status", &e),
     }
 }
 
@@ -1526,6 +1540,159 @@ mod tests {
             body["task_id"].as_str().is_some(),
             "task id should be returned"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a2a_failed_task_message_hides_internal_error_details() {
+        let message = a2a_failed_task_message("No provider configured for tenant-a");
+        let serialized = serde_json::to_string(&message).expect("serialize message");
+        assert!(
+            !serialized.contains("No provider configured"),
+            "raw backend error leaked: {serialized}"
+        );
+        assert!(serialized.contains("Task execution failed"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a2a_get_task_not_found_does_not_echo_task_id() {
+        let (_tmp, state) = test_app_state();
+
+        let response = a2a_get_task(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            Path("secret-task-id".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["error"], "Task not found");
+        let serialized = serde_json::to_string(&body).expect("serialize body");
+        assert!(!serialized.contains("secret-task-id"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a2a_get_external_agent_not_found_does_not_echo_identifier() {
+        let (_tmp, state) = test_app_state();
+
+        let response = a2a_get_external_agent(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            Path("secret-agent-ref".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["error"], "A2A agent not found");
+        let serialized = serde_json::to_string(&body).expect("serialize body");
+        assert!(!serialized.contains("secret-agent-ref"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn external_a2a_failure_response_hides_upstream_details() {
+        let response =
+            external_a2a_failure_response("discover", "connection refused: token=secret-123");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = response_json(response).await;
+        assert_eq!(body["error"], "External A2A request failed");
+        let serialized = serde_json::to_string(&body).expect("serialize body");
+        assert!(!serialized.contains("secret-123"));
+        assert!(!serialized.contains("connection refused"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a2a_get_task_returns_404_for_cross_tenant_owner() {
+        let (_tmp, state) = test_app_state();
+        state
+            .kernel
+            .a2a_tasks()
+            .insert(librefang_runtime::a2a::A2aTask {
+                id: "tenant-a-task".to_string(),
+                account_id: Some("tenant-a".to_string()),
+                session_id: None,
+                status: librefang_runtime::a2a::A2aTaskStatus::Working.into(),
+                messages: vec![],
+                artifacts: vec![],
+            });
+
+        let response = a2a_get_task(
+            AccountId(Some("tenant-b".to_string())),
+            State(state),
+            Path("tenant-a-task".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a2a_cancel_task_returns_404_for_cross_tenant_owner() {
+        let (_tmp, state) = test_app_state();
+        state
+            .kernel
+            .a2a_tasks()
+            .insert(librefang_runtime::a2a::A2aTask {
+                id: "tenant-a-task".to_string(),
+                account_id: Some("tenant-a".to_string()),
+                session_id: None,
+                status: librefang_runtime::a2a::A2aTaskStatus::Working.into(),
+                messages: vec![],
+                artifacts: vec![],
+            });
+
+        let response = a2a_cancel_task(
+            AccountId(Some("tenant-b".to_string())),
+            State(state.clone()),
+            Path("tenant-a-task".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let task = state
+            .kernel
+            .a2a_tasks()
+            .get("tenant-a-task")
+            .expect("task should remain");
+        assert_eq!(task.status, librefang_runtime::a2a::A2aTaskStatus::Working);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a2a_send_task_assigns_request_account_to_tracked_task() {
+        let (_tmp, state) = test_app_state();
+        let agent = tenant_agent("tenant-a-agent", "tenant-a");
+        state
+            .kernel
+            .agent_registry()
+            .register(agent)
+            .expect("register agent");
+
+        let response = a2a_send_task(
+            AccountId(Some("tenant-a".to_string())),
+            State(state.clone()),
+            Json(serde_json::json!({
+                "params": {
+                    "message": {
+                        "parts": [{"type": "text", "text": "hello"}]
+                    }
+                }
+            })),
+        )
+        .await
+        .into_response();
+
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::OK | StatusCode::INTERNAL_SERVER_ERROR
+            ),
+            "unexpected status: {}",
+            response.status()
+        );
+        let body = response_json(response).await;
+        let task_id = body["id"].as_str().expect("task id");
+        let tracked = state.kernel.a2a_tasks().get(task_id).expect("tracked task");
+        assert_eq!(tracked.account_id.as_deref(), Some("tenant-a"));
     }
 }
 

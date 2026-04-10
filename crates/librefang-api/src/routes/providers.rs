@@ -85,6 +85,48 @@ fn scoped_provider_env_var(base_env: &str, account_id: &str) -> String {
         sanitize_account_component(account_id)
     )
 }
+
+fn provider_test_cache_key(
+    account_id: &str,
+    provider: &str,
+    effective_base_url: &str,
+) -> (String, String, String) {
+    (
+        account_id.to_string(),
+        provider.to_string(),
+        effective_base_url.to_string(),
+    )
+}
+
+fn tenant_has_configured_api_key(
+    tenant_record: Option<&librefang_kernel::provider_accounts::TenantProviderRecord>,
+) -> bool {
+    tenant_record
+        .and_then(|record| record.api_key_env.as_deref())
+        .and_then(|env_var| std::env::var(env_var).ok())
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn effective_tenant_auth_status(
+    multi_tenant: bool,
+    provider: &librefang_types::model_catalog::ProviderInfo,
+    tenant_record: Option<&librefang_kernel::provider_accounts::TenantProviderRecord>,
+) -> librefang_types::model_catalog::AuthStatus {
+    use librefang_types::model_catalog::AuthStatus;
+
+    if multi_tenant && provider.key_required {
+        // In multi-tenant mode each tenant needs their own credentials.
+        // The operator's system CLI (ConfiguredCli) is NOT shared with tenants —
+        // inheriting it would leak operator billing credentials to arbitrary users.
+        if tenant_has_configured_api_key(tenant_record) {
+            AuthStatus::Configured
+        } else {
+            AuthStatus::Missing
+        }
+    } else {
+        provider.auth_status
+    }
+}
 #[utoipa::path(
     get,
     path = "/api/models",
@@ -346,14 +388,17 @@ fn attach_probe_result(
     probe: &librefang_runtime::provider_health::ProbeResult,
     provider_id: &str,
     catalog: &std::sync::RwLock<librefang_runtime::model_catalog::ModelCatalog>,
+    merge_into_catalog: bool,
 ) {
     entry["is_local"] = serde_json::json!(true);
     entry["reachable"] = serde_json::json!(probe.reachable);
     entry["latency_ms"] = serde_json::json!(probe.latency_ms);
     if !probe.discovered_models.is_empty() {
         entry["discovered_models"] = serde_json::json!(&probe.discovered_models);
-        if let Ok(mut cat) = catalog.write() {
-            cat.merge_discovered_models(provider_id, &probe.discovered_models);
+        if merge_into_catalog {
+            if let Ok(mut cat) = catalog.write() {
+                cat.merge_discovered_models(provider_id, &probe.discovered_models);
+            }
         }
     }
     if !probe.discovered_model_info.is_empty() {
@@ -411,10 +456,19 @@ pub async fn list_providers(
     let local_providers: Vec<(usize, String, String)> = provider_list
         .iter()
         .enumerate()
-        .filter(|(_, p)| {
-            librefang_runtime::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
+        .filter_map(|(i, p)| {
+            if !librefang_runtime::provider_health::is_local_provider(&p.id) {
+                return None;
+            }
+            let effective_base_url = tenant_by_provider
+                .get(&p.id)
+                .and_then(|record| record.base_url.clone())
+                .unwrap_or_else(|| p.base_url.clone());
+            if effective_base_url.is_empty() {
+                return None;
+            }
+            Some((i, p.id.clone(), effective_base_url))
         })
-        .map(|(i, p)| (i, p.id.clone(), p.base_url.clone()))
         .collect();
 
     // Fire all probes concurrently (cached results return instantly)
@@ -438,17 +492,19 @@ pub async fn list_providers(
 
     for (i, p) in provider_list.iter().enumerate() {
         let tenant_record = tenant_by_provider.get(&p.id);
+        let effective_auth_status =
+            effective_tenant_auth_status(state.kernel.config_ref().multi_tenant, p, tenant_record);
         let mut entry = serde_json::json!({
             "id": p.id,
             "display_name": p.display_name,
-            "auth_status": p.auth_status,
+            "auth_status": effective_auth_status,
             "model_count": p.model_count,
             "key_required": p.key_required,
             "api_key_env": p.api_key_env,
             "base_url": p.base_url,
             "media_capabilities": p.media_capabilities,
             "tenant": {
-                "configured": tenant_record.and_then(|record| record.api_key_env.as_ref()).is_some(),
+                "configured": tenant_has_configured_api_key(tenant_record),
                 "default": tenant_record.map(|record| record.is_default).unwrap_or(false),
                 "api_key_env": tenant_record.and_then(|record| record.api_key_env.clone()),
                 "base_url": tenant_record.and_then(|record| record.base_url.clone()),
@@ -483,7 +539,13 @@ pub async fn list_providers(
         // auth_status when the service is not reachable so the dashboard
         // shows "needs setup" instead of "configured".
         if let Some(probe) = probe_map.remove(&i) {
-            attach_probe_result(&mut entry, &probe, &p.id, state.kernel.model_catalog_ref());
+            attach_probe_result(
+                &mut entry,
+                &probe,
+                &p.id,
+                state.kernel.model_catalog_ref(),
+                false,
+            );
             if !probe.reachable {
                 entry["auth_status"] = serde_json::json!("missing");
             }
@@ -494,7 +556,14 @@ pub async fn list_providers(
 
         // Attach cached manual test result if no probe already set it.
         // TTL: 10 minutes — stale results are ignored.
-        if let Some(ref_entry) = state.provider_test_cache.get(&p.id) {
+        let effective_base_url = tenant_record
+            .and_then(|record| record.base_url.clone())
+            .unwrap_or_else(|| p.base_url.clone());
+        if let Some(ref_entry) = state.provider_test_cache.get(&provider_test_cache_key(
+            &account_id,
+            &p.id,
+            &effective_base_url,
+        )) {
             let (tested_at, ms, tested_rfc3339, reachable) = ref_entry.value();
             if tested_at.elapsed() < std::time::Duration::from_secs(600) {
                 if entry.get("latency_ms").is_none() || entry["latency_ms"].is_null() {
@@ -572,24 +641,35 @@ pub async fn get_provider(
         }
     };
 
+    let tenant_record = state
+        .kernel
+        .provider_store()
+        .get_scoped(&account_id, &name)
+        .await;
+    let effective_base_url = tenant_record
+        .as_ref()
+        .and_then(|record| record.base_url.clone())
+        .unwrap_or_else(|| provider.base_url.clone());
+
+    let effective_auth_status = effective_tenant_auth_status(
+        state.kernel.config_ref().multi_tenant,
+        &provider,
+        tenant_record.as_ref(),
+    );
+
     let mut entry = serde_json::json!({
         "id": provider.id,
         "display_name": provider.display_name,
-        "auth_status": provider.auth_status,
+        "auth_status": effective_auth_status,
         "model_count": provider.model_count,
         "key_required": provider.key_required,
         "api_key_env": provider.api_key_env,
         "base_url": provider.base_url,
         "models": models,
     });
-    if let Some(record) = state
-        .kernel
-        .provider_store()
-        .get_scoped(&account_id, &name)
-        .await
-    {
+    if let Some(record) = tenant_record {
         entry["tenant"] = serde_json::json!({
-            "configured": record.api_key_env.is_some(),
+            "configured": tenant_has_configured_api_key(Some(&record)),
             "default": record.is_default,
             "api_key_env": record.api_key_env,
             "base_url": record.base_url,
@@ -607,12 +687,12 @@ pub async fn get_provider(
 
     // For local providers, run a probe and attach the result
     if librefang_runtime::provider_health::is_local_provider(&provider.id)
-        && !provider.base_url.is_empty()
+        && !effective_base_url.is_empty()
     {
         let cache = &state.provider_probe_cache;
         let probe = librefang_runtime::provider_health::probe_provider_cached(
             &provider.id,
-            &provider.base_url,
+            &effective_base_url,
             cache,
         )
         .await;
@@ -622,12 +702,28 @@ pub async fn get_provider(
             &probe,
             &provider.id,
             state.kernel.model_catalog_ref(),
+            false,
         );
         if !probe.reachable {
             entry["auth_status"] = serde_json::json!("missing");
         }
     } else if librefang_runtime::provider_health::is_local_provider(&provider.id) {
         entry["is_local"] = serde_json::json!(true);
+    }
+
+    if let Some(ref_entry) = state.provider_test_cache.get(&provider_test_cache_key(
+        &account_id,
+        &provider.id,
+        &effective_base_url,
+    )) {
+        let (tested_at, ms, tested_rfc3339, reachable) = ref_entry.value();
+        if tested_at.elapsed() < std::time::Duration::from_secs(600) {
+            if entry.get("latency_ms").is_none() || entry["latency_ms"].is_null() {
+                entry["latency_ms"] = serde_json::json!(ms);
+            }
+            entry["last_tested"] = serde_json::json!(tested_rfc3339);
+            entry["reachable"] = serde_json::json!(reachable);
+        }
     }
 
     (StatusCode::OK, Json(entry)).into_response()
@@ -960,7 +1056,11 @@ pub async fn test_provider(
                     .and_then(|record| record.base_url.clone())
                     .unwrap_or_else(|| p.base_url.clone()),
                 p.key_required,
-                p.auth_status,
+                effective_tenant_auth_status(
+                    state.kernel.config_ref().multi_tenant,
+                    p,
+                    tenant_record.as_ref(),
+                ),
             ),
             None => {
                 return ApiErrorResponse::not_found(format!("Unknown provider '{}'", name))
@@ -979,7 +1079,7 @@ pub async fn test_provider(
         let cli_ok = librefang_runtime::drivers::cli_provider_available(name.as_str());
         let cli_latency = cli_start.elapsed().as_millis();
         state.provider_test_cache.insert(
-            name.clone(),
+            provider_test_cache_key(&account_id, &name, &base_url),
             (
                 Instant::now(),
                 cli_latency,
@@ -1016,7 +1116,7 @@ pub async fn test_provider(
         let cli_ok = librefang_runtime::drivers::cli_provider_available(cli_name);
         let cli_latency = cli_start.elapsed().as_millis();
         state.provider_test_cache.insert(
-            name.clone(),
+            provider_test_cache_key(&account_id, &name, &base_url),
             (
                 Instant::now(),
                 cli_latency,
@@ -1078,7 +1178,7 @@ pub async fn test_provider(
     // ── Bedrock: AWS Signature auth — can't test with simple HTTP ──
     if name == "bedrock" || name == "aws-bedrock" {
         state.provider_test_cache.insert(
-            name.clone(),
+            provider_test_cache_key(&account_id, &name, &base_url),
             (Instant::now(), 0, chrono::Utc::now().to_rfc3339(), true),
         );
         return (
@@ -1154,7 +1254,7 @@ pub async fn test_provider(
 
     // Cache test result so GET /api/providers can show latency for all providers.
     state.provider_test_cache.insert(
-        name.clone(),
+        provider_test_cache_key(&account_id, &name, &base_url),
         (
             Instant::now(),
             latency_ms,
@@ -1274,7 +1374,7 @@ pub async fn set_default_provider(
 ) -> axum::response::Response {
     let account_id = account.0.clone();
     // Verify the provider exists in the catalog
-    let (default_model, env_var) = {
+    let (catalog_model, env_var) = {
         let catalog = state
             .kernel
             .model_catalog_ref()
@@ -1292,7 +1392,34 @@ pub async fn set_default_provider(
         (model_id, provider.api_key_env.clone())
     };
 
-    let model_id = match default_model {
+    // Prefer models discovered from the tenant's custom URL probe over the
+    // global catalog default. A tenant pointing at a private Ollama / vLLM
+    // instance has different models than the global catalog knows about.
+    let tenant_record = state
+        .kernel
+        .provider_store()
+        .get_scoped(&account_id, &name)
+        .await;
+
+    // Track whether the selected model came from a live probe result vs the
+    // catalog fallback so the response can communicate which path was taken.
+    let (raw_model_id, model_source) = if let Some(ref record) = tenant_record {
+        if let Some(ref custom_url) = record.base_url {
+            match state
+                .provider_probe_cache
+                .get(&name, custom_url)
+                .and_then(|probe| probe.discovered_models.into_iter().next())
+            {
+                Some(discovered) => (Some(discovered), "probe"),
+                None => (catalog_model, "catalog_fallback"),
+            }
+        } else {
+            (catalog_model, "catalog")
+        }
+    } else {
+        (catalog_model, "catalog")
+    };
+    let model_id = match raw_model_id {
         Some(id) => id,
         None => {
             return ApiErrorResponse::bad_request(format!(
@@ -1342,6 +1469,7 @@ pub async fn set_default_provider(
             "status": "updated",
             "provider": name,
             "model": model_id,
+            "model_source": model_source,
             "api_key_env": record.api_key_env.unwrap_or(env_var),
             "tenant_account_id": account_id,
         })),

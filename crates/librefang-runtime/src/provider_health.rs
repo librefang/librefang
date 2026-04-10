@@ -99,23 +99,30 @@ impl ProbeCache {
     }
 
     /// Look up a cached probe result. Returns `None` if missing or expired.
-    pub fn get(&self, provider_id: &str) -> Option<ProbeResult> {
-        if let Some(entry) = self.inner.get(provider_id) {
+    fn cache_key(provider_id: &str, base_url: &str) -> String {
+        format!("{provider_id}\n{base_url}")
+    }
+
+    pub fn get(&self, provider_id: &str, base_url: &str) -> Option<ProbeResult> {
+        let cache_key = Self::cache_key(provider_id, base_url);
+        if let Some(entry) = self.inner.get(&cache_key) {
             let (ts, ref result) = *entry;
             if ts.elapsed() < self.ttl {
                 return Some(result.clone());
             }
             // Expired — drop the read guard before removing
             drop(entry);
-            self.inner.remove(provider_id);
+            self.inner.remove(&cache_key);
         }
         None
     }
 
     /// Store a probe result.
-    pub fn insert(&self, provider_id: &str, result: ProbeResult) {
-        self.inner
-            .insert(provider_id.to_string(), (Instant::now(), result));
+    pub fn insert(&self, provider_id: &str, base_url: &str, result: ProbeResult) {
+        self.inner.insert(
+            Self::cache_key(provider_id, base_url),
+            (Instant::now(), result),
+        );
     }
 }
 
@@ -274,11 +281,11 @@ pub async fn probe_provider_cached(
     base_url: &str,
     cache: &ProbeCache,
 ) -> ProbeResult {
-    if let Some(cached) = cache.get(provider) {
+    if let Some(cached) = cache.get(provider, base_url) {
         return cached;
     }
     let result = probe_provider(provider, base_url).await;
-    cache.insert(provider, result.clone());
+    cache.insert(provider, base_url, result.clone());
     result
 }
 
@@ -409,7 +416,7 @@ mod tests {
     #[test]
     fn test_probe_cache_miss_returns_none() {
         let cache = ProbeCache::new();
-        assert!(cache.get("ollama").is_none());
+        assert!(cache.get("ollama", "http://localhost:11434/v1").is_none());
     }
 
     #[test]
@@ -423,17 +430,64 @@ mod tests {
             error: None,
             ..Default::default()
         };
-        cache.insert("ollama", result.clone());
-        let cached = cache.get("ollama").expect("should be cached");
+        cache.insert("ollama", "http://localhost:11434/v1", result.clone());
+        let cached = cache
+            .get("ollama", "http://localhost:11434/v1")
+            .expect("should be cached");
         assert!(cached.reachable);
         assert_eq!(cached.latency_ms, 42);
         assert_eq!(cached.discovered_models, vec!["llama3".to_string()]);
     }
 
     #[test]
+    fn test_probe_cache_scopes_entries_by_base_url() {
+        let cache = ProbeCache::new();
+        cache.insert(
+            "ollama",
+            "http://tenant-a.local/v1",
+            ProbeResult {
+                reachable: true,
+                latency_ms: 10,
+                discovered_models: vec!["tenant-a-model".into()],
+                discovered_model_info: vec![],
+                error: None,
+                ..Default::default()
+            },
+        );
+        cache.insert(
+            "ollama",
+            "http://tenant-b.local/v1",
+            ProbeResult {
+                reachable: true,
+                latency_ms: 20,
+                discovered_models: vec!["tenant-b-model".into()],
+                discovered_model_info: vec![],
+                error: None,
+                ..Default::default()
+            },
+        );
+
+        let cached_a = cache
+            .get("ollama", "http://tenant-a.local/v1")
+            .expect("tenant a cache");
+        let cached_b = cache
+            .get("ollama", "http://tenant-b.local/v1")
+            .expect("tenant b cache");
+
+        assert_eq!(
+            cached_a.discovered_models,
+            vec!["tenant-a-model".to_string()]
+        );
+        assert_eq!(
+            cached_b.discovered_models,
+            vec!["tenant-b-model".to_string()]
+        );
+    }
+
+    #[test]
     fn test_probe_cache_default() {
         let cache = ProbeCache::default();
-        assert!(cache.get("anything").is_none());
+        assert!(cache.get("anything", "http://localhost").is_none());
         assert_eq!(cache.ttl, Duration::from_secs(PROBE_CACHE_TTL_SECS));
     }
 

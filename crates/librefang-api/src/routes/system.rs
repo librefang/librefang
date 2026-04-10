@@ -466,6 +466,18 @@ pub async fn get_agent_kv(
                 .into_response();
         }
     };
+    match state.kernel.agent_registry().get(agent_id) {
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .into_json_tuple()
+                .into_response();
+        }
+        Some(entry) => {
+            if let Err((code, json)) = check_account(&entry, &account) {
+                return (code, json).into_response();
+            }
+        }
+    }
     match state.kernel.memory_substrate().list_kv(agent_id) {
         Ok(pairs) => {
             let kv: Vec<serde_json::Value> = pairs
@@ -503,6 +515,18 @@ pub async fn get_agent_kv_key(
                 .into_response();
         }
     };
+    match state.kernel.agent_registry().get(agent_id) {
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .into_json_tuple()
+                .into_response();
+        }
+        Some(entry) => {
+            if let Err((code, json)) = check_account(&entry, &account) {
+                return (code, json).into_response();
+            }
+        }
+    }
     match state
         .kernel
         .memory_substrate()
@@ -546,6 +570,18 @@ pub async fn set_agent_kv_key(
                 .into_response();
         }
     };
+    match state.kernel.agent_registry().get(agent_id) {
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .into_json_tuple()
+                .into_response();
+        }
+        Some(entry) => {
+            if let Err((code, json)) = check_account(&entry, &account) {
+                return (code, json).into_response();
+            }
+        }
+    }
     let value = body.get("value").cloned().unwrap_or(body);
 
     match state
@@ -587,6 +623,18 @@ pub async fn delete_agent_kv_key(
                 .into_response();
         }
     };
+    match state.kernel.agent_registry().get(agent_id) {
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .into_json_tuple()
+                .into_response();
+        }
+        Some(entry) => {
+            if let Err((code, json)) = check_account(&entry, &account) {
+                return (code, json).into_response();
+            }
+        }
+    }
     match state
         .kernel
         .memory_substrate()
@@ -770,17 +818,28 @@ pub async fn audit_recent(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> axum::response::Response {
+    let requester_account = account.0.clone();
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
+    let Some(requester_account) = requester_account else {
+        return ApiErrorResponse::bad_request("X-Account-Id required").into_response();
+    };
     let n: usize = params
         .get("n")
         .and_then(|v| v.parse().ok())
         .unwrap_or(50)
         .min(1000); // Cap at 1000
 
-    let entries = state.kernel.audit().recent(n);
-    let tip = state.kernel.audit().tip_hash();
+    let visible_entries: Vec<_> = state
+        .kernel
+        .audit()
+        .recent(state.kernel.audit().len())
+        .into_iter()
+        .filter(|entry| audit_entry_visible_to_account(&state, &requester_account, &entry.agent_id))
+        .collect();
+    let total = visible_entries.len();
+    let entries: Vec<_> = visible_entries.into_iter().take(n).collect();
 
     let items: Vec<serde_json::Value> = entries
         .iter()
@@ -789,6 +848,7 @@ pub async fn audit_recent(
                 "seq": e.seq,
                 "timestamp": e.timestamp,
                 "agent_id": e.agent_id,
+                "account_id": requester_account.clone(),
                 "action": format!("{:?}", e.action),
                 "detail": e.detail,
                 "outcome": e.outcome,
@@ -799,8 +859,7 @@ pub async fn audit_recent(
 
     Json(serde_json::json!({
     "entries": items,
-    "total": state.kernel.audit().len(),
-    "tip_hash": tip,
+    "total": total,
     }))
     .into_response()
 }
@@ -814,6 +873,16 @@ pub async fn audit_verify(
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
+    if state.kernel.config_ref().multi_tenant {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "error": "Audit integrity verification is unavailable in multi-tenant mode because the audit chain is global",
+            })),
+        )
+            .into_response();
+    }
+
     let entry_count = state.kernel.audit().len();
     match state.kernel.audit().verify_integrity() {
         Ok(()) => {
@@ -823,14 +892,12 @@ pub async fn audit_verify(
                 "valid": true,
                 "entries": 0,
                 "warning": "Audit log is empty — no events have been recorded yet",
-                "tip_hash": state.kernel.audit().tip_hash(),
                             }))
                 .into_response()
             } else {
                 Json(serde_json::json!({
                 "valid": true,
                 "entries": entry_count,
-                "tip_hash": state.kernel.audit().tip_hash(),
                             }))
                 .into_response()
             }
@@ -862,9 +929,13 @@ pub async fn logs_stream(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> axum::response::Response {
+    let requester_account = account.0.clone();
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
+    let Some(requester_account) = requester_account else {
+        return ApiErrorResponse::bad_request("X-Account-Id required").into_response();
+    };
     use axum::response::sse::{Event, KeepAlive, Sse};
 
     let level_filter = params.get("level").cloned().unwrap_or_default();
@@ -885,9 +956,12 @@ pub async fn logs_stream(
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-            let entries = state.kernel.audit().recent(200);
+            let entries = state.kernel.audit().recent(state.kernel.audit().len());
 
             for entry in &entries {
+                if !audit_entry_visible_to_account(&state, &requester_account, &entry.agent_id) {
+                    continue;
+                }
                 // On first poll, send all existing entries as backfill.
                 // After that, only send entries newer than last_seq.
                 if !first_poll && entry.seq <= last_seq {
@@ -917,6 +991,7 @@ pub async fn logs_stream(
                     "seq": entry.seq,
                     "timestamp": entry.timestamp,
                     "agent_id": entry.agent_id,
+                    "account_id": requester_account.clone(),
                     "action": action_str,
                     "detail": entry.detail,
                     "outcome": entry.outcome,
@@ -1441,11 +1516,29 @@ pub async fn list_approvals(
     account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
+    let requester_account = account.0.clone();
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
-    let pending = state.kernel.approvals().list_pending();
-    let recent = state.kernel.approvals().list_recent(50);
+    let Some(requester_account) = requester_account else {
+        return ApiErrorResponse::bad_request("X-Account-Id required").into_response();
+    };
+    let pending: Vec<_> = state
+        .kernel
+        .approvals()
+        .list_pending()
+        .into_iter()
+        .filter(|a| audit_entry_visible_to_account(&state, &requester_account, &a.agent_id))
+        .collect();
+    let recent: Vec<_> = state
+        .kernel
+        .approvals()
+        .list_recent(50)
+        .into_iter()
+        .filter(|record| {
+            audit_entry_visible_to_account(&state, &requester_account, &record.request.agent_id)
+        })
+        .collect();
 
     let registry_agents = state.kernel.agent_registry().list();
     let agent_name_for = |agent_id: &str| {
@@ -1837,27 +1930,66 @@ fn default_audit_limit() -> usize {
     50
 }
 
+fn audit_entry_visible_to_account(state: &AppState, account_id: &str, agent_id: &str) -> bool {
+    if agent_id == account_id {
+        return true;
+    }
+
+    let Ok(parsed) = uuid::Uuid::parse_str(agent_id) else {
+        return false;
+    };
+
+    state
+        .kernel
+        .agent_registry()
+        .get(librefang_types::agent::AgentId(parsed))
+        .and_then(|entry| entry.account_id)
+        .as_deref()
+        == Some(account_id)
+}
+
 #[utoipa::path(get, path = "/api/approvals/audit", tag = "approvals", params(("limit" = Option<usize>, Query, description = "Max entries"), ("offset" = Option<usize>, Query, description = "Offset"), ("agent_id" = Option<String>, Query, description = "Filter by agent"), ("tool_name" = Option<String>, Query, description = "Filter by tool")), responses((status = 200, description = "Audit log entries", body = serde_json::Value)))]
 pub async fn audit_log(
     account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
 ) -> axum::response::Response {
+    let requester_account = account.0.clone();
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
+    let Some(requester_account) = requester_account else {
+        return ApiErrorResponse::bad_request("X-Account-Id required").into_response();
+    };
     const MAX_AUDIT_LIMIT: usize = 500;
     let limit = params.limit.min(MAX_AUDIT_LIMIT);
-    let entries = state.kernel.approvals().query_audit(
-        limit,
-        params.offset,
-        params.agent_id.as_deref(),
-        params.tool_name.as_deref(),
-    );
-    let total = state
+    let global_total = state
         .kernel
         .approvals()
         .audit_count(params.agent_id.as_deref(), params.tool_name.as_deref());
+    let mut visible_entries = Vec::new();
+    let mut page_offset = 0usize;
+    while page_offset < global_total {
+        let batch = state.kernel.approvals().query_audit(
+            MAX_AUDIT_LIMIT,
+            page_offset,
+            params.agent_id.as_deref(),
+            params.tool_name.as_deref(),
+        );
+        if batch.is_empty() {
+            break;
+        }
+        visible_entries.extend(batch.into_iter().filter(|entry| {
+            audit_entry_visible_to_account(&state, &requester_account, &entry.agent_id)
+        }));
+        page_offset += MAX_AUDIT_LIMIT;
+    }
+    let total = visible_entries.len();
+    let entries: Vec<_> = visible_entries
+        .into_iter()
+        .skip(params.offset)
+        .take(limit)
+        .collect();
 
     Json(serde_json::json!({"entries": entries, "total": total})).into_response()
 }
@@ -1868,10 +2000,22 @@ pub async fn approval_count(
     account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
+    let requester_account = account.0.clone();
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
-    let pending = state.kernel.approvals().pending_count();
+    let Some(requester_account) = requester_account else {
+        return ApiErrorResponse::bad_request("X-Account-Id required").into_response();
+    };
+    let pending = state
+        .kernel
+        .approvals()
+        .list_pending()
+        .into_iter()
+        .filter(|request| {
+            audit_entry_visible_to_account(&state, &requester_account, &request.agent_id)
+        })
+        .count();
     Json(serde_json::json!({"pending": pending})).into_response()
 }
 
@@ -3180,6 +3324,10 @@ static EVENT_WEBHOOKS: std::sync::LazyLock<
     tokio::sync::RwLock<HashMap<String, serde_json::Value>>,
 > = std::sync::LazyLock::new(|| tokio::sync::RwLock::new(HashMap::new()));
 
+fn event_webhook_visible_to_account(webhook: &serde_json::Value, account_id: &str) -> bool {
+    webhook.get("account_id").and_then(|v| v.as_str()) == Some(account_id)
+}
+
 /// Validate an events JSON array against VALID_EVENT_TYPES.
 fn validate_event_types(
     arr: &[serde_json::Value],
@@ -3236,8 +3384,15 @@ pub async fn list_event_webhooks(
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
+    let Some(account_id) = account.0 else {
+        return ApiErrorResponse::bad_request("X-Account-Id required").into_response();
+    };
     let store = EVENT_WEBHOOKS.read().await;
-    let list: Vec<serde_json::Value> = store.values().map(redact_webhook_secret).collect();
+    let list: Vec<serde_json::Value> = store
+        .values()
+        .filter(|webhook| event_webhook_visible_to_account(webhook, &account_id))
+        .map(redact_webhook_secret)
+        .collect();
     Json(list).into_response()
 }
 
@@ -3251,6 +3406,9 @@ pub async fn create_event_webhook(
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
+    let Some(account_id) = account.0 else {
+        return ApiErrorResponse::bad_request("X-Account-Id required").into_response();
+    };
     // Pre-translate error messages before .await to avoid holding !Send ErrorTranslator across await
     let (err_missing_url, err_invalid_url, err_missing_events) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -3294,6 +3452,7 @@ pub async fn create_event_webhook(
 
     let webhook = serde_json::json!({
         "id": id,
+        "account_id": account_id,
         "url": url,
         "events": events,
         "secret": secret,
@@ -3320,6 +3479,9 @@ pub async fn update_event_webhook(
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
+    let Some(account_id) = account.0 else {
+        return ApiErrorResponse::bad_request("X-Account-Id required").into_response();
+    };
     let (err_webhook_not_found, err_invalid_url) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
@@ -3329,8 +3491,13 @@ pub async fn update_event_webhook(
     };
     let mut store = EVENT_WEBHOOKS.write().await;
     let existing = match store.get(&id) {
-        Some(w) => w.clone(),
+        Some(w) if event_webhook_visible_to_account(w, &account_id) => w.clone(),
         None => {
+            return ApiErrorResponse::not_found(err_webhook_not_found)
+                .into_json_tuple()
+                .into_response();
+        }
+        Some(_) => {
             return ApiErrorResponse::not_found(err_webhook_not_found)
                 .into_json_tuple()
                 .into_response();
@@ -3378,12 +3545,19 @@ pub async fn delete_event_webhook(
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
+    let Some(account_id) = account.0 else {
+        return ApiErrorResponse::bad_request("X-Account-Id required").into_response();
+    };
     let err_webhook_not_found = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         t.t("api-error-webhook-not-found")
     };
     let mut store = EVENT_WEBHOOKS.write().await;
-    if store.remove(&id).is_some() {
+    let should_remove = store
+        .get(&id)
+        .map(|webhook| event_webhook_visible_to_account(webhook, &account_id))
+        .unwrap_or(false);
+    if should_remove && store.remove(&id).is_some() {
         (
             StatusCode::OK,
             Json(serde_json::json!({"status": "removed", "id": id})),
@@ -3647,10 +3821,14 @@ pub async fn test_webhook(
         return webhook_url_unsafe_response().into_response();
     }
 
+    // ADR-0014 §6 (tenant-scoped observability): include account_id so downstream
+    // webhook consumers can attribute events to the originating tenant without
+    // needing out-of-band context.
     let test_payload = serde_json::json!({
         "event": "test",
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "webhook_id": webhook.id.to_string(),
+        "account_id": account_id,
         "message": "This is a test event from LibreFang.",
     });
 
@@ -4240,7 +4418,11 @@ mod event_webhook_tests {
         let config = librefang_types::config::KernelConfig {
             home_dir: home.clone(),
             data_dir: home.join("data"),
-            admin_accounts: vec!["admin".to_string()],
+            admin_accounts: vec![
+                "admin".to_string(),
+                "admin-a".to_string(),
+                "admin-b".to_string(),
+            ],
             ..Default::default()
         };
         let kernel = std::sync::Arc::new(
@@ -4574,6 +4756,128 @@ mod event_webhook_tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_event_webhooks_are_scoped_per_account() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_webhooks().await;
+        let app = webhook_router();
+
+        for (account_id, url) in [
+            ("admin-a", "https://example.com/a"),
+            ("admin-b", "https://example.com/b"),
+        ] {
+            let payload = serde_json::json!({
+                "url": url,
+                "events": ["agent.spawned"],
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/webhooks/events")
+                        .header("x-account-id", account_id)
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+        }
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/webhooks/events")
+                    .header("x-account-id", "admin-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let list: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let items = list.as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["account_id"], "admin-a");
+        assert_eq!(items[0]["url"], "https://example.com/a");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_event_webhook_update_and_delete_respect_account_boundary() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_webhooks().await;
+        let app = webhook_router();
+
+        let payload = serde_json::json!({
+            "url": "https://example.com/a",
+            "events": ["agent.spawned"],
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/webhooks/events")
+                    .header("x-account-id", "admin-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let update_payload = serde_json::json!({"enabled": false});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/webhooks/events/{id}"))
+                    .header("x-account-id", "admin-b")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&update_payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/webhooks/events/{id}"))
+                    .header("x-account-id", "admin-b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/webhooks/events")
+                    .header("x-account-id", "admin-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let list: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
