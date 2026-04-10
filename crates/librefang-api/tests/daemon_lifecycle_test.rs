@@ -100,6 +100,7 @@ async fn test_full_daemon_lifecycle() {
             base_url: None,
             message_timeout_secs: 300,
             extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
     };
@@ -240,6 +241,7 @@ async fn test_server_immediate_responsiveness() {
             base_url: None,
             message_timeout_secs: 300,
             extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
     };
