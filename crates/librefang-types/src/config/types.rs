@@ -1213,6 +1213,9 @@ pub struct ExecPolicy {
     pub safe_bins: Vec<String>,
     /// Global command allowlist (when mode = allowlist).
     pub allowed_commands: Vec<String>,
+    /// Environment variables explicitly allowed to pass through to `shell_exec`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_env_vars: Vec<String>,
     /// Max execution timeout in seconds. Default: 30.
     pub timeout_secs: u64,
     /// Max output size in bytes. Default: 100KB.
@@ -1239,6 +1242,7 @@ impl Default for ExecPolicy {
             .map(String::from)
             .collect(),
             allowed_commands: Vec::new(),
+            allowed_env_vars: Vec::new(),
             timeout_secs: 30,
             max_output_bytes: 100 * 1024,
             no_output_timeout_secs: default_no_output_timeout(),

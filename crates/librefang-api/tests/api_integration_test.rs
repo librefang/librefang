@@ -1371,6 +1371,8 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
     let api_key_state = middleware::AuthState {
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
+        dashboard_auth_enabled: false,
+        user_api_keys: Arc::new(Vec::new()),
     };
 
     let app = Router::new()

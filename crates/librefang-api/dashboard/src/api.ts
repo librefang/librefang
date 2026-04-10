@@ -2067,7 +2067,7 @@ export function hasApiKey(): boolean {
   return !!key && key.length > 0;
 }
 
-export type AuthMode = "credentials" | "api_key" | "none";
+export type AuthMode = "credentials" | "api_key" | "hybrid" | "none";
 
 export async function checkDashboardAuthMode(): Promise<AuthMode> {
   try {
@@ -2337,6 +2337,55 @@ export async function createRegistryContent(
 
 // ---------------------------------------------------------------------------
 // Auth — change password
+// ---------------------------------------------------------------------------
+
+// ── MCP Servers API ─────────────────────────────────────────────────────
+
+export interface McpServerTransport {
+  type: "stdio" | "sse" | "http";
+  command?: string;
+  args?: string[];
+  url?: string;
+}
+
+export interface McpServerConfigured {
+  name: string;
+  transport: McpServerTransport;
+  timeout_secs?: number;
+  env?: string[];
+  headers?: string[];
+}
+
+export interface McpServerConnected {
+  name: string;
+  tools_count: number;
+  tools: { name: string; description?: string }[];
+  connected: boolean;
+}
+
+export interface McpServersResponse {
+  configured: McpServerConfigured[];
+  connected: McpServerConnected[];
+  total_configured: number;
+  total_connected: number;
+}
+
+export async function listMcpServers(): Promise<McpServersResponse> {
+  return get<McpServersResponse>("/api/mcp/servers");
+}
+
+export async function addMcpServer(server: Omit<McpServerConfigured, "name"> & { name: string }): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/mcp/servers", server);
+}
+
+export async function updateMcpServer(name: string, server: Partial<McpServerConfigured>): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`, server);
+}
+
+export async function deleteMcpServer(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`);
+}
+
 // ---------------------------------------------------------------------------
 
 export async function changePassword(

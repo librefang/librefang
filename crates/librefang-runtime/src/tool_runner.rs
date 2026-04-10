@@ -273,9 +273,18 @@ pub async fn execute_tool_raw(
                     };
                 }
             }
+            let effective_allowed_env_vars = allowed_env_vars.or_else(|| {
+                exec_policy.and_then(|policy| {
+                    if policy.allowed_env_vars.is_empty() {
+                        None
+                    } else {
+                        Some(policy.allowed_env_vars.as_slice())
+                    }
+                })
+            });
             tool_shell_exec(
                 input,
-                allowed_env_vars.unwrap_or(&[]),
+                effective_allowed_env_vars.unwrap_or(&[]),
                 *workspace_root,
                 *exec_policy,
             )
@@ -663,12 +672,24 @@ pub async fn execute_tool(
                 tool_name,
                 librefang_types::truncate_str(&input_str, 200)
             );
+            let deferred_allowed_env_vars =
+                allowed_env_vars.map(|vars| vars.to_vec()).or_else(|| {
+                    exec_policy.and_then(|policy| {
+                        if policy.allowed_env_vars.is_empty() {
+                            None
+                        } else {
+                            Some(policy.allowed_env_vars.clone())
+                        }
+                    })
+                });
             let deferred = librefang_types::tool::DeferredToolExecution {
                 agent_id: agent_id_str.to_string(),
                 tool_use_id: tool_use_id.to_string(),
                 tool_name: tool_name.to_string(),
                 input: input.clone(),
                 allowed_tools: allowed_tools.map(|a| a.to_vec()),
+                allowed_env_vars: deferred_allowed_env_vars,
+                exec_policy: exec_policy.cloned(),
                 sender_id: sender_id.map(|s| s.to_string()),
                 channel: channel.map(|c| c.to_string()),
                 workspace_root: workspace_root.map(|p| p.to_path_buf()),
@@ -5041,6 +5062,68 @@ mod tests {
             librefang_types::tool::ToolExecutionStatus::WaitingApproval
         );
         assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_shell_exec_uses_exec_policy_allowed_env_vars() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let original = std::env::var("LIBREFANG_TEST_ALLOWED_ENV").ok();
+        unsafe {
+            std::env::set_var("LIBREFANG_TEST_ALLOWED_ENV", "present");
+        }
+
+        let allowed = ["shell_exec".to_string()];
+        let policy = librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Allowlist,
+            allowed_env_vars: vec!["LIBREFANG_TEST_ALLOWED_ENV".to_string()],
+            ..Default::default()
+        };
+
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": "env"}),
+            None,
+            Some(&allowed),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(workspace.path()),
+            None, // media_engine
+            None, // media_drivers
+            Some(&policy),
+            None,
+            None,
+            None,
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+
+        match original {
+            Some(val) => unsafe {
+                std::env::set_var("LIBREFANG_TEST_ALLOWED_ENV", val);
+            },
+            None => unsafe {
+                std::env::remove_var("LIBREFANG_TEST_ALLOWED_ENV");
+            },
+        }
+
+        assert!(
+            !result.is_error,
+            "shell_exec should succeed with env passthrough, got: {}",
+            result.content
+        );
+        assert!(
+            result
+                .content
+                .contains("LIBREFANG_TEST_ALLOWED_ENV=present"),
+            "allowed env var should be visible to subprocess, got: {}",
+            result.content
+        );
     }
 
     // --- Schedule parser tests ---
