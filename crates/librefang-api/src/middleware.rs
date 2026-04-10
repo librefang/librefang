@@ -50,6 +50,16 @@ pub struct AuthenticatedApiUser {
     pub role: UserRole,
 }
 
+/// Whitelist check for per-user API-key access.
+///
+/// - `Admin` and above: full access to all methods and paths.
+/// - `User`: GET everything + POST to a limited set of endpoints
+///   (agent messages, clone, approval actions).
+/// - `Viewer`: GET only.
+/// - All other methods (`PUT`/`DELETE`/`PATCH`) require `Admin`+.
+///
+/// The `path` must already be normalized (no trailing slash, version prefix
+/// stripped) before calling this function.
 fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &str) -> bool {
     if role >= UserRole::Admin || *method == axum::http::Method::GET {
         return true;
@@ -59,7 +69,8 @@ fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &
         return false;
     }
 
-    if method == axum::http::Method::POST {
+    // User role: only specific POST endpoints are allowed.
+    if *method == axum::http::Method::POST {
         let agent_message = path.starts_with("/api/agents/")
             && (path.ends_with("/message") || path.ends_with("/message/stream"));
         let agent_clone = path.starts_with("/api/agents/") && path.ends_with("/clone");
@@ -244,15 +255,16 @@ pub async fn auth(
     // Normalize versioned paths: /api/v1/foo → /api/foo so public endpoint
     // checks work identically for both /api/ and /api/v1/ prefixes.
     let raw_path = request.uri().path().to_string();
-    let normalized;
-    let path: &str = if raw_path.starts_with("/api/v1/") {
-        normalized = format!("/api{}", &raw_path[7..]);
-        normalized.as_str()
+    // Normalize: strip version prefix and trailing slashes so ACL checks
+    // work consistently (e.g. "/api/v1/agents/" → "/api/agents").
+    let after_version: String = if raw_path.starts_with("/api/v1/") {
+        format!("/api{}", &raw_path[7..])
     } else if raw_path == "/api/v1" {
-        "/api"
+        "/api".to_string()
     } else {
-        &raw_path
+        raw_path.clone()
     };
+    let path: &str = after_version.strip_suffix('/').unwrap_or(&after_version);
     if path == "/api/shutdown" {
         let is_loopback = request
             .extensions()
@@ -409,6 +421,7 @@ pub async fn auth(
                     .unwrap_or(i18n::DEFAULT_LANGUAGE);
                 return Response::builder()
                     .status(StatusCode::FORBIDDEN)
+                    .header("content-type", "application/json")
                     .header("content-language", lang)
                     .body(Body::from(
                         serde_json::json!({
@@ -675,5 +688,147 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_viewer_api_key_cannot_post_anything() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![ApiUserAuth {
+                name: "ReadOnly".to_string(),
+                role: UserRole::Viewer,
+                api_key_hash: crate::password_hash::hash_password("viewer-key").unwrap(),
+            }]),
+        };
+        let app = Router::new()
+            .route(
+                "/api/agents/123/message",
+                get(|| async { "ok" }).post(|| async { "ok" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agents/123/message")
+                    .header("authorization", "Bearer viewer-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_viewer_api_key_can_get() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![ApiUserAuth {
+                name: "ReadOnly".to_string(),
+                role: UserRole::Viewer,
+                api_key_hash: crate::password_hash::hash_password("viewer-key").unwrap(),
+            }]),
+        };
+        let app = Router::new()
+            .route("/api/budget", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/budget")
+                    .header("authorization", "Bearer viewer-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_trailing_slash_does_not_bypass_acl() {
+        // Verify that a User-role key trying to POST /api/agents/ (with
+        // trailing slash) still gets FORBIDDEN, not allowed through because
+        // the path normalization strips the slash before the ACL check.
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![ApiUserAuth {
+                name: "Guest".to_string(),
+                role: UserRole::User,
+                api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
+            }]),
+        };
+        let app = Router::new()
+            .route(
+                "/api/agents",
+                get(|| async { "ok" }).post(|| async { "ok" }),
+            )
+            .route(
+                "/api/agents/",
+                get(|| async { "ok" }).post(|| async { "ok" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agents/")
+                    .header("authorization", "Bearer user-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // After normalization "/api/agents/" → "/api/agents", which User
+        // role is not allowed to POST to → FORBIDDEN.
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_forbidden_response_has_json_content_type() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![ApiUserAuth {
+                name: "Guest".to_string(),
+                role: UserRole::User,
+                api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
+            }]),
+        };
+        let app = Router::new()
+            .route(
+                "/api/agents",
+                get(|| async { "ok" }).post(|| async { "ok" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agents")
+                    .header("authorization", "Bearer user-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["content-type"], "application/json");
     }
 }
