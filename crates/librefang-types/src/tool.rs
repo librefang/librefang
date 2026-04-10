@@ -129,6 +129,10 @@ pub struct DeferredToolExecution {
     pub tool_name: String,
     pub input: serde_json::Value,
     pub allowed_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_env_vars: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_policy: Option<crate::config::ExecPolicy>,
     pub sender_id: Option<String>,
     pub channel: Option<String>,
     pub workspace_root: Option<std::path::PathBuf>,
@@ -952,6 +956,11 @@ mod tests {
             tool_name: "shell_exec".to_string(),
             input: serde_json::json!({"cmd": "ls -la"}),
             allowed_tools: Some(vec!["shell_exec".to_string()]),
+            allowed_env_vars: Some(vec!["OPENAI_API_KEY".to_string()]),
+            exec_policy: Some(crate::config::ExecPolicy {
+                mode: crate::config::ExecSecurityMode::Full,
+                ..Default::default()
+            }),
             sender_id: Some("user-123".to_string()),
             channel: Some("telegram".to_string()),
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
@@ -961,6 +970,14 @@ mod tests {
         assert_eq!(deserialized.agent_id, "agent-1");
         assert_eq!(deserialized.tool_use_id, "toolu_abc");
         assert_eq!(deserialized.tool_name, "shell_exec");
+        assert_eq!(
+            deserialized.allowed_env_vars,
+            Some(vec!["OPENAI_API_KEY".to_string()])
+        );
+        assert_eq!(
+            deserialized.exec_policy.as_ref().map(|p| p.mode),
+            Some(crate::config::ExecSecurityMode::Full)
+        );
         assert_eq!(deserialized.sender_id, Some("user-123".to_string()));
     }
 }

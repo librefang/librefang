@@ -600,6 +600,7 @@ impl LlmDriver for OpenAIDriver {
                 }
                 return Err(LlmError::RateLimited {
                     retry_after_ms: 5000,
+                    message: None,
                 });
             }
 
@@ -939,6 +940,7 @@ impl LlmDriver for OpenAIDriver {
                 }
                 return Err(LlmError::RateLimited {
                     retry_after_ms: 5000,
+                    message: None,
                 });
             }
 
