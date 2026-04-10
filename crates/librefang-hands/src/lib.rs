@@ -23,6 +23,8 @@ pub enum HandError {
     AlreadyActive(String),
     #[error("Hand already registered: {0}")]
     AlreadyRegistered(String),
+    #[error("Cannot uninstall built-in hand: {0}")]
+    BuiltinHand(String),
     #[error("Hand instance not found: {0}")]
     InstanceNotFound(Uuid),
     #[error("Activation failed: {0}")]

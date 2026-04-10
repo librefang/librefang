@@ -35,6 +35,7 @@
     "network": "网络",
     "a2a": "A2A",
     "telemetry": "遥测",
+    "terminal": "终端",
     "user_center": "用户中心",
     "logout": "退出登录",
     "expand_sidebar": "展开侧边栏",
@@ -1411,6 +1412,21 @@
     "navigate": "导航",
     "open": "打开",
     "close": "关闭"
+  },
+  "terminal": {
+    "badge": "终端",
+    "title": "终端",
+    "subtitle_connected": "已连接",
+    "subtitle_disconnected": "未连接",
+    "subtitle_error": "错误: {{error}}",
+    "connect": "连接",
+    "disconnect": "断开",
+    "started": "[终端已启动: {{shell}} (PID: {{pid}})]",
+    "exited": "[进程已退出，代码 {{code}}]",
+    "error_unknown": "未知错误",
+    "websocket_error": "WebSocket 连接错误",
+    "connection_closed_non_recoverable": "由于不可恢复的错误，连接已关闭",
+    "max_reconnect_exceeded": "已达到最大重连次数，请手动连接。"
   },
   "mcp": {
     "title": "MCP 服务器",

@@ -5,6 +5,50 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.11] - 2026-04-11
+
+### Added
+
+- Add WebSocket terminal with PTY backend and xterm frontend  (Phase 1) (#2229) (@leszek3737)
+- Claude Code CLI profile rotation for rate-limit resilience (#2249) (@f-liva)
+- Add MCP Servers management page (#2278) (@houko)
+- Raise MSRV to 1.94.1 and keep stable toolchain (#2302) (@houko)
+- Uninstall hand (#2312) (@houko)
+
+### Fixed
+
+- Change Docker setup to fix permissions for LIBREFANG_HOME (#2240) (@Cruel)
+- Also ignore secrets.env (dashboard-managed env file) (#2248) (@DaBlitzStein)
+- Localize agent template copy for zh users (#2257) (@houko)
+- Restore approval context and dashboard auth flows (#2272) (@houko)
+- Exclude Hand sub-agents from channel routing fallback (#2276) (@houko)
+- Accept claude-code (hyphen) in CLI profile rotation guard (#2284) (@f-liva)
+- Replace --verbose with --include-partial-messages for qwen driver (#2290) (@f-liva)
+- Add missing cli_profile_dirs to DefaultModelConfig literals (#2296) (@houko)
+- Delegate first-boot config to librefang init (#2297) (@houko)
+- Scan workspaces/ dir to persist locally-installed hands across boot (#2298) (@houko)
+- Hide delete button for built-in providers, flag custom (#2300) (@houko)
+- Mark manifest mut in parse_manifest (#2306) (@houko)
+- Stop middleware path normalization from swallowing GET / (#2307) (@houko)
+- Preserve pending Telegram updates across daemon restart (#2309) (@houko)
+- Stop agent loop on pure-text max_tokens overflow (#2310) (@houko)
+- Make Hands Settings tab actually editable (#2311) (@houko)
+- Wire ConPTY resize on Windows (#2313) (@houko)
+
+### Changed
+
+- Harden and optimize Telegram adapter (#2223) (@leszek3737)
+
+### Maintenance
+
+- Cover full-path context hook launchers (#2255) (@houko)
+- Cover wechat and wecom multi-account config parsing (#2258) (@houko)
+
+### Other
+
+- Feat(ws) harden terminal websocket follow-ups after #2229 (#2304) (@houko)
+
+
 ## [2026.4.10] - 2026-04-10
 
 ### Added

@@ -19,22 +19,73 @@ pub struct ModelCatalog {
 impl ModelCatalog {
     /// Create a new catalog by loading providers from `home_dir/providers/`
     /// and aliases from `home_dir/aliases.toml`.
+    ///
+    /// Providers whose TOML filename also exists in
+    /// `home_dir/registry/providers/` are marked as built-in; the rest are
+    /// flagged `is_custom = true` so the dashboard can show a real delete
+    /// control for them.
     pub fn new(home_dir: &std::path::Path) -> Self {
         let providers_dir = home_dir.join("providers");
-        Self::new_from_dir(&providers_dir)
+        let registry_providers_dir = home_dir.join("registry").join("providers");
+        Self::new_from_dir_with_registry(&providers_dir, Some(&registry_providers_dir))
     }
 
     /// Create a catalog by loading all `*.toml` files from a specific directory.
     ///
     /// Also loads `aliases.toml` from the parent of `providers_dir` if present.
+    /// All loaded providers are marked `is_custom = false` (safe default —
+    /// callers that want custom detection should use
+    /// [`Self::new_from_dir_with_registry`] or [`Self::new`]).
     pub fn new_from_dir(providers_dir: &std::path::Path) -> Self {
-        let mut sources = Vec::new();
+        Self::new_from_dir_with_registry(providers_dir, None)
+    }
+
+    /// Same as [`Self::new_from_dir`] but with a registry-providers directory
+    /// used to classify each loaded provider as built-in vs user-added.
+    pub fn new_from_dir_with_registry(
+        providers_dir: &std::path::Path,
+        registry_providers_dir: Option<&std::path::Path>,
+    ) -> Self {
+        // Built-in filename set for custom classification.
+        //
+        // Tri-state semantics:
+        //   - `None` registry dir passed, or `read_dir` on it failed
+        //     (missing / corrupt / unreadable cache) → classification
+        //     unavailable, fall back to is_custom=false for every provider.
+        //     This keeps the delete button hidden, which is the safe
+        //     default — a user can always remove an API key via the edit
+        //     dialog's "Remove Key" control.
+        //   - `Some(set)` successful read, even if `set` is empty → trust
+        //     the classification. An empty registry dir genuinely means
+        //     every provider is user-added.
+        let builtin_filenames: Option<std::collections::HashSet<std::ffi::OsString>> =
+            registry_providers_dir.and_then(|dir| {
+                std::fs::read_dir(dir).ok().map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|e| {
+                            let path = e.path();
+                            if path.extension().is_some_and(|ext| ext == "toml") {
+                                path.file_name().map(|n| n.to_os_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+            });
+
+        let mut sources: Vec<(String, bool)> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(providers_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "toml") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        sources.push(content);
+                        let is_custom = match (&builtin_filenames, path.file_name()) {
+                            (Some(set), Some(name)) => !set.contains(name),
+                            _ => false,
+                        };
+                        sources.push((content, is_custom));
                     }
                 }
             }
@@ -46,14 +97,19 @@ impl ModelCatalog {
     }
 
     /// Build a catalog from pre-loaded TOML source strings.
-    fn from_sources(sources: &[String], aliases_source: Option<&str>) -> Self {
+    ///
+    /// Each source is tagged with an `is_custom` flag that is copied onto
+    /// the corresponding [`ProviderInfo`].
+    fn from_sources(sources: &[(String, bool)], aliases_source: Option<&str>) -> Self {
         let mut models: Vec<ModelCatalogEntry> = Vec::new();
         let mut providers: Vec<ProviderInfo> = Vec::new();
-        for source in sources {
+        for (source, is_custom) in sources {
             if let Ok(file) = toml::from_str::<ModelCatalogFile>(source) {
                 let provider_id = file.provider.as_ref().map(|p| p.id.clone());
                 if let Some(p) = file.provider {
-                    providers.push(p.into());
+                    let mut info: ProviderInfo = p.into();
+                    info.is_custom = *is_custom;
+                    providers.push(info);
                 }
                 for mut model in file.models {
                     // Back-fill provider from the [provider] section when
@@ -359,6 +415,8 @@ impl ModelCatalog {
                 regions: std::collections::HashMap::new(),
                 media_capabilities: Vec::new(),
                 available_models: Vec::new(),
+                // Added at runtime via set_provider_url → always custom.
+                is_custom: true,
             });
             // Re-detect auth for the newly added provider
             self.detect_auth();
@@ -853,6 +911,74 @@ mod tests {
     fn test_catalog_has_models() {
         let catalog = test_catalog();
         assert!(catalog.list_models().len() >= 30);
+    }
+
+    /// P2 regression: when registry classification is unavailable
+    /// (registry dir unreadable or missing), every provider must fall back
+    /// to is_custom=false so the dashboard does not re-enable the misleading
+    /// delete button on built-ins.
+    #[test]
+    fn test_is_custom_safe_fallback_on_missing_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let providers_dir = tmp.path().join("providers");
+        std::fs::create_dir_all(&providers_dir).unwrap();
+        std::fs::write(
+            providers_dir.join("acme.toml"),
+            r#"[provider]
+id = "acme"
+display_name = "Acme"
+api_key_env = "ACME_API_KEY"
+base_url = "https://acme.test"
+"#,
+        )
+        .unwrap();
+
+        // Case 1: registry dir argument is None → classification skipped.
+        let catalog = ModelCatalog::new_from_dir_with_registry(&providers_dir, None);
+        assert!(
+            !catalog.list_providers().iter().any(|p| p.is_custom),
+            "is_custom must be false when no registry dir is supplied"
+        );
+
+        // Case 2: registry dir points to a nonexistent path → read_dir
+        // fails, classification must degrade to false (not true).
+        let missing_registry = tmp.path().join("nonexistent-registry");
+        let catalog =
+            ModelCatalog::new_from_dir_with_registry(&providers_dir, Some(&missing_registry));
+        assert!(
+            !catalog.list_providers().iter().any(|p| p.is_custom),
+            "is_custom must be false when registry read_dir fails"
+        );
+
+        // Case 3: registry dir exists and does NOT contain acme.toml →
+        // acme is correctly flagged custom.
+        let registry_dir = tmp.path().join("registry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        let catalog = ModelCatalog::new_from_dir_with_registry(&providers_dir, Some(&registry_dir));
+        assert!(
+            catalog
+                .list_providers()
+                .iter()
+                .any(|p| p.id == "acme" && p.is_custom),
+            "acme must be flagged custom when registry dir exists but does not list it"
+        );
+
+        // Case 4: registry dir lists acme.toml → acme is a built-in.
+        std::fs::write(
+            registry_dir.join("acme.toml"),
+            r#"[provider]
+id = "acme"
+"#,
+        )
+        .unwrap();
+        let catalog = ModelCatalog::new_from_dir_with_registry(&providers_dir, Some(&registry_dir));
+        assert!(
+            catalog
+                .list_providers()
+                .iter()
+                .any(|p| p.id == "acme" && !p.is_custom),
+            "acme must NOT be flagged custom when registry dir lists it"
+        );
     }
 
     #[test]
@@ -1411,7 +1537,10 @@ supports_tools = false
 supports_vision = false
 supports_streaming = false
 "#;
-        let sources = vec![provider_a.to_string(), provider_b.to_string()];
+        let sources = vec![
+            (provider_a.to_string(), false),
+            (provider_b.to_string(), false),
+        ];
         ModelCatalog::from_sources(&sources, None)
     }
 
@@ -1792,7 +1921,7 @@ supports_tools = true
 supports_vision = false
 supports_streaming = true
 "#;
-        let catalog = ModelCatalog::from_sources(&[toml_content.to_string()], None);
+        let catalog = ModelCatalog::from_sources(&[(toml_content.to_string(), false)], None);
         let providers = catalog.list_providers();
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "testprov");
@@ -1827,7 +1956,7 @@ supports_tools = false
 supports_vision = false
 supports_streaming = true
 "#;
-        let catalog = ModelCatalog::from_sources(&[toml_content.to_string()], None);
+        let catalog = ModelCatalog::from_sources(&[(toml_content.to_string(), false)], None);
         let providers = catalog.list_providers();
         assert_eq!(providers.len(), 1);
         assert!(providers[0].media_capabilities.is_empty());

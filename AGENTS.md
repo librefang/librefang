@@ -5,7 +5,7 @@
 LibreFang is an open-source **Agent Operating System** written in Rust.
 It manages AI agents (LLM-backed), their tools, memory, messaging channels, and inter-agent networking.
 
-- **Language**: Rust (edition 2021, MSRV 1.75)
+- **Language**: Rust (edition 2021, MSRV 1.94.1)
 - **Async runtime**: tokio
 - **Web framework**: axum 0.8 (HTTP + WebSocket)
 - **Database**: SQLite via rusqlite (bundled)
