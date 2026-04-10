@@ -7,6 +7,7 @@ use crate::chunker;
 use crate::consolidation::ConsolidationEngine;
 use crate::knowledge::KnowledgeStore;
 use crate::migration::run_migrations;
+use crate::roster_store::RosterStore;
 use crate::semantic::SemanticStore;
 use crate::session::{Session, SessionStore};
 use crate::structured::StructuredStore;
@@ -35,6 +36,7 @@ pub struct MemorySubstrate {
     sessions: SessionStore,
     consolidation: ConsolidationEngine,
     usage: UsageStore,
+    roster: RosterStore,
     chunk_config: ChunkConfig,
 }
 
@@ -63,6 +65,7 @@ impl MemorySubstrate {
             knowledge: KnowledgeStore::new(Arc::clone(&shared)),
             sessions: SessionStore::new(Arc::clone(&shared)),
             usage: UsageStore::new(Arc::clone(&shared)),
+            roster: RosterStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),
             chunk_config,
         })
@@ -90,6 +93,7 @@ impl MemorySubstrate {
             knowledge: KnowledgeStore::new(Arc::clone(&shared)),
             sessions: SessionStore::new(Arc::clone(&shared)),
             usage: UsageStore::new(Arc::clone(&shared)),
+            roster: RosterStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),
             chunk_config,
         })
@@ -103,6 +107,11 @@ impl MemorySubstrate {
     /// Get a reference to the knowledge graph store.
     pub fn knowledge(&self) -> &KnowledgeStore {
         &self.knowledge
+    }
+
+    /// Get a reference to the group roster store.
+    pub fn roster(&self) -> &RosterStore {
+        &self.roster
     }
 
     /// Attach an external vector store backend to the semantic store.

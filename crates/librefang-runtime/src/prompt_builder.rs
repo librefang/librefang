@@ -488,7 +488,7 @@ fn build_channel_section(
     is_group: bool,
     was_mentioned: bool,
     bot_username: Option<&str>,
-    group_members: &[(String, String, Option<String>)],
+    _group_members: &[(String, String, Option<String>)],
 ) -> String {
     let (limit, hints) = match channel {
         "telegram" => (
@@ -586,33 +586,8 @@ fn build_channel_section(
             section.push_str(" You were @mentioned directly — respond to this message.");
         }
 
-        // Group roster: list the known members so the agent can distinguish
-        // the current sender from other humans mentioned by `@handle` in the
-        // message text. Without this, a message like `dile a @jose ...` looks
-        // like a reference to an internal agent.
-        if !group_members.is_empty() {
-            section.push_str("\n\n### Known members of this group");
-            for (user_id, display_name, username) in group_members {
-                let name_clean = sanitize_identity(display_name);
-                let id_clean = sanitize_identity(user_id);
-                let handle = match username {
-                    Some(u) => format!(" (@{}, id={})", sanitize_identity(u), id_clean),
-                    None => format!(" (id={id_clean})"),
-                };
-                section.push_str(&format!("\n- {name_clean}{handle}"));
-            }
-            section.push_str(
-                "\n\nWhen a message contains an `@handle` or a user name, look it up \
-                 in the list above. Those are real humans in this chat. They are \
-                 NEVER agents or other LibreFang entities — if you need to reach \
-                 another agent you use the `agent_send` tool (by name), not an \
-                 `@` mention in the reply text. If the referenced name is not in \
-                 the list above, say so plainly — do not invent an identity. \
-                 Address replies to the actual sender of the current message, \
-                 not to other members unless explicitly asked to pass a message \
-                 along.",
-            );
-        }
+        // Group roster is now available via the `group_members` tool.
+        // No longer injected into the system prompt (saves context tokens).
     }
 
     section
@@ -1145,7 +1120,9 @@ mod tests {
     }
 
     #[test]
-    fn test_channel_group_roster_rendered() {
+    fn test_channel_group_roster_not_rendered() {
+        // Roster is now tool-based — passing members should NOT inject them
+        // into the system prompt.
         let members = vec![
             (
                 "1".to_string(),
@@ -1169,13 +1146,14 @@ mod tests {
             Some("fandangorodelo_bot"),
             &members,
         );
-        assert!(section.contains("### Known members of this group"));
-        assert!(section.contains("Pakman"));
-        assert!(section.contains("Jorge Pablo"));
-        assert!(section.contains("dvpablo"));
-        assert!(section.contains("@jorgepablo"));
-        assert!(section.contains("real humans"));
-        assert!(section.contains("NOT agents"));
+        assert!(
+            !section.contains("### Known members of this group"),
+            "Roster should not be rendered in system prompt"
+        );
+        assert!(
+            !section.contains("real humans"),
+            "Roster instructions should not appear in system prompt"
+        );
     }
 
     #[test]

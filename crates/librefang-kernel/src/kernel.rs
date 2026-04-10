@@ -3239,6 +3239,50 @@ system_prompt = "You are a helpful assistant."
     ///
     /// The message is answered using the agent's system prompt and model, but in a
     /// **fresh temporary session** — no conversation history is loaded and the
+    /// Lightweight LLM call for classification tasks (reply-intent, routing, etc.).
+    ///
+    /// Resolves the agent's LLM driver and sends a minimal completion request
+    /// with NO tools, NO history, NO agent loop — just a system prompt and a
+    /// user message. Returns the raw LLM text response.
+    ///
+    /// Cost: ~100-200 tokens (system + user + response). Orders of magnitude
+    /// cheaper than `send_message` which runs the full agent loop.
+    pub async fn classify_text(
+        &self,
+        agent_id: AgentId,
+        system_prompt: &str,
+        user_message: &str,
+        max_tokens: u32,
+    ) -> KernelResult<String> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        let driver = self.resolve_driver(&entry.manifest)?;
+        let request = librefang_runtime::llm_driver::CompletionRequest {
+            model: entry.manifest.model.model.clone(),
+            messages: vec![librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Text(user_message.to_string()),
+                pinned: false,
+            }],
+            tools: vec![],
+            max_tokens,
+            temperature: 0.0, // Deterministic for classification
+            system: Some(system_prompt.to_string()),
+            thinking: None,
+            extra_body: None,
+            response_format: None,
+            prompt_caching: false,
+            timeout_secs: Some(10),
+        };
+        let response = driver.complete(request).await.map_err(|e| {
+            KernelError::LibreFang(LibreFangError::Internal(format!(
+                "classify_text LLM call failed: {e}"
+            )))
+        })?;
+        Ok(response.text())
+    }
+
     /// exchange is **not persisted** to the real session. This lets users ask quick
     /// throwaway questions without polluting the ongoing conversation context.
     pub async fn send_message_ephemeral(
@@ -10512,6 +10556,50 @@ impl KernelHandle for LibreFangKernel {
                     .collect())
             }
         }
+    }
+
+    fn roster_upsert(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+        display_name: &str,
+        username: Option<&str>,
+    ) -> Result<(), String> {
+        self.memory
+            .roster()
+            .upsert(channel, chat_id, user_id, display_name, username);
+        Ok(())
+    }
+
+    fn roster_members(
+        &self,
+        channel: &str,
+        chat_id: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let members = self.memory.roster().members(channel, chat_id);
+        Ok(members
+            .into_iter()
+            .map(|(uid, name, uname)| {
+                serde_json::json!({
+                    "user_id": uid,
+                    "display_name": name,
+                    "username": uname,
+                })
+            })
+            .collect())
+    }
+
+    fn roster_remove_member(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+    ) -> Result<(), String> {
+        self.memory
+            .roster()
+            .remove_member(channel, chat_id, user_id);
+        Ok(())
     }
 
     fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {
