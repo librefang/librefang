@@ -625,7 +625,14 @@ fn content_to_text(content: &ChannelContent) -> String {
             Some(c) => format!("[Photo: {url}]\n{c}"),
             None => format!("[Photo: {url}]"),
         },
-        ChannelContent::File { url, filename } => format!("[File ({filename}): {url}]"),
+        ChannelContent::File { url, filename } => {
+            // After download_file_to_local, url is a local path
+            if url.starts_with('/') || url.starts_with("./") {
+                format!("[File: {filename} — saved at {url}]")
+            } else {
+                format!("[File ({filename}): {url}]")
+            }
+        }
         ChannelContent::Voice {
             url,
             duration_seconds,
@@ -1005,6 +1012,19 @@ impl BridgeManager {
                                         channel_type_str(&message.channel),
                                         message.sender.platform_id
                                     );
+
+                                    // Download remote files to local storage so
+                                    // agent tools (file_read, media_describe) can
+                                    // access them after the remote URL expires.
+                                    let mut message = message;
+                                    if let ChannelContent::File { ref url, ref filename } = message.content {
+                                        if let Some(local_path) = download_file_to_local(url, filename).await {
+                                            message.content = ChannelContent::File {
+                                                url: local_path,
+                                                filename: filename.clone(),
+                                            };
+                                        }
+                                    }
 
                                     let image_blocks = if let ChannelContent::Image {
                                         ref url, ref caption, ref mime_type
@@ -2596,6 +2616,69 @@ fn media_type_from_url(url: &str) -> String {
         // JPEG is the most common image format — safe default
         "image/jpeg".to_string()
     }
+}
+
+/// Download a file from a URL and save it locally so agent tools can access it
+/// after the remote URL expires (e.g. Telegram file links are short-lived).
+///
+/// Returns the local path on success, or `None` if the download fails.
+/// Compatible with all channels — any `ChannelContent::File` gets persisted.
+async fn download_file_to_local(url: &str, filename: &str) -> Option<String> {
+    const MAX_FILE_BYTES: usize = 50 * 1024 * 1024; // 50 MB limit
+
+    let client = crate::http_client::new_client();
+    let resp = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to download file from channel: {e}");
+            return None;
+        }
+    };
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Failed to read file bytes: {e}");
+            return None;
+        }
+    };
+
+    if bytes.len() > MAX_FILE_BYTES {
+        warn!(
+            size = bytes.len(),
+            limit = MAX_FILE_BYTES,
+            "File too large, skipping download"
+        );
+        return None;
+    }
+
+    // Save to /tmp/librefang_uploads/ with a unique name preserving extension
+    let upload_dir = std::path::Path::new("/tmp/librefang_uploads");
+    if let Err(e) = tokio::fs::create_dir_all(upload_dir).await {
+        warn!("Failed to create upload dir: {e}");
+        return None;
+    }
+
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+    let local_name = format!("{}_{}.{}", uuid::Uuid::new_v4(), filename, ext);
+    let local_path = upload_dir.join(&local_name);
+
+    if let Err(e) = tokio::fs::write(&local_path, &bytes).await {
+        warn!("Failed to write file to {}: {e}", local_path.display());
+        return None;
+    }
+
+    debug!(
+        filename = filename,
+        path = %local_path.display(),
+        size = bytes.len(),
+        "Downloaded channel file to local storage"
+    );
+
+    Some(local_path.to_string_lossy().to_string())
 }
 
 /// Download an image from a URL and build content blocks for multimodal LLM input.
