@@ -130,7 +130,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         }
     };
 
-    let cfg = state.kernel.config_ref();
+    let cfg = state.kernel.config_snapshot();
     Json(serde_json::json!({
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
@@ -1924,7 +1924,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         .list_sessions()
         .map(|s| s.len())
         .unwrap_or(0);
-    let cfg = state.kernel.config_ref();
+    let cfg = state.kernel.config_snapshot();
     let status = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "agent_count": agent_count,
