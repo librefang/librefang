@@ -1274,6 +1274,159 @@ system_prompt = "Test prompt"
         assert!(reg.get_definition("uptime-watcher").is_some());
     }
 
+    // ── uninstall_hand ───────────────────────────────────────────────────
+    //
+    // These tests cover all four branches of `uninstall_hand` so we don't
+    // regress the contract the DELETE /api/hands/{id} route depends on:
+    //
+    //   1. Hand id unknown               → NotFound
+    //   2. Hand is built-in (registry)   → BuiltinHand, definition untouched
+    //   3. Hand still has a live inst.   → AlreadyActive, nothing touched
+    //   4. Custom hand, no live inst.    → Ok, definition + workspace gone
+    //
+    // The "built-in" case exercises the specific rule that
+    // `home/workspaces/{id}/HAND.toml` must exist for a hand to be
+    // uninstallable — anything else (even if loaded into memory) is
+    // assumed to come from the registry cache and would be recreated on
+    // the next sync.
+
+    const UNINSTALL_TEST_TOML: &str = r#"
+id = "__PLACEHOLDER__"
+name = "Test Hand"
+description = "Fixture for uninstall_hand tests"
+category = "data"
+
+[routing]
+aliases = []
+
+[agent]
+name = "test-agent"
+description = "Agent"
+system_prompt = "Test"
+"#;
+
+    fn install_custom_for_uninstall(
+        reg: &HandRegistry,
+        home: &std::path::Path,
+        id: &str,
+    ) -> HandDefinition {
+        let toml = UNINSTALL_TEST_TOML.replace("__PLACEHOLDER__", id);
+        reg.install_from_content_persisted(home, &toml, "# skill\n")
+            .unwrap()
+    }
+
+    #[test]
+    fn uninstall_nonexistent_hand_returns_not_found() {
+        let reg = HandRegistry::new();
+        let tmp = tempfile::tempdir().unwrap();
+
+        let err = reg
+            .uninstall_hand(tmp.path(), "does-not-exist")
+            .unwrap_err();
+
+        assert!(
+            matches!(err, HandError::NotFound(ref id) if id == "does-not-exist"),
+            "expected NotFound(\"does-not-exist\"), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn uninstall_builtin_hand_is_refused() {
+        let reg = HandRegistry::new();
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Simulate a built-in: create the HAND.toml under
+        // `home/registry/hands/{id}/` (the registry cache location) and
+        // reload. After reload, the definition exists in memory, but the
+        // `home/workspaces/{id}/HAND.toml` file does NOT — that is exactly
+        // the state uninstall_hand treats as "built-in".
+        let reg_hand_dir = tmp
+            .path()
+            .join("registry")
+            .join("hands")
+            .join("builtin-x");
+        std::fs::create_dir_all(&reg_hand_dir).unwrap();
+        std::fs::write(
+            reg_hand_dir.join("HAND.toml"),
+            UNINSTALL_TEST_TOML.replace("__PLACEHOLDER__", "builtin-x"),
+        )
+        .unwrap();
+        reg.reload_from_disk(tmp.path());
+
+        assert!(
+            reg.get_definition("builtin-x").is_some(),
+            "pre-check: hand should be loaded from registry/hands/"
+        );
+        assert!(
+            !tmp.path()
+                .join("workspaces/builtin-x/HAND.toml")
+                .exists(),
+            "pre-check: no user-installed copy should exist"
+        );
+
+        let err = reg.uninstall_hand(tmp.path(), "builtin-x").unwrap_err();
+
+        assert!(
+            matches!(err, HandError::BuiltinHand(ref id) if id == "builtin-x"),
+            "expected BuiltinHand(\"builtin-x\"), got {err:?}"
+        );
+
+        // A failed uninstall MUST leave the in-memory registry untouched —
+        // otherwise the UI would see the hand disappear until the next
+        // reload, and the reload would silently bring it back, confusing
+        // the user.
+        assert!(
+            reg.get_definition("builtin-x").is_some(),
+            "definition must be preserved after refused uninstall"
+        );
+    }
+
+    #[test]
+    fn uninstall_active_hand_is_refused() {
+        let reg = HandRegistry::new();
+        let tmp = tempfile::tempdir().unwrap();
+        install_custom_for_uninstall(&reg, tmp.path(), "test-hand");
+
+        reg.activate("test-hand", HashMap::new()).unwrap();
+
+        let err = reg.uninstall_hand(tmp.path(), "test-hand").unwrap_err();
+
+        assert!(
+            matches!(err, HandError::AlreadyActive(_)),
+            "expected AlreadyActive, got {err:?}"
+        );
+
+        // Nothing should be touched on a refused uninstall — both the
+        // in-memory definition and the on-disk workspace must survive.
+        assert!(reg.get_definition("test-hand").is_some());
+        assert!(tmp
+            .path()
+            .join("workspaces/test-hand/HAND.toml")
+            .exists());
+    }
+
+    #[test]
+    fn uninstall_custom_hand_removes_definition_and_workspace() {
+        let reg = HandRegistry::new();
+        let tmp = tempfile::tempdir().unwrap();
+        install_custom_for_uninstall(&reg, tmp.path(), "removable");
+
+        let workspace = tmp.path().join("workspaces").join("removable");
+        assert!(workspace.join("HAND.toml").exists(), "pre-check");
+        assert!(reg.get_definition("removable").is_some(), "pre-check");
+
+        reg.uninstall_hand(tmp.path(), "removable").unwrap();
+
+        assert!(
+            reg.get_definition("removable").is_none(),
+            "definition must be dropped from memory"
+        );
+        assert!(
+            !workspace.exists(),
+            "workspace directory must be removed from disk"
+        );
+    }
+
     #[test]
     fn activate_and_deactivate() {
         let reg = HandRegistry::new();
