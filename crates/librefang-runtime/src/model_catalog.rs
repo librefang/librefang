@@ -954,10 +954,12 @@ base_url = "https://acme.test"
         // acme is correctly flagged custom.
         let registry_dir = tmp.path().join("registry");
         std::fs::create_dir_all(&registry_dir).unwrap();
-        let catalog =
-            ModelCatalog::new_from_dir_with_registry(&providers_dir, Some(&registry_dir));
+        let catalog = ModelCatalog::new_from_dir_with_registry(&providers_dir, Some(&registry_dir));
         assert!(
-            catalog.list_providers().iter().any(|p| p.id == "acme" && p.is_custom),
+            catalog
+                .list_providers()
+                .iter()
+                .any(|p| p.id == "acme" && p.is_custom),
             "acme must be flagged custom when registry dir exists but does not list it"
         );
 
@@ -969,8 +971,7 @@ id = "acme"
 "#,
         )
         .unwrap();
-        let catalog =
-            ModelCatalog::new_from_dir_with_registry(&providers_dir, Some(&registry_dir));
+        let catalog = ModelCatalog::new_from_dir_with_registry(&providers_dir, Some(&registry_dir));
         assert!(
             catalog
                 .list_providers()
