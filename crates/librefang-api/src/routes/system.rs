@@ -199,6 +199,61 @@ use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn invalid_session_label_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Invalid session label").into_json_tuple()
+}
+
+fn backup_create_error_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to create backup").into_json_tuple()
+}
+
+fn backup_delete_error_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to delete backup").into_json_tuple()
+}
+
+fn backup_open_error_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to open backup").into_json_tuple()
+}
+
+fn invalid_backup_archive_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Invalid backup archive").into_json_tuple()
+}
+
+fn webhook_url_unsafe_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Webhook URL is not allowed").into_json_tuple()
+}
+
+fn webhook_reach_failed_response(webhook_id: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({
+            "status": "error",
+            "error": "Failed to reach webhook",
+            "webhook_id": webhook_id,
+        })),
+    )
+}
+
+fn registry_content_missing_identifier_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Missing required content identifier").into_json_tuple()
+}
+
+fn registry_content_invalid_identifier_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Invalid content identifier").into_json_tuple()
+}
+
+fn registry_content_invalid_type_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Unsupported registry content type").into_json_tuple()
+}
+
+fn registry_content_already_exists_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::conflict("Registry content already exists").into_json_tuple()
+}
+
+fn registry_content_type_not_found_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("Registry content type not found").into_json_tuple()
+}
+
 // ---------------------------------------------------------------------------
 // Profile + Mode endpoints
 // ---------------------------------------------------------------------------
@@ -1068,7 +1123,8 @@ pub async fn get_session(
             .into_json_tuple()
             .into_response(),
         Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+            tracing::warn!("Failed to load session {session_id}: {e}");
+            ApiErrorResponse::internal("Failed to load session")
                 .into_json_tuple()
                 .into_response()
         }
@@ -1103,7 +1159,8 @@ pub async fn delete_session(
         )
             .into_response(),
         Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+            tracing::warn!("Failed to delete session {session_id}: {e}");
+            ApiErrorResponse::internal("Failed to delete session")
                 .into_json_tuple()
                 .into_response()
         }
@@ -1137,11 +1194,8 @@ pub async fn set_session_label(
     // Validate label if present
     if let Some(lbl) = label {
         if let Err(e) = librefang_types::agent::SessionLabel::new(lbl) {
-            return ApiErrorResponse::bad_request(
-                t.t_args("api-error-generic", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple()
-            .into_response();
+            tracing::warn!("Invalid session label for session {session_id}: {e}");
+            return invalid_session_label_response().into_response();
         }
     }
 
@@ -1160,7 +1214,8 @@ pub async fn set_session_label(
         )
             .into_response(),
         Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+            tracing::warn!("Failed to update label for session {session_id}: {e}");
+            ApiErrorResponse::internal("Failed to update session label")
                 .into_json_tuple()
                 .into_response()
         }
@@ -1213,7 +1268,8 @@ pub async fn find_session_by_label(
             .into_json_tuple()
             .into_response(),
         Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+            tracing::warn!("Failed to find session by label '{label}' for agent {agent_id}: {e}");
+            ApiErrorResponse::internal("Failed to load session")
                 .into_json_tuple()
                 .into_response()
         }
@@ -1232,12 +1288,11 @@ pub async fn find_session_by_label(
 pub async fn session_cleanup(
     account: AccountId,
     State(state): State<Arc<AppState>>,
-    lang: Option<axum::Extension<RequestLanguage>>,
+    _lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let kcfg = state.kernel.config_ref();
     let cfg = &kcfg.session;
     let mut total: u64 = 0;
@@ -1250,12 +1305,10 @@ pub async fn session_cleanup(
         {
             Ok(n) => total += n,
             Err(e) => {
-                return ApiErrorResponse::internal(t.t_args(
-                    "api-error-session-cleanup-expired-failed",
-                    &[("error", &e.to_string())],
-                ))
-                .into_json_tuple()
-                .into_response();
+                tracing::warn!("Failed to clean up expired sessions: {e}");
+                return ApiErrorResponse::internal("Failed to clean up sessions")
+                    .into_json_tuple()
+                    .into_response();
             }
         }
     }
@@ -1268,12 +1321,10 @@ pub async fn session_cleanup(
         {
             Ok(n) => total += n,
             Err(e) => {
-                return ApiErrorResponse::internal(t.t_args(
-                    "api-error-session-cleanup-excess-failed",
-                    &[("error", &e.to_string())],
-                ))
-                .into_json_tuple()
-                .into_response();
+                tracing::warn!("Failed to clean up excess sessions: {e}");
+                return ApiErrorResponse::internal("Failed to clean up sessions")
+                    .into_json_tuple()
+                    .into_response();
             }
         }
     }
@@ -1332,10 +1383,21 @@ pub async fn search_sessions(
             Json(serde_json::json!({"results": results})),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => {
+            tracing::warn!("Failed to search sessions: {e}");
+            ApiErrorResponse::internal("Failed to search sessions")
+                .into_json_tuple()
+                .into_response()
+        }
     }
+}
+
+fn admin_internal_error_response(
+    action: &'static str,
+    err: impl std::fmt::Display,
+) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::warn!(error = %err, "admin route failed: {action}");
+    ApiErrorResponse::internal(format!("Failed to {action}")).into_json_tuple()
 }
 
 // ---------------------------------------------------------------------------
@@ -2432,21 +2494,19 @@ struct BackupManifest {
 pub async fn create_backup(
     account: AccountId,
     State(state): State<Arc<AppState>>,
-    lang: Option<axum::Extension<RequestLanguage>>,
+    _lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let home_dir = &state.kernel.home_dir();
     let backups_dir = home_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-backup-create-dir-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple()
-        .into_response();
+        tracing::warn!(
+            "Failed to create backups dir {}: {e}",
+            backups_dir.display()
+        );
+        return backup_create_error_response().into_response();
     }
 
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
@@ -2459,12 +2519,11 @@ pub async fn create_backup(
     let file = match std::fs::File::create(&backup_path) {
         Ok(f) => f,
         Err(e) => {
-            return ApiErrorResponse::internal(t.t_args(
-                "api-error-backup-create-file-failed",
-                &[("error", &e.to_string())],
-            ))
-            .into_json_tuple()
-            .into_response();
+            tracing::warn!(
+                "Failed to create backup file {}: {e}",
+                backup_path.display()
+            );
+            return backup_create_error_response().into_response();
         }
     };
     let mut zip = zip::ZipWriter::new(file);
@@ -2615,12 +2674,11 @@ pub async fn create_backup(
     }
 
     if let Err(e) = zip.finish() {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-backup-finalize-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple()
-        .into_response();
+        tracing::warn!(
+            "Failed to finalize backup archive {}: {e}",
+            backup_path.display()
+        );
+        return backup_create_error_response().into_response();
     }
 
     let size = std::fs::metadata(&backup_path)
@@ -2782,22 +2840,17 @@ pub async fn delete_backup(
                 .into_response();
         }
         Err(e) => {
-            return ApiErrorResponse::internal(t.t_args(
-                "api-error-backup-delete-failed",
-                &[("error", &e.to_string())],
-            ))
-            .into_json_tuple()
-            .into_response();
+            tracing::warn!(
+                "Failed to resolve backup path for deletion {}: {e}",
+                filename
+            );
+            return backup_delete_error_response().into_response();
         }
     };
 
     if let Err(e) = std::fs::remove_file(&backup_path) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-backup-delete-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple()
-        .into_response();
+        tracing::warn!("Failed to delete backup {}: {e}", backup_path.display());
+        return backup_delete_error_response().into_response();
     }
 
     tracing::info!("Backup deleted: {filename}");
@@ -2862,11 +2915,11 @@ pub async fn restore_backup(
                 .into_response();
         }
         Err(e) => {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple()
-            .into_response();
+            tracing::warn!(
+                "Failed to resolve backup path for restore {}: {e}",
+                filename
+            );
+            return backup_open_error_response().into_response();
         }
     };
 
@@ -2874,22 +2927,15 @@ pub async fn restore_backup(
     let file = match std::fs::File::open(&backup_path) {
         Ok(f) => f,
         Err(e) => {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple()
-            .into_response();
+            tracing::warn!("Failed to open backup {}: {e}", backup_path.display());
+            return backup_open_error_response().into_response();
         }
     };
     let mut archive = match zip::ZipArchive::new(file) {
         Ok(a) => a,
         Err(e) => {
-            return ApiErrorResponse::bad_request(t.t_args(
-                "api-error-backup-invalid-archive",
-                &[("error", &e.to_string())],
-            ))
-            .into_json_tuple()
-            .into_response();
+            tracing::warn!("Invalid backup archive {}: {e}", backup_path.display());
+            return invalid_backup_archive_response().into_response();
         }
     };
 
@@ -3548,13 +3594,8 @@ pub async fn test_webhook(
 
     // Re-validate the URL against SSRF rules before sending
     if let Err(e) = crate::webhook_store::validate_webhook_url(&webhook.url) {
-        let err_msg = {
-            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            t.t_args("api-error-webhook-url-unsafe", &[("error", &e.to_string())])
-        };
-        return ApiErrorResponse::bad_request(err_msg)
-            .into_json_tuple()
-            .into_response();
+        tracing::warn!("Webhook {} URL rejected during test send: {e}", webhook.id);
+        return webhook_url_unsafe_response().into_response();
     }
 
     let test_payload = serde_json::json!({
@@ -3597,20 +3638,8 @@ pub async fn test_webhook(
                 .into_response()
         }
         Err(e) => {
-            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            let msg = t.t_args(
-                "api-error-webhook-reach-failed",
-                &[("error", &e.to_string())],
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "status": "error",
-                    "error": msg,
-                    "webhook_id": id,
-                })),
-            )
-                .into_response()
+            tracing::warn!("Webhook test send failed for {id}: {e}");
+            webhook_reach_failed_response(&id).into_response()
         }
     }
 }
@@ -3655,9 +3684,7 @@ pub async fn task_queue_status(
             )
                 .into_response()
         }
-        Err(e) => ApiErrorResponse::internal(e)
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => admin_internal_error_response("load tasks", e).into_response(),
     }
 }
 
@@ -3681,9 +3708,7 @@ pub async fn task_queue_list(
             )
                 .into_response()
         }
-        Err(e) => ApiErrorResponse::internal(e)
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => admin_internal_error_response("list tasks", e).into_response(),
     }
 }
 
@@ -3710,9 +3735,7 @@ pub async fn task_queue_delete(
         Ok(false) => ApiErrorResponse::not_found(err_task_not_found)
             .into_json_tuple()
             .into_response(),
-        Err(e) => ApiErrorResponse::internal(e)
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => admin_internal_error_response("delete task", e).into_response(),
     }
 }
 
@@ -3745,9 +3768,7 @@ pub async fn task_queue_retry(
             })),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::internal(e)
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => admin_internal_error_response("retry task", e).into_response(),
     }
 }
 
@@ -3767,9 +3788,12 @@ async fn registry_schema(
     match librefang_types::registry_schema::load_registry_schema(home_dir) {
         Some(schema) => match serde_json::to_value(&schema) {
             Ok(val) => Json(val).into_response(),
-            Err(e) => ApiErrorResponse::internal(e.to_string())
-                .into_json_tuple()
-                .into_response(),
+            Err(e) => {
+                tracing::warn!("Failed to serialize registry schema: {e}");
+                ApiErrorResponse::internal("Failed to load registry schema")
+                    .into_json_tuple()
+                    .into_response()
+            }
         },
         None => ApiErrorResponse::not_found(
             "Registry schema not found or not yet in machine-parseable format",
@@ -3793,15 +3817,16 @@ async fn registry_schema_by_type(
         Some(schema) => match schema.content_types.get(&content_type) {
             Some(ct) => match serde_json::to_value(ct) {
                 Ok(val) => Json(val).into_response(),
-                Err(e) => ApiErrorResponse::internal(e.to_string())
-                    .into_json_tuple()
-                    .into_response(),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to serialize registry content type '{content_type}': {e}"
+                    );
+                    ApiErrorResponse::internal("Failed to load registry schema")
+                        .into_json_tuple()
+                        .into_response()
+                }
             },
-            None => ApiErrorResponse::not_found(format!(
-                "Content type '{content_type}' not found in registry schema"
-            ))
-            .into_json_tuple()
-            .into_response(),
+            None => registry_content_type_not_found_response().into_response(),
         },
         None => ApiErrorResponse::not_found("Registry schema not found")
             .into_json_tuple()
@@ -3864,17 +3889,13 @@ async fn create_registry_content(
     let identifier = match identifier {
         Some(id) => id,
         None => {
-            return ApiErrorResponse::bad_request("Missing required 'id' or 'name' field")
-                .into_json_tuple()
-                .into_response();
+            return registry_content_missing_identifier_response().into_response();
         }
     };
 
     // Validate identifier (prevent path traversal)
     if identifier.contains('/') || identifier.contains('\\') || identifier.contains("..") {
-        return ApiErrorResponse::bad_request("Invalid identifier")
-            .into_json_tuple()
-            .into_response();
+        return registry_content_invalid_identifier_response().into_response();
     }
 
     // Determine target file path
@@ -3897,19 +3918,13 @@ async fn create_registry_content(
             .join(&identifier)
             .join("plugin.toml"),
         _ => {
-            return ApiErrorResponse::bad_request(format!("Unknown content type '{content_type}'"))
-                .into_json_tuple()
-                .into_response();
+            return registry_content_invalid_type_response().into_response();
         }
     };
 
     // Don't overwrite existing content unless explicitly allowed
     if target.exists() && !allow_overwrite {
-        return ApiErrorResponse::conflict(format!(
-            "{content_type} '{identifier}' already exists (use ?allow_overwrite=true to replace)"
-        ))
-        .into_json_tuple()
-        .into_response();
+        return registry_content_already_exists_response().into_response();
     }
 
     // Convert JSON values to TOML.
@@ -3926,7 +3941,10 @@ async fn create_registry_content(
     let toml_string = match toml::to_string_pretty(&toml_value) {
         Ok(s) => s,
         Err(e) => {
-            return ApiErrorResponse::internal(e.to_string())
+            tracing::warn!(
+                "Failed to convert registry content '{content_type}/{identifier}' to TOML: {e}"
+            );
+            return ApiErrorResponse::internal("Failed to serialize registry content")
                 .into_json_tuple()
                 .into_response();
         }
@@ -3935,13 +3953,21 @@ async fn create_registry_content(
     // Create parent directories and write file
     if let Some(parent) = target.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            return ApiErrorResponse::internal(e.to_string())
+            tracing::warn!(
+                "Failed to create parent directory for registry content '{}': {e}",
+                target.display()
+            );
+            return ApiErrorResponse::internal("Failed to prepare registry content path")
                 .into_json_tuple()
                 .into_response();
         }
     }
     if let Err(e) = std::fs::write(&target, &toml_string) {
-        return ApiErrorResponse::internal(e.to_string())
+        tracing::warn!(
+            "Failed to write registry content '{}': {e}",
+            target.display()
+        );
+        return ApiErrorResponse::internal("Failed to write registry content")
             .into_json_tuple()
             .into_response();
     }
@@ -3967,7 +3993,6 @@ async fn create_registry_content(
         "ok": true,
         "content_type": content_type,
         "identifier": identifier,
-        "path": target.display().to_string(),
     }))
     .into_response()
 }
@@ -4793,5 +4818,248 @@ mod event_webhook_tests {
             StatusCode::NOT_FOUND,
             "same-tenant webhook target should resolve within owner scope"
         );
+    }
+
+    #[test]
+    fn invalid_session_label_response_is_generic() {
+        let response = invalid_session_label_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Invalid session label"));
+    }
+
+    #[test]
+    fn backup_create_error_response_is_generic() {
+        let response = backup_create_error_response();
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Failed to create backup"));
+    }
+
+    #[test]
+    fn backup_delete_error_response_is_generic() {
+        let response = backup_delete_error_response();
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Failed to delete backup"));
+    }
+
+    #[test]
+    fn backup_open_error_response_is_generic() {
+        let response = backup_open_error_response();
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Failed to open backup"));
+    }
+
+    #[test]
+    fn invalid_backup_archive_response_is_generic() {
+        let response = invalid_backup_archive_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Invalid backup archive"));
+    }
+
+    #[test]
+    fn webhook_url_unsafe_response_is_generic() {
+        let response = webhook_url_unsafe_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Webhook URL is not allowed"));
+    }
+
+    #[test]
+    fn webhook_reach_failed_response_is_generic() {
+        let response = webhook_reach_failed_response("test-webhook");
+        assert_eq!(response.0, StatusCode::BAD_GATEWAY);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Failed to reach webhook"));
+        assert_eq!(body["webhook_id"].as_str(), Some("test-webhook"));
+        assert_eq!(body["status"].as_str(), Some("error"));
+    }
+
+    #[test]
+    fn registry_content_missing_identifier_response_is_generic() {
+        let response = registry_content_missing_identifier_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(
+            body["error"].as_str(),
+            Some("Missing required content identifier")
+        );
+    }
+
+    #[test]
+    fn registry_content_invalid_identifier_response_is_generic() {
+        let response = registry_content_invalid_identifier_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(body["error"].as_str(), Some("Invalid content identifier"));
+    }
+
+    #[test]
+    fn registry_content_invalid_type_response_is_generic() {
+        let response = registry_content_invalid_type_response();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        assert_eq!(
+            body["error"].as_str(),
+            Some("Unsupported registry content type")
+        );
+    }
+
+    #[test]
+    fn registry_content_already_exists_response_is_generic() {
+        let response = registry_content_already_exists_response();
+        assert_eq!(response.0, StatusCode::CONFLICT);
+        let Json(body) = response.1;
+        assert_eq!(
+            body["error"].as_str(),
+            Some("Registry content already exists")
+        );
+    }
+
+    #[test]
+    fn registry_content_type_not_found_response_is_generic() {
+        let response = registry_content_type_not_found_response();
+        assert_eq!(response.0, StatusCode::NOT_FOUND);
+        let Json(body) = response.1;
+        assert_eq!(
+            body["error"].as_str(),
+            Some("Registry content type not found")
+        );
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::Router;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn binding_router(
+        admin_account: &str,
+        bindings: Vec<librefang_types::config::AgentBinding>,
+        agents: Vec<librefang_types::agent::AgentEntry>,
+    ) -> Router {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            admin_accounts: vec![admin_account.to_string()],
+            ..Default::default()
+        };
+        let kernel = std::sync::Arc::new(
+            librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel"),
+        );
+        for agent in agents {
+            kernel
+                .agent_registry()
+                .register(agent)
+                .expect("register agent");
+        }
+        for binding in bindings {
+            kernel.add_binding(binding);
+        }
+        let state = std::sync::Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            api_key_lock: std::sync::Arc::new(tokio::sync::RwLock::new(String::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+                Router::new(),
+            ))),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            account_sig_secret: None,
+        });
+        std::mem::forget(tmp);
+        Router::new()
+            .route("/api/bindings", axum::routing::get(list_bindings))
+            .with_state(state)
+    }
+
+    fn tenant_agent(name: &str, account_id: &str) -> librefang_types::agent::AgentEntry {
+        librefang_types::agent::AgentEntry {
+            id: AgentId::new(),
+            account_id: Some(account_id.to_string()),
+            name: name.to_string(),
+            manifest: AgentManifest::default(),
+            state: librefang_types::agent::AgentState::Created,
+            mode: librefang_types::agent::AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: librefang_types::agent::AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_system_bindings_admin_sees_global_bindings() {
+        let binding = librefang_types::config::AgentBinding {
+            agent: "tenant-b-agent".to_string(),
+            match_rule: librefang_types::config::BindingMatchRule {
+                channel: Some("discord".to_string()),
+                account_id: Some("bot-1".to_string()),
+                ..Default::default()
+            },
+        };
+        let app = binding_router(
+            "tenant-a",
+            vec![binding],
+            vec![tenant_agent("tenant-b-agent", "tenant-b")],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/bindings")
+                    .header("x-account-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let bindings = json["bindings"].as_array().expect("bindings array");
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0]["agent"], "tenant-b-agent");
+        assert_eq!(bindings[0]["match_rule"]["channel"], "discord");
+        assert_eq!(bindings[0]["match_rule"]["account_id"], "bot-1");
+    }
+
+    #[test]
+    fn test_admin_internal_error_response_is_generic() {
+        let (status, Json(body)) = admin_internal_error_response("list tasks", "backend exploded");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let err = body["error"].as_str().expect("error string");
+        assert_eq!(err, "Failed to list tasks");
+        assert!(!err.contains("backend exploded"));
     }
 }

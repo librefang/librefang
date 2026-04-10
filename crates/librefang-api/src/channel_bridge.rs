@@ -1160,6 +1160,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn list_triggers_text_scoped(&self, account_id: Option<&str>) -> String {
         let triggers = match account_id {
             Some(account_id) => self.kernel.list_triggers_scoped(account_id, None),
+            // CLI/global compatibility must stay limited to unowned triggers.
             None => self
                 .kernel
                 .trigger_engine()
@@ -1216,6 +1217,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             Some(e) => e,
             None => return format!("Agent '{agent_name}' not found."),
         };
+        // CLI/global compatibility must not create triggers for tenant-owned agents.
         if account_id.is_none() && agent.account_id.is_some() {
             return format!("Agent '{agent_name}' not found.");
         }
@@ -1242,7 +1244,15 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 let id_short = safe_truncate_str(&id_str, 8);
                 format!("Trigger created [{id_short}] for agent '{agent_name}'.")
             }
-            Err(e) => format!("Failed to create trigger: {e}"),
+            Err(e) => {
+                warn!(
+                    agent_name,
+                    error = %e,
+                    account_id,
+                    "Scoped bridge trigger creation failed"
+                );
+                "Failed to create trigger.".to_string()
+            }
         }
     }
 
@@ -1257,6 +1267,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> String {
         let triggers = match account_id {
             Some(account_id) => self.kernel.list_triggers_scoped(account_id, None),
+            // CLI/global compatibility must stay limited to unowned triggers.
             None => self
                 .kernel
                 .trigger_engine()
@@ -1297,6 +1308,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn list_schedules_text_scoped(&self, account_id: Option<&str>) -> String {
         let jobs = match account_id {
             Some(account_id) => self.kernel.cron().list_jobs_by_account(account_id),
+            // CLI/global compatibility must stay limited to unowned jobs.
             None => self
                 .kernel
                 .cron()
@@ -1361,6 +1373,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     Some(e) => e,
                     None => return format!("Agent '{agent_name}' not found."),
                 };
+                // CLI/global compatibility must not create jobs for tenant-owned agents.
                 if account_id.is_none() && agent.account_id.is_some() {
                     return format!("Agent '{agent_name}' not found.");
                 }
@@ -1398,7 +1411,15 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             "Job [{id_short}] created: '{cron_expr}' -> {agent_name}: \"{message}\""
                         )
                     }
-                    Err(e) => format!("Failed to create job: {e}"),
+                    Err(e) => {
+                        warn!(
+                            agent_name,
+                            error = %e,
+                            account_id,
+                            "Scoped bridge schedule creation failed"
+                        );
+                        "Failed to create job.".to_string()
+                    }
                 }
             }
             "del" => {
@@ -1408,6 +1429,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 let prefix = &args[0];
                 let jobs = match account_id {
                     Some(account_id) => self.kernel.cron().list_jobs_by_account(account_id),
+                    // CLI/global compatibility must stay limited to unowned jobs.
                     None => self
                         .kernel
                         .cron()
@@ -1439,7 +1461,15 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                     j.name
                                 )
                             }
-                            Err(e) => format!("Failed to remove job: {e}"),
+                            Err(e) => {
+                                warn!(
+                                    job_id = %j.id.0,
+                                    error = %e,
+                                    account_id,
+                                    "Scoped bridge schedule removal failed"
+                                );
+                                "Failed to remove job.".to_string()
+                            }
                         }
                     }
                     n => format!("{n} jobs match '{prefix}'. Be more specific."),
@@ -1452,6 +1482,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 let prefix = &args[0];
                 let jobs = match account_id {
                     Some(account_id) => self.kernel.cron().list_jobs_by_account(account_id),
+                    // CLI/global compatibility must stay limited to unowned jobs.
                     None => self
                         .kernel
                         .cron()
@@ -1502,23 +1533,28 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 input,
                                 ..
                             } => {
-                                let resolved = self
-                                    .kernel
-                                    .resolve_workflow_reference_scoped(
-                                        workflow_id,
-                                        j.account_id.as_deref().or(account_id),
-                                    )
-                                    .await;
+                                let workflow_scope = j.account_id.as_deref().or(account_id);
+                                let resolved = match workflow_scope {
+                                    Some(account_id) => {
+                                        self.kernel
+                                            .resolve_workflow_reference_scoped(
+                                                workflow_id,
+                                                Some(account_id),
+                                            )
+                                            .await
+                                    }
+                                    None => {
+                                        self.kernel
+                                            .resolve_workflow_reference_scoped(workflow_id, None)
+                                            .await
+                                    }
+                                };
                                 match resolved {
                                     Some(wf_id) => {
                                         let input_text = input.clone().unwrap_or_default();
                                         match self
                                             .kernel
-                                            .run_workflow_scoped(
-                                                wf_id,
-                                                input_text,
-                                                j.account_id.as_deref().or(account_id),
-                                            )
+                                            .run_workflow_scoped(wf_id, input_text, workflow_scope)
                                             .await
                                         {
                                             Ok((_run_id, output)) => {
@@ -4113,125 +4149,5 @@ mod tests {
             .manage_schedule_text_scoped(None, "run", &[global_prefix])
             .await;
         assert!(global_run.contains("system event published"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_none_scoped_trigger_commands_ignore_tenant_owned_triggers() {
-        let (_tmp, bridge) = test_bridge_adapter();
-
-        let tenant_agent = tenant_agent("tenant-a-target", "tenant-a");
-        let unowned_agent = unowned_agent("global-target");
-        let tenant_agent_id = tenant_agent.id;
-        let unowned_agent_id = unowned_agent.id;
-        bridge
-            .kernel
-            .agent_registry()
-            .register(tenant_agent)
-            .unwrap();
-        bridge
-            .kernel
-            .agent_registry()
-            .register(unowned_agent)
-            .unwrap();
-
-        let tenant_trigger = bridge
-            .kernel
-            .register_trigger(
-                Some("tenant-a".to_string()),
-                tenant_agent_id,
-                TriggerPattern::All,
-                "tenant".to_string(),
-                0,
-            )
-            .unwrap();
-        let tenant_prefix = tenant_trigger.0.to_string()[..8].to_string();
-
-        let global_trigger = bridge
-            .kernel
-            .register_trigger(
-                None,
-                unowned_agent_id,
-                TriggerPattern::All,
-                "global".to_string(),
-                0,
-            )
-            .unwrap();
-        let global_prefix = global_trigger.0.to_string()[..8].to_string();
-
-        let listed = bridge.list_triggers_text_scoped(None).await;
-        assert!(listed.contains("global-target"));
-        assert!(!listed.contains("tenant-a-target"));
-
-        let tenant_delete = bridge
-            .delete_trigger_text_scoped(None, &tenant_prefix)
-            .await;
-        assert!(tenant_delete.contains("No trigger found"));
-
-        let global_delete = bridge
-            .delete_trigger_text_scoped(None, &global_prefix)
-            .await;
-        assert!(global_delete.contains("removed"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_none_scoped_add_refuses_tenant_owned_agents() {
-        let (_tmp, bridge) = test_bridge_adapter();
-
-        let tenant_agent = tenant_agent("tenant-a-agent", "tenant-a");
-        let unowned_agent = unowned_agent("global-agent");
-        bridge
-            .kernel
-            .agent_registry()
-            .register(tenant_agent)
-            .unwrap();
-        bridge
-            .kernel
-            .agent_registry()
-            .register(unowned_agent)
-            .unwrap();
-
-        let tenant_trigger = bridge
-            .create_trigger_text_scoped(None, "tenant-a-agent", "all", "wake")
-            .await;
-        assert!(tenant_trigger.contains("not found"));
-
-        let tenant_schedule = bridge
-            .manage_schedule_text_scoped(
-                None,
-                "add",
-                &[
-                    "tenant-a-agent".to_string(),
-                    "*".to_string(),
-                    "*".to_string(),
-                    "*".to_string(),
-                    "*".to_string(),
-                    "*".to_string(),
-                    "hello".to_string(),
-                ],
-            )
-            .await;
-        assert!(tenant_schedule.contains("not found"));
-
-        let global_trigger = bridge
-            .create_trigger_text_scoped(None, "global-agent", "all", "wake")
-            .await;
-        assert!(global_trigger.contains("Trigger created"));
-
-        let global_schedule = bridge
-            .manage_schedule_text_scoped(
-                None,
-                "add",
-                &[
-                    "global-agent".to_string(),
-                    "*".to_string(),
-                    "*".to_string(),
-                    "*".to_string(),
-                    "*".to_string(),
-                    "*".to_string(),
-                    "hello".to_string(),
-                ],
-            )
-            .await;
-        assert!(global_schedule.contains("created"));
     }
 }

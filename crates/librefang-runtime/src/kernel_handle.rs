@@ -42,6 +42,12 @@ pub trait KernelHandle: Send + Sync {
     /// Kill an agent by ID.
     fn kill_agent(&self, agent_id: &str) -> Result<(), String>;
 
+    /// Resolve the caller agent's tenant/account owner when available.
+    fn caller_account_id(&self, caller_agent_id: &str) -> Result<Option<String>, String> {
+        let _ = caller_agent_id;
+        Ok(None)
+    }
+
     /// Store a value in shared memory (cross-agent accessible).
     /// Shared memory is scoped to the caller's tenant. When `peer_id` is
     /// `Some`, the key is further scoped to that peer so different end users
@@ -131,7 +137,9 @@ pub trait KernelHandle: Send + Sync {
         payload: serde_json::Value,
     ) -> Result<(), String> {
         let _ = caller_agent_id;
-        self.publish_event(event_type, payload).await
+        let _ = event_type;
+        let _ = payload;
+        Err("Caller-scoped event publishing is not available on this kernel handle.".to_string())
     }
 
     /// Add an entity to the knowledge graph.
@@ -675,5 +683,22 @@ mod tests {
             handle.published.lock().unwrap().clone(),
             vec![("tenant.alert".to_string(), serde_json::json!({"ok": true}))]
         );
+    }
+
+    #[tokio::test]
+    async fn test_publish_event_for_agent_default_fails_closed() {
+        let handle = FallbackEventKernel {
+            published: Mutex::new(Vec::new()),
+        };
+
+        let result = handle
+            .publish_event_for_agent("agent-123", "tenant.alert", serde_json::json!({"ok": true}))
+            .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Caller-scoped event publishing is not available on this kernel handle."
+        );
+        assert!(handle.published.lock().unwrap().is_empty());
     }
 }

@@ -168,6 +168,138 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+fn skill_install_failed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to install skill").into_json_tuple()
+}
+
+fn skill_uninstall_not_found_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("Skill not found").into_json_tuple()
+}
+
+fn mcp_server_not_found_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("MCP server not found").into_json_tuple()
+}
+
+fn invalid_mcp_server_config_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Invalid MCP server config").into_json_tuple()
+}
+
+fn mcp_config_write_failed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to write MCP config").into_json_tuple()
+}
+
+fn skill_create_failed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to create skill").into_json_tuple()
+}
+
+fn extension_not_found_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("Extension not found").into_json_tuple()
+}
+
+fn integration_install_failed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to install integration").into_json_tuple()
+}
+
+fn integration_already_installed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::conflict("Integration already installed").into_json_tuple()
+}
+
+fn integration_unknown_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("Integration not found").into_json_tuple()
+}
+
+fn integration_not_installed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("Integration not installed").into_json_tuple()
+}
+
+fn extension_install_failed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to install extension").into_json_tuple()
+}
+
+fn extension_already_installed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::conflict("Extension already installed").into_json_tuple()
+}
+
+fn extension_unknown_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("Extension not found").into_json_tuple()
+}
+
+fn integration_reconnect_failed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to reconnect integration").into_json_tuple()
+}
+
+fn integrations_reload_failed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to reload integrations").into_json_tuple()
+}
+
+fn hand_not_found_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("Hand not found").into_json_tuple()
+}
+
+fn hand_install_failed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request("Failed to install hand").into_json_tuple()
+}
+
+fn hand_secret_write_failed_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal("Failed to write secret").into_json_tuple()
+}
+
+fn hand_settings_not_found_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("Hand not found").into_json_tuple()
+}
+
+fn no_active_hand_instance_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("No active hand instance").into_json_tuple()
+}
+
+fn marketplace_backend_failed_response(
+    status: StatusCode,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "items": [],
+            "next_cursor": null,
+            "error": "Marketplace request failed",
+        })),
+    )
+}
+
+fn marketplace_detail_failed_response(status: StatusCode) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": if status == StatusCode::TOO_MANY_REQUESTS {
+                "Marketplace request failed"
+            } else {
+                "Skill not found"
+            }
+        })),
+    )
+}
+
+fn skill_already_installed_response() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "Skill is already installed",
+            "status": "already_installed",
+        })),
+    )
+}
+
+fn skill_not_found_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::not_found("Skill not found").into_json_tuple()
+}
+
+fn mcp_server_already_exists_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::conflict("MCP server already exists").into_json_tuple()
+}
+
+fn skill_already_exists_response() -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::conflict("Skill already exists").into_json_tuple()
+}
+
 // ---------------------------------------------------------------------------
 // Skills endpoints
 // ---------------------------------------------------------------------------
@@ -254,41 +386,26 @@ pub async fn install_skill(
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);
         if !hand_dir.exists() {
-            return ApiErrorResponse::not_found(format!("Hand '{hand_id}' not found"))
-                .into_json_tuple()
-                .into_response();
+            return hand_not_found_response().into_response();
         }
         hand_dir.join("skills")
     } else {
         home.join("skills")
     };
     if let Err(e) = std::fs::create_dir_all(&skills_dir) {
-        return ApiErrorResponse::internal(format!("Failed to create skills dir: {e}"))
-            .into_json_tuple()
-            .into_response();
+        tracing::warn!("Failed to create skills dir {}: {e}", skills_dir.display());
+        return skill_install_failed_response().into_response();
     }
 
     // Install from local registry (~/.librefang/registry/skills/{name}/)
     let registry_src = home.join("registry").join("skills").join(&req.name);
     if !registry_src.exists() {
-        return ApiErrorResponse::not_found(format!(
-            "Skill '{}' not found in local registry",
-            req.name
-        ))
-        .into_json_tuple()
-        .into_response();
+        return skill_not_found_response().into_response();
     }
 
     let dest = skills_dir.join(&req.name);
     if dest.exists() {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": format!("Skill '{}' is already installed", req.name),
-                "status": "already_installed",
-            })),
-        )
-            .into_response();
+        return skill_already_installed_response().into_response();
     }
 
     // Copy the skill directory from registry to skills
@@ -317,7 +434,7 @@ pub async fn install_skill(
             tracing::warn!("Skill install failed: {e}");
             // Clean up partial copy
             let _ = std::fs::remove_dir_all(&dest);
-            ApiErrorResponse::internal(format!("Install failed: {e}")).into_json_tuple()
+            skill_install_failed_response()
         }
     }
     .into_response()
@@ -356,7 +473,10 @@ pub async fn uninstall_skill(
                 Json(serde_json::json!({"status": "uninstalled", "name": req.name})),
             )
         }
-        Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::warn!("Skill uninstall failed for {}: {e}", req.name);
+            skill_uninstall_not_found_response()
+        }
     }
     .into_response()
 }
@@ -597,17 +717,13 @@ pub async fn clawhub_search(
             (StatusCode::OK, Json(resp))
         }
         Err(e) => {
-            let msg = format!("{e}");
-            tracing::warn!("ClawHub search failed: {msg}");
+            tracing::warn!("ClawHub search failed: {e}");
             let status = if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else {
                 StatusCode::OK
             };
-            (
-                status,
-                Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
-            )
+            marketplace_backend_failed_response(status)
         }
     }
     .into_response()
@@ -681,17 +797,13 @@ pub async fn clawhub_browse(
             (StatusCode::OK, Json(resp))
         }
         Err(e) => {
-            let msg = format!("{e}");
-            tracing::warn!("ClawHub browse failed: {msg}");
+            tracing::warn!("ClawHub browse failed: {e}");
             let status = if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else {
                 StatusCode::OK
             };
-            (
-                status,
-                Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
-            )
+            marketplace_backend_failed_response(status)
         }
     }
     .into_response()
@@ -767,12 +879,13 @@ pub async fn clawhub_skill_detail(
             )
         }
         Err(e) => {
+            tracing::warn!("ClawHub detail failed for {slug}: {e}");
             let status = if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else {
                 StatusCode::NOT_FOUND
             };
-            (status, Json(serde_json::json!({"error": format!("{e}")})))
+            marketplace_detail_failed_response(status)
         }
     }
     .into_response()
@@ -858,11 +971,7 @@ pub async fn clawhub_install(
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);
         if !hand_dir.exists() {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Hand '{hand_id}' not found")})),
-            )
-                .into_response();
+            return hand_not_found_response().into_response();
         }
         let dir = hand_dir.join("skills");
         let _ = std::fs::create_dir_all(&dir);
@@ -875,14 +984,7 @@ pub async fn clawhub_install(
 
     // Check if already installed
     if client.is_installed(&req.slug, &skills_dir) {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": format!("Skill '{}' is already installed", req.slug),
-                "status": "already_installed",
-            })),
-        )
-            .into_response();
+        return skill_already_installed_response().into_response();
     }
 
     match client.install(&req.slug, &skills_dir).await {
@@ -918,7 +1020,6 @@ pub async fn clawhub_install(
             )
         }
         Err(e) => {
-            let msg = format!("{e}");
             let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
                 StatusCode::FORBIDDEN
             } else if is_clawhub_rate_limit(&e) {
@@ -928,8 +1029,11 @@ pub async fn clawhub_install(
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
-            tracing::warn!("ClawHub install failed: {msg}");
-            (status, Json(serde_json::json!({"error": msg})))
+            tracing::warn!("ClawHub install failed: {e}");
+            (
+                status,
+                Json(serde_json::json!({"error": "Failed to install skill"})),
+            )
         }
     }
     .into_response()
@@ -999,17 +1103,13 @@ pub async fn skillhub_search(
             (StatusCode::OK, Json(resp))
         }
         Err(e) => {
-            let msg = format!("{e}");
-            tracing::warn!("Skillhub search failed: {msg}");
+            tracing::warn!("Skillhub search failed: {e}");
             let status = if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else {
                 StatusCode::OK
             };
-            (
-                status,
-                Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
-            )
+            marketplace_backend_failed_response(status)
         }
     }
     .into_response()
@@ -1068,11 +1168,10 @@ pub async fn skillhub_browse(
             (StatusCode::OK, Json(resp))
         }
         Err(e) => {
-            let msg = format!("{e}");
-            tracing::warn!("Skillhub browse failed: {msg}");
+            tracing::warn!("Skillhub browse failed: {e}");
             (
                 StatusCode::OK,
-                Json(serde_json::json!({"items": [], "error": msg})),
+                Json(serde_json::json!({"items": [], "error": "Marketplace request failed"})),
             )
         }
     }
@@ -1144,12 +1243,13 @@ pub async fn skillhub_skill_detail(
             )
         }
         Err(e) => {
+            tracing::warn!("Skillhub detail failed for {slug}: {e}");
             let status = if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else {
                 StatusCode::NOT_FOUND
             };
-            (status, Json(serde_json::json!({"error": format!("{e}")})))
+            marketplace_detail_failed_response(status)
         }
     }.into_response()
 }
@@ -1181,11 +1281,7 @@ pub async fn skillhub_install(
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);
         if !hand_dir.exists() {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Hand '{hand_id}' not found")})),
-            )
-                .into_response();
+            return hand_not_found_response().into_response();
         }
         let dir = hand_dir.join("skills");
         let _ = std::fs::create_dir_all(&dir);
@@ -1203,14 +1299,7 @@ pub async fn skillhub_install(
 
     // Check if already installed
     if client.is_installed(&req.slug, &skills_dir) {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": format!("Skill '{}' is already installed", req.slug),
-                "status": "already_installed",
-            })),
-        )
-            .into_response();
+        return skill_already_installed_response().into_response();
     }
 
     match client.install(&req.slug, &skills_dir).await {
@@ -1246,7 +1335,6 @@ pub async fn skillhub_install(
             )
         }
         Err(e) => {
-            let msg = format!("{e}");
             let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
                 StatusCode::FORBIDDEN
             } else if is_clawhub_rate_limit(&e) {
@@ -1256,8 +1344,11 @@ pub async fn skillhub_install(
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
-            tracing::warn!("Skillhub install failed: {msg}");
-            (status, Json(serde_json::json!({"error": msg})))
+            tracing::warn!("Skillhub install failed: {e}");
+            (
+                status,
+                Json(serde_json::json!({"error": "Failed to install skill"})),
+            )
         }
     }
     .into_response()
@@ -1299,7 +1390,11 @@ fn server_platform() -> &'static str {
     }
 }
 
-/// GET /api/hands — List all hand definitions (marketplace).
+/// GET /api/hands — List daemon-global hand catalog definitions.
+///
+/// This is intentionally global catalog metadata served from the hands
+/// subsystem. Tenant-owned behavior lives under active hand instances,
+/// settings, and activation flows.
 #[utoipa::path(
     get,
     path = "/api/hands",
@@ -1355,18 +1450,12 @@ pub async fn list_hands(
                 "active": active,
                 "degraded": degraded,
                 "requirements": reqs.iter().map(|(r, ok)| {
-                    let mut req = serde_json::json!({
+                    serde_json::json!({
                         "key": r.check_value,
                         "label": r.label,
                         "satisfied": ok,
                         "optional": r.optional,
-                    });
-                    if *ok {
-                        if let Ok(val) = std::env::var(&r.check_value) {
-                            req["current_value"] = serde_json::json!(val);
-                        }
-                    }
-                    req
+                    })
                 }).collect::<Vec<_>>(),
                 "dashboard_metrics": d.dashboard.metrics.len(),
                 "has_settings": !d.settings.is_empty(),
@@ -1378,6 +1467,15 @@ pub async fn list_hands(
         .collect();
 
     Json(serde_json::json!({ "hands": hands, "total": hands.len() })).into_response()
+}
+
+fn hand_action_failed_response(
+    action: &'static str,
+    err: &dyn std::fmt::Display,
+) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::warn!(error = %err, "hand action failed: {action}");
+    let message = format!("Failed to {action} hand");
+    ApiErrorResponse::bad_request(message).into_json_tuple()
 }
 
 /// GET /api/hands/active — List active hand instances.
@@ -1421,7 +1519,11 @@ pub async fn list_active_hands(
     Json(serde_json::json!({ "instances": items, "total": items.len() })).into_response()
 }
 
-/// GET /api/hands/{hand_id} — Get a single hand definition with requirements check.
+/// GET /api/hands/{hand_id} — Get daemon-global hand definition metadata with requirements check.
+///
+/// Like `list_hands`, this is catalog metadata from the global hands subsystem.
+/// Tenant-owned behavior stays in active instances, activation, and settings
+/// routes.
 #[utoipa::path(
     get,
     path = "/api/hands/{hand_id}",
@@ -1564,7 +1666,11 @@ pub async fn get_hand(
     .into_response()
 }
 
-/// POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a hand.
+/// POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a
+/// daemon-global hand definition.
+///
+/// This endpoint inspects global catalog requirements only. It does not expose
+/// or mutate tenant-owned hand instance state.
 #[utoipa::path(
     post,
     path = "/api/hands/{hand_id}/check-deps",
@@ -1651,9 +1757,7 @@ pub async fn install_hand_deps(
     let def = match state.kernel.hands().get_definition(&hand_id) {
         Some(d) => d.clone(),
         None => {
-            return ApiErrorResponse::not_found(format!("Hand not found: {hand_id}"))
-                .into_json_tuple()
-                .into_response();
+            return hand_not_found_response().into_response();
         }
     };
 
@@ -1742,11 +1846,15 @@ pub async fn install_hand_deps(
         {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
+                tracing::warn!(
+                    "Hand dependency install command failed for {}: {e}",
+                    req.key
+                );
                 results.push(serde_json::json!({
                     "key": req.key,
                     "status": "error",
                     "command": final_cmd,
-                    "message": format!("Failed to execute: {e}"),
+                    "message": "Failed to execute install command",
                 }));
                 continue;
             }
@@ -1923,7 +2031,10 @@ pub async fn install_hand(
                 })),
             )
         }
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => {
+            tracing::warn!("install_hand failed: {e}");
+            hand_install_failed_response()
+        }
     }
     .into_response()
 }
@@ -2034,7 +2145,7 @@ pub async fn pause_hand(
             StatusCode::OK,
             Json(serde_json::json!({"status": "paused", "instance_id": id})),
         ),
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => hand_action_failed_response("pause", &e),
     }
     .into_response()
 }
@@ -2067,7 +2178,7 @@ pub async fn resume_hand(
             StatusCode::OK,
             Json(serde_json::json!({"status": "resumed", "instance_id": id})),
         ),
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => hand_action_failed_response("resume", &e),
     }
     .into_response()
 }
@@ -2100,7 +2211,7 @@ pub async fn deactivate_hand(
             StatusCode::OK,
             Json(serde_json::json!({"status": "deactivated", "instance_id": id})),
         ),
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => hand_action_failed_response("deactivate", &e),
     }
     .into_response()
 }
@@ -2154,20 +2265,16 @@ pub async fn set_hand_secret(
     };
 
     if !valid {
-        return ApiErrorResponse::bad_request(format!(
-            "'{}' is not a requirement of hand '{}'",
-            env_key, hand_id
-        ))
-        .into_json_tuple()
-        .into_response();
+        return ApiErrorResponse::bad_request("Secret key is not valid for this hand")
+            .into_json_tuple()
+            .into_response();
     }
 
     // Write to secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_key, &value) {
-        return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
-            .into_json_tuple()
-            .into_response();
+        tracing::warn!("Failed to write secret {}: {e}", secrets_path.display());
+        return hand_secret_write_failed_response().into_response();
     }
 
     // Set in current process
@@ -2216,9 +2323,7 @@ pub async fn get_hand_settings(
     {
         Ok(s) => s,
         Err(_) => {
-            return ApiErrorResponse::not_found(format!("Hand not found: {hand_id}"))
-                .into_json_tuple()
-                .into_response();
+            return hand_settings_not_found_response().into_response();
         }
     };
 
@@ -2288,12 +2393,12 @@ pub async fn update_hand_settings(
                     })),
                 )
             }
-            Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+            Err(e) => {
+                tracing::warn!(error = %e, hand_id, "hand settings update failed");
+                ApiErrorResponse::bad_request("Failed to update hand settings").into_json_tuple()
+            }
         },
-        None => ApiErrorResponse::not_found(format!(
-            "No active instance for hand: {hand_id}. Activate the hand first."
-        ))
-        .into_json_tuple(),
+        None => no_active_hand_instance_response(),
     }
     .into_response()
 }
@@ -2592,10 +2697,15 @@ pub async fn hand_send_message(
 
     // Resolve file attachments
     if !req.attachments.is_empty() {
-        let image_blocks =
-            super::agents::resolve_attachments(&req.attachments, account.0.as_deref());
-        if !image_blocks.is_empty() {
-            super::agents::inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+        if let Some(account_id) = account.0.as_deref() {
+            let image_blocks = super::agents::resolve_attachments(&req.attachments, account_id);
+            if !image_blocks.is_empty() {
+                super::agents::inject_attachments_into_session(
+                    &state.kernel,
+                    agent_id,
+                    image_blocks,
+                );
+            }
         }
     }
 
@@ -3077,9 +3187,7 @@ pub async fn get_mcp_server(
     let entry = match entry {
         Some(e) => e,
         None => {
-            return ApiErrorResponse::not_found(format!("MCP server '{}' not found", name))
-                .into_json_tuple()
-                .into_response();
+            return mcp_server_not_found_response().into_response();
         }
     };
 
@@ -3157,9 +3265,8 @@ pub async fn add_mcp_server(
     let entry: librefang_types::config::McpServerConfigEntry = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {
-            return ApiErrorResponse::bad_request(format!("Invalid MCP server config: {e}"))
-                .into_json_tuple()
-                .into_response();
+            tracing::warn!("Invalid MCP server config for {name}: {e}");
+            return invalid_mcp_server_config_response().into_response();
         }
     };
 
@@ -3171,17 +3278,14 @@ pub async fn add_mcp_server(
         .iter()
         .any(|s| s.name == name)
     {
-        return ApiErrorResponse::conflict(format!("MCP server '{}' already exists", name))
-            .into_json_tuple()
-            .into_response();
+        return mcp_server_already_exists_response().into_response();
     }
 
     // Persist to config.toml
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
-            .into_json_tuple()
-            .into_response();
+        tracing::warn!("Failed to persist MCP config for {name}: {e}");
+        return mcp_config_write_failed_response().into_response();
     }
 
     // Trigger config reload
@@ -3250,11 +3354,7 @@ pub async fn update_mcp_server(
         .iter()
         .any(|s| s.name == name)
     {
-        return ApiErrorResponse::not_found(
-            t.t_args("api-error-mcp-not-found", &[("name", &name)]),
-        )
-        .into_json_tuple()
-        .into_response();
+        return mcp_server_not_found_response().into_response();
     }
 
     // Force the name in body to match the path parameter
@@ -3272,23 +3372,16 @@ pub async fn update_mcp_server(
     let entry: librefang_types::config::McpServerConfigEntry = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {
-            return ApiErrorResponse::bad_request(
-                t.t_args("api-error-mcp-invalid-config", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple()
-            .into_response();
+            tracing::warn!("Invalid MCP server config for {name}: {e}");
+            return invalid_mcp_server_config_response().into_response();
         }
     };
 
     // Persist — upsert replaces an existing entry with the same name
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-config-write-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple()
-        .into_response();
+        tracing::warn!("Failed to persist MCP config for {name}: {e}");
+        return mcp_config_write_failed_response().into_response();
     }
     // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
     // be held across an async suspension point.
@@ -3339,12 +3432,11 @@ pub async fn delete_mcp_server(
     account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-    lang: Option<axum::Extension<RequestLanguage>>,
+    _lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
     if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
         return (code, json).into_response();
     }
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Ensure the entry exists
     if !state
         .kernel
@@ -3353,23 +3445,14 @@ pub async fn delete_mcp_server(
         .iter()
         .any(|s| s.name == name)
     {
-        return ApiErrorResponse::not_found(
-            t.t_args("api-error-mcp-not-found", &[("name", &name)]),
-        )
-        .into_json_tuple()
-        .into_response();
+        return mcp_server_not_found_response().into_response();
     }
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = remove_mcp_server_config(&config_path, &name) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-config-write-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple()
-        .into_response();
+        tracing::warn!("Failed to persist MCP config for {name}: {e}");
+        return mcp_config_write_failed_response().into_response();
     }
-    drop(t);
 
     let reload_status = match state.kernel.reload_config().await {
         Ok(plan) => {
@@ -3557,15 +3640,12 @@ pub async fn create_skill(
     // Write skill.toml to ~/.librefang/skills/{name}/
     let skill_dir = state.kernel.home_dir().join("skills").join(&name);
     if skill_dir.exists() {
-        return ApiErrorResponse::conflict(format!("Skill '{}' already exists", name))
-            .into_json_tuple()
-            .into_response();
+        return skill_already_exists_response().into_response();
     }
 
     if let Err(e) = std::fs::create_dir_all(&skill_dir) {
-        return ApiErrorResponse::internal(format!("Failed to create skill directory: {e}"))
-            .into_json_tuple()
-            .into_response();
+        tracing::warn!("Failed to create skill dir {}: {e}", skill_dir.display());
+        return skill_create_failed_response().into_response();
     }
 
     let toml_content = format!(
@@ -3577,9 +3657,11 @@ pub async fn create_skill(
 
     let toml_path = skill_dir.join("skill.toml");
     if let Err(e) = std::fs::write(&toml_path, &toml_content) {
-        return ApiErrorResponse::internal(format!("Failed to write skill.toml: {e}"))
-            .into_json_tuple()
-            .into_response();
+        tracing::warn!(
+            "Failed to write skill manifest {}: {e}",
+            toml_path.display()
+        );
+        return skill_create_failed_response().into_response();
     }
 
     (
@@ -3819,9 +3901,7 @@ pub async fn get_integration(
     let template = match registry.get_template(&id) {
         Some(t) => t,
         None => {
-            return ApiErrorResponse::not_found(format!("Integration '{}' not found", id))
-                .into_json_tuple()
-                .into_response();
+            return integration_unknown_response().into_response();
         }
     };
 
@@ -3954,15 +4034,9 @@ pub async fn add_integration(
             .unwrap_or_else(|e| e.into_inner());
 
         if registry.is_installed(&id) {
-            Some((
-                StatusCode::CONFLICT,
-                format!("Integration '{}' already installed", id),
-            ))
+            Some(integration_already_installed_response())
         } else if registry.get_template(&id).is_none() {
-            Some((
-                StatusCode::NOT_FOUND,
-                format!("Unknown integration: '{}'", id),
-            ))
+            Some(integration_unknown_response())
         } else {
             let entry = librefang_extensions::InstalledIntegration {
                 id: id.clone(),
@@ -3973,13 +4047,16 @@ pub async fn add_integration(
             };
             match registry.install(entry) {
                 Ok(_) => None,
-                Err(e) => Some((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+                Err(e) => {
+                    tracing::warn!("Integration install failed for {id}: {e}");
+                    Some(integration_install_failed_response())
+                }
             }
         }
     }; // write lock dropped here
 
-    if let Some((status, error)) = install_err {
-        return (status, Json(serde_json::json!({"error": error}))).into_response();
+    if let Some(response) = install_err {
+        return response.into_response();
     }
 
     state.kernel.extension_monitor().register(&id);
@@ -4083,9 +4160,7 @@ pub async fn reconnect_integration(
     };
 
     if !is_installed {
-        return ApiErrorResponse::not_found(format!("Integration '{}' not installed", id))
-            .into_json_tuple()
-            .into_response();
+        return integration_not_installed_response().into_response();
     }
 
     match state.kernel.reconnect_extension_mcp(&id).await {
@@ -4097,14 +4172,10 @@ pub async fn reconnect_integration(
                 "tool_count": tool_count,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "id": id,
-                "status": "error",
-                "error": e,
-            })),
-        ),
+        Err(e) => {
+            tracing::warn!("Failed to reconnect integration {id}: {e}");
+            integration_reconnect_failed_response()
+        }
     }
     .into_response()
 }
@@ -4174,7 +4245,10 @@ pub async fn reload_integrations(
                 "new_connections": connected,
             })),
         ),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => {
+            tracing::warn!("Failed to reload integrations: {e}");
+            integrations_reload_failed_response()
+        }
     }
     .into_response()
 }
@@ -4268,9 +4342,7 @@ pub async fn get_extension(
     let template = match registry.get_template(&name) {
         Some(t) => t.clone(),
         None => {
-            return ApiErrorResponse::not_found(format!("Extension '{}' not found", name))
-                .into_json_tuple()
-                .into_response();
+            return extension_not_found_response().into_response();
         }
     };
 
@@ -4354,15 +4426,9 @@ pub async fn install_extension(
             .unwrap_or_else(|e| e.into_inner());
 
         if registry.is_installed(&name) {
-            Some((
-                StatusCode::CONFLICT,
-                format!("Extension '{}' already installed", name),
-            ))
+            Some(extension_already_installed_response())
         } else if registry.get_template(&name).is_none() {
-            Some((
-                StatusCode::NOT_FOUND,
-                format!("Unknown extension: '{}'", name),
-            ))
+            Some(extension_unknown_response())
         } else {
             let entry = librefang_extensions::InstalledIntegration {
                 id: name.clone(),
@@ -4373,13 +4439,16 @@ pub async fn install_extension(
             };
             match registry.install(entry) {
                 Ok(_) => None,
-                Err(e) => Some((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+                Err(e) => {
+                    tracing::warn!("Extension install failed for {name}: {e}");
+                    Some(extension_install_failed_response())
+                }
             }
         }
     }; // write lock dropped here
 
-    if let Some((status, error)) = install_err {
-        return (status, Json(serde_json::json!({"error": error}))).into_response();
+    if let Some(response) = install_err {
+        return response.into_response();
     }
 
     state.kernel.extension_monitor().register(&name);
@@ -4434,9 +4503,8 @@ pub async fn uninstall_extension(
     };
 
     if let Some(e) = uninstall_err {
-        return ApiErrorResponse::not_found(e.to_string())
-            .into_json_tuple()
-            .into_response();
+        tracing::warn!("Extension uninstall failed for {name}: {e}");
+        return extension_not_found_response().into_response();
     }
 
     state.kernel.extension_monitor().unregister(&name);
@@ -4589,6 +4657,108 @@ mod tests {
         assert_eq!(body["error"].as_str(), Some("Failed to load session"));
     }
 
+    #[test]
+    fn hand_action_failed_response_is_generic() {
+        let response = super::hand_action_failed_response("pause", &"kernel exploded");
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let Json(body) = response.1;
+        let err = body["error"].as_str().expect("error string");
+        assert_eq!(err, "Failed to pause hand");
+        assert!(!err.contains("kernel exploded"));
+    }
+
+    #[test]
+    fn admin_sanitizer_helpers_are_generic() {
+        let cases = [
+            (
+                skill_install_failed_response(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to install skill",
+            ),
+            (
+                skill_uninstall_not_found_response(),
+                StatusCode::NOT_FOUND,
+                "Skill not found",
+            ),
+            (
+                mcp_server_not_found_response(),
+                StatusCode::NOT_FOUND,
+                "MCP server not found",
+            ),
+            (
+                invalid_mcp_server_config_response(),
+                StatusCode::BAD_REQUEST,
+                "Invalid MCP server config",
+            ),
+            (
+                mcp_config_write_failed_response(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to write MCP config",
+            ),
+            (
+                skill_create_failed_response(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create skill",
+            ),
+            (
+                extension_not_found_response(),
+                StatusCode::NOT_FOUND,
+                "Extension not found",
+            ),
+            (
+                integration_install_failed_response(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to install integration",
+            ),
+            (
+                integration_already_installed_response(),
+                StatusCode::CONFLICT,
+                "Integration already installed",
+            ),
+            (
+                integration_unknown_response(),
+                StatusCode::NOT_FOUND,
+                "Integration not found",
+            ),
+            (
+                integration_not_installed_response(),
+                StatusCode::NOT_FOUND,
+                "Integration not installed",
+            ),
+            (
+                extension_install_failed_response(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to install extension",
+            ),
+            (
+                extension_already_installed_response(),
+                StatusCode::CONFLICT,
+                "Extension already installed",
+            ),
+            (
+                extension_unknown_response(),
+                StatusCode::NOT_FOUND,
+                "Extension not found",
+            ),
+            (
+                integration_reconnect_failed_response(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to reconnect integration",
+            ),
+            (
+                integrations_reload_failed_response(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to reload integrations",
+            ),
+        ];
+
+        for (response, status, message) in cases {
+            assert_eq!(response.0, status);
+            let Json(body) = response.1;
+            assert_eq!(body["error"].as_str(), Some(message));
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn get_hand_sanitizes_missing_hand_errors() {
         let (_tmp, state) = test_app_state();
@@ -4648,6 +4818,94 @@ mod tests {
         assert!(
             !err.contains("missing-integration"),
             "raw internal error leaked: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_extension_sanitizes_missing_extension_errors() {
+        let (_tmp, state) = test_app_state();
+
+        let response = get_extension(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            Path("missing-extension".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        let err = body["error"].as_str().expect("error string");
+        assert_eq!(err, "Extension not found");
+        assert!(!err.contains("missing-extension"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uninstall_extension_sanitizes_missing_extension_errors() {
+        let (_tmp, state) = test_app_state();
+
+        let response = uninstall_extension(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            Json(ExtensionUninstallRequest {
+                name: "missing-extension".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        let err = body["error"].as_str().expect("error string");
+        assert_eq!(err, "Extension not found");
+        assert!(!err.contains("missing-extension"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_hands_does_not_expose_requirement_env_values() {
+        let (_tmp, state) = test_app_state();
+        let defs = state.kernel.hands().list_definitions();
+        let (hand_id, env_key) = defs
+            .iter()
+            .find_map(|def| {
+                def.requires
+                    .first()
+                    .map(|req| (def.id.clone(), req.check_value.clone()))
+            })
+            .expect("hand with requirement");
+
+        // SAFETY: test-local environment setup.
+        unsafe {
+            std::env::set_var(&env_key, "super-secret-hand-value");
+        }
+
+        let response = list_hands(
+            AccountId(Some("tenant-a".to_string())),
+            State(state),
+            axum::http::HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let hand = body["hands"]
+            .as_array()
+            .expect("hands array")
+            .iter()
+            .find(|hand| hand["id"].as_str() == Some(hand_id.as_str()))
+            .expect("target hand");
+        let req = hand["requirements"]
+            .as_array()
+            .expect("requirements array")
+            .iter()
+            .find(|req| req["key"].as_str() == Some(env_key.as_str()))
+            .expect("target requirement");
+
+        assert!(
+            req.get("current_value").is_none(),
+            "requirement leaked current_value: {req}"
+        );
+        assert!(
+            body.to_string().find("super-secret-hand-value").is_none(),
+            "hand catalog leaked env value: {body}"
         );
     }
 }

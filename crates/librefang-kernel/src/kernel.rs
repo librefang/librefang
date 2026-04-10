@@ -3083,7 +3083,8 @@ system_prompt = "You are a helpful assistant."
                 agent_id,
                 name: name.clone(),
             }),
-        );
+        )
+        .with_account_id(entry.account_id.clone());
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
         let _triggered = self.triggers.evaluate(&event);
 
@@ -7299,13 +7300,20 @@ system_prompt = "You are a helpful assistant."
                     .workflows
                     .get_workflow(workflow_id)
                     .await
+                    .filter(|workflow| workflow.account_id.is_none())
                     .map(|workflow| workflow.id),
             };
         }
 
         let workflows = match account_id {
             Some(account_id) => self.workflows.list_workflows_by_account(account_id).await,
-            None => self.workflows.list_workflows().await,
+            None => self
+                .workflows
+                .list_workflows()
+                .await
+                .into_iter()
+                .filter(|workflow| workflow.account_id.is_none())
+                .collect(),
         };
         workflows
             .into_iter()
@@ -7336,7 +7344,11 @@ system_prompt = "You are a helpful assistant."
                     .get_workflow_scoped(workflow_id, account_id)
                     .await
             }
-            None => self.workflows.get_workflow(workflow_id).await,
+            None => self
+                .workflows
+                .get_workflow(workflow_id)
+                .await
+                .filter(|workflow| workflow.account_id.is_none()),
         }
         .ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::Internal("Workflow not found".to_string()))
@@ -7356,9 +7368,16 @@ system_prompt = "You are a helpful assistant."
                 StepAgent::ById { id } => {
                     let agent_id: AgentId = id.parse().ok()?;
                     let entry = self.registry.get(agent_id)?;
-                    if let Some(account_id) = account_id {
-                        if entry.account_id.as_deref() != Some(account_id) {
-                            return None;
+                    match account_id {
+                        Some(account_id) => {
+                            if entry.account_id.as_deref() != Some(account_id) {
+                                return None;
+                            }
+                        }
+                        None => {
+                            if entry.account_id.is_some() {
+                                return None;
+                            }
                         }
                     }
                     let inherit = entry.manifest.inherit_parent_context;
@@ -7371,7 +7390,11 @@ system_prompt = "You are a helpful assistant."
                             .list_by_account(account_id)
                             .into_iter()
                             .find(|entry| entry.name == *name)?,
-                        None => self.registry.find_by_name(name)?,
+                        None => self
+                            .registry
+                            .list()
+                            .into_iter()
+                            .find(|entry| entry.account_id.is_none() && entry.name == *name)?,
                     };
                     let inherit = entry.manifest.inherit_parent_context;
                     Some((entry.id, entry.name.clone(), inherit))
@@ -7431,15 +7454,28 @@ system_prompt = "You are a helpful assistant."
         input: String,
         account_id: Option<&str>,
     ) -> KernelResult<Vec<DryRunStep>> {
-        if let Some(account_id) = account_id {
-            self.workflows
-                .get_workflow_scoped(workflow_id, account_id)
-                .await
-                .ok_or_else(|| {
-                    KernelError::LibreFang(LibreFangError::Internal(
-                        "Workflow not found".to_string(),
-                    ))
-                })?;
+        match account_id {
+            Some(account_id) => {
+                self.workflows
+                    .get_workflow_scoped(workflow_id, account_id)
+                    .await
+                    .ok_or_else(|| {
+                        KernelError::LibreFang(LibreFangError::Internal(
+                            "Workflow not found".to_string(),
+                        ))
+                    })?;
+            }
+            None => {
+                self.workflows
+                    .get_workflow(workflow_id)
+                    .await
+                    .filter(|workflow| workflow.account_id.is_none())
+                    .ok_or_else(|| {
+                        KernelError::LibreFang(LibreFangError::Internal(
+                            "Workflow not found".to_string(),
+                        ))
+                    })?;
+            }
         }
         let resolver =
             |agent_ref: &StepAgent| -> Option<(librefang_types::agent::AgentId, String, bool)> {
@@ -7447,23 +7483,33 @@ system_prompt = "You are a helpful assistant."
                     StepAgent::ById { id } => {
                         let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
                         let entry = self.registry.get(agent_id)?;
-                        if let Some(account_id) = account_id {
-                            if entry.account_id.as_deref() != Some(account_id) {
-                                return None;
+                        match account_id {
+                            Some(account_id) => {
+                                if entry.account_id.as_deref() != Some(account_id) {
+                                    return None;
+                                }
+                            }
+                            None => {
+                                if entry.account_id.is_some() {
+                                    return None;
+                                }
                             }
                         }
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((agent_id, entry.name.clone(), inherit))
                     }
                     StepAgent::ByName { name } => {
-                        let entry = match account_id {
-                            Some(account_id) => self
-                                .registry
-                                .list_by_account(account_id)
-                                .into_iter()
-                                .find(|entry| entry.name == *name)?,
-                            None => self.registry.find_by_name(name)?,
-                        };
+                        let entry =
+                            match account_id {
+                                Some(account_id) => self
+                                    .registry
+                                    .list_by_account(account_id)
+                                    .into_iter()
+                                    .find(|entry| entry.name == *name)?,
+                                None => self.registry.list().into_iter().find(|entry| {
+                                    entry.account_id.is_none() && entry.name == *name
+                                })?,
+                            };
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
                     }
@@ -8048,140 +8094,7 @@ system_prompt = "You are a helpful assistant."
                         break;
                     }
 
-                    let due = kernel.cron_scheduler.due_jobs();
-                    for job in due {
-                        let job_id = job.id;
-                        let agent_id = job.agent_id;
-                        let job_name = job.name.clone();
-
-                        match &job.action {
-                            librefang_types::scheduler::CronAction::SystemEvent { text } => {
-                                tracing::debug!(job = %job_name, "Cron: firing system event");
-                                let payload_bytes = serde_json::to_vec(&serde_json::json!({
-                                    "type": format!("cron.{}", job_name),
-                                    "text": text,
-                                    "job_id": job_id.to_string(),
-                                }))
-                                .unwrap_or_default();
-                                let event = Event::new(
-                                    AgentId::new(), // system-originated
-                                    EventTarget::Broadcast,
-                                    EventPayload::Custom(payload_bytes),
-                                )
-                                .with_account_id(job.account_id.clone());
-                                kernel.publish_event(event).await;
-                                kernel.cron_scheduler.record_success(job_id);
-                            }
-                            librefang_types::scheduler::CronAction::AgentTurn {
-                                message,
-                                timeout_secs,
-                                ..
-                            } => {
-                                tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
-                                let timeout_s = timeout_secs.unwrap_or(120);
-                                let timeout = std::time::Duration::from_secs(timeout_s);
-                                let delivery = job.delivery.clone();
-                                let kh: std::sync::Arc<
-                                    dyn librefang_runtime::kernel_handle::KernelHandle,
-                                > = kernel.clone();
-                                match tokio::time::timeout(
-                                    timeout,
-                                    kernel.send_message_with_handle(agent_id, message, Some(kh)),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(result)) => {
-                                        tracing::info!(job = %job_name, "Cron job completed successfully");
-                                        kernel.cron_scheduler.record_success(job_id);
-                                        // Deliver response to configured channel
-                                        cron_deliver_response(
-                                            &kernel,
-                                            agent_id,
-                                            &result.response,
-                                            &delivery,
-                                        )
-                                        .await;
-                                    }
-                                    Ok(Err(e)) => {
-                                        let err_msg = format!("{e}");
-                                        tracing::warn!(job = %job_name, error = %err_msg, "Cron job failed");
-                                        kernel.cron_scheduler.record_failure(job_id, &err_msg);
-                                    }
-                                    Err(_) => {
-                                        tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");
-                                        kernel.cron_scheduler.record_failure(
-                                            job_id,
-                                            &format!("timed out after {timeout_s}s"),
-                                        );
-                                    }
-                                }
-                            }
-                            librefang_types::scheduler::CronAction::Workflow {
-                                workflow_id,
-                                input,
-                                timeout_secs,
-                            } => {
-                                tracing::debug!(job = %job_name, workflow = %workflow_id, "Cron: firing workflow");
-                                let input_text = input.clone().unwrap_or_default();
-                                let delivery = job.delivery.clone();
-                                let timeout_s = timeout_secs.unwrap_or(300);
-                                let timeout = std::time::Duration::from_secs(timeout_s);
-
-                                let workflow_account_id = job.account_id.as_deref();
-                                let resolved_id = kernel
-                                    .resolve_workflow_reference_scoped(
-                                        workflow_id,
-                                        workflow_account_id,
-                                    )
-                                    .await;
-
-                                match resolved_id {
-                                    Some(wf_id) => {
-                                        match tokio::time::timeout(
-                                            timeout,
-                                            kernel.run_workflow_scoped(
-                                                wf_id,
-                                                input_text,
-                                                workflow_account_id,
-                                            ),
-                                        )
-                                        .await
-                                        {
-                                            Ok(Ok((_run_id, output))) => {
-                                                tracing::info!(job = %job_name, "Cron workflow completed successfully");
-                                                kernel.cron_scheduler.record_success(job_id);
-                                                cron_deliver_response(
-                                                    &kernel, agent_id, &output, &delivery,
-                                                )
-                                                .await;
-                                            }
-                                            Ok(Err(e)) => {
-                                                let err_msg = format!("{e}");
-                                                tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow failed");
-                                                kernel
-                                                    .cron_scheduler
-                                                    .record_failure(job_id, &err_msg);
-                                            }
-                                            Err(_) => {
-                                                tracing::warn!(job = %job_name, timeout_s, "Cron workflow timed out");
-                                                kernel.cron_scheduler.record_failure(
-                                                    job_id,
-                                                    &format!(
-                                                        "workflow timed out after {timeout_s}s"
-                                                    ),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    None => {
-                                        let err_msg = format!("workflow not found: {workflow_id}");
-                                        tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow lookup failed");
-                                        kernel.cron_scheduler.record_failure(job_id, &err_msg);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    kernel.process_due_cron_jobs_once().await;
 
                     // Persist every ~5 minutes (20 ticks * 15s)
                     persist_counter += 1;
@@ -8227,6 +8140,120 @@ system_prompt = "You are a helpful assistant."
             tokio::spawn(async move {
                 crate::whatsapp_gateway::start_whatsapp_gateway(&kernel).await;
             });
+        }
+    }
+
+    async fn process_due_cron_jobs_once(self: &Arc<Self>) {
+        let due = self.cron_scheduler.due_jobs();
+        for job in due {
+            let job_id = job.id;
+            let agent_id = job.agent_id;
+            let job_name = job.name.clone();
+
+            match &job.action {
+                librefang_types::scheduler::CronAction::SystemEvent { text } => {
+                    tracing::debug!(job = %job_name, "Cron: firing system event");
+                    let payload_bytes = serde_json::to_vec(&serde_json::json!({
+                        "type": format!("cron.{}", job_name),
+                        "text": text,
+                        "job_id": job_id.to_string(),
+                    }))
+                    .unwrap_or_default();
+                    let event = Event::new(
+                        AgentId::new(),
+                        EventTarget::Broadcast,
+                        EventPayload::Custom(payload_bytes),
+                    )
+                    .with_account_id(job.account_id.clone());
+                    self.publish_event(event).await;
+                    self.cron_scheduler.record_success(job_id);
+                }
+                librefang_types::scheduler::CronAction::AgentTurn {
+                    message,
+                    timeout_secs,
+                    ..
+                } => {
+                    tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
+                    let timeout_s = timeout_secs.unwrap_or(120);
+                    let timeout = std::time::Duration::from_secs(timeout_s);
+                    let delivery = job.delivery.clone();
+                    let kh: std::sync::Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
+                        self.clone();
+                    match tokio::time::timeout(
+                        timeout,
+                        self.send_message_with_handle(agent_id, message, Some(kh)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(result)) => {
+                            tracing::info!(job = %job_name, "Cron job completed successfully");
+                            self.cron_scheduler.record_success(job_id);
+                            cron_deliver_response(self, agent_id, &result.response, &delivery)
+                                .await;
+                        }
+                        Ok(Err(e)) => {
+                            let err_msg = format!("{e}");
+                            tracing::warn!(job = %job_name, error = %err_msg, "Cron job failed");
+                            self.cron_scheduler.record_failure(job_id, &err_msg);
+                        }
+                        Err(_) => {
+                            tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");
+                            self.cron_scheduler
+                                .record_failure(job_id, &format!("timed out after {timeout_s}s"));
+                        }
+                    }
+                }
+                librefang_types::scheduler::CronAction::Workflow {
+                    workflow_id,
+                    input,
+                    timeout_secs,
+                } => {
+                    tracing::debug!(job = %job_name, workflow = %workflow_id, "Cron: firing workflow");
+                    let input_text = input.clone().unwrap_or_default();
+                    let delivery = job.delivery.clone();
+                    let timeout_s = timeout_secs.unwrap_or(300);
+                    let timeout = std::time::Duration::from_secs(timeout_s);
+
+                    let workflow_account_id = job.account_id.as_deref();
+                    let resolved_id = self
+                        .resolve_workflow_reference_scoped(workflow_id, workflow_account_id)
+                        .await;
+
+                    match resolved_id {
+                        Some(wf_id) => {
+                            match tokio::time::timeout(
+                                timeout,
+                                self.run_workflow_scoped(wf_id, input_text, workflow_account_id),
+                            )
+                            .await
+                            {
+                                Ok(Ok((_run_id, output))) => {
+                                    tracing::info!(job = %job_name, "Cron workflow completed successfully");
+                                    self.cron_scheduler.record_success(job_id);
+                                    cron_deliver_response(self, agent_id, &output, &delivery).await;
+                                }
+                                Ok(Err(e)) => {
+                                    let err_msg = format!("{e}");
+                                    tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow failed");
+                                    self.cron_scheduler.record_failure(job_id, &err_msg);
+                                }
+                                Err(_) => {
+                                    tracing::warn!(job = %job_name, timeout_s, "Cron workflow timed out");
+                                    self.cron_scheduler.record_failure(
+                                        job_id,
+                                        &format!("workflow timed out after {timeout_s}s"),
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            let err_msg = format!("workflow not found: {workflow_id}");
+                            tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow lookup failed");
+                            self.cron_scheduler.record_failure(job_id, &err_msg);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -8381,7 +8408,7 @@ system_prompt = "You are a helpful assistant."
                                     unresponsive_secs: status.inactive_secs as u64,
                                 }),
                             );
-                            kernel.event_bus.publish(event).await;
+                            kernel.publish_event(event).await;
                         }
                     } else {
                         // Agent recovered — remove from known-unresponsive set
@@ -10420,6 +10447,14 @@ impl KernelHandle for LibreFangKernel {
         LibreFangKernel::kill_agent(self, id).map_err(|e| format!("Kill failed: {e}"))
     }
 
+    fn caller_account_id(&self, caller_agent_id: &str) -> Result<Option<String>, String> {
+        let id = self.resolve_agent_identifier(caller_agent_id)?;
+        Ok(self
+            .registry
+            .get(id)
+            .and_then(|entry| entry.account_id.clone()))
+    }
+
     fn memory_store(
         &self,
         caller_agent_id: &str,
@@ -10584,8 +10619,11 @@ impl KernelHandle for LibreFangKernel {
         let account_id = self
             .registry
             .get(caller_agent_id)
-            .and_then(|entry| entry.account_id.clone());
-        self.publish_event_scoped(event_type, payload, account_id.as_deref())
+            .ok_or_else(|| format!("Agent not found: {caller_agent_id}"))?
+            .account_id
+            .clone()
+            .ok_or_else(|| "Event publishing requires a tenant-owned caller".to_string())?;
+        self.publish_event_scoped(event_type, payload, Some(account_id.as_str()))
             .await
     }
 
@@ -10928,7 +10966,7 @@ impl KernelHandle for LibreFangKernel {
                     risk_level: format!("{:?}", risk_level),
                 }),
             );
-            self.event_bus.publish(event).await;
+            self.publish_event(event).await;
         }
 
         // Push approval notification to configured channels.
@@ -11003,7 +11041,7 @@ impl KernelHandle for LibreFangKernel {
                     decided_by: None,
                 }),
             );
-            self.event_bus.publish(event).await;
+            self.publish_event(event).await;
         }
 
         Ok(decision)
@@ -11073,7 +11111,7 @@ impl KernelHandle for LibreFangKernel {
                     risk_level: format!("{:?}", risk_level),
                 }),
             );
-            self.event_bus.publish(event).await;
+            self.publish_event(event).await;
         }
         {
             use librefang_types::capability::glob_matches;
@@ -12903,6 +12941,73 @@ mod tests {
     }
 
     #[test]
+    fn test_spawn_agent_owned_lifecycle_event_stays_tenant_scoped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-owned-spawn-trigger-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        let tenant_a_target = test_agent_entry("tenant-a-target", "tenant-a");
+        let tenant_b_target = test_agent_entry("tenant-b-target", "tenant-b");
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        kernel.registry.register(tenant_a_target).unwrap();
+        kernel.registry.register(tenant_b_target).unwrap();
+
+        let tenant_a_trigger = kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                TriggerPattern::Lifecycle,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_b_trigger = kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                TriggerPattern::Lifecycle,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let manifest = AgentManifest {
+            name: "owned-spawn-trigger".to_string(),
+            description: "tenant-owned spawn lifecycle test".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            ..Default::default()
+        };
+
+        kernel
+            .spawn_agent_owned(manifest, "tenant-a")
+            .expect("owned spawn should succeed");
+
+        let tenant_a_state = kernel
+            .triggers
+            .get(tenant_a_trigger)
+            .expect("tenant-a trigger");
+        let tenant_b_state = kernel
+            .triggers
+            .get(tenant_b_trigger)
+            .expect("tenant-b trigger");
+
+        assert_eq!(tenant_a_state.fire_count, 1);
+        assert_eq!(tenant_b_state.fire_count, 0);
+
+        kernel.shutdown();
+    }
+
+    #[test]
     fn test_assistant_route_key_scopes_sender_and_thread() {
         let agent_id = AgentId::new();
         let sender = SenderContext {
@@ -13239,6 +13344,81 @@ mod tests {
         assert_eq!(triggered.len(), 1);
         assert_eq!(triggered[0].0, tenant_a_target_id);
         assert!(triggered[0].1.contains("Kernel started"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_submit_tool_approval_keeps_approval_events_tenant_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_a_agent = test_agent_entry("tenant-a-source", "tenant-a");
+        let tenant_a_target = test_agent_entry("tenant-a-target", "tenant-a");
+        let tenant_b_target = test_agent_entry("tenant-b-target", "tenant-b");
+        let tenant_a_source_id = tenant_a_agent.id;
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        kernel.registry.register(tenant_a_agent).unwrap();
+        kernel.registry.register(tenant_a_target).unwrap();
+        kernel.registry.register(tenant_b_target).unwrap();
+
+        let tenant_a_trigger = kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                TriggerPattern::All,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_b_trigger = kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                TriggerPattern::All,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        let deferred = librefang_types::tool::DeferredToolExecution {
+            agent_id: tenant_a_source_id.to_string(),
+            tool_use_id: "tool-use-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"command": "echo hi"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+
+        let submission = KernelHandle::submit_tool_approval(
+            &kernel,
+            &tenant_a_source_id.to_string(),
+            "shell_exec",
+            "run shell command",
+            deferred,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            submission,
+            librefang_types::tool::ToolApprovalSubmission::Pending { .. }
+        ));
+
+        let tenant_a = kernel
+            .trigger_engine()
+            .get(tenant_a_trigger)
+            .expect("tenant-a trigger");
+        let tenant_b = kernel
+            .trigger_engine()
+            .get(tenant_b_trigger)
+            .expect("tenant-b trigger");
+        assert_eq!(tenant_a.fire_count, 1);
+        assert_eq!(tenant_b.fire_count, 0);
 
         kernel.shutdown();
     }
@@ -13601,6 +13781,104 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_resolve_workflow_reference_none_hides_tenant_owned_workflows() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_workflow = crate::workflow::Workflow {
+            id: crate::workflow::WorkflowId::new(),
+            name: "tenant-only-flow".to_string(),
+            description: String::new(),
+            steps: vec![],
+            created_at: chrono::Utc::now(),
+            account_id: Some("tenant-a".to_string()),
+            layout: None,
+        };
+        let tenant_workflow_id = tenant_workflow.id;
+        let global_workflow = crate::workflow::Workflow {
+            id: crate::workflow::WorkflowId::new(),
+            name: "global-flow".to_string(),
+            description: String::new(),
+            steps: vec![],
+            created_at: chrono::Utc::now(),
+            account_id: None,
+            layout: None,
+        };
+        let global_workflow_id = global_workflow.id;
+
+        kernel.workflow_engine().register(tenant_workflow).await;
+        kernel.workflow_engine().register(global_workflow).await;
+
+        assert_eq!(
+            kernel
+                .resolve_workflow_reference_scoped("tenant-only-flow", None)
+                .await,
+            None
+        );
+        assert_eq!(
+            kernel
+                .resolve_workflow_reference_scoped(&tenant_workflow_id.0.to_string(), None)
+                .await,
+            None
+        );
+        assert_eq!(
+            kernel
+                .resolve_workflow_reference_scoped("global-flow", None)
+                .await,
+            Some(global_workflow_id)
+        );
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_run_workflow_none_rejects_tenant_owned_step_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let tenant_agent = test_agent_entry("tenant-agent", "tenant-a");
+        let tenant_agent_id = tenant_agent.id;
+        kernel.registry.register(tenant_agent).unwrap();
+
+        let global_workflow = crate::workflow::Workflow {
+            id: crate::workflow::WorkflowId::new(),
+            name: "global-flow".to_string(),
+            description: String::new(),
+            steps: vec![crate::workflow::WorkflowStep {
+                name: "step-1".to_string(),
+                agent: crate::workflow::StepAgent::ById {
+                    id: tenant_agent_id.to_string(),
+                },
+                prompt_template: "hello".to_string(),
+                mode: crate::workflow::StepMode::Sequential,
+                timeout_secs: 30,
+                error_mode: crate::workflow::ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+            }],
+            created_at: chrono::Utc::now(),
+            account_id: None,
+            layout: None,
+        };
+        let workflow_id = global_workflow.id;
+        kernel.workflow_engine().register(global_workflow).await;
+
+        let err = kernel
+            .run_workflow_scoped(workflow_id, "hello".to_string(), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Workflow failed"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_cron_list_rejects_unowned_caller_agent() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("data")).unwrap();
@@ -13684,6 +13962,48 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_publish_event_for_agent_rejects_unowned_caller_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel =
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel");
+
+        let unowned = AgentEntry {
+            id: AgentId::new(),
+            account_id: None,
+            name: "unowned-agent".to_string(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+        };
+        let unowned_id = unowned.id;
+        kernel.registry.register(unowned).unwrap();
+
+        let err = KernelHandle::publish_event_for_agent(
+            &kernel,
+            &unowned_id.to_string(),
+            "tenant.alert",
+            serde_json::json!({"ok": true}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("tenant-owned caller"));
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_cron_cancel_stays_tenant_scoped() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("data")).unwrap();
@@ -13723,6 +14043,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tenant_a_jobs.len(), 1);
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cron_background_system_event_stays_tenant_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let kernel = Arc::new(
+            LibreFangKernel::boot_with_config(test_kernel_config(dir.path())).expect("boot kernel"),
+        );
+
+        let tenant_a_source = test_agent_entry("tenant-a-source", "tenant-a");
+        let tenant_a_target = test_agent_entry("tenant-a-target", "tenant-a");
+        let tenant_b_target = test_agent_entry("tenant-b-target", "tenant-b");
+        let tenant_a_source_id = tenant_a_source.id;
+        let tenant_a_target_id = tenant_a_target.id;
+        let tenant_b_target_id = tenant_b_target.id;
+        kernel.registry.register(tenant_a_source).unwrap();
+        kernel.registry.register(tenant_a_target).unwrap();
+        kernel.registry.register(tenant_b_target).unwrap();
+
+        let tenant_a_trigger = kernel
+            .register_trigger(
+                Some("tenant-a".to_string()),
+                tenant_a_target_id,
+                TriggerPattern::All,
+                "tenant-a saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+        let tenant_b_trigger = kernel
+            .register_trigger(
+                Some("tenant-b".to_string()),
+                tenant_b_target_id,
+                TriggerPattern::All,
+                "tenant-b saw {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
+
+        KernelHandle::cron_create(
+            kernel.as_ref(),
+            &tenant_a_source_id.to_string(),
+            serde_json::json!({
+                "name": "tenant-a system event",
+                "schedule": { "kind": "every", "every_secs": 60 },
+                "action": { "kind": "system_event", "text": "tenant-a cron event" },
+                "delivery": { "kind": "none" }
+            }),
+        )
+        .await
+        .unwrap();
+
+        kernel
+            .cron_scheduler
+            .mark_due_now_by_agent(tenant_a_source_id);
+        kernel.process_due_cron_jobs_once().await;
+
+        let tenant_a_state = kernel
+            .triggers
+            .get(tenant_a_trigger)
+            .expect("tenant-a trigger");
+        let tenant_b_state = kernel
+            .triggers
+            .get(tenant_b_trigger)
+            .expect("tenant-b trigger");
+
+        assert_eq!(tenant_a_state.fire_count, 1);
+        assert_eq!(tenant_b_state.fire_count, 0);
 
         kernel.shutdown();
     }

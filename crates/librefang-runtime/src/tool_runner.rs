@@ -321,7 +321,16 @@ pub async fn execute_tool_raw(
         "media_transcribe" => tool_media_transcribe(input, *media_engine, *workspace_root).await,
 
         // Media generation tools (MediaDriver-based)
-        "image_generate" => tool_image_generate(input, *media_drivers, *workspace_root).await,
+        "image_generate" => {
+            tool_image_generate(
+                input,
+                *media_drivers,
+                *workspace_root,
+                *kernel,
+                *caller_agent_id,
+            )
+            .await
+        }
         "video_generate" => tool_video_generate(input, *media_drivers).await,
         "video_status" => tool_video_status(input, *media_drivers).await,
         "music_generate" => tool_music_generate(input, *media_drivers, *workspace_root).await,
@@ -3327,6 +3336,8 @@ async fn tool_image_generate(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
     workspace_root: Option<&Path>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let prompt = input["prompt"]
         .as_str()
@@ -3339,6 +3350,17 @@ async fn tool_image_generate(
     let height = input["height"].as_u64().map(|v| v as u32);
     let quality = input["quality"].as_str().map(|s| s.to_string());
     let count = input["count"].as_u64().unwrap_or(1).min(9) as u8;
+
+    let owner_account_id = match (kernel, caller_agent_id) {
+        (Some(kh), Some(agent_id)) => match kh.caller_account_id(agent_id) {
+            Ok(account_id) => account_id,
+            Err(e) => {
+                warn!(agent_id, error = %e, "Failed to resolve caller account for generated uploads");
+                None
+            }
+        },
+        _ => None,
+    };
 
     // Use MediaDriverCache if available (multi-provider), fall back to old OpenAI-only path.
     if let Some(cache) = media_drivers {
@@ -3370,7 +3392,7 @@ async fn tool_image_generate(
 
         // Save images to workspace and uploads dir
         let saved_paths = save_media_images_to_workspace(&result.images, workspace_root);
-        let image_urls = save_media_images_to_uploads(&result.images);
+        let image_urls = save_media_images_to_uploads(&result.images, owner_account_id.as_deref());
 
         let response = serde_json::json!({
             "model": result.model,
@@ -3424,22 +3446,8 @@ async fn tool_image_generate(
         Vec::new()
     };
 
-    let mut image_urls: Vec<String> = Vec::new();
-    {
-        use base64::Engine;
-        let upload_dir = std::env::temp_dir().join("librefang_uploads");
-        let _ = std::fs::create_dir_all(&upload_dir);
-        for img in &result.images {
-            let file_id = uuid::Uuid::new_v4().to_string();
-            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&img.data_base64)
-            {
-                let path = upload_dir.join(&file_id);
-                if std::fs::write(&path, &decoded).is_ok() {
-                    image_urls.push(format!("/api/uploads/{file_id}"));
-                }
-            }
-        }
-    }
+    let image_urls =
+        save_media_images_to_uploads_legacy(&result.images, owner_account_id.as_deref());
 
     let response = serde_json::json!({
         "model": result.model,
@@ -3480,7 +3488,35 @@ fn save_media_images_to_workspace(
 }
 
 /// Save MediaImageResult images to uploads temp dir, returning /api/uploads/... URLs.
-fn save_media_images_to_uploads(images: &[librefang_types::media::GeneratedImage]) -> Vec<String> {
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UploadSidecarMeta {
+    content_type: String,
+    account_id: Option<String>,
+}
+
+fn upload_sidecar_path(file_id: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join("librefang_uploads")
+        .join(format!("{file_id}.meta.json"))
+}
+
+fn write_upload_sidecar(
+    file_id: &str,
+    content_type: &str,
+    account_id: Option<&str>,
+) -> Result<(), String> {
+    let sidecar = UploadSidecarMeta {
+        content_type: content_type.to_string(),
+        account_id: account_id.map(str::to_string),
+    };
+    let bytes = serde_json::to_vec(&sidecar).map_err(|e| format!("Serialize error: {e}"))?;
+    std::fs::write(upload_sidecar_path(file_id), bytes).map_err(|e| format!("Write error: {e}"))
+}
+
+fn save_media_images_to_uploads(
+    images: &[librefang_types::media::GeneratedImage],
+    account_id: Option<&str>,
+) -> Vec<String> {
     use base64::Engine;
     let upload_dir = std::env::temp_dir().join("librefang_uploads");
     let _ = std::fs::create_dir_all(&upload_dir);
@@ -3498,8 +3534,30 @@ fn save_media_images_to_uploads(images: &[librefang_types::media::GeneratedImage
             if !decoded.is_empty() {
                 let path = upload_dir.join(&file_id);
                 if std::fs::write(&path, &decoded).is_ok() {
+                    let _ = write_upload_sidecar(&file_id, "image/png", account_id);
                     urls.push(format!("/api/uploads/{file_id}"));
                 }
+            }
+        }
+    }
+    urls
+}
+
+fn save_media_images_to_uploads_legacy(
+    images: &[librefang_types::media::GeneratedImage],
+    account_id: Option<&str>,
+) -> Vec<String> {
+    use base64::Engine;
+    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+    let _ = std::fs::create_dir_all(&upload_dir);
+    let mut urls = Vec::new();
+    for img in images {
+        let file_id = uuid::Uuid::new_v4().to_string();
+        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&img.data_base64) {
+            let path = upload_dir.join(&file_id);
+            if std::fs::write(&path, &decoded).is_ok() {
+                let _ = write_upload_sidecar(&file_id, "image/png", account_id);
+                urls.push(format!("/api/uploads/{file_id}"));
             }
         }
     }

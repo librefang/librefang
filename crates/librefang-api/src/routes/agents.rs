@@ -171,6 +171,10 @@ use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
+fn agent_action_failed_response(message: &str) -> serde_json::Value {
+    serde_json::json!({ "error": message })
+}
+
 fn tenant_owner<'a>(
     account: &'a AccountId,
 ) -> Result<&'a str, (StatusCode, Json<serde_json::Value>)> {
@@ -557,11 +561,12 @@ pub async fn bulk_delete_agents(
                 });
             }
             Err(e) => {
+                tracing::warn!("bulk_delete_agents failed for {agent_id}: {e}");
                 results.push(BulkActionResult {
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some(t.t_args("api-error-generic", &[("error", &e.to_string())])),
+                    error: Some("Failed to delete agent".to_string()),
                 });
             }
         }
@@ -766,11 +771,12 @@ pub async fn bulk_stop_agents(
                 });
             }
             Err(e) => {
+                tracing::warn!("bulk_stop_agents failed for {agent_id}: {e}");
                 results.push(BulkActionResult {
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some(t.t_args("api-error-generic", &[("error", &e.to_string())])),
+                    error: Some("Failed to stop agent".to_string()),
                 });
             }
         }
@@ -1001,7 +1007,7 @@ pub async fn list_agents(
 /// returns image content blocks ready to insert into a session message.
 pub fn resolve_attachments(
     attachments: &[AttachmentRef],
-    account_id: Option<&str>,
+    account_id: &str,
 ) -> Vec<librefang_types::message::ContentBlock> {
     use base64::Engine;
 
@@ -1013,32 +1019,24 @@ pub fn resolve_attachments(
         let meta = UPLOAD_REGISTRY.get(&att.file_id);
         let content_type = match meta.as_ref() {
             Some(m) => {
-                if let Some(caller) = account_id {
-                    if m.account_id.as_deref() != Some(caller) {
-                        tracing::warn!(
-                            file_id = %att.file_id,
-                            caller_account_id = caller,
-                            upload_account_id = ?m.account_id.as_deref(),
-                            "Skipping attachment not owned by caller"
-                        );
-                        continue;
-                    }
+                if m.account_id.as_deref() != Some(account_id) {
+                    tracing::warn!(
+                        file_id = %att.file_id,
+                        caller_account_id = account_id,
+                        upload_account_id = ?m.account_id.as_deref(),
+                        "Skipping attachment not owned by caller"
+                    );
+                    continue;
                 }
                 m.content_type.clone()
             }
             None => {
-                if account_id.is_some() {
-                    tracing::warn!(
-                        file_id = %att.file_id,
-                        "Skipping unregistered attachment for scoped caller"
-                    );
-                    continue;
-                }
-                if !att.content_type.is_empty() {
-                    att.content_type.clone()
-                } else {
-                    continue;
-                }
+                tracing::warn!(
+                    file_id = %att.file_id,
+                    caller_account_id = account_id,
+                    "Skipping unregistered attachment for scoped caller"
+                );
+                continue;
             }
         };
 
@@ -1290,9 +1288,11 @@ pub async fn send_message(
 
     // Resolve file attachments into image content blocks
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&req.attachments, account.0.as_deref());
-        if !image_blocks.is_empty() {
-            inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+        if let Some(account_id) = account.0.as_deref() {
+            let image_blocks = resolve_attachments(&req.attachments, account_id);
+            if !image_blocks.is_empty() {
+                inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+            }
         }
     }
 
@@ -1994,18 +1994,33 @@ pub async fn send_message_stream(
 
     // Resolve file attachments into image content blocks (same as non-streaming)
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&req.attachments, account.0.as_deref());
-        if !image_blocks.is_empty() {
-            inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+        if let Some(account_id) = account.0.as_deref() {
+            let image_blocks = resolve_attachments(&req.attachments, account_id);
+            if !image_blocks.is_empty() {
+                inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+            }
         }
     }
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    let (rx, _handle) = match state
-        .kernel
-        .send_message_streaming_with_routing(agent_id, &req.message, Some(kernel_handle))
-        .await
-    {
+    let sender_context = request_sender_context(&req, &account);
+    let result = if let Some(sender) = sender_context.as_ref() {
+        state
+            .kernel
+            .send_message_streaming_with_sender_context_and_routing(
+                agent_id,
+                &req.message,
+                Some(kernel_handle),
+                sender,
+            )
+            .await
+    } else {
+        state
+            .kernel
+            .send_message_streaming_with_routing(agent_id, &req.message, Some(kernel_handle))
+            .await
+    };
+    let (rx, _handle) = match result {
         Ok(pair) => pair,
         Err(e) => {
             tracing::warn!("Streaming message failed for agent {id}: {e}");
@@ -2105,12 +2120,13 @@ pub async fn list_agent_sessions(
             StatusCode::OK,
             Json(serde_json::json!({"sessions": sessions})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("list_agent_sessions failed for {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(agent_action_failed_response("Failed to list sessions")),
+            )
+        }
     }
 }
 
@@ -2159,12 +2175,13 @@ pub async fn create_agent_session(
     let label = req.get("label").and_then(|v| v.as_str());
     match state.kernel.create_agent_session(agent_id, label) {
         Ok(session) => (StatusCode::OK, Json(session)),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("create_agent_session failed for {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(agent_action_failed_response("Failed to create session")),
+            )
+        }
     }
 }
 
@@ -2225,12 +2242,13 @@ pub async fn switch_agent_session(
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "Session switched"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("switch_agent_session failed for {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(agent_action_failed_response("Failed to switch session")),
+            )
+        }
     }
 }
 
@@ -2293,12 +2311,13 @@ pub async fn export_session(
             StatusCode::OK,
             Json(serde_json::to_value(export).unwrap_or_default()),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("export_session failed for {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(agent_action_failed_response("Failed to export session")),
+            )
+        }
     }
 }
 
@@ -2363,12 +2382,13 @@ pub async fn import_session(
                 "message": "Session imported successfully"
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("import_session failed for {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(agent_action_failed_response("Failed to import session")),
+            )
+        }
     }
 }
 
@@ -2419,12 +2439,13 @@ pub async fn reset_session(
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "Session reset"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("reset_session failed for {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(agent_action_failed_response("Failed to reset session")),
+            )
+        }
     }
 }
 
@@ -2475,12 +2496,13 @@ pub async fn reboot_session(
                 serde_json::json!({"status": "ok", "message": "Session rebooted. Context cleared."}),
             ),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("reboot_session failed for {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(agent_action_failed_response("Failed to reboot session")),
+            )
+        }
     }
 }
 
@@ -2529,12 +2551,13 @@ pub async fn clear_agent_history(
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "All history cleared"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("clear_agent_history failed for {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(agent_action_failed_response("Failed to clear history")),
+            )
+        }
     }
 }
 
@@ -2591,12 +2614,10 @@ pub async fn compact_session(
             Json(serde_json::json!({"status": "ok", "message": msg})),
         ),
         Err(e) => {
-            let t = ErrorTranslator::new(l);
+            tracing::warn!("compact_session failed for {agent_id}: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(agent_action_failed_response("Failed to compact session")),
             )
         }
     }
@@ -2651,12 +2672,13 @@ pub async fn stop_agent(
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "No active run"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("stop_agent failed for {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(agent_action_failed_response("Failed to stop agent")),
+            )
+        }
     }
 }
 
@@ -2737,12 +2759,13 @@ pub async fn set_model(
                 ),
             )
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("set_model failed for {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(agent_action_failed_response("Failed to update model")),
+            )
+        }
     }
 }
 
@@ -2925,12 +2948,13 @@ pub async fn set_agent_tools(
         .set_agent_tool_filters(agent_id, allowlist, blocklist)
     {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("set_agent_tool_filters failed for {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(agent_action_failed_response("Failed to update tools")),
+            )
+        }
     }
 }
 
@@ -3047,12 +3071,13 @@ pub async fn set_agent_skills(
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "skills": skills})),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("set_agent_skills failed for {agent_id}: {e}");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(agent_action_failed_response("Failed to update skills")),
+            )
+        }
     }
 }
 
@@ -3189,12 +3214,13 @@ pub async fn set_agent_mcp_servers(
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "mcp_servers": servers})),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("set_agent_mcp_servers failed for {agent_id}: {e}");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(agent_action_failed_response("Failed to update MCP servers")),
+            )
+        }
     }
 }
 
@@ -3248,12 +3274,10 @@ pub async fn update_agent(
     // Parse the new manifest
     let _manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
         Ok(m) => m,
-        Err(e) => {
+        Err(_e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-agent-invalid-manifest", &[("error", &e.to_string())])}),
-                ),
+                Json(serde_json::json!({"error": t.t("api-error-manifest-invalid-format")})),
             );
         }
     };
@@ -3318,11 +3342,10 @@ pub async fn patch_agent(
             .agent_registry()
             .update_name(agent_id, name.to_string())
         {
+            tracing::warn!("patch_agent update_name failed for {agent_id}: {e}");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(agent_action_failed_response("Failed to update agent")),
             );
         }
     }
@@ -3332,11 +3355,10 @@ pub async fn patch_agent(
             .agent_registry()
             .update_description(agent_id, desc.to_string())
         {
+            tracing::warn!("patch_agent update_description failed for {agent_id}: {e}");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(agent_action_failed_response("Failed to update agent")),
             );
         }
     }
@@ -3346,11 +3368,10 @@ pub async fn patch_agent(
             .kernel
             .set_agent_model(agent_id, model, explicit_provider)
         {
+            tracing::warn!("patch_agent set_model failed for {agent_id}: {e}");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(agent_action_failed_response("Failed to update agent")),
             );
         }
     }
@@ -3360,11 +3381,10 @@ pub async fn patch_agent(
             .agent_registry()
             .update_system_prompt(agent_id, system_prompt.to_string())
         {
+            tracing::warn!("patch_agent update_system_prompt failed for {agent_id}: {e}");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(agent_action_failed_response("Failed to update agent")),
             );
         }
     }
@@ -3647,11 +3667,12 @@ pub async fn patch_agent_config(
                 .agent_registry()
                 .update_name(agent_id, new_name.clone())
             {
+                tracing::warn!("update_agent_identity name failed for {agent_id}: {e}");
                 return (
                     StatusCode::CONFLICT,
-                    Json(
-                        serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                    ),
+                    Json(agent_action_failed_response(
+                        "Failed to update agent identity",
+                    )),
                 );
             }
         }
@@ -3751,22 +3772,24 @@ pub async fn patch_agent_config(
                 } else {
                     // Provider is empty string — resolve from catalog
                     if let Err(e) = state.kernel.set_agent_model(agent_id, new_model, None) {
+                        tracing::warn!(
+                            "update_agent_identity model resolve failed for {agent_id}: {e}"
+                        );
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(
-                                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                            ),
+                            Json(agent_action_failed_response("Failed to update agent model")),
                         );
                     }
                 }
             } else {
                 // No provider field at all — resolve from catalog
                 if let Err(e) = state.kernel.set_agent_model(agent_id, new_model, None) {
+                    tracing::warn!(
+                        "update_agent_identity model resolve failed for {agent_id}: {e}"
+                    );
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                        ),
+                        Json(agent_action_failed_response("Failed to update agent model")),
                     );
                 }
             }
@@ -3964,11 +3987,10 @@ pub async fn clone_agent(
     let new_id = match state.kernel.spawn_agent_owned(cloned_manifest, owner) {
         Ok(id) => id,
         Err(e) => {
+            tracing::warn!("clone_agent failed for source {agent_id}: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-agent-clone-failed", &[("error", &e.to_string())])}),
-                ),
+                Json(agent_action_failed_response("Failed to clone agent")),
             );
         }
     };
@@ -4059,12 +4081,13 @@ pub async fn reload_agent_manifest(
             StatusCode::OK,
             Json(serde_json::json!({"status": "reloaded", "agent_id": id})),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            tracing::warn!("reload_agent_manifest failed for {agent_id}: {e}");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(agent_action_failed_response("Failed to reload agent")),
+            )
+        }
     }
 }
 
@@ -4378,22 +4401,20 @@ pub async fn set_agent_file(
     // Atomic write: write to .tmp, then rename
     let tmp_path = workspace.join(format!(".{filename}.tmp"));
     if let Err(e) = std::fs::write(&tmp_path, &req.content) {
+        tracing::warn!("set_agent_file write failed for {agent_id} {filename}: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-file-write-failed", &[("error", &e.to_string())])}),
-            ),
+            Json(agent_action_failed_response("Failed to write agent file")),
         );
     }
     if let Err(e) = std::fs::rename(&tmp_path, &file_path) {
         if let Err(e) = std::fs::remove_file(&tmp_path) {
             tracing::warn!("Failed to remove temporary file: {e}");
         }
+        tracing::warn!("set_agent_file rename failed for {agent_id} {filename}: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-file-rename-failed", &[("error", &e.to_string())])}),
-            ),
+            Json(agent_action_failed_response("Failed to write agent file")),
         );
     }
 
@@ -4497,11 +4518,10 @@ pub async fn delete_agent_file(
     }
 
     if let Err(e) = std::fs::remove_file(&canonical) {
+        tracing::warn!("delete_agent_file failed for {agent_id} {filename}: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-file-delete-failed", &[("error", &e.to_string())])}),
-            ),
+            Json(agent_action_failed_response("Failed to delete agent file")),
         );
     }
 
@@ -4542,6 +4562,23 @@ pub(crate) struct UploadMeta {
 /// In-memory upload metadata registry.
 pub(crate) static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> =
     LazyLock::new(DashMap::new);
+
+#[derive(serde::Deserialize)]
+struct UploadSidecarMeta {
+    content_type: String,
+    account_id: Option<String>,
+}
+
+fn upload_sidecar_path(file_id: &str) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("librefang_uploads")
+        .join(format!("{file_id}.meta.json"))
+}
+
+fn read_upload_sidecar(file_id: &str) -> Option<UploadSidecarMeta> {
+    let bytes = std::fs::read(upload_sidecar_path(file_id)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
 
 /// Maximum upload size: 10 MB.
 #[allow(dead_code)]
@@ -4756,8 +4793,10 @@ pub async fn serve_upload(account: AccountId, Path(file_id): Path<String>) -> im
         .join("librefang_uploads")
         .join(&file_id);
 
-    // Look up metadata from registry; fall back to disk probe for generated images
-    // (image_generate saves files without registering in UPLOAD_REGISTRY).
+    // Look up metadata from the registry first. Runtime image generation also
+    // writes a sidecar when the shared registry is unavailable in-process.
+    // Raw disk-only fallback is intentionally disabled because it cannot prove
+    // upload ownership for tenant-scoped callers.
     let content_type = match UPLOAD_REGISTRY.get(&file_id) {
         Some(m) => {
             // Ownership check: scoped tenant can only access own uploads.
@@ -4777,6 +4816,47 @@ pub async fn serve_upload(account: AccountId, Path(file_id): Path<String>) -> im
             m.content_type.clone()
         }
         None => {
+            if let Some(sidecar) = read_upload_sidecar(&file_id) {
+                match (account.0.as_deref(), sidecar.account_id.as_deref()) {
+                    (Some(caller), Some(owner)) if caller == owner => {
+                        return match std::fs::read(&file_path) {
+                            Ok(data) => (
+                                StatusCode::OK,
+                                [(axum::http::header::CONTENT_TYPE, sidecar.content_type)],
+                                data,
+                            ),
+                            Err(_) => (
+                                StatusCode::NOT_FOUND,
+                                [(
+                                    axum::http::header::CONTENT_TYPE,
+                                    "application/json".to_string(),
+                                )],
+                                b"{\"error\":\"File not found\"}".to_vec(),
+                            ),
+                        };
+                    }
+                    (Some(_), _) | (None, Some(_)) => {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                "application/json".to_string(),
+                            )],
+                            b"{\"error\":\"File not found\"}".to_vec(),
+                        );
+                    }
+                    (None, None) => {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                "application/json".to_string(),
+                            )],
+                            b"{\"error\":\"File not found\"}".to_vec(),
+                        );
+                    }
+                }
+            }
             // No registry entry — scoped tenants cannot access unregistered files
             // because there is no ownership metadata to verify against.
             if account.0.is_some() {
@@ -4789,18 +4869,14 @@ pub async fn serve_upload(account: AccountId, Path(file_id): Path<String>) -> im
                     b"{\"error\":\"File not found\"}".to_vec(),
                 );
             }
-            // System/admin fallback: infer content type from disk
-            if !file_path.exists() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    [(
-                        axum::http::header::CONTENT_TYPE,
-                        "application/json".to_string(),
-                    )],
-                    b"{\"error\":\"File not found\"}".to_vec(),
-                );
-            }
-            "image/png".to_string()
+            return (
+                StatusCode::NOT_FOUND,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/json".to_string(),
+                )],
+                b"{\"error\":\"File not found\"}".to_vec(),
+            );
         }
     };
 
@@ -4816,7 +4892,7 @@ pub async fn serve_upload(account: AccountId, Path(file_id): Path<String>) -> im
                 axum::http::header::CONTENT_TYPE,
                 "application/json".to_string(),
             )],
-            b"{\"error\":\"File not found on disk\"}".to_vec(),
+            b"{\"error\":\"File not found\"}".to_vec(),
         ),
     }
 }
@@ -5575,6 +5651,39 @@ mod tests {
             "raw serde error leaked: {err}"
         );
     }
+
+    #[test]
+    fn agent_action_failed_response_is_generic() {
+        let body = agent_action_failed_response("Failed to update agent");
+        assert_eq!(body["error"].as_str(), Some("Failed to update agent"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn patch_agent_sanitizes_backend_errors() {
+        let (_tmp, state) = test_app_state();
+        let first = tenant_agent("patch-duplicate-a", "tenant-a");
+        let first_id = first.id;
+        let second = tenant_agent("patch-duplicate-b", "tenant-a");
+        let second_id = second.id;
+        state.kernel.agent_registry().register(first).unwrap();
+        state.kernel.agent_registry().register(second).unwrap();
+
+        let response = patch_agent(
+            State(state),
+            AccountId(Some("tenant-a".to_string())),
+            Path(second_id.to_string()),
+            None,
+            Json(serde_json::json!({"name": "patch-duplicate-a"})),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        let err = body["error"].as_str().expect("error string");
+        assert_eq!(err, "Failed to update agent");
+        assert!(!err.contains(&first_id.to_string()));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5802,6 +5911,7 @@ mod monitoring_tests {
     use axum::extract::{Path, Query, State};
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
     use librefang_runtime::audit::AuditAction;
     use librefang_types::config::KernelConfig;
 
@@ -5986,7 +6096,7 @@ mod monitoring_tests {
             content_type: "image/png".to_string(),
         }];
 
-        let blocks = resolve_attachments(&attachments, Some("tenant-b"));
+        let blocks = resolve_attachments(&attachments, "tenant-b");
         assert!(blocks.is_empty(), "wrong tenant must not resolve uploads");
 
         UPLOAD_REGISTRY.remove(&file_id);
@@ -6006,12 +6116,80 @@ mod monitoring_tests {
             content_type: "image/png".to_string(),
         }];
 
-        let blocks = resolve_attachments(&attachments, Some("tenant-a"));
+        let blocks = resolve_attachments(&attachments, "tenant-a");
         assert!(
             blocks.is_empty(),
             "scoped callers must not resolve unregistered uploads"
         );
 
         let _ = std::fs::remove_file(upload_dir.join(file_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_serve_upload_honors_sidecar_scope_without_registry_entry() {
+        let file_id = uuid::Uuid::new_v4().to_string();
+        let upload_dir = std::env::temp_dir().join("librefang_uploads");
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        std::fs::write(upload_dir.join(&file_id), b"generated-bytes").unwrap();
+        std::fs::write(
+            upload_sidecar_path(&file_id),
+            serde_json::to_vec(&serde_json::json!({
+                "content_type": "image/png",
+                "account_id": "tenant-a"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let ok = serve_upload(
+            AccountId(Some("tenant-a".to_string())),
+            Path(file_id.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        let wrong = serve_upload(
+            AccountId(Some("tenant-b".to_string())),
+            Path(file_id.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(wrong.status(), StatusCode::NOT_FOUND);
+
+        let unscoped = serve_upload(AccountId(None), Path(file_id.clone()))
+            .await
+            .into_response();
+        assert_eq!(unscoped.status(), StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_file(upload_dir.join(&file_id));
+        let _ = std::fs::remove_file(upload_sidecar_path(&file_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_serve_upload_rejects_unregistered_disk_only_fallback() {
+        let file_id = uuid::Uuid::new_v4().to_string();
+        let upload_dir = std::env::temp_dir().join("librefang_uploads");
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        std::fs::write(upload_dir.join(&file_id), b"disk-only-bytes").unwrap();
+
+        let unscoped = serve_upload(AccountId(None), Path(file_id.clone()))
+            .await
+            .into_response();
+        assert_eq!(unscoped.status(), StatusCode::NOT_FOUND);
+
+        let scoped = serve_upload(
+            AccountId(Some("tenant-a".to_string())),
+            Path(file_id.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(scoped.status(), StatusCode::NOT_FOUND);
+
+        let body = scoped.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"].as_str(), Some("File not found"));
+
+        let _ = std::fs::remove_file(upload_dir.join(&file_id));
     }
 }
