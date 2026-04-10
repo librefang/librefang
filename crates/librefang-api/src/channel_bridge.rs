@@ -609,6 +609,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .agent_registry()
             .list()
             .iter()
+            .filter(|e| !e.is_hand)
             .map(|e| (e.id, e.name.clone()))
             .collect())
     }

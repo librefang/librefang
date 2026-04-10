@@ -10,6 +10,7 @@
 
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
+use chrono::Timelike;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -82,7 +83,59 @@ impl TokenRotationDriver {
             .as_millis() as u64
     }
 
+    /// Extract reset hour (0-23 UTC) from a rate-limit message like
+    /// "You've hit your limit · resets 10am (UTC)" → Some(10).
+    /// Returns None if no parseable time is found.
+    fn parse_reset_hour(err: &LlmError) -> Option<u32> {
+        let text = match err {
+            LlmError::RateLimited {
+                message: Some(m), ..
+            } => m.as_str(),
+            _ => return None,
+        };
+        // Look for pattern: "resets <N>am" or "resets <N>pm"
+        let lower = text.to_lowercase();
+        let idx = lower.find("resets ")?;
+        let after = &lower[idx + 7..];
+        let num_end = after.find(|c: char| !c.is_ascii_digit())?;
+        let hour: u32 = after[..num_end].parse().ok()?;
+        if hour == 0 || hour > 12 {
+            return None; // Invalid 12-hour format
+        }
+        if after[num_end..].starts_with("pm") {
+            Some(if hour == 12 { 12 } else { hour + 12 })
+        } else if after[num_end..].starts_with("am") {
+            Some(if hour == 12 { 0 } else { hour })
+        } else {
+            None
+        }
+    }
+
+    /// Compare two rate-limit errors and return true if `new` resets sooner than `current`.
+    /// Uses current UTC hour to determine which reset is closer (handles day wrap).
+    fn resets_sooner(current: &LlmError, new: &LlmError) -> bool {
+        let (Some(cur_h), Some(new_h)) =
+            (Self::parse_reset_hour(current), Self::parse_reset_hour(new))
+        else {
+            return false; // Can't parse → keep current
+        };
+        let now_h = chrono::Utc::now().hour();
+        // Hours until reset, wrapping at 24
+        let cur_wait = (cur_h + 24 - now_h) % 24;
+        let new_wait = (new_h + 24 - now_h) % 24;
+        // 0 means "resets this hour" which is the soonest possible
+        let cur_wait = if cur_wait == 0 { 24 } else { cur_wait };
+        let new_wait = if new_wait == 0 { 24 } else { new_wait };
+        new_wait < cur_wait
+    }
+
     /// Check if an error should trigger key rotation.
+    ///
+    /// Rotates on: rate-limit, overload, billing (402), permission (403),
+    /// authentication (401), and expired OAuth tokens.  The Claude Code CLI
+    /// reports auth failures as exit-code 1 (mapped to `status: 1` by the
+    /// driver) with messages containing "not authenticated" or "expired".
+    /// Rotating lets us try the next profile whose token may still be valid.
     fn should_rotate(err: &LlmError) -> bool {
         matches!(
             err,
@@ -90,17 +143,43 @@ impl TokenRotationDriver {
         ) || matches!(err, LlmError::Api { status, message }
             if *status == 429
                 || *status == 402
+                || *status == 401
                 || (*status == 403 && !message.to_lowercase().contains("invalid api key"))
+                // CLI-based providers (Claude Code) exit with code 1 and
+                // include rate-limit or auth errors in the message.
+                || {
+                    let lower = message.to_lowercase();
+                    lower.contains("hit your limit")
+                        || lower.contains("out of extra usage")
+                        || lower.contains("rate limit")
+                        || lower.contains("too many requests")
+                        || lower.contains("not authenticated")
+                        || lower.contains("token has expired")
+                        || lower.contains("authentication_error")
+                }
         )
     }
 
     /// Extract cooldown duration from an error, falling back to the default.
     fn cooldown_from_error(err: &LlmError) -> u64 {
+        // If the error contains a reset hour (e.g. "resets 10am UTC"),
+        // compute cooldown to that exact time instead of using retry_after_ms.
+        if let Some(reset_hour) = Self::parse_reset_hour(err) {
+            let now = chrono::Utc::now();
+            let now_h = now.hour();
+            let hours_until = if reset_hour > now_h {
+                reset_hour - now_h
+            } else {
+                // Wraps to next day
+                24 - now_h + reset_hour
+            };
+            // Convert to ms, add 5 minutes buffer for safety
+            let ms = (hours_until as u64) * 3_600_000 + 300_000;
+            return ms.max(60_000); // at least 1 minute
+        }
+
         match err {
-            LlmError::RateLimited { retry_after_ms } => {
-                // Use the suggested retry delay, but at least 30 seconds
-                (*retry_after_ms).max(30_000)
-            }
+            LlmError::RateLimited { retry_after_ms, .. } => (*retry_after_ms).max(30_000),
             LlmError::Overloaded { retry_after_ms } => (*retry_after_ms).max(10_000),
             _ => DEFAULT_COOLDOWN_MS,
         }
@@ -180,7 +259,14 @@ impl LlmDriver for TokenRotationDriver {
                     let cooldown = Self::cooldown_from_error(&err);
                     self.mark_exhausted(idx, cooldown).await;
                     self.advance();
-                    last_error = Some(err);
+                    // Keep the error with the earliest reset time so the
+                    // user sees when the first profile becomes available.
+                    if last_error
+                        .as_ref()
+                        .map_or(true, |cur| Self::resets_sooner(cur, &err))
+                    {
+                        last_error = Some(err);
+                    }
                     tried += 1;
                 }
                 Err(err) => {
@@ -236,7 +322,14 @@ impl LlmDriver for TokenRotationDriver {
                     let cooldown = Self::cooldown_from_error(&err);
                     self.mark_exhausted(idx, cooldown).await;
                     self.advance();
-                    last_error = Some(err);
+                    // Keep the error with the earliest reset time so the
+                    // user sees when the first profile becomes available.
+                    if last_error
+                        .as_ref()
+                        .map_or(true, |cur| Self::resets_sooner(cur, &err))
+                    {
+                        last_error = Some(err);
+                    }
                     tried += 1;
                 }
                 Err(err) => {
@@ -315,6 +408,7 @@ mod tests {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             Err(LlmError::RateLimited {
                 retry_after_ms: 60_000,
+                message: None,
             })
         }
     }
@@ -464,7 +558,8 @@ mod tests {
     #[test]
     fn test_should_rotate_classification() {
         assert!(TokenRotationDriver::should_rotate(&LlmError::RateLimited {
-            retry_after_ms: 1000
+            retry_after_ms: 1000,
+            message: None,
         }));
         assert!(TokenRotationDriver::should_rotate(&LlmError::Overloaded {
             retry_after_ms: 1000
@@ -498,20 +593,44 @@ mod tests {
             status: 403,
             message: "invalid api key".to_string()
         }));
+        // Auth errors that should rotate (expired token on one profile)
+        assert!(TokenRotationDriver::should_rotate(&LlmError::Api {
+            status: 401,
+            message: "OAuth token has expired".to_string()
+        }));
+        assert!(TokenRotationDriver::should_rotate(&LlmError::Api {
+            status: 1,
+            message: "Claude Code CLI is not authenticated. Run: claude auth\nDetail: {\"result\":\"Failed to authenticate. API Error: 401 {\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"authentication_error\\\"}}\"}".to_string()
+        }));
+        assert!(TokenRotationDriver::should_rotate(&LlmError::Api {
+            status: 1,
+            message: "not authenticated".to_string()
+        }));
+        assert!(TokenRotationDriver::should_rotate(&LlmError::Api {
+            status: 1,
+            message: "OAuth token has expired".to_string()
+        }));
+        // Generic exit-code-1 errors should NOT rotate
+        assert!(!TokenRotationDriver::should_rotate(&LlmError::Api {
+            status: 1,
+            message: "some other CLI error".to_string()
+        }));
     }
 
     #[test]
     fn test_cooldown_extraction() {
         assert_eq!(
             TokenRotationDriver::cooldown_from_error(&LlmError::RateLimited {
-                retry_after_ms: 60_000
+                retry_after_ms: 60_000,
+                message: None,
             }),
             60_000
         );
         // Small retry_after should be clamped to minimum 30s
         assert_eq!(
             TokenRotationDriver::cooldown_from_error(&LlmError::RateLimited {
-                retry_after_ms: 100
+                retry_after_ms: 100,
+                message: None,
             }),
             30_000
         );

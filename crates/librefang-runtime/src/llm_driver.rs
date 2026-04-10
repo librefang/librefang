@@ -26,10 +26,12 @@ pub enum LlmError {
         message: String,
     },
     /// Rate limited — should retry after delay.
-    #[error("Rate limited, retry after {retry_after_ms}ms")]
+    #[error("Rate limited, retry after {retry_after_ms}ms{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
     RateLimited {
         /// How long to wait before retrying.
         retry_after_ms: u64,
+        /// Optional original message from the provider (e.g. "You've hit your limit · resets 10am (UTC)").
+        message: Option<String>,
     },
     /// Response parsing failed.
     #[error("Parse error: {0}")]

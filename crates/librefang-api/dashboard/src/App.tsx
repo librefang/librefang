@@ -1,7 +1,7 @@
 import { Link, Outlet } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge, LogOut, UserCircle, X, Sparkles } from "lucide-react";
+import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge, LogOut, UserCircle, X, Sparkles, Plug } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
@@ -14,8 +14,16 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   const [key, setKey] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [authMethod, setAuthMethod] = useState<"credentials" | "api_key">(
+    mode === "api_key" ? "api_key" : "credentials",
+  );
   const [errorKey, setErrorKey] = useState<"invalid_api_key" | "invalid_credentials" | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    setAuthMethod(mode === "api_key" ? "api_key" : "credentials");
+    setErrorKey(null);
+  }, [mode]);
 
   async function handleApiKeySubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -67,7 +75,8 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
     }
   }
 
-  const isCredentials = mode === "credentials";
+  const isHybrid = mode === "hybrid";
+  const isCredentials = authMethod === "credentials";
 
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/70 backdrop-blur-md">
@@ -80,6 +89,28 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             <h2 className="text-xl font-black tracking-tight">{t(isCredentials ? "auth.credentials_title" : "auth.title")}</h2>
             <p className="text-sm text-text-dim mt-1">{t(isCredentials ? "auth.credentials_description" : "auth.description")}</p>
           </div>
+          {isHybrid && (
+            <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-main p-1">
+              <button
+                type="button"
+                onClick={() => { setAuthMethod("credentials"); setErrorKey(null); setKey(""); }}
+                className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                  isCredentials ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-brand"
+                }`}
+              >
+                {t("auth.credentials_tab")}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setAuthMethod("api_key"); setErrorKey(null); setUsername(""); setPassword(""); }}
+                className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                  !isCredentials ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-brand"
+                }`}
+              >
+                {t("auth.api_key_tab")}
+              </button>
+            </div>
+          )}
           <form onSubmit={isCredentials ? handleCredentialsSubmit : handleApiKeySubmit} className="space-y-4">
             {isCredentials ? (
               <>
@@ -414,6 +445,7 @@ export function App() {
         { to: "/channels", label: t("nav.channels"), icon: Network },
         { to: "/skills", label: t("nav.skills"), icon: Bell },
         { to: "/plugins", label: t("nav.plugins"), icon: Puzzle },
+        { to: "/mcp-servers", label: t("nav.mcp_servers"), icon: Plug },
       ],
     },
     {

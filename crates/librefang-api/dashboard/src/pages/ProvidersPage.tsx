@@ -535,6 +535,7 @@ export function ProvidersPage() {
   useCreateShortcut(() => setShowCreateForm(true));
   const [keyInput, setKeyInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
+  const [hasStoredKey, setHasStoredKey] = useState(false);
   const [keySaving, setKeySaving] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [keyTesting, setKeyTesting] = useState(false);
@@ -661,6 +662,7 @@ export function ProvidersPage() {
     setConfigProvider(provider);
     setKeyInput("");
     setUrlInput(provider.base_url || "");
+    setHasStoredKey(provider.auth_status === "configured" || provider.auth_status === "validated_key");
     setKeyError(null);
     setKeyTestResult(null);
   };
@@ -675,6 +677,8 @@ export function ProvidersPage() {
       }
       if (keyInput.trim()) {
         await setProviderKey(configProvider.id, keyInput.trim());
+        setHasStoredKey(true);
+        setKeyInput("");
       }
       await providersQuery.refetch();
       setConfigProvider(null);
@@ -692,6 +696,7 @@ export function ProvidersPage() {
     try {
       await deleteProviderKey(configProvider.id);
       await providersQuery.refetch();
+      setHasStoredKey(false);
       setConfigProvider(null);
       addToast(t("providers.key_removed"), "success");
     } catch (e: any) {
@@ -726,6 +731,7 @@ export function ProvidersPage() {
       // Save any pending key/url input before testing so the backend uses the new value
       if (keyInput.trim()) {
         await setProviderKey(configProvider.id, keyInput.trim());
+        setHasStoredKey(true);
         setKeyInput("");
       }
       if (urlInput.trim() && urlInput !== configProvider.base_url) {
@@ -998,11 +1004,11 @@ export function ProvidersPage() {
                   {keySaving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
                   {t("common.save")}
                 </Button>
-                <Button variant="secondary" onClick={handleTestKey} disabled={keySaving || keyTesting || (!isProviderAvailable(configProvider.auth_status) && !keyInput.trim())}>
+                <Button variant="secondary" onClick={handleTestKey} disabled={keySaving || keyTesting || (!hasStoredKey && !keyInput.trim())}>
                   {keyTesting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
                   {t("providers.test")}
                 </Button>
-                {(configProvider.auth_status === "configured" || configProvider.auth_status === "validated_key") && (
+                {hasStoredKey && (
                   <Button variant="secondary" onClick={handleDeleteKey} disabled={keySaving || keyTesting}>
                     <XCircle className="w-4 h-4 mr-1 text-error" />
                     {t("providers.remove_key")}
