@@ -1971,6 +1971,29 @@ async fn dispatch_message(
         );
     }
 
+    // For files: download to local storage so agent tools can access them
+    // after the remote URL expires (e.g. Telegram file links are short-lived).
+    // We create a modified copy since `message` is borrowed immutably.
+    let message = if let ChannelContent::File {
+        ref url,
+        ref filename,
+    } = message.content
+    {
+        if let Some(local_path) = download_file_to_local(url, filename).await {
+            let mut m = message.clone();
+            m.content = ChannelContent::File {
+                url: local_path,
+                filename: filename.clone(),
+            };
+            std::borrow::Cow::Owned(m)
+        } else {
+            std::borrow::Cow::Borrowed(message)
+        }
+    } else {
+        std::borrow::Cow::Borrowed(message)
+    };
+    let message = message.as_ref();
+
     // For images: download, base64 encode, and send as multimodal content blocks
     if let ChannelContent::Image {
         ref url,
