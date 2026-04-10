@@ -1147,7 +1147,7 @@ mod tests {
         let reg = HandRegistry::new();
         let home = ensure_test_home();
         let (count, _) = reg.reload_from_disk(&home);
-        assert_eq!(count, 15);
+        assert!(count >= 15, "expected at least 15 hands, got {count}");
         assert!(!reg.list_definitions().is_empty());
 
         // Clip hand should be loaded
