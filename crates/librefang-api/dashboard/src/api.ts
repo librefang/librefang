@@ -2067,7 +2067,7 @@ export function hasApiKey(): boolean {
   return !!key && key.length > 0;
 }
 
-export type AuthMode = "credentials" | "api_key" | "none";
+export type AuthMode = "credentials" | "api_key" | "hybrid" | "none";
 
 export async function checkDashboardAuthMode(): Promise<AuthMode> {
   try {
