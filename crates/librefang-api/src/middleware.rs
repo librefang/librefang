@@ -956,10 +956,11 @@ mod tests {
 
 // ── Account Management ────────────────────────────────────────────────────
 
-use hmac::{Hmac, Mac};
+use hmac::Hmac;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+#[allow(dead_code)] // used only in #[cfg(test)] helper
 type HmacSha256 = Hmac<Sha256>;
 
 /// Account ID extracted from the `X-Account-Id` HTTP header.
@@ -1544,6 +1545,7 @@ mod account_sig_check_tests {
 
     /// Compute a valid HMAC-SHA256 hex signature for testing.
     fn sign(secret: &str, account_id: &str) -> String {
+        use hmac::Mac;
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(account_id.as_bytes());
         hex::encode(mac.finalize().into_bytes())

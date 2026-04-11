@@ -309,7 +309,7 @@ mod tests {
 
         let result = store.search(&[0.1, 0.2], 5, Some(filter)).await;
         assert!(result.is_err());
-        let err = result.err().expect("error").to_string();
+        let err = result.unwrap_err().to_string();
         assert!(err.contains("mismatched account_id"));
     }
 
@@ -329,7 +329,7 @@ mod tests {
         let store = HttpVectorStore::new(format!("{base}/v1"));
         let result = store.get_embeddings(&["mem-1"]).await;
         assert!(result.is_err());
-        let err = result.err().expect("error").to_string();
+        let err = result.unwrap_err().to_string();
         assert!(err.contains("unexpected id"));
     }
 }
