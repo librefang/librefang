@@ -5672,7 +5672,8 @@ mod tests {
         .expect("Loop should complete without error");
 
         assert_eq!(result.response, "Partial answer");
-        assert_eq!(result.iterations, MAX_CONTINUATIONS);
+        // Pure-text max_tokens overflow short-circuits on iter 1 (#2310).
+        assert_eq!(result.iterations, 1);
         assert_eq!(result.directives.reply_to.as_deref(), Some("msg_999"));
         assert!(result.directives.current_thread);
         assert!(!result.directives.silent);
@@ -5728,7 +5729,8 @@ mod tests {
             result.response,
             "[Partial response — token limit reached with no text output.]"
         );
-        assert_eq!(result.iterations, MAX_CONTINUATIONS);
+        // Pure-text max_tokens overflow short-circuits on iter 1 (#2310).
+        assert_eq!(result.iterations, 1);
         assert!(result.directives.reply_to.is_none());
         assert!(!result.directives.current_thread);
         assert!(!result.directives.silent);
@@ -5784,7 +5786,8 @@ mod tests {
         .expect("Streaming loop should complete without error");
 
         assert_eq!(result.response, "Partial answer");
-        assert_eq!(result.iterations, MAX_CONTINUATIONS);
+        // Pure-text max_tokens overflow short-circuits on iter 1 (#2310).
+        assert_eq!(result.iterations, 1);
         assert_eq!(result.directives.reply_to.as_deref(), Some("msg_999"));
         assert!(result.directives.current_thread);
         assert!(!result.directives.silent);
