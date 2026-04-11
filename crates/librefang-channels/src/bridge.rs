@@ -107,6 +107,15 @@ pub trait ChannelBridgeHandle: Send + Sync {
         "Provider listing not available.".to_string()
     }
 
+    /// Return the uploads directory for an agent's workspace.
+    ///
+    /// Channel files (images, documents) are saved here so agent tools can
+    /// access them inside the workspace sandbox.  Returns `None` if the agent
+    /// has no workspace configured.
+    async fn agent_upload_dir(&self, _agent_id: AgentId) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// Send an ephemeral "side question" (`/btw`) — answered with the agent's system
     /// prompt but without loading or saving session history.
     async fn send_message_ephemeral(
@@ -691,7 +700,17 @@ fn flush_debounced(
         };
 
         if let Some(mut blocks) = blocks {
-            let text = content_to_text(&merged_msg.content);
+            // When we already have image content blocks, only prepend the
+            // caption text — NOT the `[Photo: URL]` string that
+            // `content_to_text` would produce, because the raw Telegram URL
+            // confuses vision models into thinking they must fetch it.
+            let text = match &merged_msg.content {
+                ChannelContent::Image {
+                    caption: Some(c), ..
+                } => c.clone(),
+                ChannelContent::Image { caption: None, .. } => String::new(),
+                other => content_to_text(other),
+            };
             if !text.is_empty() {
                 blocks.insert(
                     0,
@@ -1013,12 +1032,23 @@ impl BridgeManager {
                                         message.sender.platform_id
                                     );
 
+                                    // Resolve workspace uploads dir for the channel's
+                                    // default agent so downloaded files land inside the
+                                    // sandbox where agent tools can read them.
+                                    // Router keys use Debug format ("Telegram"), not
+                                    // the lowercase config key ("telegram").
+                                    let ct_key = format!("{:?}", message.channel);
+                                    let ws_upload_dir = match router.channel_default(&ct_key) {
+                                        Some(aid) => handle.agent_upload_dir(aid).await,
+                                        None => None,
+                                    };
+
                                     // Download remote files to local storage so
                                     // agent tools (file_read, media_describe) can
                                     // access them after the remote URL expires.
                                     let mut message = message;
                                     if let ChannelContent::File { ref url, ref filename } = message.content {
-                                        if let Some(local_path) = download_file_to_local(url, filename).await {
+                                        if let Some(local_path) = download_file_to_local(url, filename, ws_upload_dir.as_deref()).await {
                                             message.content = ChannelContent::File {
                                                 url: local_path,
                                                 filename: filename.clone(),
@@ -1029,8 +1059,8 @@ impl BridgeManager {
                                     let image_blocks = if let ChannelContent::Image {
                                         ref url, ref caption, ref mime_type
                                     } = message.content {
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await {
-                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })) => Some(blocks),
+                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), ws_upload_dir.as_deref()).await {
+                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
                                             _ => None,
                                         }
                                     } else {
@@ -1971,6 +2001,14 @@ async fn dispatch_message(
         );
     }
 
+    // Resolve workspace uploads dir so downloaded files land inside the sandbox.
+    // Router keys use Debug format ("Telegram"), not the lowercase config key.
+    let ct_key = format!("{:?}", message.channel);
+    let ws_upload_dir = match router.channel_default(&ct_key) {
+        Some(aid) => handle.agent_upload_dir(aid).await,
+        None => None,
+    };
+
     // For files: download to local storage so agent tools can access them
     // after the remote URL expires (e.g. Telegram file links are short-lived).
     // We create a modified copy since `message` is borrowed immutably.
@@ -1979,7 +2017,9 @@ async fn dispatch_message(
         ref filename,
     } = message.content
     {
-        if let Some(local_path) = download_file_to_local(url, filename).await {
+        if let Some(local_path) =
+            download_file_to_local(url, filename, ws_upload_dir.as_deref()).await
+        {
             let mut m = message.clone();
             m.content = ChannelContent::File {
                 url: local_path,
@@ -2001,11 +2041,19 @@ async fn dispatch_message(
         ref mime_type,
     } = message.content
     {
-        let blocks = download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await;
-        if blocks
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Image { .. }))
-        {
+        let blocks = download_image_to_blocks(
+            url,
+            caption.as_deref(),
+            mime_type.as_deref(),
+            ws_upload_dir.as_deref(),
+        )
+        .await;
+        if blocks.iter().any(|b| {
+            matches!(
+                b,
+                ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
+            )
+        }) {
             // We have actual image data — send as structured blocks for vision
             dispatch_with_blocks(
                 blocks,
@@ -2646,7 +2694,11 @@ fn media_type_from_url(url: &str) -> String {
 ///
 /// Returns the local path on success, or `None` if the download fails.
 /// Compatible with all channels — any `ChannelContent::File` gets persisted.
-async fn download_file_to_local(url: &str, filename: &str) -> Option<String> {
+async fn download_file_to_local(
+    url: &str,
+    filename: &str,
+    upload_dir: Option<&std::path::Path>,
+) -> Option<String> {
     const MAX_FILE_BYTES: usize = 50 * 1024 * 1024; // 50 MB limit
 
     let client = crate::http_client::new_client();
@@ -2675,8 +2727,9 @@ async fn download_file_to_local(url: &str, filename: &str) -> Option<String> {
         return None;
     }
 
-    // Save to /tmp/librefang_uploads/ with a unique name preserving extension
-    let upload_dir = std::path::Path::new("/tmp/librefang_uploads");
+    // Save to workspace uploads/ dir (inside sandbox) or /tmp/ as fallback
+    let fallback = std::env::temp_dir().join("librefang_uploads");
+    let upload_dir = upload_dir.unwrap_or(&fallback);
     if let Err(e) = tokio::fs::create_dir_all(upload_dir).await {
         warn!("Failed to create upload dir: {e}");
         return None;
@@ -2717,6 +2770,7 @@ async fn download_image_to_blocks(
     url: &str,
     caption: Option<&str>,
     mime_type_hint: Option<&str>,
+    upload_dir: Option<&std::path::Path>,
 ) -> Vec<ContentBlock> {
     use base64::Engine;
 
@@ -2839,7 +2893,9 @@ async fn download_image_to_blocks(
 
     // Save image to disk instead of base64-encoding into the session.
     // A 3 MB photo becomes ~100 KB on disk with only a short path in the session.
-    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+    // Use workspace uploads/ dir (inside sandbox) or /tmp/ as fallback.
+    let fallback = std::env::temp_dir().join("librefang_uploads");
+    let upload_dir = upload_dir.unwrap_or(&fallback).to_path_buf();
 
     let ext = match final_media_type.as_str() {
         "image/jpeg" => "jpg",

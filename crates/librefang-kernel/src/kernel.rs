@@ -9331,16 +9331,24 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        let all_builtins = if cfg.browser.enabled {
-            builtin_tool_definitions()
-        } else {
-            // When built-in browser is disabled (replaced by an external
-            // browser MCP server such as CamoFox), filter out browser_* tools.
-            builtin_tool_definitions()
-                .into_iter()
-                .filter(|t| !t.name.starts_with("browser_"))
-                .collect()
-        };
+        let has_vision = librefang_runtime::media_understanding::has_vision_provider();
+        let all_builtins: Vec<ToolDefinition> = builtin_tool_definitions()
+            .into_iter()
+            .filter(|t| {
+                // When built-in browser is disabled (replaced by an external
+                // browser MCP server such as CamoFox), filter out browser_* tools.
+                if !cfg.browser.enabled && t.name.starts_with("browser_") {
+                    return false;
+                }
+                // Don't offer media_describe/media_transcribe when no dedicated
+                // vision provider is configured — vision-capable LLMs (e.g.
+                // kimi-k2.5) already see images inline via base64 content parts.
+                if !has_vision && (t.name == "media_describe" || t.name == "media_transcribe") {
+                    return false;
+                }
+                true
+            })
+            .collect();
 
         // Look up agent entry for profile, skill/MCP allowlists, and declared tools
         let entry = self.registry.get(agent_id);

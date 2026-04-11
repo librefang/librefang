@@ -748,6 +748,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         tokio::fs::read_to_string(&path).await.ok()
     }
 
+    async fn agent_upload_dir(&self, agent_id: AgentId) -> Option<std::path::PathBuf> {
+        let registry = self.kernel.agent_registry();
+        let entry = registry.get(agent_id)?;
+        let workspace = entry.manifest.workspace.as_ref()?;
+        Some(workspace.join("uploads"))
+    }
+
     async fn uptime_info(&self) -> String {
         let uptime = self.started_at.elapsed();
         let agents = self.list_agents().await.unwrap_or_default();
