@@ -1,0 +1,271 @@
+{
+  "analysis_metadata": {
+    "task": "Priority 2 Memory Table Migration v19 - Production Readiness Assessment",
+    "schema_change": "ALTER TABLE memories ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default'",
+    "current_tests_passing": 5,
+    "analysis_date": "2026-04-10",
+    "analysis_scope": [
+      "crates/librefang-memory/src/migration.rs (v19 at line 641)",
+      "crates/librefang-memory/src/semantic.rs (5 query sites verified)",
+      "crates/librefang-memory/src/structured.rs (1 query site + agent deletion)"
+    ]
+  },
+  "critical_gaps": [
+    {
+      "gap_id": 1,
+      "category": "Migration Edge Cases",
+      "title": "Partial Migration - Schema Added But Backfill Incomplete",
+      "description": "If migration v19 completes schema addition (line 652) but fails during backfill (lines 657-668), the database enters an inconsistent state where account_id exists but many rows still have 'default' instead of their true tenant ID from metadata.",
+      "why_it_matters": "In production, queries filtering by account_id would exclude tenant data until migration is re-run or manually fixed. This violates tenant isolation guarantees.",
+      "what_could_go_wrong": [
+        "Operator runs migration, network/disk error occurs during UPDATE (line 657-668)",
+        "Process crashes mid-backfill, leaving some rows with 'default', others with real tenant IDs",
+        "Multi-process environment attempts concurrent migration, one succeeds, one fails",
+        "Tenant A's memory is invisible to Tenant A queries if stuck in 'default' after partial migration"
+      ],
+      "test_scenario": "Simulate partial migration: execute ALTER TABLE at line 652, then trigger failure mid-UPDATE. Verify database is left in detectable bad state and operator can re-run recovery safely.",
+      "test_code_pattern": "Mock rusqlite::Connection to fail after first UPDATE (line 657) completes but before second UPDATE (line 664). Verify idempotency: running migrate_v19 again should complete backfill correctly.",
+      "risk_level": "Critical",
+      "affected_paths": [
+        "crates/librefang-memory/src/migration.rs:641-668"
+      ],
+      "recommendation": "Generate test: test_migration_v19_partial_failure_is_recoverable - verify second run of migrate_v19 completes backfill"
+    },
+    {
+      "gap_id": 2,
+      "category": "Migration Edge Cases",
+      "title": "Concurrent Migration Execution - Race Condition on Schema Check",
+      "description": "Line 650 checks `column_exists()` then line 652 executes ALTER. If two processes run migrate_v19 simultaneously, both may pass the check before either executes ALTER, causing duplicate column creation error.",
+      "why_it_matters": "In multi-process deployments (workers, multiple app instances), concurrent migrations could crash the entire service if not handled.",
+      "what_could_go_wrong": [
+        "Worker A checks column_exists() = false, Worker B checks column_exists() = false",
+        "Both attempt ALTER TABLE simultaneously",
+        "SQLite locks prevent ALTER, one succeeds, one fails with 'duplicate column'",
+        "Migration rollback/error handling leaves database in unknown state"
+      ],
+      "test_scenario": "Simulate concurrent migration: two threads both check column_exists() before either executes ALTER. Verify the first succeeds and second gracefully detects column exists and continues.",
+      "test_code_pattern": "Use parking_lot::Mutex or std::sync::mpsc to orchestrate two migration threads. Patch column_exists() to return false for both before ALTER executes. Verify both complete successfully.",
+      "risk_level": "Critical",
+      "affected_paths": [
+        "crates/librefang-memory/src/migration.rs:650-655"
+      ],
+      "recommendation": "Generate test: test_migration_v19_concurrent_execution_safe - verify both concurrent runs complete without ALTER conflict"
+    },
+    {
+      "gap_id": 3,
+      "category": "Query Isolation Gaps",
+      "title": "count_all() Leaks All Tenants' Memory Count - No account_id Filter",
+      "description": "Function at line 843-863 queries ALL memories across ALL accounts without tenant filtering. count_all(Some('episodic')) returns aggregated count for all tenants' episodic memories, violating tenant isolation.",
+      "why_it_matters": "If count_all() is used in billing, quota enforcement, or analytics, Tenant A learns Tenant B's memory usage. Compliance violation (multi-tenancy data leakage).",
+      "what_could_go_wrong": [
+        "API endpoint /api/memory/stats calls count_all() and exposes global memory count",
+        "Billing system uses count_all() to charge all tenants equally based on total count",
+        "Tenant A can infer Tenant B's activity level by calling count_all() repeatedly",
+        "No account_id parameter in function signature, impossible to fix without breaking API"
+      ],
+      "test_scenario": "Create memories for Tenant A and Tenant B. Call count_all('episodic'). Verify return is 2. Then test that if used in tenant-aware context, it fails isolation tests.",
+      "test_code_pattern": "Setup two semantic stores (or same store with different metadata). Insert 5 memories for 'tenant-a', 3 for 'tenant-b'. Assert count_all('episodic') returns 8 (not filtered by account). THEN verify this is NOT called from tenant-aware endpoints.",
+      "risk_level": "Critical",
+      "affected_paths": [
+        "crates/librefang-memory/src/semantic.rs:843-863"
+      ],
+      "recommendation": "Accept risk + mitigate: Verify count_all() is NEVER called from tenant-aware API paths. Add #[deprecated] warning: \"Use count_by_account() instead for tenant queries\". Generate test: test_count_all_is_not_exposed_via_api"
+    },
+    {
+      "gap_id": 4,
+      "category": "Query Isolation Gaps",
+      "title": "recall_via_vector_store() Missing account_id Filter in Delegation",
+      "description": "Line 1150 builds SQL for embedding search but does NOT pass account_id to filter object before delegating to external VectorStore (line 206). The query_embedding path delegates to external backend which may not enforce tenant isolation.",
+      "why_it_matters": "If VectorStore backend (Weaviate, Qdrant, Pinecone) is used, tenant A could query and retrieve Tenant B's embeddings if backend isn't tenant-aware.",
+      "what_could_go_wrong": [
+        "External VectorStore is shared across tenants but unaware of account_id",
+        "Vector similarity search returns results from other tenants",
+        "Operator doesn't realize VectorStore needs separate index per tenant",
+        "No test validates account_id is passed to VectorStore during recall_with_embedding"
+      ],
+      "test_scenario": "Mock VectorStore backend. Call recall_with_embedding() with filter={account_id: 'tenant-a'}. Verify account_id is passed to VectorStore.query() call (line 206).",
+      "test_code_pattern": "Create MockVectorStore implementing VectorStore trait. Track which parameters are passed to its query() method. Assert account_id from filter is included in query call.",
+      "risk_level": "Critical",
+      "affected_paths": [
+        "crates/librefang-memory/src/semantic.rs:204-206",
+        "crates/librefang-memory/src/semantic.rs:1145-1170"
+      ],
+      "recommendation": "Generate test: test_recall_via_vector_store_includes_account_id_filter - verify account_id is passed to external VectorStore backend"
+    },
+    {
+      "gap_id": 5,
+      "category": "Query Isolation Gaps",
+      "title": "get_by_id() No Tenant Validation - Returns Any Tenant's Memory",
+      "description": "Function at line 496-520 retrieves memory by ID without account_id parameter or filter. Tenant A can call get_by_id(memory_uuid) and retrieve ANY tenant's memory if UUID is known.",
+      "why_it_matters": "Direct ID-based access bypasses all tenant isolation. Severe data leakage vulnerability.",
+      "what_could_go_wrong": [
+        "Tenant A guesses/brute-forces memory UUID from another tenant",
+        "get_by_id() is called without tenant context check in API layer",
+        "Memory UUID could be guessable (sequential, predictable UUIDs)",
+        "No test validates get_by_id() rejects cross-tenant access"
+      ],
+      "test_scenario": "Create memory for Tenant A. Call get_by_id(memory_id) without providing Tenant A context. Verify it returns the memory (current behavior is WRONG). Then add account_id parameter and verify without account_id it fails.",
+      "test_code_pattern": "Store memory for 'tenant-a'. Call get_by_id(id, None, include_deleted=false). Assert it returns memory (current bug). THEN test that a tenant-aware wrapper would correctly reject this.",
+      "risk_level": "Critical",
+      "affected_paths": [
+        "crates/librefang-memory/src/semantic.rs:496-520"
+      ],
+      "recommendation": "BLOCKING: Add account_id parameter to get_by_id() signature. Update all callers to pass tenant context. Generate test: test_get_by_id_with_account_id_isolation"
+    },
+    {
+      "gap_id": 6,
+      "category": "Backward Compatibility Failures",
+      "title": "DEFAULT_ACCOUNT_ID = 'default' Collides With Real Tenant Named 'default'",
+      "description": "Lines 7 and 21 define DEFAULT_ACCOUNT_ID = 'default'. If an operator creates a real tenant named 'default', all legacy rows (backfilled to 'default') become indistinguishable from 'default' tenant's actual rows.",
+      "why_it_matters": "Two different entities claim same account_id. Queries for 'default' tenant return mixed data from both legacy+real.",
+      "what_could_go_wrong": [
+        "Operator creates tenant with org name 'default' (e.g., Default Organization)",
+        "Legacy rows and new rows both use account_id='default'",
+        "count_by_account('default', None) returns combined count",
+        "Impossible to distinguish legacy data from 'default' tenant's actual data"
+      ],
+      "test_scenario": "Insert legacy memory without explicit tenant. Backfill assigns account_id='default'. Then insert new memory with account_id='default' (real tenant). Query count_by_account('default'). Verify we can't separate them (demonstrates the problem).",
+      "test_code_pattern": "Simulate two sources: legacy row → backfilled to 'default', new row → inserted with account_id='default'. Assert count_by_account('default') returns 2. Then verify no way to distinguish which is which.",
+      "risk_level": "High",
+      "affected_paths": [
+        "crates/librefang-memory/src/semantic.rs:7,21",
+        "crates/librefang-memory/src/migration.rs:7,661,667"
+      ],
+      "recommendation": "Generate test: test_default_account_id_collision_documented - verify behavior is documented. Optionally: use UUID-based default (e.g., 'system-00000000') instead of string 'default'"
+    },
+    {
+      "gap_id": 7,
+      "category": "Concurrent Access Scenarios",
+      "title": "Insert During Migration - Does DEFAULT Correctly Assign New Rows?",
+      "description": "If row is inserted DURING v19 migration (while backfill UPDATE is running), the DEFAULT 'default' is applied. But if metadata.account_id is present, it's not synchronized until next backfill run.",
+      "why_it_matters": "Memory inserted mid-migration might have account_id='default' even if metadata.account_id='tenant-a', causing it to be invisible to tenant queries until next migration run.",
+      "what_could_go_wrong": [
+        "Agent inserts memory at line 159 while migration UPDATE is running",
+        "DEFAULT applies 'default' to account_id column",
+        "metadata contains account_id but physical column is 'default'",
+        "Tenant A's newest memory is invisible because account_id='default'"
+      ],
+      "test_scenario": "Start migration v19. Pause after schema created (line 652) but before backfill (line 657). Insert new memory with metadata.account_id='tenant-a'. Resume migration. Verify new memory's account_id is correctly set to 'tenant-a' (not 'default').",
+      "test_code_pattern": "Use parking_lot::Mutex to coordinate: migrate_v19 acquires lock, pauses after ALTER. Insert memory in separate thread. Resume migrate_v19. Query new memory's account_id. Assert it's 'tenant-a' (requires backfill of metadata.account_id).",
+      "risk_level": "High",
+      "affected_paths": [
+        "crates/librefang-memory/src/migration.rs:641-668",
+        "crates/librefang-memory/src/semantic.rs:156-174"
+      ],
+      "recommendation": "Generate test: test_insert_during_v19_migration_syncs_account_id - verify inserts mid-migration are backfilled correctly"
+    },
+    {
+      "gap_id": 8,
+      "category": "Backward Compatibility Failures",
+      "title": "Metadata.account_id Deserialization Error - Corrupt JSON Silently Defaults to 'default'",
+      "description": "Lines 23-30 extract account_id from metadata JSON. If metadata is corrupt (malformed JSON in database), json_extract() on line 658 silently returns NULL, then second UPDATE (line 664) applies DEFAULT 'default'. No error logged.",
+      "why_it_matters": "Corrupt metadata is masked. Tenant's data defaults to 'default' without operator visibility.",
+      "what_could_go_wrong": [
+        "Old schema stored invalid JSON in metadata column",
+        "SQLite json_extract() returns NULL on malformed JSON",
+        "Backfill silently assigns 'default' to corrupt rows",
+        "No audit log or warning that data was potentially reassigned",
+        "Operator doesn't know which rows were corrupt"
+      ],
+      "test_scenario": "Insert memory with corrupt metadata (invalid JSON string). Run v19 migration. Verify account_id is set to 'default' (not error). Check if any warning/log is emitted (should be).",
+      "test_code_pattern": "Insert row with metadata='invalid json string' directly via SQL. Run migrate_v19(). Query account_id. Assert it's 'default'. THEN verify a log warning was emitted (if not, generate test that one should be).",
+      "risk_level": "High",
+      "affected_paths": [
+        "crates/librefang-memory/src/migration.rs:657-668",
+        "crates/librefang-memory/src/semantic.rs:23-30"
+      ],
+      "recommendation": "Generate test: test_v19_migration_handles_corrupt_metadata_with_warning - verify corrupt rows are logged as warnings"
+    },
+    {
+      "gap_id": 9,
+      "category": "Production Deployment Risks",
+      "title": "Operator Runbook Missing: Recovery Steps for Failed Migration",
+      "description": "Migration v19 doesn't document failure scenarios or recovery steps. If backfill fails (network, disk full, timeout), operator has no runbook to recover without data loss.",
+      "why_it_matters": "In production, failed migration could cause downtime until operator manually fixes database state.",
+      "what_could_go_wrong": [
+        "Migration starts, UPDATE (line 657) times out after processing 50% of rows",
+        "Operator has no guidance on what state database is in",
+        "Manual recovery steps are unclear - should they re-run migration? Drop column? Restore from backup?",
+        "Multiple operators applying different fixes simultaneously causes inconsistency"
+      ],
+      "test_scenario": "Generate migration failure scenario documentation. Verify each recovery step in the runbook works (e.g., 'if backfill hangs, run migrate_v19 again').",
+      "test_code_pattern": "Document runbook: 'V19 Migration Failure Recovery'. For each step (partial schema, backfill timeout, etc.), write a test that simulates failure and verifies recovery step resolves it.",
+      "risk_level": "High",
+      "affected_paths": [
+        "crates/librefang-memory/src/migration.rs (entire v19 function)"
+      ],
+      "recommendation": "Generate documentation test + code: test_migration_v19_failure_scenarios_documented - verify runbook covers all edge cases"
+    },
+    {
+      "gap_id": 10,
+      "category": "Query Isolation Gaps",
+      "title": "lowest_confidence() Missing account_id - Memory Eviction Could Delete Other Tenant's Data",
+      "description": "Function at line 808-840 queries lowest-confidence memories for agent eviction (line 820). Does NOT filter by account_id. If two tenants share an agent_id, evicting lowest_confidence could delete other tenant's memories.",
+      "why_it_matters": "Cross-tenant data deletion. Tenant A's eviction action deletes Tenant B's lowest-confidence memories if agent is shared.",
+      "what_could_go_wrong": [
+        "Agent ID is reused across tenants (UUID collision or intentional)",
+        "lowest_confidence() returns memories from both tenants",
+        "forget_memory() deletes memories from wrong tenant",
+        "Tenant A's quota enforcement deletes Tenant B's data"
+      ],
+      "test_scenario": "Create agent_id shared by two tenants. Insert 5 memories for tenant-a, 5 for tenant-b (same agent_id). Call lowest_confidence(agent_id, 3). Verify returned IDs belong to BOTH tenants (demonstrating isolation failure).",
+      "test_code_pattern": "Use same agent_id for two accounts. Insert memories with different account_id values. Query lowest_confidence(). Assert results are filtered by... nothing (current bug). Then add account_id filter.",
+      "risk_level": "High",
+      "affected_paths": [
+        "crates/librefang-memory/src/semantic.rs:808-840"
+      ],
+      "recommendation": "Generate test: test_lowest_confidence_does_not_cross_tenant_boundary - add account_id parameter to function OR add test that demonstrates this is only called with tenant context"
+    }
+  ],
+  "test_coverage_summary": {
+    "currently_passing": {
+      "migration_schema": "test_migration_v19_adds_memories_account_column ✓",
+      "backfill_from_metadata": "test_migration_v19_backfills_memories_account_from_metadata ✓",
+      "default_application": "test_migration_v19_defaults_missing_memories_account_id ✓",
+      "query_by_account": "test_count_by_account_uses_physical_account_column ✓",
+      "update_sync": "test_update_content_syncs_account_id_column ✓"
+    },
+    "critical_gaps": 10,
+    "high_impact_gaps": 8,
+    "coverage_percentage": "33% (5 tests covering ~15% of risk surface)"
+  },
+  "recommended_priority_order": [
+    {
+      "priority": 1,
+      "gap_ids": [5],
+      "title": "BLOCKING: Fix get_by_id() Tenant Isolation",
+      "rationale": "Critical security vulnerability - any tenant can read any other tenant's memory by UUID"
+    },
+    {
+      "priority": 2,
+      "gap_ids": [1, 2],
+      "title": "Migration Reliability: Partial Failure & Concurrency",
+      "rationale": "Production crashes or data loss in multi-process deployments"
+    },
+    {
+      "priority": 3,
+      "gap_ids": [3, 4, 10],
+      "title": "Query Isolation: count_all(), VectorStore, lowest_confidence()",
+      "rationale": "Data leakage and cross-tenant contamination in core query paths"
+    },
+    {
+      "priority": 4,
+      "gap_ids": [6, 7, 8],
+      "title": "Backward Compatibility: Collision, Corruption, Mid-Migration",
+      "rationale": "Silent data degradation during migration"
+    },
+    {
+      "priority": 5,
+      "gap_ids": [9],
+      "title": "Operational: Runbook & Recovery",
+      "rationale": "Enables fast MTTR if migration fails in production"
+    }
+  ],
+  "risk_assessment": {
+    "overall_production_readiness": "NOT READY",
+    "blocking_issues": 1,
+    "critical_data_leakage_risk": "HIGH",
+    "migration_reliability_risk": "HIGH",
+    "recommended_action": "DO NOT DEPLOY until gaps 1, 2, 5 are resolved. Strongly recommend resolving gaps 3, 4, 10 before production use."
+  }
+}
