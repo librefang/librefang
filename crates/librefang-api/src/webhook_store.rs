@@ -128,22 +128,38 @@ pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
         }
     }
 
-    // Block private/link-local IPs to mitigate SSRF
-    if let Some(host) = parsed.host_str() {
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
-                return Err(
-                    "url must not point to a private, loopback, or link-local address".to_string(),
-                );
+    // Block private/link-local IPs to mitigate SSRF.
+    // Use parsed.host() (typed) so IPv6 addresses are extracted correctly.
+    // host_str() returns bracketed IPv6 (e.g. "[fd00::1]") which fails IpAddr::parse.
+    if let Some(host) = parsed.host() {
+        match host {
+            url::Host::Ipv4(v4) => {
+                let ip = std::net::IpAddr::V4(v4);
+                if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
+                    return Err(
+                        "url must not point to a private, loopback, or link-local address"
+                            .to_string(),
+                    );
+                }
             }
-        }
-        // Also block common internal hostnames
-        let lower = host.to_lowercase();
-        if lower == "localhost"
-            || lower == "metadata.google.internal"
-            || lower.ends_with(".internal")
-        {
-            return Err("url must not point to an internal/localhost address".to_string());
+            url::Host::Ipv6(v6) => {
+                let ip = std::net::IpAddr::V6(v6);
+                if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
+                    return Err(
+                        "url must not point to a private, loopback, or link-local address"
+                            .to_string(),
+                    );
+                }
+            }
+            url::Host::Domain(host) => {
+                let lower = host.to_lowercase();
+                if lower == "localhost"
+                    || lower == "metadata.google.internal"
+                    || lower.ends_with(".internal")
+                {
+                    return Err("url must not point to an internal/localhost address".to_string());
+                }
+            }
         }
     }
 
@@ -156,14 +172,14 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
             v4.is_private() || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64
             // 100.64.0.0/10
         }
-        std::net::IpAddr::V6(_) => false, // Simplified; production should check IPv6 ULA
+        std::net::IpAddr::V6(v6) => v6.is_unique_local(), // fc00::/7 ULA
     }
 }
 
 fn is_link_local(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.octets()[0] == 169,
-        std::net::IpAddr::V6(_) => false,
+        std::net::IpAddr::V6(v6) => v6.is_unicast_link_local(), // fe80::/10
     }
 }
 
@@ -559,6 +575,32 @@ mod tests {
         req.url = "http://169.254.169.254/metadata".to_string();
         let err = store.create_scoped(req, account_id()).unwrap_err();
         assert!(err.contains("private") || err.contains("link-local"));
+    }
+
+    #[test]
+    fn create_rejects_ipv6_ula_url() {
+        let (store, _dir) = temp_store();
+        let mut req = valid_create_req();
+        // fd00::/8 is a ULA (unique local) IPv6 range — private equivalent
+        req.url = "http://[fd00::1]/hook".to_string();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
+        assert!(
+            err.contains("private") || err.contains("link-local"),
+            "IPv6 ULA should be blocked, got: {err}"
+        );
+    }
+
+    #[test]
+    fn create_rejects_ipv6_link_local_url() {
+        let (store, _dir) = temp_store();
+        let mut req = valid_create_req();
+        // fe80::/10 is IPv6 link-local
+        req.url = "http://[fe80::1]/hook".to_string();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
+        assert!(
+            err.contains("private") || err.contains("link-local"),
+            "IPv6 link-local should be blocked, got: {err}"
+        );
     }
 
     #[test]
