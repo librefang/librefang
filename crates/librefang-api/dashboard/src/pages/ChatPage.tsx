@@ -144,7 +144,20 @@ const sessionCache = new Map<string, ChatMessage[]>();
 // sessionVersion: bump to force reload after session switch
 function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  // Per-agent loading state. A single shared `isLoading` would freeze the
+  // ChatInput on every agent while one of them is streaming (#2322). Keyed
+  // by agentId so switching away from a busy agent unblocks the new one,
+  // and coming back still reflects the in-flight status of the original.
+  const [loadingAgents, setLoadingAgents] = useState<Record<string, boolean>>({});
+  const isLoading = !!(agentId && loadingAgents[agentId]);
+  const setAgentLoading = useCallback((id: string, on: boolean) => {
+    setLoadingAgents(prev => {
+      if (!!prev[id] === on) return prev;
+      const next = { ...prev };
+      if (on) next[id] = true; else delete next[id];
+      return next;
+    });
+  }, []);
   const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
 
@@ -180,8 +193,9 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     }
 
     setMessages([]);
-    setIsLoading(true);
-    loadAgentSession(agentId)
+    const loadId = agentId;
+    setAgentLoading(loadId, true);
+    loadAgentSession(loadId)
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
@@ -214,11 +228,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
             }];
           });
           setMessages(historical);
-          sessionCache.set(agentId, historical);
+          sessionCache.set(loadId, historical);
         }
       })
       .catch(() => {})
-      .finally(() => setIsLoading(false));
+      .finally(() => setAgentLoading(loadId, false));
   }, [agentId, sessionVersion]);
 
   // Send message - WS first, HTTP fallback
@@ -288,6 +302,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     }
 
     if (!agentId) return;
+    // Snapshot the agent at send time. The user may switch agents before
+    // the response finishes; all completion/cleanup paths must still target
+    // the original sender so we don't flip loading state / HTTP routes on
+    // the agent the user is now looking at.
+    const sendAgentId = agentId;
 
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
@@ -305,12 +324,12 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     };
 
     setMessages(prev => [...prev, userMsg, botMsg]);
-    setIsLoading(true);
+    setAgentLoading(sendAgentId, true);
 
     // Helper: send via HTTP (used as primary fallback and WS drop recovery)
     const sendViaHttp = async () => {
       try {
-        const response = await sendAgentMessage(agentId, trimmed);
+        const response = await sendAgentMessage(sendAgentId, trimmed);
         const fullContent = response.response || "";
         setMessages(prev => prev.map(m =>
           m.id === botMsg.id
@@ -324,9 +343,9 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
             : m
         ));
         if (response.memories_saved?.length) {
-          const agentName = agents.find(a => a.id === agentId)?.name;
+          const agentName = agents.find(a => a.id === sendAgentId)?.name;
           response.memories_saved.forEach((mem: string) => {
-            addSkillOutput({ skillName: "memory", agentId: agentId || undefined, agentName, content: mem });
+            addSkillOutput({ skillName: "memory", agentId: sendAgentId, agentName, content: mem });
           });
         }
       } catch (err) {
@@ -335,7 +354,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
           m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg } : m
         ));
       } finally {
-        setIsLoading(false);
+        setAgentLoading(sendAgentId, false);
       }
     };
 
@@ -422,11 +441,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               // Also keep the skill output panel behavior
               const entry = normalizeToolOutput(data);
               if (entry) {
-                addSkillOutput({ skillName: entry.tool, agentId: agentId || undefined, content: entry.content });
+                addSkillOutput({ skillName: entry.tool, agentId: sendAgentId, content: entry.content });
               }
             } else if (data.type === "silent_complete") {
               setMessages(prev => prev.filter(m => m.id !== botMsg.id));
-              setIsLoading(false);
+              setAgentLoading(sendAgentId, false);
               cleanup();
             } else if (data.type === "error") {
               const error = data.content || "WebSocket error";
@@ -452,7 +471,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                     }
                   : m
               ));
-              setIsLoading(false);
+              setAgentLoading(sendAgentId, false);
               cleanup();
             }
           } catch {
