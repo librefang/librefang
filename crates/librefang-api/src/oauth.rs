@@ -24,6 +24,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use crate::middleware::AccountId;
 use crate::routes::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -192,6 +193,8 @@ static DISCOVERY_CACHE: std::sync::LazyLock<DiscoveryCache> =
 struct OAuthStatePayload {
     /// Provider ID (e.g. "google", "github").
     provider: String,
+    /// Owning tenant account for this auth flow when initiated from a tenant context.
+    account_id: Option<String>,
     /// Random nonce for CSRF protection.
     nonce: String,
     /// Timestamp (seconds since UNIX epoch) for expiry checking.
@@ -202,7 +205,7 @@ struct OAuthStatePayload {
 const STATE_TOKEN_TTL_SECS: u64 = 600;
 
 /// Build an HMAC-signed state parameter containing provider + nonce.
-fn build_state_token(provider_id: &str) -> String {
+fn build_state_token(provider_id: &str, account_id: Option<&str>) -> String {
     let nonce = uuid::Uuid::new_v4().to_string();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -210,6 +213,7 @@ fn build_state_token(provider_id: &str) -> String {
         .as_secs();
     let payload = OAuthStatePayload {
         provider: provider_id.to_string(),
+        account_id: account_id.map(str::to_owned),
         nonce: nonce.clone(),
         ts,
     };
@@ -227,6 +231,41 @@ fn build_state_token(provider_id: &str) -> String {
 
     // Format: payload.signature (both base64url)
     format!("{payload_b64}.{sig_b64}")
+}
+
+fn require_account_bound_oauth(
+    multi_tenant: bool,
+    account_id: Option<&str>,
+) -> Result<(), &'static str> {
+    if multi_tenant && account_id.is_none() {
+        Err("OAuth endpoints require X-Account-Id in multi-tenant mode")
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_callback_tenant_binding(
+    multi_tenant: bool,
+    state_account_id: Option<&str>,
+    callback_account_id: Option<&str>,
+) -> Result<(), &'static str> {
+    if !multi_tenant {
+        if let Some(callback_account_id) = callback_account_id {
+            if state_account_id != Some(callback_account_id) {
+                return Err("OAuth tenant mismatch");
+            }
+        }
+        return Ok(());
+    }
+
+    match (state_account_id, callback_account_id) {
+        (Some(state_account_id), Some(callback_account_id))
+            if state_account_id == callback_account_id =>
+        {
+            Ok(())
+        }
+        _ => Err("OAuth tenant mismatch"),
+    }
 }
 
 /// Verify and decode a state token. Returns the payload if valid.
@@ -269,10 +308,23 @@ fn verify_state_token(state: &str) -> Result<OAuthStatePayload, String> {
 
 /// Derive the HMAC signing key for state tokens. Uses LIBREFANG_STATE_SECRET
 /// env var if set, otherwise falls back to a random per-process key.
+///
+/// **Production requirement**: set `LIBREFANG_STATE_SECRET` to a stable secret.
+/// Without it, OAuth state tokens are invalidated on every restart and will not
+/// work across multiple server instances (load balancer / rolling deploy).
 fn state_signing_key() -> String {
-    static KEY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        std::env::var("LIBREFANG_STATE_SECRET").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
-    });
+    static KEY: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| match std::env::var("LIBREFANG_STATE_SECRET") {
+            Ok(key) if !key.trim().is_empty() => key,
+            _ => {
+                tracing::warn!(
+                    "LIBREFANG_STATE_SECRET is not set — OAuth state tokens will not survive \
+                     server restarts or load-balanced deployments. Set this environment variable \
+                     to a stable secret in production."
+                );
+                uuid::Uuid::new_v4().to_string()
+            }
+        });
     KEY.clone()
 }
 
@@ -331,6 +383,8 @@ struct StoredTokens {
     expires_at: Option<std::time::Instant>,
     /// Provider ID that issued these tokens.
     provider_id: String,
+    /// Owning tenant account for this stored token set.
+    account_id: Option<String>,
     /// When this entry was stored (for TTL eviction).
     stored_at: std::time::Instant,
 }
@@ -341,7 +395,7 @@ const TOKEN_STORE_TTL: std::time::Duration = std::time::Duration::from_secs(24 *
 /// In-memory token store. Maps user `sub` to their stored tokens.
 #[derive(Default)]
 pub struct TokenStore {
-    inner: RwLock<HashMap<String, StoredTokens>>,
+    inner: RwLock<HashMap<(String, Option<String>), StoredTokens>>,
 }
 
 /// Global token store instance.
@@ -349,19 +403,20 @@ static TOKEN_STORE: std::sync::LazyLock<TokenStore> = std::sync::LazyLock::new(T
 
 impl TokenStore {
     /// Store tokens for a user.
-    async fn store(&self, sub: &str, tokens: StoredTokens) {
+    async fn store(&self, sub: &str, account_id: Option<&str>, tokens: StoredTokens) {
         let mut write = self.inner.write().await;
-        write.insert(sub.to_string(), tokens);
+        write.insert((sub.to_string(), account_id.map(str::to_owned)), tokens);
     }
 
     /// Retrieve stored tokens for a user, evicting if older than TTL.
     #[allow(dead_code)]
-    async fn get(&self, sub: &str) -> Option<StoredTokens> {
+    async fn get(&self, sub: &str, account_id: Option<&str>) -> Option<StoredTokens> {
         let mut write = self.inner.write().await;
-        if let Some(entry) = write.get(sub) {
+        let key = (sub.to_string(), account_id.map(str::to_owned));
+        if let Some(entry) = write.get(&key) {
             if entry.stored_at.elapsed() > TOKEN_STORE_TTL {
                 debug!(sub = %sub, "Evicting expired token store entry (>24h)");
-                write.remove(sub);
+                write.remove(&key);
                 return None;
             }
             return Some(entry.clone());
@@ -371,13 +426,17 @@ impl TokenStore {
 
     /// Remove stored tokens for a user (e.g., on logout).
     #[allow(dead_code)]
-    async fn remove(&self, sub: &str) {
+    async fn remove(&self, sub: &str, account_id: Option<&str>) {
         let mut write = self.inner.write().await;
-        write.remove(sub);
+        write.remove(&(sub.to_string(), account_id.map(str::to_owned)));
     }
 
     /// Find a stored entry by provider ID, evicting expired entries along the way.
-    async fn find_by_provider(&self, provider_id: &str) -> Option<(String, StoredTokens)> {
+    async fn find_by_provider(
+        &self,
+        provider_id: &str,
+        account_id: Option<&str>,
+    ) -> Option<(String, StoredTokens)> {
         let mut write = self.inner.write().await;
         let now = std::time::Instant::now();
 
@@ -386,12 +445,19 @@ impl TokenStore {
 
         write
             .iter()
-            .find(|(_sub, entry)| entry.provider_id == provider_id)
-            .map(|(sub, entry)| (sub.clone(), entry.clone()))
+            .find(|((_, stored_account_id), entry)| {
+                entry.provider_id == provider_id
+                    && stored_account_id.as_deref() == account_id
+                    && entry.account_id.as_deref() == account_id
+            })
+            .map(|((sub, _), entry)| (sub.clone(), entry.clone()))
     }
 
     /// Find any stored entry with a refresh token, evicting expired entries.
-    async fn find_any_with_refresh(&self) -> Option<(String, StoredTokens)> {
+    async fn find_any_with_refresh(
+        &self,
+        account_id: Option<&str>,
+    ) -> Option<(String, StoredTokens)> {
         let mut write = self.inner.write().await;
         let now = std::time::Instant::now();
 
@@ -400,8 +466,12 @@ impl TokenStore {
 
         write
             .iter()
-            .find(|(_sub, entry)| entry.refresh_token.is_some())
-            .map(|(sub, entry)| (sub.clone(), entry.clone()))
+            .find(|((_, stored_account_id), entry)| {
+                entry.refresh_token.is_some()
+                    && stored_account_id.as_deref() == account_id
+                    && entry.account_id.as_deref() == account_id
+            })
+            .map(|((sub, _), entry)| (sub.clone(), entry.clone()))
     }
 }
 
@@ -453,6 +523,16 @@ pub async fn auth_login(State(state): State<Arc<AppState>>) -> Response {
             .into_response();
     }
 
+    if cfg.multi_tenant {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Legacy /api/auth/login is unavailable in multi-tenant mode; use an account-bound flow"
+            })),
+        )
+            .into_response();
+    }
+
     let providers = resolve_providers(ext_auth).await;
     let provider = match providers.first() {
         Some(p) => p,
@@ -465,13 +545,14 @@ pub async fn auth_login(State(state): State<Arc<AppState>>) -> Response {
         }
     };
 
-    build_login_redirect(provider).into_response()
+    build_login_redirect(provider, None).into_response()
 }
 
 /// GET /api/auth/login/:provider — Redirect to a specific provider.
 #[utoipa::path(get, path = "/api/auth/login/{provider}", tag = "auth", params(("provider" = String, Path, description = "OAuth provider name")), responses((status = 302, description = "Redirect to specific OAuth provider")))]
 pub async fn auth_login_provider(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(provider_id): Path<String>,
 ) -> Response {
     let cfg = state.kernel.config_snapshot();
@@ -480,6 +561,14 @@ pub async fn auth_login_provider(
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"error": "External authentication is not configured"})),
+        )
+            .into_response();
+    }
+
+    if let Err(message) = require_account_bound_oauth(cfg.multi_tenant, account.0.as_deref()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": message })),
         )
             .into_response();
     }
@@ -496,13 +585,16 @@ pub async fn auth_login_provider(
         }
     };
 
-    build_login_redirect(provider).into_response()
+    build_login_redirect(provider, account.0.as_deref()).into_response()
 }
 
 /// Build the OAuth2 authorization redirect for the given provider.
 /// Generates a signed state token encoding the provider ID and a nonce.
-fn build_login_redirect(provider: &ResolvedProvider) -> impl IntoResponse {
-    let state_token = build_state_token(&provider.id);
+fn build_login_redirect(
+    provider: &ResolvedProvider,
+    account_id: Option<&str>,
+) -> impl IntoResponse {
+    let state_token = build_state_token(&provider.id, account_id);
     // Extract the nonce from the state for the OIDC nonce parameter.
     let nonce = if let Ok(payload) = verify_state_token(&state_token) {
         payload.nonce
@@ -575,6 +667,9 @@ struct CallbackResponse {
     expires_in: u64,
     /// Provider that authenticated the user.
     provider: String,
+    /// Owning tenant account associated with this OAuth flow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
     /// User info extracted from the ID token.
     user: CallbackUser,
     /// Refresh token (if the provider issued one). Clients should store this
@@ -600,6 +695,7 @@ struct CallbackUser {
 #[utoipa::path(get, path = "/api/auth/callback", tag = "auth", responses((status = 200, description = "OAuth callback — completes login flow", body = serde_json::Value)))]
 pub async fn auth_callback(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Query(query): Query<CallbackQuery>,
 ) -> impl IntoResponse {
     let cfg = state.kernel.config_snapshot();
@@ -660,13 +756,21 @@ pub async fn auth_callback(
         }
     };
 
-    handle_code_exchange(ext_auth, &code, &state_payload).await
+    handle_code_exchange(
+        ext_auth,
+        cfg.multi_tenant,
+        &code,
+        &state_payload,
+        account.0.as_deref(),
+    )
+    .await
 }
 
 /// POST /api/auth/callback — Handle the OAuth2 callback (programmatic clients).
 #[utoipa::path(post, path = "/api/auth/callback", tag = "auth", responses((status = 200, description = "OAuth callback (POST) — completes login flow", body = serde_json::Value)))]
 pub async fn auth_callback_post(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(body): Json<CallbackBody>,
 ) -> impl IntoResponse {
     let cfg = state.kernel.config_snapshot();
@@ -692,15 +796,36 @@ pub async fn auth_callback_post(
         }
     };
 
-    handle_code_exchange(ext_auth, &body.code, &state_payload).await
+    handle_code_exchange(
+        ext_auth,
+        cfg.multi_tenant,
+        &body.code,
+        &state_payload,
+        account.0.as_deref(),
+    )
+    .await
 }
 
 /// Shared code exchange logic for both GET and POST callback handlers.
 async fn handle_code_exchange(
     ext_auth: &librefang_types::config::ExternalAuthConfig,
+    multi_tenant: bool,
     code: &str,
     state_payload: &OAuthStatePayload,
+    callback_account_id: Option<&str>,
 ) -> Response {
+    if let Err(message) = validate_callback_tenant_binding(
+        multi_tenant,
+        state_payload.account_id.as_deref(),
+        callback_account_id,
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": message})),
+        )
+            .into_response();
+    }
+
     let providers = resolve_providers(ext_auth).await;
 
     // Route to the provider encoded in the state token.
@@ -875,11 +1000,13 @@ async fn handle_code_exchange(
     TOKEN_STORE
         .store(
             &claims.sub,
+            state_payload.account_id.as_deref(),
             StoredTokens {
                 access_token: token_resp.access_token.clone(),
                 refresh_token: token_resp.refresh_token.clone(),
                 expires_at,
                 provider_id: provider.id.clone(),
+                account_id: state_payload.account_id.clone(),
                 stored_at: std::time::Instant::now(),
             },
         )
@@ -892,6 +1019,7 @@ async fn handle_code_exchange(
             token_type: "Bearer".to_string(),
             expires_in,
             provider: provider.id.clone(),
+            account_id: state_payload.account_id.clone(),
             user: CallbackUser {
                 sub: claims.sub,
                 email: claims.email,
@@ -1093,6 +1221,7 @@ struct RefreshResponse {
 #[utoipa::path(post, path = "/api/auth/refresh", tag = "auth", request_body = RefreshRequest, responses((status = 200, description = "New access token", body = serde_json::Value), (status = 400, description = "Missing or invalid refresh token"), (status = 502, description = "Token refresh failed")))]
 pub async fn auth_refresh(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(req): Json<RefreshRequest>,
 ) -> impl IntoResponse {
     let kcfg = state.kernel.config_ref();
@@ -1101,6 +1230,14 @@ pub async fn auth_refresh(
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"error": "External authentication is not configured"})),
+        )
+            .into_response();
+    }
+
+    if let Err(message) = require_account_bound_oauth(kcfg.multi_tenant, account.0.as_deref()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": message })),
         )
             .into_response();
     }
@@ -1120,7 +1257,10 @@ pub async fn auth_refresh(
         (rt.clone(), None::<String>, provider.cloned())
     } else if let Some(ref pid) = req.provider {
         // No refresh token in request, but provider given — look up from store.
-        match TOKEN_STORE.find_by_provider(pid).await {
+        match TOKEN_STORE
+            .find_by_provider(pid, account.0.as_deref())
+            .await
+        {
             Some((sub, entry)) => match entry.refresh_token {
                 Some(rt) => {
                     let provider = providers.iter().find(|p| p.id == *pid).cloned();
@@ -1148,7 +1288,10 @@ pub async fn auth_refresh(
         }
     } else {
         // Neither refresh token nor provider — try to find any stored refresh token.
-        match TOKEN_STORE.find_any_with_refresh().await {
+        match TOKEN_STORE
+            .find_any_with_refresh(account.0.as_deref())
+            .await
+        {
             Some((sub, entry)) => {
                 let provider = providers
                     .iter()
@@ -1223,11 +1366,13 @@ pub async fn auth_refresh(
         TOKEN_STORE
             .store(
                 sub,
+                account.0.as_deref(),
                 StoredTokens {
                     access_token: token_resp.access_token.clone(),
                     refresh_token: token_resp.refresh_token.clone(),
                     expires_at,
                     provider_id: provider.id.clone(),
+                    account_id: account.0.clone(),
                     stored_at: std::time::Instant::now(),
                 },
             )
@@ -1816,15 +1961,25 @@ mod tests {
 
     #[test]
     fn test_build_and_verify_state_token() {
-        let token = build_state_token("google");
+        let token = build_state_token("google", None);
         let payload = verify_state_token(&token).unwrap();
         assert_eq!(payload.provider, "google");
+        assert_eq!(payload.account_id, None);
+        assert!(!payload.nonce.is_empty());
+    }
+
+    #[test]
+    fn test_build_and_verify_state_token_with_account_id() {
+        let token = build_state_token("google", Some("tenant-a"));
+        let payload = verify_state_token(&token).unwrap();
+        assert_eq!(payload.provider, "google");
+        assert_eq!(payload.account_id.as_deref(), Some("tenant-a"));
         assert!(!payload.nonce.is_empty());
     }
 
     #[test]
     fn test_state_token_rejects_tampered_payload() {
-        let token = build_state_token("google");
+        let token = build_state_token("google", None);
         // Tamper with the payload part.
         let parts: Vec<&str> = token.splitn(2, '.').collect();
         let tampered = format!("{}.{}", "dGFtcGVyZWQ", parts[1]);
@@ -1841,6 +1996,7 @@ mod tests {
         // Build a token with an old timestamp.
         let payload = OAuthStatePayload {
             provider: "test".to_string(),
+            account_id: None,
             nonce: "nonce".to_string(),
             ts: 0, // epoch = very expired
         };
@@ -1857,6 +2013,94 @@ mod tests {
         let result = verify_state_token(&token);
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_code_exchange_rejects_tenant_mismatch() {
+        let ext_auth = librefang_types::config::ExternalAuthConfig::default();
+        let state_payload = OAuthStatePayload {
+            provider: "google".to_string(),
+            account_id: Some("tenant-a".to_string()),
+            nonce: "nonce".to_string(),
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        let response =
+            handle_code_exchange(&ext_auth, true, "code", &state_payload, Some("tenant-b")).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_require_account_bound_oauth_rejects_missing_account_in_multi_tenant() {
+        let err = require_account_bound_oauth(true, None).unwrap_err();
+        assert!(err.contains("X-Account-Id"));
+    }
+
+    #[test]
+    fn test_validate_callback_tenant_binding_rejects_missing_callback_account_in_multi_tenant() {
+        let err = validate_callback_tenant_binding(true, Some("tenant-a"), None).unwrap_err();
+        assert_eq!(err, "OAuth tenant mismatch");
+    }
+
+    #[test]
+    fn test_validate_callback_tenant_binding_allows_matching_callback_account_in_multi_tenant() {
+        assert!(validate_callback_tenant_binding(true, Some("tenant-a"), Some("tenant-a")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_token_store_is_scoped_by_account_id() {
+        let sub = format!("subject-{}", uuid::Uuid::new_v4());
+        let tenant_a = "tenant-a";
+        let tenant_b = "tenant-b";
+
+        TOKEN_STORE
+            .store(
+                &sub,
+                Some(tenant_a),
+                StoredTokens {
+                    access_token: "access-a".to_string(),
+                    refresh_token: Some("refresh-a".to_string()),
+                    expires_at: None,
+                    provider_id: "google".to_string(),
+                    account_id: Some(tenant_a.to_string()),
+                    stored_at: std::time::Instant::now(),
+                },
+            )
+            .await;
+        TOKEN_STORE
+            .store(
+                &sub,
+                Some(tenant_b),
+                StoredTokens {
+                    access_token: "access-b".to_string(),
+                    refresh_token: Some("refresh-b".to_string()),
+                    expires_at: None,
+                    provider_id: "google".to_string(),
+                    account_id: Some(tenant_b.to_string()),
+                    stored_at: std::time::Instant::now(),
+                },
+            )
+            .await;
+
+        let stored_a = TOKEN_STORE
+            .find_by_provider("google", Some(tenant_a))
+            .await
+            .expect("tenant-a entry");
+        let stored_b = TOKEN_STORE
+            .find_by_provider("google", Some(tenant_b))
+            .await
+            .expect("tenant-b entry");
+
+        assert_eq!(stored_a.0, sub);
+        assert_eq!(stored_a.1.refresh_token.as_deref(), Some("refresh-a"));
+        assert_eq!(stored_b.0, sub);
+        assert_eq!(stored_b.1.refresh_token.as_deref(), Some("refresh-b"));
+
+        TOKEN_STORE.remove(&sub, Some(tenant_a)).await;
+        TOKEN_STORE.remove(&sub, Some(tenant_b)).await;
     }
 
     // ── resolve_providers tests ─────────────────────────────────────────

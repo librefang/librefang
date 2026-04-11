@@ -100,6 +100,7 @@ async fn test_full_daemon_lifecycle() {
             base_url: None,
             message_timeout_secs: 300,
         },
+        admin_accounts: vec!["test-tenant".to_string()],
         ..KernelConfig::default()
     };
 
@@ -179,6 +180,7 @@ async fn test_full_daemon_lifecycle() {
     // --- Verify status endpoint ---
     let resp = client
         .get(format!("http://{}/api/status", addr))
+        .header("x-account-id", "test-tenant")
         .send()
         .await
         .unwrap();
@@ -190,6 +192,7 @@ async fn test_full_daemon_lifecycle() {
     // --- Shutdown ---
     let resp = client
         .post(format!("http://{}/api/shutdown", addr))
+        .header("x-account-id", "test-tenant")
         .send()
         .await
         .unwrap();

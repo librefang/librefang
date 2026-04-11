@@ -107,9 +107,10 @@ pub struct AppState {
     /// Avoids blocking the `/api/providers` endpoint on TCP timeouts to
     /// unreachable local services. 60-second TTL.
     pub provider_probe_cache: librefang_runtime::provider_health::ProbeCache,
-    /// Cache for manual provider test results (latency, timestamp, reachable).
-    /// Populated by POST /api/providers/{name}/test, consumed by GET /api/providers.
-    pub provider_test_cache: DashMap<String, (Instant, u128, String, bool)>,
+    /// Cache for manual tenant-scoped provider test results.
+    /// Keyed by `(account_id, provider, effective_base_url)` so one tenant's
+    /// diagnostics do not bleed into another tenant's provider view.
+    pub provider_test_cache: DashMap<(String, String, String), (Instant, u128, String, bool)>,
     /// Webhook subscription store for outbound event notifications.
     pub webhook_store: crate::webhook_store::WebhookStore,
     /// Active session tokens issued by dashboard login.

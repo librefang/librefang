@@ -6,9 +6,9 @@ use axum::Json;
 use librefang_types::agent::AgentEntry;
 
 /// Require a concrete account identity on tenant-facing or admin-only routes.
-pub fn require_concrete_account<'a>(
-    account: &'a AccountId,
-) -> Result<&'a str, (StatusCode, Json<serde_json::Value>)> {
+pub fn require_concrete_account(
+    account: &AccountId,
+) -> Result<&str, (StatusCode, Json<serde_json::Value>)> {
     account.0.as_deref().ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,

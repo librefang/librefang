@@ -4116,6 +4116,7 @@ name = "librefang-memory"
 version = "2026.4.7-beta16"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "librefang-types",
  "reqwest 0.13.2",

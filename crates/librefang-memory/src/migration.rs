@@ -4,87 +4,107 @@
 
 use rusqlite::Connection;
 
+const DEFAULT_ACCOUNT_ID: &str = "default";
+
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 18;
+const SCHEMA_VERSION: u32 = 19;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
-    let current_version = get_schema_version(conn);
+    conn.execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
+    let migration_result = (|| {
+        let current_version = get_schema_version(conn);
 
-    if current_version < 1 {
-        migrate_v1(conn)?;
+        if current_version < 1 {
+            migrate_v1(conn)?;
+        }
+
+        if current_version < 2 {
+            migrate_v2(conn)?;
+        }
+
+        if current_version < 3 {
+            migrate_v3(conn)?;
+        }
+
+        if current_version < 4 {
+            migrate_v4(conn)?;
+        }
+
+        if current_version < 5 {
+            migrate_v5(conn)?;
+        }
+
+        if current_version < 6 {
+            migrate_v6(conn)?;
+        }
+
+        if current_version < 7 {
+            migrate_v7(conn)?;
+        }
+
+        if current_version < 8 {
+            migrate_v8(conn)?;
+        }
+
+        if current_version < 9 {
+            migrate_v9(conn)?;
+        }
+
+        if current_version < 10 {
+            migrate_v10(conn)?;
+        }
+
+        if current_version < 11 {
+            migrate_v11(conn)?;
+        }
+
+        if current_version < 12 {
+            migrate_v12(conn)?;
+        }
+
+        if current_version < 13 {
+            migrate_v13(conn)?;
+        }
+
+        if current_version < 14 {
+            migrate_v14(conn)?;
+        }
+
+        if current_version < 15 {
+            migrate_v15(conn)?;
+        }
+
+        if current_version < 16 {
+            migrate_v16(conn)?;
+        }
+
+        if current_version < 17 {
+            migrate_v17(conn)?;
+        }
+
+        if current_version < 18 {
+            migrate_v18(conn)?;
+        }
+
+        if current_version < 19 {
+            migrate_v19(conn)?;
+        }
+
+        set_schema_version(conn, SCHEMA_VERSION)?;
+        Ok(())
+    })();
+
+    match migration_result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(err) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(err)
+        }
     }
-
-    if current_version < 2 {
-        migrate_v2(conn)?;
-    }
-
-    if current_version < 3 {
-        migrate_v3(conn)?;
-    }
-
-    if current_version < 4 {
-        migrate_v4(conn)?;
-    }
-
-    if current_version < 5 {
-        migrate_v5(conn)?;
-    }
-
-    if current_version < 6 {
-        migrate_v6(conn)?;
-    }
-
-    if current_version < 7 {
-        migrate_v7(conn)?;
-    }
-
-    if current_version < 8 {
-        migrate_v8(conn)?;
-    }
-
-    if current_version < 9 {
-        migrate_v9(conn)?;
-    }
-
-    if current_version < 10 {
-        migrate_v10(conn)?;
-    }
-
-    if current_version < 11 {
-        migrate_v11(conn)?;
-    }
-
-    if current_version < 12 {
-        migrate_v12(conn)?;
-    }
-
-    if current_version < 13 {
-        migrate_v13(conn)?;
-    }
-
-    if current_version < 14 {
-        migrate_v14(conn)?;
-    }
-
-    if current_version < 15 {
-        migrate_v15(conn)?;
-    }
-
-    if current_version < 16 {
-        migrate_v16(conn)?;
-    }
-
-    if current_version < 17 {
-        migrate_v17(conn)?;
-    }
-
-    if current_version < 18 {
-        migrate_v18(conn)?;
-    }
-
-    set_schema_version(conn, SCHEMA_VERSION)?;
-    Ok(())
 }
 
 /// Get the current schema version from the database.
@@ -632,6 +652,105 @@ fn migrate_v18(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// V19: Add physical account_id column to memories for tenant-scoped queries.
+///
+/// Operator note:
+/// - Fresh v19 migrations create `memories.account_id` as `TEXT NOT NULL DEFAULT 'default'`.
+/// - Legacy rows are backfilled from `metadata.account_id` when present.
+/// - If a developer previously ran an unshipped local draft that created a nullable
+///   `memories.account_id`, rebuild that local DB or normalize null rows manually before relying
+///   on tenant isolation queries.
+fn migrate_v19(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "memories", "account_id") {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default'",
+            [],
+        )?;
+    }
+    conn.execute(
+        "UPDATE memories
+         SET account_id = json_extract(metadata, '$.account_id')
+         WHERE (account_id IS NULL OR account_id = ?1 OR trim(account_id) = '')
+           AND json_type(metadata, '$.account_id') = 'text'",
+        [DEFAULT_ACCOUNT_ID],
+    )?;
+    conn.execute(
+        "UPDATE memories
+         SET account_id = ?1
+         WHERE account_id IS NULL OR trim(account_id) = ''",
+        [DEFAULT_ACCOUNT_ID],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_account ON memories(account_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_agent_account ON memories(agent_id, account_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_account_scope ON memories(account_id, scope)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (19, datetime('now'), 'Add account_id to memories table for tenant scoping')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Best-effort rollback for v19.
+///
+/// SQLite cannot drop columns in place, so this rebuilds the `memories` table
+/// using the v1 schema shape and preserves all pre-v19 columns/data.
+#[allow(dead_code)]
+fn rollback_v19(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "memories", "account_id") {
+        set_schema_version(conn, 18)?;
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "
+        DROP INDEX IF EXISTS idx_memories_account;
+        DROP INDEX IF EXISTS idx_memories_agent_account;
+        DROP INDEX IF EXISTS idx_memories_account_scope;
+
+        ALTER TABLE memories RENAME TO memories_v19_backup;
+
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source TEXT NOT NULL,
+            scope TEXT NOT NULL DEFAULT 'episodic',
+            confidence REAL NOT NULL DEFAULT 1.0,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            accessed_at TEXT NOT NULL,
+            access_count INTEGER NOT NULL DEFAULT 0,
+            deleted INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
+
+        INSERT INTO memories (
+            id, agent_id, content, source, scope, confidence, metadata,
+            created_at, accessed_at, access_count, deleted
+        )
+        SELECT
+            id, agent_id, content, source, scope, confidence, metadata,
+            created_at, accessed_at, access_count, deleted
+        FROM memories_v19_backup;
+
+        DROP TABLE memories_v19_backup;
+        ",
+    )?;
+    conn.execute("DELETE FROM migrations WHERE version = 19", [])?;
+    set_schema_version(conn, 18)?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -692,5 +811,123 @@ mod tests {
 
         assert!(column_exists(&conn, "entities", "account_id"));
         assert!(column_exists(&conn, "relations", "account_id"));
+    }
+
+    #[test]
+    fn test_migration_v19_adds_memories_account_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "memories", "account_id"));
+    }
+
+    #[test]
+    fn test_migration_v19_backfills_memories_account_from_metadata() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_v1(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'), 0, 0)",
+            rusqlite::params![
+                "mem-1",
+                uuid::Uuid::new_v4().to_string(),
+                "hello",
+                "\"system\"",
+                "episodic",
+                1.0f64,
+                "{\"account_id\":\"tenant-a\"}",
+            ],
+        )
+        .unwrap();
+
+        migrate_v19(&conn).unwrap();
+
+        let account_id: Option<String> = conn
+            .query_row(
+                "SELECT account_id FROM memories WHERE id = 'mem-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(account_id.as_deref(), Some("tenant-a"));
+    }
+
+    #[test]
+    fn test_migration_v19_defaults_missing_memories_account_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_v1(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'), 0, 0)",
+            rusqlite::params![
+                "mem-2",
+                uuid::Uuid::new_v4().to_string(),
+                "hello",
+                "\"system\"",
+                "episodic",
+                1.0f64,
+                "{}",
+            ],
+        )
+        .unwrap();
+
+        migrate_v19(&conn).unwrap();
+
+        let account_id: String = conn
+            .query_row(
+                "SELECT account_id FROM memories WHERE id = 'mem-2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(account_id, DEFAULT_ACCOUNT_ID);
+    }
+
+    #[test]
+    fn test_run_migrations_is_atomic_on_failure() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_v1(&conn).unwrap();
+        set_schema_version(&conn, 1).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'), 0, 0)",
+            rusqlite::params![
+                "mem-trigger",
+                uuid::Uuid::new_v4().to_string(),
+                "hello",
+                "\"system\"",
+                "episodic",
+                1.0f64,
+                "{\"account_id\":\"tenant-a\"}",
+            ],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TRIGGER memories_v19_fail
+             BEFORE UPDATE ON memories
+             BEGIN
+                 SELECT RAISE(FAIL, 'forced-v19-failure');
+             END",
+            [],
+        )
+        .unwrap();
+
+        let err = run_migrations(&conn).unwrap_err();
+        assert!(err.to_string().contains("forced-v19-failure"));
+        assert_eq!(get_schema_version(&conn), 1);
+    }
+
+    #[test]
+    fn test_rollback_v19_removes_memories_account_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(column_exists(&conn, "memories", "account_id"));
+
+        rollback_v19(&conn).unwrap();
+
+        assert!(!column_exists(&conn, "memories", "account_id"));
+        assert_eq!(get_schema_version(&conn), 18);
     }
 }

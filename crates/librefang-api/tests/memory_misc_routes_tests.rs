@@ -327,6 +327,85 @@ async fn memory_update_creates_history_entry() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn memory_history_denies_cross_tenant_access() {
+    let h = start_mt_router_with_admin("tenant-admin").await;
+    let agent_id = spawn_agent(&h, "tenant-a", "history-owner").await;
+    let memory_id = insert_test_memory(&h, &agent_id, "tenant-a", "tenant-a only history");
+
+    let history = h
+        .send(empty_request(
+            axum::http::Method::GET,
+            format!("/api/memory/items/{memory_id}/history"),
+            "tenant-b",
+        ))
+        .await;
+
+    assert_eq!(
+        history.status(),
+        StatusCode::NOT_FOUND,
+        "cross-tenant history lookup must return 404"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_import_overrides_malicious_account_id_in_request_payload() {
+    let h = start_mt_router_with_admin("tenant-admin").await;
+    let agent_id = spawn_agent(&h, "tenant-a", "import-owner").await;
+
+    let import = h
+        .send(json_request(
+            axum::http::Method::POST,
+            format!("/api/memory/agents/{agent_id}/import"),
+            "tenant-a",
+            serde_json::json!([
+                {
+                    "content": "tenant-a imported memory",
+                    "level": "user",
+                    "category": "malicious_override",
+                    "confidence": 0.9,
+                    "created_at": chrono::Utc::now().to_rfc3339(),
+                    "updated_at": null,
+                    "metadata": {
+                        "account_id": "tenant-b"
+                    }
+                }
+            ]),
+        ))
+        .await;
+    assert_eq!(import.status(), StatusCode::OK);
+
+    let tenant_a_search = h
+        .send(empty_request(
+            axum::http::Method::GET,
+            "/api/memory/search?q=tenant-a+imported+memory&limit=10".to_string(),
+            "tenant-a",
+        ))
+        .await;
+    assert_eq!(tenant_a_search.status(), StatusCode::OK);
+    let tenant_a_json = read_json(tenant_a_search).await;
+    let tenant_a_items = tenant_a_json["memories"].as_array().unwrap();
+    assert!(
+        !tenant_a_items.is_empty(),
+        "tenant-a should find the imported memory under its authenticated account"
+    );
+
+    let tenant_b_search = h
+        .send(empty_request(
+            axum::http::Method::GET,
+            "/api/memory/search?q=tenant-a+imported+memory&limit=10".to_string(),
+            "tenant-b",
+        ))
+        .await;
+    assert_eq!(tenant_b_search.status(), StatusCode::OK);
+    let tenant_b_json = read_json(tenant_b_search).await;
+    let tenant_b_items = tenant_b_json["memories"].as_array().unwrap();
+    assert!(
+        tenant_b_items.is_empty(),
+        "payload metadata.account_id must be overridden so tenant-b cannot see tenant-a's imported memory"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn memory_duplicates_returns_groups_for_duplicate_content() {
     let h = start_mt_router_with_admin("tenant-admin").await;
     let agent_id = spawn_agent(&h, "tenant-a", "dup-agent").await;

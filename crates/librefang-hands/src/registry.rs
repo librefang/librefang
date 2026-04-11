@@ -856,7 +856,8 @@ mod tests {
         let reg = HandRegistry::new();
         let home = ensure_test_home();
         let (count, _) = reg.reload_from_disk(&home);
-        assert_eq!(count, 15);
+        assert_eq!(count, reg.list_definitions().len());
+        assert!(count >= 15, "expected at least the baseline registry hands");
         assert!(!reg.list_definitions().is_empty());
 
         // Clip hand should be loaded

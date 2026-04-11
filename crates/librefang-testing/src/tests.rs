@@ -1,6 +1,9 @@
 //! Example tests — demonstrates how to use the test infrastructure.
 
-use crate::{assert_json_error, assert_json_ok, test_request, MockKernelBuilder, TestAppState};
+use crate::{
+    assert_json_error, assert_json_ok, test_request, test_tenant_request, MockKernelBuilder,
+    TestAppState,
+};
 use axum::http::{Method, StatusCode};
 use tower::ServiceExt;
 
@@ -32,7 +35,7 @@ async fn test_list_agents() {
     let app = TestAppState::new();
     let router = app.router();
 
-    let req = test_request(Method::GET, "/api/agents", None);
+    let req = test_tenant_request(Method::GET, "/api/agents", None, "tenant-test");
     let resp = router.oneshot(req).await.expect("request failed");
     let json = assert_json_ok(resp).await;
 
@@ -83,7 +86,7 @@ async fn test_get_agent_not_found() {
     // Use a valid UUID that does not exist in the registry
     let fake_id = uuid::Uuid::new_v4();
     let path = format!("/api/agents/{fake_id}");
-    let req = test_request(Method::GET, &path, None);
+    let req = test_tenant_request(Method::GET, &path, None, "tenant-test");
     let resp = router.oneshot(req).await.expect("request failed");
     let json = assert_json_error(resp, StatusCode::NOT_FOUND).await;
 
@@ -170,7 +173,7 @@ name = "test-bot"
 system_prompt = "You are a test bot."
 "#;
     let body = serde_json::json!({ "manifest_toml": manifest }).to_string();
-    let req = test_request(Method::POST, "/api/agents", Some(&body));
+    let req = test_tenant_request(Method::POST, "/api/agents", Some(&body), "tenant-test");
     let resp = router.oneshot(req).await.expect("request failed");
     let status = resp.status();
 
@@ -189,7 +192,7 @@ async fn test_delete_agent_not_found() {
 
     let fake_id = uuid::Uuid::new_v4();
     let path = format!("/api/agents/{fake_id}");
-    let req = test_request(Method::DELETE, &path, None);
+    let req = test_tenant_request(Method::DELETE, &path, None, "tenant-test");
     let resp = router.oneshot(req).await.expect("request failed");
 
     // Deleting a nonexistent agent should return 404
@@ -209,7 +212,7 @@ async fn test_set_model_not_found() {
     let fake_id = uuid::Uuid::new_v4();
     let path = format!("/api/agents/{fake_id}/model");
     let body = serde_json::json!({ "model": "gpt-4" }).to_string();
-    let req = test_request(Method::PUT, &path, Some(&body));
+    let req = test_tenant_request(Method::PUT, &path, Some(&body), "tenant-test");
     let resp = router.oneshot(req).await.expect("request failed");
 
     // Nonexistent agent should return a non-200 error status code
@@ -229,7 +232,7 @@ async fn test_send_message_agent_not_found() {
     let fake_id = uuid::Uuid::new_v4();
     let path = format!("/api/agents/{fake_id}/message");
     let body = serde_json::json!({ "message": "hello" }).to_string();
-    let req = test_request(Method::POST, &path, Some(&body));
+    let req = test_tenant_request(Method::POST, &path, Some(&body), "tenant-test");
     let resp = router.oneshot(req).await.expect("request failed");
 
     let status = resp.status();
@@ -248,7 +251,7 @@ async fn test_patch_agent_not_found() {
     let fake_id = uuid::Uuid::new_v4();
     let path = format!("/api/agents/{fake_id}");
     let body = serde_json::json!({ "name": "new-name" }).to_string();
-    let req = test_request(Method::PATCH, &path, Some(&body));
+    let req = test_tenant_request(Method::PATCH, &path, Some(&body), "tenant-test");
     let resp = router.oneshot(req).await.expect("request failed");
 
     let status = resp.status();

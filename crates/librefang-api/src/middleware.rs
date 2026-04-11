@@ -128,6 +128,7 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = request.method().clone();
     let uri = request.uri().path().to_string();
+    let account_id = parse_account_id_header(request.headers());
     let start = Instant::now();
 
     let mut response = next.run(request).await;
@@ -141,6 +142,7 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
             request_id = %request_id,
             method = %method,
             path = %uri,
+            account_id = ?account_id,
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             "API request"
@@ -150,13 +152,20 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
             request_id = %request_id,
             method = %method,
             path = %uri,
+            account_id = ?account_id,
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             "API request"
         );
     }
 
-    metrics::record_http_request(&uri, method.as_str(), status, elapsed);
+    metrics::record_http_request(
+        &uri,
+        method.as_str(),
+        status,
+        elapsed,
+        account_id.as_deref(),
+    );
 
     // Inject the request ID into the response
     if let Ok(header_val) = request_id.parse() {
@@ -530,6 +539,19 @@ pub fn extract_verified_account(
         None => return Ok(None),
     };
 
+    // Validate account_id format using the same rules as parse_account_id_header
+    // so that the HMAC-verified account is exactly the one route handlers will see.
+    // Without this check, a caller could sign "default" or an overlong string, pass
+    // HMAC verification, and then have handlers observe AccountId(None) — a mismatch
+    // between what was signed and what was authorised.
+    if !is_valid_account_id(account_id) || is_reserved_account_id(account_id) {
+        return Err(Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"error":"Invalid X-Account-Id"}"#))
+            .unwrap_or_default());
+    }
+
     let signature = match headers.get("x-account-sig").and_then(|v| v.to_str().ok()) {
         Some(sig) => sig,
         None => {
@@ -856,14 +878,89 @@ mod tests {
         let result = extract_verified_account(&headers, "GET", "/api/agents", "secret", 300);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_extract_verified_account_rejects_reserved_account_id_before_hmac() {
+        // A valid HMAC signed for "default" must not pass — the HMAC-verified
+        // account_id must go through the same validation as parse_account_id_header
+        // so that the account authorised by the signature matches the one handlers see.
+        let secret = "test-secret";
+        let account_id = "default";
+        let ts = now_unix().to_string();
+        let message = format!("{}\n{}\n{}\n{}", account_id, "GET", "/api/agents", ts);
+        let sig = compute_hmac(secret, &message);
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-account-id", account_id.parse().unwrap());
+        headers.insert("x-account-timestamp", ts.parse().unwrap());
+        headers.insert("x-account-sig", sig.parse().unwrap());
+
+        let result = extract_verified_account(&headers, "GET", "/api/agents", secret, 300);
+        assert!(
+            result.is_err(),
+            "reserved account_id must be rejected even with valid HMAC"
+        );
+    }
+
+    #[test]
+    fn test_extract_verified_account_rejects_invalid_account_id_before_hmac() {
+        // An overlong or character-invalid account_id must be rejected before HMAC —
+        // not pass verification and then silently degrade to AccountId(None) in handlers.
+        let secret = "test-secret";
+        let account_id = "tenant.bad"; // dot not allowed
+        let ts = now_unix().to_string();
+        let message = format!("{}\n{}\n{}\n{}", account_id, "GET", "/api/agents", ts);
+        let sig = compute_hmac(secret, &message);
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-account-id", account_id.parse().unwrap());
+        headers.insert("x-account-timestamp", ts.parse().unwrap());
+        headers.insert("x-account-sig", sig.parse().unwrap());
+
+        let result = extract_verified_account(&headers, "GET", "/api/agents", secret, 300);
+        assert!(
+            result.is_err(),
+            "invalid account_id format must be rejected even with valid HMAC"
+        );
+    }
+
+    #[test]
+    fn test_hmac_query_params_are_not_bound_by_design() {
+        // INTENTIONAL: the HMAC message is "{account_id}\n{method}\n{path}\n{timestamp}"
+        // where `path` = uri().path() — the query string is NOT included.
+        // This is a deliberate trade-off: binding query params would make signatures
+        // fragile for paginated/filtered reads. The timestamp window limits replay risk.
+        // Consequence: a valid signature for GET /api/agents is also accepted for
+        // GET /api/agents?any=query_params — callers must treat the path as the scope
+        // boundary, not individual query parameters.
+        let secret = "test-secret-key";
+        let account_id = "acct_123";
+        let method = "GET";
+        let path = "/api/agents"; // path-only, no query string
+        let ts = now_unix().to_string();
+        let message = format!("{}\n{}\n{}\n{}", account_id, method, path, ts);
+        let sig = compute_hmac(secret, &message);
+
+        // verify_account_signature is called with only the path component —
+        // the middleware strips the query string at the call site (uri().path()).
+        // Confirming the contract: signature over "/api/agents" verifies against "/api/agents".
+        let result =
+            verify_account_signature(secret, account_id, method, path, Some(&ts), &sig, 300);
+        assert_eq!(
+            result,
+            AccountSigResult::Valid,
+            "path-only HMAC must verify against path-only comparison"
+        );
+    }
 }
 
 // ── Account Management ────────────────────────────────────────────────────
 
-use hmac::{Hmac, Mac};
+use hmac::Hmac;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+#[allow(dead_code)] // used only in #[cfg(test)] helper
 type HmacSha256 = Hmac<Sha256>;
 
 /// Account ID extracted from the `X-Account-Id` HTTP header.
@@ -887,6 +984,34 @@ pub struct AccountId(pub Option<String>);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConcreteAccountId(pub String);
 
+fn is_reserved_account_id(account_id: &str) -> bool {
+    account_id.eq_ignore_ascii_case("default")
+        || account_id.eq_ignore_ascii_case(librefang_types::account::AccountId::SYSTEM)
+}
+
+fn is_valid_account_id(account_id: &str) -> bool {
+    let trimmed = account_id.trim();
+    // Only allow alphanumeric, hyphen, and underscore.
+    // Dots and colons are excluded: both collapse to '_' in scoped_provider_env_var,
+    // which would allow `tenant.a` and `tenant:a` to collide with `tenant_a` and share
+    // API key env vars.
+    !trimmed.is_empty()
+        && trimmed.len() <= 64
+        && trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+fn parse_account_id_header(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("x-account-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| is_valid_account_id(s))
+        .filter(|s| !is_reserved_account_id(s))
+        .map(str::to_string)
+}
+
 impl From<AccountId> for librefang_types::account::AccountId {
     fn from(val: AccountId) -> Self {
         librefang_types::account::AccountId(val.0)
@@ -906,12 +1031,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for AccountId {
         parts: &mut axum::http::request::Parts,
         _state: &S,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        let account = parts
-            .headers
-            .get("x-account-id")
-            .and_then(|v| v.to_str().ok())
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.to_string());
+        let account = parse_account_id_header(&parts.headers);
         std::future::ready(Ok(AccountId(account)))
     }
 }
@@ -923,13 +1043,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ConcreteAccountId {
         parts: &mut axum::http::request::Parts,
         _state: &S,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        let account = parts
-            .headers
-            .get("x-account-id")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
+        let account = parse_account_id_header(&parts.headers);
         std::future::ready(account.map(ConcreteAccountId).ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
@@ -937,29 +1051,6 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ConcreteAccountId {
             )
         }))
     }
-}
-
-/// Verify that HMAC-SHA256(secret, account_id) matches the provided hex signature.
-/// Uses constant-time comparison via `hmac::Mac::verify_slice`.
-///
-/// # Security notes
-///
-/// - `hex::decode` is NOT constant-time: it will return early on invalid hex
-///   characters. This leaks whether the input was valid hex, but does NOT
-///   leak any bits of the expected signature. Acceptable trade-off: an
-///   attacker already knows the expected format is hex.
-/// - `verify_slice` internally uses `subtle::ConstantTimeEq`, so the actual
-///   HMAC comparison is timing-safe.
-#[deprecated(note = "Use verify_account_signature with replay protection instead")]
-#[allow(dead_code)]
-pub fn verify_account_sig(secret: &str, account_id: &str, sig_hex: &str) -> bool {
-    let Ok(sig_bytes) = hex::decode(sig_hex) else {
-        return false;
-    };
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(account_id.as_bytes());
-    mac.verify_slice(&sig_bytes).is_ok()
 }
 
 /// Middleware: verify `X-Account-Sig` HMAC-SHA256 signature when a shared
@@ -995,36 +1086,26 @@ pub async fn account_sig_check(
 
     match extract_verified_account(request.headers(), method, path, secret, hmac_max_age) {
         Ok(_) => next.run(request).await,
-        Err(rejection) => rejection,
-    }
-}
-
-/// Core account signature policy check -- pure function, fully testable.
-///
-/// Returns None if the request should pass through, or Some(error_message)
-/// if it must be rejected with 401.
-///
-/// Policy matrix:
-/// | secret | account_id | sig     | Result                          |
-/// |--------|------------|---------|----------------------------------|
-/// | absent | any        | any     | None (pass)                      |
-/// | any    | absent     | any     | None (pass)                      |
-/// | present| present    | absent  | Some("Missing X-Account-Sig ...") |
-/// | present| present    | invalid | Some("Invalid account signature") |
-/// | present| present    | valid   | None (pass)                      |
-#[deprecated(note = "Middleware now uses extract_verified_account with replay protection")]
-#[allow(deprecated, dead_code)]
-pub(crate) fn account_sig_policy(
-    secret: Option<&str>,
-    account_id: Option<&str>,
-    sig: Option<&str>,
-) -> Option<&'static str> {
-    let secret = secret?;
-    let account_id = account_id?;
-    match sig {
-        None => Some("Missing X-Account-Sig header"),
-        Some(s) if !verify_account_sig(secret, account_id, s) => Some("Invalid account signature"),
-        Some(_) => None,
+        Err(rejection) => {
+            let account_id = request
+                .headers()
+                .get("x-account-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("<missing>");
+            let has_sig = request.headers().contains_key("x-account-sig");
+            let has_timestamp = request.headers().contains_key("x-account-timestamp");
+            tracing::warn!(
+                account_id = %account_id,
+                method = %method,
+                path = %path,
+                has_sig,
+                has_timestamp,
+                "Rejected request with invalid tenant signature"
+            );
+            rejection
+        }
     }
 }
 
@@ -1070,12 +1151,7 @@ pub async fn require_account_id(request: Request<Body>, next: Next) -> Response<
         || is_anonymous_public_route(path, request.method());
 
     if !is_exempt {
-        let has_account = request
-            .headers()
-            .get("x-account-id")
-            .and_then(|v| v.to_str().ok())
-            .filter(|s| !s.trim().is_empty())
-            .is_some();
+        let has_account = parse_account_id_header(request.headers()).is_some();
 
         if !has_account {
             return Response::builder()
@@ -1198,108 +1274,84 @@ mod account_tests {
         assert_eq!(json["error"], "X-Account-Id required");
     }
 
-    // ─── Legacy Signature Verification (7 tests) ───
-    // These test the deprecated legacy HMAC functions. Kept for coverage of
-    // the legacy fallback path in verify_account_signature.
+    #[tokio::test]
+    async fn test_account_id_rejects_reserved_default_header() {
+        let mut parts = make_parts_with_header("x-account-id", "default");
+        let account =
+            <AccountId as axum::extract::FromRequestParts<()>>::from_request_parts(&mut parts, &())
+                .await
+                .unwrap();
+        assert_eq!(account, AccountId(None));
+    }
 
-    #[test]
-    #[allow(deprecated)]
-    fn test_verify_account_sig_valid_hmac() {
-        let secret = "my-secret";
-        let account_id = "tenant-123";
-        let sig_hex = {
-            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-            mac.update(account_id.as_bytes());
-            hex::encode(mac.finalize().into_bytes())
-        };
-        assert!(verify_account_sig(secret, account_id, &sig_hex));
+    #[tokio::test]
+    async fn test_account_id_rejects_reserved_default_header_case_insensitive() {
+        let mut parts = make_parts_with_header("x-account-id", "Default");
+        let account =
+            <AccountId as axum::extract::FromRequestParts<()>>::from_request_parts(&mut parts, &())
+                .await
+                .unwrap();
+        assert_eq!(account, AccountId(None));
+    }
+
+    #[tokio::test]
+    async fn test_concrete_account_id_rejects_reserved_system_header() {
+        let mut parts = make_parts_with_header("x-account-id", "system");
+        let (code, json) =
+            <ConcreteAccountId as axum::extract::FromRequestParts<()>>::from_request_parts(
+                &mut parts,
+                &(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "X-Account-Id required");
+    }
+
+    #[tokio::test]
+    async fn test_account_id_rejects_invalid_characters() {
+        for bad in ["tenant/a", "tenant.a", "tenant:a", "tenant@a", "tenant a"] {
+            let mut parts = make_parts_with_header("x-account-id", bad);
+            let account = <AccountId as axum::extract::FromRequestParts<()>>::from_request_parts(
+                &mut parts,
+                &(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                account,
+                AccountId(None),
+                "expected None for account id {bad:?}"
+            );
+        }
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn test_verify_account_sig_invalid_hmac() {
-        assert!(!verify_account_sig("secret", "tenant-123", "deadbeef"));
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_verify_account_sig_malformed_hex() {
-        assert!(!verify_account_sig("secret", "tenant-123", "not-hex"));
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_verify_account_sig_empty_hex() {
-        assert!(!verify_account_sig("secret", "tenant-123", ""));
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_passes_when_no_secret() {
-        assert_eq!(account_sig_policy(None, Some("tenant-123"), None), None);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_passes_when_no_account_id() {
-        assert_eq!(account_sig_policy(Some("secret"), None, Some("sig")), None);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_requires_sig_when_secret_and_account_present() {
-        assert_eq!(
-            account_sig_policy(Some("secret"), Some("tenant-123"), None),
-            Some("Missing X-Account-Sig header")
+    fn test_is_valid_account_id_rejects_collision_candidates() {
+        // Dot and colon are excluded because both collapse to '_' in
+        // scoped_provider_env_var, allowing `tenant.a` and `tenant:a` to collide
+        // with `tenant_a` (sharing the same API key env var).
+        assert!(!is_valid_account_id("tenant.a"), "dot must be rejected");
+        assert!(!is_valid_account_id("tenant:a"), "colon must be rejected");
+        assert!(is_valid_account_id("tenant-a"), "hyphen must be accepted");
+        assert!(
+            is_valid_account_id("tenant_a"),
+            "underscore must be accepted"
         );
     }
 
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_rejects_invalid_sig() {
-        assert_eq!(
-            account_sig_policy(Some("secret"), Some("tenant-123"), Some("invalid")),
-            Some("Invalid account signature")
-        );
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_accepts_valid_sig() {
-        let secret = "my-secret";
-        let account_id = "tenant-123";
-        let sig_hex = {
-            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-            mac.update(account_id.as_bytes());
-            hex::encode(mac.finalize().into_bytes())
-        };
-        assert_eq!(
-            account_sig_policy(Some(secret), Some(account_id), Some(&sig_hex)),
-            None
-        );
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_matrix_row_1_no_secret() {
-        // Row 1: no secret configured -> always pass regardless of other headers
-        assert_eq!(
-            account_sig_policy(None, Some("acc-123"), Some("any-sig")),
-            None
-        );
-        assert_eq!(account_sig_policy(None, Some("acc-123"), None), None);
-        assert_eq!(account_sig_policy(None, None, None), None);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_sig_policy_matrix_row_2_no_account_id() {
-        // Row 2: no account_id header -> pass regardless of secret/sig
-        assert_eq!(
-            account_sig_policy(Some("secret"), None, Some("any-sig")),
-            None
-        );
-        assert_eq!(account_sig_policy(Some("secret"), None, None), None);
+    #[tokio::test]
+    async fn test_concrete_account_id_rejects_overlong_value() {
+        let mut parts = make_parts_with_header("x-account-id", &"a".repeat(65));
+        let (code, json) =
+            <ConcreteAccountId as axum::extract::FromRequestParts<()>>::from_request_parts(
+                &mut parts,
+                &(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "X-Account-Id required");
     }
 
     // ─── From conversion between middleware and types-crate AccountId ───
@@ -1493,6 +1545,7 @@ mod account_sig_check_tests {
 
     /// Compute a valid HMAC-SHA256 hex signature for testing.
     fn sign(secret: &str, account_id: &str) -> String {
+        use hmac::Mac;
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(account_id.as_bytes());
         hex::encode(mac.finalize().into_bytes())

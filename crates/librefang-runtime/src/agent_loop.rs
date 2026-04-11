@@ -17,7 +17,7 @@ use crate::tool_runner;
 use crate::web_search::WebToolsContext;
 use crate::workspace_sandbox::{ERR_PATH_TRAVERSAL, ERR_SANDBOX_ESCAPE};
 use librefang_memory::session::Session;
-use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
+use librefang_memory::{MemoryScope, MemorySubstrate};
 use librefang_skills::registry::SkillRegistry;
 use librefang_types::agent::{AgentManifest, STABLE_PREFIX_MODE_METADATA_KEY};
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -523,6 +523,25 @@ fn serialize_session_messages(
         .collect()
 }
 
+/// Build a `MemoryFilter.metadata` map carrying the caller's account_id.
+///
+/// When `account_id` is `Some`, the map holds `{"account_id": "<value>"}` so
+/// the SQLite recall query adds `AND account_id = ?` (defense-in-depth — the
+/// `agent_id` filter already provides per-tenant isolation since UUIDs are
+/// globally unique, but explicit account scoping makes the boundary auditable).
+/// When `None` (legacy / no kernel context) an empty map is returned so the
+/// filter behaves exactly as before.
+fn account_id_metadata(account_id: Option<&str>) -> HashMap<String, serde_json::Value> {
+    let mut m = HashMap::new();
+    if let Some(aid) = account_id {
+        m.insert(
+            "account_id".to_string(),
+            serde_json::Value::String(aid.to_string()),
+        );
+    }
+    m
+}
+
 /// Run the agent execution loop for a single user message.
 ///
 /// This is the core of LibreFang: it loads session context, recalls memories,
@@ -637,6 +656,15 @@ pub async fn run_agent_loop(
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
+    // Resolve tenant account_id from the kernel — used for both recall scoping
+    // (defense-in-depth; agent_id already uniquely scopes per-tenant) and for
+    // auto_memorize_scoped so stored memories carry the correct account_id.
+    let caller_account_id: Option<String> = kernel.as_ref().and_then(|k| {
+        k.caller_account_id(&session.agent_id.0.to_string())
+            .ok()
+            .flatten()
+    });
+
     // Recall relevant memories — use context engine if available, else fallback to inline logic.
     // In stable_prefix_mode, skip memory recall to keep the system prompt prefix stable for caching.
     // Scope recall to the current peer so multi-user channels don't leak context across users.
@@ -659,6 +687,7 @@ pub async fn run_agent_loop(
                         Some(MemoryFilter {
                             agent_id: Some(session.agent_id),
                             peer_id: sender_user_id.clone(),
+                            metadata: account_id_metadata(caller_account_id.as_deref()),
                             ..Default::default()
                         }),
                         Some(&query_vec),
@@ -675,6 +704,7 @@ pub async fn run_agent_loop(
                         Some(MemoryFilter {
                             agent_id: Some(session.agent_id),
                             peer_id: sender_user_id.clone(),
+                            metadata: account_id_metadata(caller_account_id.as_deref()),
                             ..Default::default()
                         }),
                     )
@@ -690,6 +720,7 @@ pub async fn run_agent_loop(
                 Some(MemoryFilter {
                     agent_id: Some(session.agent_id),
                     peer_id: sender_user_id.clone(),
+                    metadata: account_id_metadata(caller_account_id.as_deref()),
                     ..Default::default()
                 }),
             )
@@ -704,7 +735,15 @@ pub async fn run_agent_loop(
             let user_id = session.agent_id.0.to_string();
 
             match pm_store_arc
-                .auto_retrieve(&user_id, user_message, sender_user_id.as_deref())
+                .auto_retrieve_scoped(
+                    &user_id,
+                    user_message,
+                    sender_user_id.as_deref(),
+                    caller_account_id
+                        .as_deref()
+                        .map(MemoryScope::tenant)
+                        .unwrap_or_else(MemoryScope::global),
+                )
                 .await
             {
                 Ok(pm_memories) if !pm_memories.is_empty() => {
@@ -1272,15 +1311,25 @@ pub async fn run_agent_loop(
                     "Agent loop completed"
                 );
 
-                // Run auto_memorize directly (not via hook) for proper result handling.
-                // Relations are stored inside auto_memorize via store_relations().
+                // Run auto_memorize_scoped (not the unscoped trait method) so stored
+                // memories carry the correct account_id for the calling tenant.
+                // Relations are stored inside auto_memorize_scoped via store_relations().
                 // Only send new messages from this turn, not the full session history.
                 if let Some(ref pm_store) = proactive_memory {
                     let user_id = session.agent_id.0.to_string();
                     let new_messages = &session.messages[new_messages_start..];
                     let messages_json = serialize_session_messages(new_messages);
+                    let pm_scope = caller_account_id
+                        .as_deref()
+                        .map(MemoryScope::tenant)
+                        .unwrap_or_else(MemoryScope::global);
                     match pm_store
-                        .auto_memorize(&user_id, &messages_json, sender_user_id.as_deref())
+                        .auto_memorize_scoped(
+                            &user_id,
+                            &messages_json,
+                            sender_user_id.as_deref(),
+                            pm_scope,
+                        )
                         .await
                     {
                         Ok(result) if result.has_content => {
@@ -2210,6 +2259,15 @@ pub async fn run_agent_loop_streaming(
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
+    // Resolve tenant account_id from the kernel — used for both recall scoping
+    // (defense-in-depth; agent_id already uniquely scopes per-tenant) and for
+    // auto_memorize_scoped so stored memories carry the correct account_id.
+    let caller_account_id: Option<String> = kernel.as_ref().and_then(|k| {
+        k.caller_account_id(&session.agent_id.0.to_string())
+            .ok()
+            .flatten()
+    });
+
     // Recall relevant memories — use context engine if available, else fallback to inline logic.
     // In stable_prefix_mode, skip memory recall to keep the system prompt prefix stable for caching.
     // Scope recall to the current peer so multi-user channels don't leak context across users.
@@ -2232,6 +2290,7 @@ pub async fn run_agent_loop_streaming(
                         Some(MemoryFilter {
                             agent_id: Some(session.agent_id),
                             peer_id: sender_user_id.clone(),
+                            metadata: account_id_metadata(caller_account_id.as_deref()),
                             ..Default::default()
                         }),
                         Some(&query_vec),
@@ -2248,6 +2307,7 @@ pub async fn run_agent_loop_streaming(
                         Some(MemoryFilter {
                             agent_id: Some(session.agent_id),
                             peer_id: sender_user_id.clone(),
+                            metadata: account_id_metadata(caller_account_id.as_deref()),
                             ..Default::default()
                         }),
                     )
@@ -2263,6 +2323,7 @@ pub async fn run_agent_loop_streaming(
                 Some(MemoryFilter {
                     agent_id: Some(session.agent_id),
                     peer_id: sender_user_id.clone(),
+                    metadata: account_id_metadata(caller_account_id.as_deref()),
                     ..Default::default()
                 }),
             )
@@ -2277,7 +2338,15 @@ pub async fn run_agent_loop_streaming(
             let user_id = session.agent_id.0.to_string();
 
             match pm_store_arc
-                .auto_retrieve(&user_id, user_message, sender_user_id.as_deref())
+                .auto_retrieve_scoped(
+                    &user_id,
+                    user_message,
+                    sender_user_id.as_deref(),
+                    caller_account_id
+                        .as_deref()
+                        .map(MemoryScope::tenant)
+                        .unwrap_or_else(MemoryScope::global),
+                )
                 .await
             {
                 Ok(pm_memories) if !pm_memories.is_empty() => {
@@ -2894,15 +2963,25 @@ pub async fn run_agent_loop_streaming(
                     "Streaming agent loop completed"
                 );
 
-                // Run auto_memorize directly for streaming path.
-                // Relations are stored inside auto_memorize via store_relations().
+                // Run auto_memorize_scoped for streaming path so stored memories
+                // carry the correct account_id for the calling tenant.
+                // Relations are stored inside auto_memorize_scoped via store_relations().
                 // Only send new messages from this turn, not the full session history.
                 if let Some(ref pm_store) = proactive_memory {
                     let user_id = session.agent_id.0.to_string();
                     let new_messages = &session.messages[new_messages_start..];
                     let messages_json = serialize_session_messages(new_messages);
+                    let pm_scope = caller_account_id
+                        .as_deref()
+                        .map(MemoryScope::tenant)
+                        .unwrap_or_else(MemoryScope::global);
                     match pm_store
-                        .auto_memorize(&user_id, &messages_json, sender_user_id.as_deref())
+                        .auto_memorize_scoped(
+                            &user_id,
+                            &messages_json,
+                            sender_user_id.as_deref(),
+                            pm_scope,
+                        )
                         .await
                     {
                         Ok(result) if result.has_content => {

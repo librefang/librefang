@@ -693,14 +693,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "non-negative finite")]
     fn test_match_threshold_rejects_nan() {
-        SupabaseVectorStore::new("https://abc.supabase.co/rest/v1", "key")
+        let _ = SupabaseVectorStore::new("https://abc.supabase.co/rest/v1", "key")
             .with_match_threshold(f32::NAN);
     }
 
     #[test]
     #[should_panic(expected = "non-negative finite")]
     fn test_match_threshold_rejects_negative() {
-        SupabaseVectorStore::new("https://abc.supabase.co/rest/v1", "key")
+        let _ = SupabaseVectorStore::new("https://abc.supabase.co/rest/v1", "key")
             .with_match_threshold(-0.1);
     }
 
@@ -1134,11 +1134,12 @@ mod tests {
     #[test]
     fn test_batch_user_id_from_first_item() {
         // insert_batch extracts user_id from first item only
+        type BatchItem = (String, Vec<f32>, String, HashMap<String, serde_json::Value>);
         let mut meta0 = HashMap::new();
         meta0.insert("user_id".to_string(), serde_json::json!("user-A"));
         let mut meta1 = HashMap::new();
         meta1.insert("user_id".to_string(), serde_json::json!("user-B"));
-        let items: Vec<(String, Vec<f32>, String, HashMap<String, serde_json::Value>)> = vec![
+        let items: Vec<BatchItem> = vec![
             ("a".to_string(), vec![0.1_f32], "d1".to_string(), meta0),
             ("b".to_string(), vec![0.2_f32], "d2".to_string(), meta1),
         ];

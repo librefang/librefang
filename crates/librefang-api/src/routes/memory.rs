@@ -187,9 +187,9 @@ fn require_memory_access(
     account: &AccountId,
     memory_id: &str,
 ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    let _ = scoped_account_id(account)?;
+    let owner = scoped_account_id(account)?;
     let owner_agent_id = store
-        .find_agent_id_for_memory(memory_id)
+        .find_agent_id_for_memory_scoped(memory_id, owner)
         .map_err(internal_error)?
         .ok_or_else(|| ApiErrorResponse::not_found("Memory not found").into_json_tuple())?;
     let entry = state
@@ -904,7 +904,7 @@ pub async fn memory_history(
         return e;
     }
 
-    match store.history(&memory_id) {
+    match store.history_scoped(&memory_id, &account.0) {
         Ok(history) => {
             let count = history.len();
             (

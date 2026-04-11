@@ -53,6 +53,9 @@ impl Drop for FullRouterHarness {
     }
 }
 
+/// Account ID used across tests that require a concrete tenant identity.
+const TEST_ACCOUNT: &str = "test-tenant";
+
 /// Start a test server using ollama as default provider (no API key needed).
 /// This lets the kernel boot without any real LLM credentials.
 /// Tests that need actual LLM calls should use `start_test_server_with_llm()`.
@@ -82,6 +85,9 @@ async fn start_test_server_with_provider(
             base_url: None,
             message_timeout_secs: 300,
         },
+        // TEST_ACCOUNT acts as admin so admin-gated endpoints (tools, config, migrate)
+        // can be exercised without a separate admin helper.
+        admin_accounts: vec![TEST_ACCOUNT.to_string()],
         ..KernelConfig::default()
     };
     let config_path = tmp.path().join("config.toml");
@@ -214,6 +220,7 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
             base_url: None,
             message_timeout_secs: 300,
         },
+        admin_accounts: vec![TEST_ACCOUNT.to_string()],
         ..KernelConfig::default()
     };
 
@@ -308,6 +315,7 @@ async fn test_status_endpoint() {
 
     let resp = client
         .get(format!("{}/api/status", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -506,6 +514,7 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
         .method("POST")
         .uri("/api/migrate")
         .header("content-type", "application/json")
+        .header("x-account-id", TEST_ACCOUNT)
         .body(Body::from(
             serde_json::to_vec(&serde_json::json!({
                 "source": "openclaw",
@@ -586,6 +595,7 @@ async fn test_config_reload_hot_reloads_proxy_changes() {
 
     let resp = client
         .post(format!("{}/api/config/reload", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -615,6 +625,7 @@ async fn test_spawn_list_kill_agent() {
     // --- Spawn ---
     let resp = client
         .post(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
         .send()
         .await
@@ -626,33 +637,10 @@ async fn test_spawn_list_kill_agent() {
     let agent_id = body["agent_id"].as_str().unwrap().to_string();
     assert!(!agent_id.is_empty());
 
-    // --- List (2 agents: default assistant + test-agent) ---
+    // --- List (1 agent: test-agent, scoped to test-tenant) ---
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let agents = body["items"].as_array().unwrap();
-    assert_eq!(agents.len(), 2);
-    let test_agent = agents.iter().find(|a| a["name"] == "test-agent").unwrap();
-    assert_eq!(test_agent["id"], agent_id);
-    assert_eq!(test_agent["model_provider"], "ollama");
-
-    // --- Kill ---
-    let resp = client
-        .delete(format!("{}/api/agents/{}", server.base_url, agent_id))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["status"], "killed");
-
-    // --- List (only default assistant remains) ---
-    let resp = client
-        .get(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -660,7 +648,32 @@ async fn test_spawn_list_kill_agent() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0]["name"], "assistant");
+    let test_agent = agents.iter().find(|a| a["name"] == "test-agent").unwrap();
+    assert_eq!(test_agent["id"], agent_id);
+    assert_eq!(test_agent["model_provider"], "ollama");
+
+    // --- Kill ---
+    let resp = client
+        .delete(format!("{}/api/agents/{}", server.base_url, agent_id))
+        .header("X-Account-Id", TEST_ACCOUNT)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "killed");
+
+    // --- List (no agents remain for test-tenant) ---
+    let resp = client
+        .get(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
+    assert_eq!(agents.len(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -671,6 +684,7 @@ async fn test_agent_session_empty() {
     // Spawn agent
     let resp = client
         .post(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
         .send()
         .await
@@ -684,6 +698,7 @@ async fn test_agent_session_empty() {
             "{}/api/agents/{}/session",
             server.base_url, agent_id
         ))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -700,6 +715,7 @@ async fn test_agent_monitoring_endpoints() {
 
     let resp = client
         .post(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
         .send()
         .await
@@ -726,6 +742,7 @@ async fn test_agent_monitoring_endpoints() {
             "{}/api/agents/{}/metrics",
             server.base_url, agent_id
         ))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -741,6 +758,7 @@ async fn test_agent_monitoring_endpoints() {
             "{}/api/agents/{}/logs?level=custom_error&n=10",
             server.base_url, agent_id
         ))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -989,6 +1007,7 @@ async fn test_kill_nonexistent_agent_returns_404() {
     let fake_id = uuid::Uuid::new_v4();
     let resp = client
         .delete(format!("{}/api/agents/{}", server.base_url, fake_id))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -1002,6 +1021,7 @@ async fn test_spawn_invalid_manifest_returns_400() {
 
     let resp = client
         .post(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .json(&serde_json::json!({"manifest_toml": "this is {{ not valid toml"}))
         .send()
         .await
@@ -1063,6 +1083,7 @@ memory_write = ["self.*"]
 
         let resp = client
             .post(format!("{}/api/agents", server.base_url))
+            .header("X-Account-Id", TEST_ACCOUNT)
             .json(&serde_json::json!({"manifest_toml": manifest}))
             .send()
             .await
@@ -1072,36 +1093,10 @@ memory_write = ["self.*"]
         ids.push(body["agent_id"].as_str().unwrap().to_string());
     }
 
-    // List should show 4 (3 spawned + default assistant)
+    // List should show 3 (all scoped to test-tenant)
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
-        .send()
-        .await
-        .unwrap();
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let agents = body["items"].as_array().unwrap();
-    assert_eq!(agents.len(), 4);
-
-    // Status should agree
-    let resp = client
-        .get(format!("{}/api/status", server.base_url))
-        .send()
-        .await
-        .unwrap();
-    let status: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(status["agent_count"], 4);
-
-    // Kill one
-    let resp = client
-        .delete(format!("{}/api/agents/{}", server.base_url, ids[1]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    // List should show 3 (2 spawned + default assistant)
-    let resp = client
-        .get(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -1109,24 +1104,56 @@ memory_write = ["self.*"]
     let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 3);
 
-    // Kill the rest
-    for id in [&ids[0], &ids[2]] {
-        client
-            .delete(format!("{}/api/agents/{}", server.base_url, id))
-            .send()
-            .await
-            .unwrap();
-    }
+    // Status should agree (test-tenant is admin so sees all agents)
+    let resp = client
+        .get(format!("{}/api/status", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
+        .send()
+        .await
+        .unwrap();
+    let status: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(status["agent_count"], 4); // 3 spawned + 1 default assistant
 
-    // List should have only default assistant
+    // Kill one
+    let resp = client
+        .delete(format!("{}/api/agents/{}", server.base_url, ids[1]))
+        .header("X-Account-Id", TEST_ACCOUNT)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // List should show 2 (2 remaining in test-tenant)
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
     let agents = body["items"].as_array().unwrap();
-    assert_eq!(agents.len(), 1);
+    assert_eq!(agents.len(), 2);
+
+    // Kill the rest
+    for id in [&ids[0], &ids[2]] {
+        client
+            .delete(format!("{}/api/agents/{}", server.base_url, id))
+            .header("X-Account-Id", TEST_ACCOUNT)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // List should be empty for test-tenant
+    let resp = client
+        .get(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
+    assert_eq!(agents.len(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1239,6 +1266,7 @@ system_prompt = "Agent {i}."
         );
         client
             .post(format!("{}/api/agents", server.base_url))
+            .header("X-Account-Id", TEST_ACCOUNT)
             .json(&serde_json::json!({"manifest_toml": manifest}))
             .send()
             .await
@@ -1248,6 +1276,7 @@ system_prompt = "Agent {i}."
     // Get first page with limit=1
     let resp = client
         .get(format!("{}/api/agents?limit=1&offset=0", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -1255,13 +1284,14 @@ system_prompt = "Agent {i}."
     let items = body["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "Should return exactly 1 item");
     assert!(
-        body["total"].as_u64().unwrap() >= 3,
-        "Total should include all agents"
+        body["total"].as_u64().unwrap() >= 2,
+        "Total should include all tenant agents"
     );
 
     // Get second page
     let resp = client
         .get(format!("{}/api/agents?limit=1&offset=1", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -1287,6 +1317,7 @@ system_prompt = "Test."
 "#;
     client
         .post(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .json(&serde_json::json!({"manifest_toml": manifest}))
         .send()
         .await
@@ -1298,6 +1329,7 @@ system_prompt = "Test."
             "{}/api/agents?q=unique-searchable",
             server.base_url
         ))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -1312,6 +1344,7 @@ system_prompt = "Test."
             "{}/api/agents?q=nonexistent-xyz-agent",
             server.base_url
         ))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -1342,6 +1375,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
             base_url: None,
             message_timeout_secs: 300,
         },
+        admin_accounts: vec![TEST_ACCOUNT.to_string()],
         ..KernelConfig::default()
     };
     let config_path = tmp.path().join("config.toml");
@@ -1517,6 +1551,7 @@ async fn test_auth_accepts_correct_token() {
     let resp = client
         .get(format!("{}/api/status", server.base_url))
         .header("authorization", "Bearer secret-key-123")
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -1534,6 +1569,7 @@ async fn test_auth_disabled_when_no_key() {
     // Protected endpoint accessible without auth when no key is configured
     let resp = client
         .get(format!("{}/api/status", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -1551,6 +1587,7 @@ async fn test_list_tools() {
 
     let resp = client
         .get(format!("{}/api/tools", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -1569,6 +1606,7 @@ async fn test_get_tool_found() {
     // First list tools to get a known tool name
     let resp = client
         .get(format!("{}/api/tools", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -1578,6 +1616,7 @@ async fn test_get_tool_found() {
     // Now fetch that specific tool
     let resp = client
         .get(format!("{}/api/tools/{}", server.base_url, first_tool_name))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();
@@ -1599,6 +1638,7 @@ async fn test_get_tool_not_found() {
             "{}/api/tools/nonexistent_tool_xyz",
             server.base_url
         ))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap();

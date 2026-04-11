@@ -97,15 +97,23 @@ fn is_uuid(s: &str) -> bool {
 /// `librefang-api`.  It delegates to `metrics::counter!` and
 /// `metrics::histogram!` so that data flows through whichever recorder has been
 /// installed (typically the Prometheus exporter).
-pub fn record_http_request(path: &str, method: &str, status: u16, duration: Duration) {
+pub fn record_http_request(
+    path: &str,
+    method: &str,
+    status: u16,
+    duration: Duration,
+    account_id: Option<&str>,
+) {
     let normalized = normalize_path(path);
     let status_str = status.to_string();
+    let account_label = account_id.unwrap_or("unscoped").to_string();
 
     metrics::counter!(
         "librefang_http_requests_total",
         "method" => method.to_string(),
         "path" => normalized.clone(),
         "status" => status_str,
+        "account_id" => account_label.clone(),
     )
     .increment(1);
 
@@ -113,6 +121,7 @@ pub fn record_http_request(path: &str, method: &str, status: u16, duration: Dura
         "librefang_http_request_duration_seconds",
         "method" => method.to_string(),
         "path" => normalized,
+        "account_id" => account_label,
     )
     .record(duration.as_secs_f64());
 }

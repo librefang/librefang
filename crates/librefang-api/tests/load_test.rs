@@ -44,6 +44,7 @@ async fn start_test_server() -> TestServer {
             base_url: None,
             message_timeout_secs: 300,
         },
+        admin_accounts: vec![TEST_ACCOUNT.to_string()],
         ..KernelConfig::default()
     };
 
@@ -138,6 +139,8 @@ async fn start_test_server() -> TestServer {
         _tmp: tmp,
     }
 }
+
+const TEST_ACCOUNT: &str = "test-tenant";
 
 const TEST_MANIFEST: &str = r#"
 name = "load-test-agent"
@@ -292,6 +295,7 @@ async fn load_concurrent_reads() {
         let manifest = TEST_MANIFEST.replace("load-test-agent", &format!("concurrent-agent-{i}"));
         client
             .post(format!("{}/api/agents", server.base_url))
+            .header("X-Account-Id", TEST_ACCOUNT)
             .json(&serde_json::json!({"manifest_toml": manifest}))
             .send()
             .await
@@ -315,6 +319,7 @@ async fn load_concurrent_reads() {
             };
             let res = c
                 .get(format!("{base}{path}"))
+                .header("X-Account-Id", TEST_ACCOUNT)
                 .send()
                 .await
                 .expect("request failed");
@@ -348,6 +353,7 @@ async fn load_session_management() {
     // Spawn an agent
     let res: serde_json::Value = client
         .post(format!("{}/api/agents", server.base_url))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
         .send()
         .await
@@ -368,6 +374,7 @@ async fn load_session_management() {
                 "{}/api/agents/{}/sessions",
                 server.base_url, agent_id
             ))
+            .header("X-Account-Id", TEST_ACCOUNT)
             .json(&serde_json::json!({"label": format!("session-{i}")}))
             .send()
             .await
@@ -393,6 +400,7 @@ async fn load_session_management() {
             "{}/api/agents/{}/sessions",
             server.base_url, agent_id
         ))
+        .header("X-Account-Id", TEST_ACCOUNT)
         .send()
         .await
         .unwrap()
@@ -429,6 +437,7 @@ async fn load_session_management() {
                 "{}/api/agents/{}/sessions/{}/switch",
                 server.base_url, agent_id, sid
             ))
+            .header("X-Account-Id", TEST_ACCOUNT)
             .send()
             .await
             .unwrap();
@@ -577,6 +586,7 @@ async fn load_metrics_sustained() {
         let manifest = TEST_MANIFEST.replace("load-test-agent", &format!("metrics-agent-{i}"));
         client
             .post(format!("{}/api/agents", server.base_url))
+            .header("X-Account-Id", TEST_ACCOUNT)
             .json(&serde_json::json!({"manifest_toml": manifest}))
             .send()
             .await
@@ -589,6 +599,7 @@ async fn load_metrics_sustained() {
     for _ in 0..n {
         let res = client
             .get(format!("{}/api/metrics", server.base_url))
+            .header("X-Account-Id", TEST_ACCOUNT)
             .send()
             .await
             .unwrap();

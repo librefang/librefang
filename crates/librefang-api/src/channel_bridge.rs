@@ -296,9 +296,7 @@ fn has_any_configured_channels(config: &librefang_types::config::ChannelsConfig)
         || config.wecom.iter().next().is_some()
 }
 
-fn validate_runtime_multiplicity(
-    adapters: &[(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)],
-) -> Result<(), String> {
+fn validate_runtime_multiplicity(adapters: &[RuntimeAdapterEntry]) -> Result<(), String> {
     let mut by_family: HashMap<String, (usize, String, Vec<String>)> = HashMap::new();
 
     for (adapter, _, account_id) in adapters {
@@ -334,6 +332,8 @@ fn validate_runtime_multiplicity(
         Err(conflicts.join("; "))
     }
 }
+
+type RuntimeAdapterEntry = (Arc<dyn ChannelAdapter>, Option<String>, Option<String>);
 
 fn contains_bare_json_tool_call(text: &str) -> bool {
     let mut scan_from = 0;
@@ -3837,17 +3837,19 @@ mod tests {
 
     #[test]
     fn test_validate_config_multiplicity_rejects_duplicate_webhook_adapters() {
-        let mut config = ChannelsConfig::default();
-        config.webhook = OneOrMany(vec![
-            WebhookConfig {
-                account_id: Some("tenant-a".to_string()),
-                ..WebhookConfig::default()
-            },
-            WebhookConfig {
-                account_id: Some("tenant-b".to_string()),
-                ..WebhookConfig::default()
-            },
-        ]);
+        let config = ChannelsConfig {
+            webhook: OneOrMany(vec![
+                WebhookConfig {
+                    account_id: Some("tenant-a".to_string()),
+                    ..WebhookConfig::default()
+                },
+                WebhookConfig {
+                    account_id: Some("tenant-b".to_string()),
+                    ..WebhookConfig::default()
+                },
+            ]),
+            ..ChannelsConfig::default()
+        };
 
         let error =
             validate_config_multiplicity(&config).expect_err("duplicate webhook configs must fail");
@@ -3857,19 +3859,21 @@ mod tests {
 
     #[test]
     fn test_validate_config_multiplicity_allows_multi_instance_safe_adapters() {
-        let mut config = ChannelsConfig::default();
-        config.ntfy = OneOrMany(vec![
-            NtfyConfig {
-                account_id: Some("tenant-a".to_string()),
-                topic: "tenant-a-topic".to_string(),
-                ..NtfyConfig::default()
-            },
-            NtfyConfig {
-                account_id: Some("tenant-b".to_string()),
-                topic: "tenant-b-topic".to_string(),
-                ..NtfyConfig::default()
-            },
-        ]);
+        let config = ChannelsConfig {
+            ntfy: OneOrMany(vec![
+                NtfyConfig {
+                    account_id: Some("tenant-a".to_string()),
+                    topic: "tenant-a-topic".to_string(),
+                    ..NtfyConfig::default()
+                },
+                NtfyConfig {
+                    account_id: Some("tenant-b".to_string()),
+                    topic: "tenant-b-topic".to_string(),
+                    ..NtfyConfig::default()
+                },
+            ]),
+            ..ChannelsConfig::default()
+        };
 
         validate_config_multiplicity(&config)
             .expect("multi-instance-safe adapters should be allowed");
@@ -3877,7 +3881,7 @@ mod tests {
 
     #[test]
     fn test_validate_runtime_multiplicity_rejects_duplicate_single_instance_family() {
-        let adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = vec![
+        let adapters: Vec<RuntimeAdapterEntry> = vec![
             (
                 Arc::new(MultiplicityTestAdapter {
                     name: "webhook",

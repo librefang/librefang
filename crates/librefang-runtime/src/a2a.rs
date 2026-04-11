@@ -85,6 +85,9 @@ pub struct AgentSkill {
 pub struct A2aTask {
     /// Unique task identifier.
     pub id: String,
+    /// Owning tenant/account for internal task tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     /// Optional session identifier for conversation continuity.
     #[serde(default)]
     pub session_id: Option<String>,
@@ -319,6 +322,12 @@ impl A2aTaskStore {
             .map(|tracked| tracked.task.clone())
     }
 
+    /// Get a task only if it belongs to the provided account.
+    pub fn get_scoped(&self, task_id: &str, account_id: &str) -> Option<A2aTask> {
+        self.get(task_id)
+            .filter(|task| task.account_id.as_deref() == Some(account_id))
+    }
+
     /// Update a task's status and optionally add messages/artifacts.
     pub fn update_status(&self, task_id: &str, status: A2aTaskStatus) -> bool {
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
@@ -355,6 +364,21 @@ impl A2aTaskStore {
     /// Cancel a task.
     pub fn cancel(&self, task_id: &str) -> bool {
         self.update_status(task_id, A2aTaskStatus::Cancelled)
+    }
+
+    /// Cancel a task only if it belongs to the provided account.
+    pub fn cancel_scoped(&self, task_id: &str, account_id: &str) -> bool {
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tracked) = tasks.get_mut(task_id) {
+            if tracked.task.account_id.as_deref() != Some(account_id) {
+                return false;
+            }
+            tracked.task.status = A2aTaskStatus::Cancelled.into();
+            tracked.updated_at = Instant::now();
+            true
+        } else {
+            false
+        }
     }
 
     /// Count of tracked tasks.
@@ -608,6 +632,7 @@ mod tests {
     fn test_a2a_task_status_transitions() {
         let task = A2aTask {
             id: "task-1".to_string(),
+            account_id: None,
             session_id: None,
             status: A2aTaskStatus::Submitted.into(),
             messages: vec![],
@@ -712,6 +737,7 @@ mod tests {
         let store = A2aTaskStore::new(10);
         let task = A2aTask {
             id: "t-1".to_string(),
+            account_id: None,
             session_id: None,
             status: A2aTaskStatus::Working.into(),
             messages: vec![],
@@ -729,6 +755,7 @@ mod tests {
         let store = A2aTaskStore::new(10);
         let task = A2aTask {
             id: "t-2".to_string(),
+            account_id: None,
             session_id: None,
             status: A2aTaskStatus::Working.into(),
             messages: vec![],
@@ -757,6 +784,7 @@ mod tests {
         let store = A2aTaskStore::new(10);
         let task = A2aTask {
             id: "t-3".to_string(),
+            account_id: None,
             session_id: None,
             status: A2aTaskStatus::Working.into(),
             messages: vec![],
@@ -776,6 +804,7 @@ mod tests {
         for i in 0..2 {
             let task = A2aTask {
                 id: format!("t-{i}"),
+                account_id: None,
                 session_id: None,
                 status: A2aTaskStatus::Completed.into(),
                 messages: vec![],
@@ -788,6 +817,7 @@ mod tests {
         // Insert a 3rd — one completed task should be evicted
         let task = A2aTask {
             id: "t-2".to_string(),
+            account_id: None,
             session_id: None,
             status: A2aTaskStatus::Working.into(),
             messages: vec![],
@@ -806,6 +836,7 @@ mod tests {
         // Insert a Working task (previously un-evictable).
         let task = A2aTask {
             id: "stuck-working".to_string(),
+            account_id: None,
             session_id: None,
             status: A2aTaskStatus::Working.into(),
             messages: vec![],
@@ -818,6 +849,7 @@ mod tests {
         // expired Working task.
         let task2 = A2aTask {
             id: "new-task".to_string(),
+            account_id: None,
             session_id: None,
             status: A2aTaskStatus::Submitted.into(),
             messages: vec![],
@@ -840,6 +872,7 @@ mod tests {
         for i in 0..2 {
             let task = A2aTask {
                 id: format!("w-{i}"),
+                account_id: None,
                 session_id: None,
                 status: A2aTaskStatus::Working.into(),
                 messages: vec![],
@@ -852,6 +885,7 @@ mod tests {
         // Insert a 3rd Working task — should evict the oldest Working task.
         let task = A2aTask {
             id: "w-2".to_string(),
+            account_id: None,
             session_id: None,
             status: A2aTaskStatus::Working.into(),
             messages: vec![],

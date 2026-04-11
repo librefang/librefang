@@ -60,6 +60,9 @@ impl std::fmt::Display for WebhookEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookSubscription {
     pub id: WebhookId,
+    /// Tenant account ID for multi-tenant isolation.
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
     /// Human-readable label.
     pub name: String,
     /// URL to POST event payloads to.
@@ -80,6 +83,11 @@ pub struct WebhookSubscription {
 
 fn default_true() -> bool {
     true
+}
+
+/// Default account_id for legacy webhooks during migration.
+fn default_account_id() -> String {
+    "default".to_string()
 }
 
 /// Return a copy of a webhook with its secret redacted for API responses.
@@ -120,22 +128,38 @@ pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
         }
     }
 
-    // Block private/link-local IPs to mitigate SSRF
-    if let Some(host) = parsed.host_str() {
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
-                return Err(
-                    "url must not point to a private, loopback, or link-local address".to_string(),
-                );
+    // Block private/link-local IPs to mitigate SSRF.
+    // Use parsed.host() (typed) so IPv6 addresses are extracted correctly.
+    // host_str() returns bracketed IPv6 (e.g. "[fd00::1]") which fails IpAddr::parse.
+    if let Some(host) = parsed.host() {
+        match host {
+            url::Host::Ipv4(v4) => {
+                let ip = std::net::IpAddr::V4(v4);
+                if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
+                    return Err(
+                        "url must not point to a private, loopback, or link-local address"
+                            .to_string(),
+                    );
+                }
             }
-        }
-        // Also block common internal hostnames
-        let lower = host.to_lowercase();
-        if lower == "localhost"
-            || lower == "metadata.google.internal"
-            || lower.ends_with(".internal")
-        {
-            return Err("url must not point to an internal/localhost address".to_string());
+            url::Host::Ipv6(v6) => {
+                let ip = std::net::IpAddr::V6(v6);
+                if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
+                    return Err(
+                        "url must not point to a private, loopback, or link-local address"
+                            .to_string(),
+                    );
+                }
+            }
+            url::Host::Domain(host) => {
+                let lower = host.to_lowercase();
+                if lower == "localhost"
+                    || lower == "metadata.google.internal"
+                    || lower.ends_with(".internal")
+                {
+                    return Err("url must not point to an internal/localhost address".to_string());
+                }
+            }
         }
     }
 
@@ -148,14 +172,14 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
             v4.is_private() || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64
             // 100.64.0.0/10
         }
-        std::net::IpAddr::V6(_) => false, // Simplified; production should check IPv6 ULA
+        std::net::IpAddr::V6(v6) => v6.is_unique_local(), // fc00::/7 ULA
     }
 }
 
 fn is_link_local(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.octets()[0] == 169,
-        std::net::IpAddr::V6(_) => false,
+        std::net::IpAddr::V6(v6) => v6.is_unicast_link_local(), // fe80::/10
     }
 }
 
@@ -186,8 +210,8 @@ pub struct UpdateWebhookRequest {
     pub enabled: Option<bool>,
 }
 
-/// Maximum number of webhook subscriptions.
-const MAX_WEBHOOKS: usize = 100;
+/// Maximum number of webhook subscriptions per tenant account.
+const MAX_WEBHOOKS_PER_TENANT: usize = 25;
 /// Maximum name length.
 const MAX_NAME_LEN: usize = 128;
 /// Maximum URL length.
@@ -255,10 +279,32 @@ impl WebhookStore {
         } else {
             StoreData::default()
         };
+        let legacy_count = data
+            .webhooks
+            .iter()
+            .filter(|webhook| webhook.account_id == default_account_id())
+            .count();
         Self {
             data: RwLock::new(data),
             path,
         }
+        .with_legacy_migration_log(legacy_count)
+    }
+
+    fn with_legacy_migration_log(self, legacy_count: usize) -> Self {
+        if legacy_count > 0 {
+            tracing::info!(
+                legacy_webhooks = legacy_count,
+                default_account = %default_account_id(),
+                "Loaded legacy webhooks without account_id; assigned to default account"
+            );
+            if let Ok(guard) = self.data.read() {
+                if let Err(e) = self.persist(&guard) {
+                    tracing::warn!("Failed to persist migrated legacy webhooks: {e}");
+                }
+            }
+        }
+        self
     }
 
     /// Persist current state to disk.
@@ -279,39 +325,52 @@ impl WebhookStore {
         Ok(())
     }
 
-    /// List all webhook subscriptions.
-    pub fn list(&self) -> Vec<WebhookSubscription> {
-        self.data
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .webhooks
-            .clone()
-    }
-
-    /// Get a single webhook by ID.
-    pub fn get(&self, id: WebhookId) -> Option<WebhookSubscription> {
+    /// List webhook subscriptions scoped to a specific account (tenant).
+    pub fn list_scoped(&self, account_id: &str) -> Vec<WebhookSubscription> {
         self.data
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .webhooks
             .iter()
-            .find(|w| w.id == id)
+            .filter(|w| w.account_id == account_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Get a single webhook by ID, verifying it belongs to the account (tenant).
+    pub fn get_scoped(&self, id: WebhookId, account_id: &str) -> Option<WebhookSubscription> {
+        self.data
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .webhooks
+            .iter()
+            .find(|w| w.id == id && w.account_id == account_id)
             .cloned()
     }
 
-    /// Create a new webhook subscription.
-    pub fn create(&self, req: CreateWebhookRequest) -> Result<WebhookSubscription, String> {
+    /// Create a new webhook subscription with account (tenant) association.
+    pub fn create_scoped(
+        &self,
+        req: CreateWebhookRequest,
+        account_id: String,
+    ) -> Result<WebhookSubscription, String> {
         req.validate()?;
         let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
-        if data.webhooks.len() >= MAX_WEBHOOKS {
+        let tenant_count = data
+            .webhooks
+            .iter()
+            .filter(|w| w.account_id == account_id)
+            .count();
+        if tenant_count >= MAX_WEBHOOKS_PER_TENANT {
             return Err(format!(
-                "maximum number of webhooks ({}) reached",
-                MAX_WEBHOOKS
+                "maximum number of webhooks per account ({}) reached",
+                MAX_WEBHOOKS_PER_TENANT
             ));
         }
         let now = Utc::now();
         let webhook = WebhookSubscription {
             id: WebhookId(Uuid::new_v4()),
+            account_id,
             name: req.name,
             url: req.url,
             secret: req.secret,
@@ -327,17 +386,18 @@ impl WebhookStore {
         Ok(webhook)
     }
 
-    /// Update an existing webhook subscription.
-    pub fn update(
+    /// Update a webhook subscription, verifying it belongs to the account (tenant).
+    pub fn update_scoped(
         &self,
         id: WebhookId,
+        account_id: &str,
         req: UpdateWebhookRequest,
     ) -> Result<WebhookSubscription, String> {
         let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
         let webhook = data
             .webhooks
             .iter_mut()
-            .find(|w| w.id == id)
+            .find(|w| w.id == id && w.account_id == account_id)
             .ok_or_else(|| "webhook not found".to_string())?;
 
         if let Some(ref name) = req.name {
@@ -367,7 +427,6 @@ impl WebhookStore {
         }
         if let Some(ref secret) = req.secret {
             if secret.is_empty() {
-                // Treat empty string as "clear the secret"
                 webhook.secret = None;
             } else if secret.len() > MAX_SECRET_LEN {
                 return Err(format!(
@@ -395,11 +454,12 @@ impl WebhookStore {
         Ok(updated)
     }
 
-    /// Delete a webhook subscription.
-    pub fn delete(&self, id: WebhookId) -> bool {
+    /// Delete a webhook subscription, verifying it belongs to the account (tenant).
+    pub fn delete_scoped(&self, id: WebhookId, account_id: &str) -> bool {
         let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
         let before = data.webhooks.len();
-        data.webhooks.retain(|w| w.id != id);
+        data.webhooks
+            .retain(|w| !(w.id == id && w.account_id == account_id));
         let removed = data.webhooks.len() < before;
         if removed {
             if let Err(e) = self.persist(&data) {
@@ -437,13 +497,21 @@ mod tests {
         }
     }
 
+    fn account_id() -> String {
+        "test-account".to_string()
+    }
+
     #[test]
     fn create_and_list() {
         let (store, _dir) = temp_store();
-        assert!(store.list().is_empty());
-        let wh = store.create(valid_create_req()).unwrap();
+        let acct = account_id();
+        assert!(store.list_scoped(&acct).is_empty());
+        let wh = store
+            .create_scoped(valid_create_req(), acct.clone())
+            .unwrap();
         assert_eq!(wh.name, "test-hook");
-        assert_eq!(store.list().len(), 1);
+        assert_eq!(wh.account_id, acct);
+        assert_eq!(store.list_scoped(&acct).len(), 1);
     }
 
     #[test]
@@ -451,7 +519,7 @@ mod tests {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.name = String::new();
-        let err = store.create(req).unwrap_err();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
         assert!(err.contains("name must not be empty"));
     }
 
@@ -460,7 +528,7 @@ mod tests {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = String::new();
-        let err = store.create(req).unwrap_err();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
         assert!(err.contains("url must not be empty"));
     }
 
@@ -469,7 +537,7 @@ mod tests {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = "not a url".to_string();
-        let err = store.create(req).unwrap_err();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
         assert!(err.contains("not a valid URL"));
     }
 
@@ -478,7 +546,7 @@ mod tests {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.events = vec![];
-        let err = store.create(req).unwrap_err();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
         assert!(err.contains("events must not be empty"));
     }
 
@@ -487,7 +555,7 @@ mod tests {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = "http://192.168.1.1/hook".to_string();
-        let err = store.create(req).unwrap_err();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
         assert!(err.contains("private"));
     }
 
@@ -496,7 +564,7 @@ mod tests {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = "http://localhost:8080/hook".to_string();
-        let err = store.create(req).unwrap_err();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
         assert!(err.contains("internal/localhost"));
     }
 
@@ -505,26 +573,59 @@ mod tests {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = "http://169.254.169.254/metadata".to_string();
-        let err = store.create(req).unwrap_err();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
         assert!(err.contains("private") || err.contains("link-local"));
+    }
+
+    #[test]
+    fn create_rejects_ipv6_ula_url() {
+        let (store, _dir) = temp_store();
+        let mut req = valid_create_req();
+        // fd00::/8 is a ULA (unique local) IPv6 range — private equivalent
+        req.url = "http://[fd00::1]/hook".to_string();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
+        assert!(
+            err.contains("private") || err.contains("link-local"),
+            "IPv6 ULA should be blocked, got: {err}"
+        );
+    }
+
+    #[test]
+    fn create_rejects_ipv6_link_local_url() {
+        let (store, _dir) = temp_store();
+        let mut req = valid_create_req();
+        // fe80::/10 is IPv6 link-local
+        req.url = "http://[fe80::1]/hook".to_string();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
+        assert!(
+            err.contains("private") || err.contains("link-local"),
+            "IPv6 link-local should be blocked, got: {err}"
+        );
     }
 
     #[test]
     fn get_by_id() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).unwrap();
-        let found = store.get(wh.id).unwrap();
+        let acct = account_id();
+        let wh = store
+            .create_scoped(valid_create_req(), acct.clone())
+            .unwrap();
+        let found = store.get_scoped(wh.id, &acct).unwrap();
         assert_eq!(found.name, "test-hook");
-        assert!(store.get(WebhookId(Uuid::new_v4())).is_none());
+        assert!(store.get_scoped(WebhookId(Uuid::new_v4()), &acct).is_none());
     }
 
     #[test]
     fn update_webhook() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).unwrap();
+        let acct = account_id();
+        let wh = store
+            .create_scoped(valid_create_req(), acct.clone())
+            .unwrap();
         let updated = store
-            .update(
+            .update_scoped(
                 wh.id,
+                &acct,
                 UpdateWebhookRequest {
                     name: Some("renamed".to_string()),
                     url: None,
@@ -542,11 +643,15 @@ mod tests {
     #[test]
     fn update_clears_secret_with_empty_string() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).unwrap();
+        let acct = account_id();
+        let wh = store
+            .create_scoped(valid_create_req(), acct.clone())
+            .unwrap();
         assert!(wh.secret.is_some());
         let updated = store
-            .update(
+            .update_scoped(
                 wh.id,
+                &acct,
                 UpdateWebhookRequest {
                     name: None,
                     url: None,
@@ -563,8 +668,9 @@ mod tests {
     fn update_not_found() {
         let (store, _dir) = temp_store();
         let err = store
-            .update(
+            .update_scoped(
                 WebhookId(Uuid::new_v4()),
+                &account_id(),
                 UpdateWebhookRequest {
                     name: Some("x".to_string()),
                     url: None,
@@ -580,35 +686,43 @@ mod tests {
     #[test]
     fn delete_webhook() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).unwrap();
-        assert!(store.delete(wh.id));
-        assert!(store.list().is_empty());
-        assert!(!store.delete(wh.id));
+        let acct = account_id();
+        let wh = store
+            .create_scoped(valid_create_req(), acct.clone())
+            .unwrap();
+        assert!(store.delete_scoped(wh.id, &acct));
+        assert!(store.list_scoped(&acct).is_empty());
+        assert!(!store.delete_scoped(wh.id, &acct));
     }
 
     #[test]
     fn persistence_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("webhooks.json");
+        let acct = account_id();
 
         // Create and persist
         {
             let store = WebhookStore::load(path.clone());
-            store.create(valid_create_req()).unwrap();
+            store
+                .create_scoped(valid_create_req(), acct.clone())
+                .unwrap();
         }
 
         // Reload and verify
         {
             let store = WebhookStore::load(path);
-            assert_eq!(store.list().len(), 1);
-            assert_eq!(store.list()[0].name, "test-hook");
+            let scoped = store.list_scoped(&acct);
+            assert_eq!(scoped.len(), 1);
+            assert_eq!(scoped[0].name, "test-hook");
         }
     }
 
     #[test]
-    fn max_webhooks_enforced() {
+    fn max_webhooks_per_tenant_enforced() {
         let (store, _dir) = temp_store();
-        for i in 0..MAX_WEBHOOKS {
+        let acct = account_id();
+        for i in 0..MAX_WEBHOOKS_PER_TENANT {
             let req = CreateWebhookRequest {
                 name: format!("hook-{i}"),
                 url: format!("https://example.com/hook/{i}"),
@@ -616,10 +730,38 @@ mod tests {
                 events: vec![WebhookEvent::All],
                 enabled: true,
             };
-            store.create(req).unwrap();
+            store.create_scoped(req, acct.clone()).unwrap();
         }
-        let err = store.create(valid_create_req()).unwrap_err();
-        assert!(err.contains("maximum number of webhooks"));
+        let err = store.create_scoped(valid_create_req(), acct).unwrap_err();
+        assert!(err.contains("maximum number of webhooks per account"));
+    }
+
+    #[test]
+    fn tenant_quota_does_not_starve_other_tenants() {
+        let (store, _dir) = temp_store();
+        let acct_a = "tenant-a".to_string();
+        let acct_b = "tenant-b".to_string();
+
+        // Tenant A fills their entire quota
+        for i in 0..MAX_WEBHOOKS_PER_TENANT {
+            let req = CreateWebhookRequest {
+                name: format!("hook-{i}"),
+                url: format!("https://example.com/hook/{i}"),
+                secret: None,
+                events: vec![WebhookEvent::All],
+                enabled: true,
+            };
+            store.create_scoped(req, acct_a.clone()).unwrap();
+        }
+        // Tenant A is now blocked
+        let err = store.create_scoped(valid_create_req(), acct_a).unwrap_err();
+        assert!(err.contains("maximum number of webhooks per account"));
+
+        // Tenant B is unaffected — this is the regression test for the DoS vector
+        let wh_b = store
+            .create_scoped(valid_create_req(), acct_b.clone())
+            .unwrap();
+        assert_eq!(wh_b.account_id, acct_b);
     }
 
     #[test]
@@ -644,7 +786,7 @@ mod tests {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.name = "x".repeat(MAX_NAME_LEN + 1);
-        let err = store.create(req).unwrap_err();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
         assert!(err.contains("name exceeds maximum length"));
     }
 
@@ -653,17 +795,21 @@ mod tests {
         let (store, _dir) = temp_store();
         let mut req = valid_create_req();
         req.url = format!("https://example.com/{}", "x".repeat(MAX_URL_LEN));
-        let err = store.create(req).unwrap_err();
+        let err = store.create_scoped(req, account_id()).unwrap_err();
         assert!(err.contains("url exceeds maximum length"));
     }
 
     #[test]
     fn update_validates_empty_name() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).unwrap();
+        let acct = account_id();
+        let wh = store
+            .create_scoped(valid_create_req(), acct.clone())
+            .unwrap();
         let err = store
-            .update(
+            .update_scoped(
                 wh.id,
+                &acct,
                 UpdateWebhookRequest {
                     name: Some(String::new()),
                     url: None,
@@ -679,10 +825,14 @@ mod tests {
     #[test]
     fn update_validates_invalid_url() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).unwrap();
+        let acct = account_id();
+        let wh = store
+            .create_scoped(valid_create_req(), acct.clone())
+            .unwrap();
         let err = store
-            .update(
+            .update_scoped(
                 wh.id,
+                &acct,
                 UpdateWebhookRequest {
                     name: None,
                     url: Some("not-a-url".to_string()),
@@ -698,10 +848,14 @@ mod tests {
     #[test]
     fn update_validates_empty_events() {
         let (store, _dir) = temp_store();
-        let wh = store.create(valid_create_req()).unwrap();
+        let acct = account_id();
+        let wh = store
+            .create_scoped(valid_create_req(), acct.clone())
+            .unwrap();
         let err = store
-            .update(
+            .update_scoped(
                 wh.id,
+                &acct,
                 UpdateWebhookRequest {
                     name: None,
                     url: None,
@@ -718,6 +872,7 @@ mod tests {
     fn redact_secret_works() {
         let wh = WebhookSubscription {
             id: WebhookId(Uuid::new_v4()),
+            account_id: account_id(),
             name: "test".to_string(),
             url: "https://example.com".to_string(),
             secret: Some("super-secret".to_string()),
@@ -743,5 +898,99 @@ mod tests {
 
         let sig3 = compute_hmac_signature("other", b"payload");
         assert_ne!(sig1, sig3);
+    }
+
+    #[test]
+    fn cross_tenant_isolation() {
+        let (store, _dir) = temp_store();
+        let acct_a = "tenant-a".to_string();
+        let acct_b = "tenant-b".to_string();
+
+        // Tenant A creates a webhook
+        let wh_a = store
+            .create_scoped(valid_create_req(), acct_a.clone())
+            .unwrap();
+
+        // Tenant B creates a webhook
+        let mut req_b = valid_create_req();
+        req_b.name = "tenant-b-hook".to_string();
+        let wh_b = store.create_scoped(req_b, acct_b.clone()).unwrap();
+
+        // Verify each tenant only sees their own webhooks
+        assert_eq!(store.list_scoped(&acct_a).len(), 1);
+        assert_eq!(store.list_scoped(&acct_b).len(), 1);
+
+        // Verify tenant A cannot see tenant B's webhook
+        assert!(store.get_scoped(wh_b.id, &acct_a).is_none());
+        assert_eq!(store.get_scoped(wh_a.id, &acct_a).unwrap().id, wh_a.id);
+
+        // Verify tenant A cannot delete tenant B's webhook
+        assert!(!store.delete_scoped(wh_b.id, &acct_a));
+        assert_eq!(store.list_scoped(&acct_b).len(), 1);
+
+        // Verify tenant A can delete their own webhook
+        assert!(store.delete_scoped(wh_a.id, &acct_a));
+        assert!(store.list_scoped(&acct_a).is_empty());
+        assert_eq!(store.list_scoped(&acct_b).len(), 1);
+    }
+
+    #[test]
+    fn update_respects_tenant_boundary() {
+        let (store, _dir) = temp_store();
+        let acct_a = "tenant-a".to_string();
+        let acct_b = "tenant-b".to_string();
+
+        let wh_a = store
+            .create_scoped(valid_create_req(), acct_a.clone())
+            .unwrap();
+
+        // Tenant B cannot update tenant A's webhook
+        let err = store
+            .update_scoped(
+                wh_a.id,
+                &acct_b,
+                UpdateWebhookRequest {
+                    name: Some("hacked".to_string()),
+                    url: None,
+                    secret: None,
+                    events: None,
+                    enabled: None,
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("not found"));
+
+        // Verify the webhook was not modified
+        let unchanged = store.get_scoped(wh_a.id, &acct_a).unwrap();
+        assert_eq!(unchanged.name, "test-hook");
+    }
+
+    #[test]
+    fn legacy_webhooks_load_with_default_account_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("webhooks.json");
+        let legacy_json = serde_json::json!({
+            "webhooks": [{
+                "id": Uuid::new_v4().to_string(),
+                "name": "legacy-hook",
+                "url": "https://example.com/legacy",
+                "secret": "legacy-secret",
+                "events": ["agent_spawned"],
+                "enabled": true,
+                "created_at": Utc::now(),
+                "updated_at": Utc::now()
+            }]
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&legacy_json).unwrap()).unwrap();
+
+        let store = WebhookStore::load(path.clone());
+        let migrated = store.list_scoped(&default_account_id());
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].name, "legacy-hook");
+        assert_eq!(migrated[0].account_id, default_account_id());
+
+        let persisted: StoreData = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted.webhooks.len(), 1);
+        assert_eq!(persisted.webhooks[0].account_id, default_account_id());
     }
 }

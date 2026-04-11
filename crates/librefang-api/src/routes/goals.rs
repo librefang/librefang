@@ -30,12 +30,14 @@ use std::sync::Arc;
 use crate::middleware::ConcreteAccountId;
 use crate::types::ApiErrorResponse;
 
-fn parse_goal_id(id: &str) -> Result<GoalId, axum::response::Response> {
+type GoalRouteError = (axum::http::StatusCode, Json<serde_json::Value>);
+
+fn parse_goal_id(id: &str) -> Result<GoalId, GoalRouteError> {
     id.parse::<GoalId>()
-        .map_err(|_| ApiErrorResponse::not_found("Goal not found").into_response())
+        .map_err(|_| ApiErrorResponse::not_found("Goal not found").into_json_tuple())
 }
 
-fn parse_goal_status(value: Option<&str>) -> Result<GoalStatus, axum::response::Response> {
+fn parse_goal_status(value: Option<&str>) -> Result<GoalStatus, GoalRouteError> {
     match value.unwrap_or("pending") {
         "pending" => Ok(GoalStatus::Pending),
         "in_progress" => Ok(GoalStatus::InProgress),
@@ -44,43 +46,44 @@ fn parse_goal_status(value: Option<&str>) -> Result<GoalStatus, axum::response::
         _ => Err(ApiErrorResponse::bad_request(
             "Invalid status. Must be: pending, in_progress, completed, or cancelled",
         )
-        .into_response()),
+        .into_json_tuple()),
     }
 }
 
 fn parse_optional_goal_id(
     value: Option<&serde_json::Value>,
-) -> Result<Option<Option<GoalId>>, axum::response::Response> {
+) -> Result<Option<Option<GoalId>>, GoalRouteError> {
     match value {
         None => Ok(None),
         Some(v) if v.is_null() => Ok(Some(None)),
         Some(v) => v
             .as_str()
             .ok_or_else(|| {
-                ApiErrorResponse::bad_request("parent_id must be a string or null").into_response()
+                ApiErrorResponse::bad_request("parent_id must be a string or null")
+                    .into_json_tuple()
             })?
             .parse::<GoalId>()
             .map(Some)
             .map(Some)
-            .map_err(|_| ApiErrorResponse::bad_request("Invalid parent_id").into_response()),
+            .map_err(|_| ApiErrorResponse::bad_request("Invalid parent_id").into_json_tuple()),
     }
 }
 
 fn parse_optional_agent_id(
     value: Option<&serde_json::Value>,
-) -> Result<Option<Option<librefang_types::agent::AgentId>>, axum::response::Response> {
+) -> Result<Option<Option<librefang_types::agent::AgentId>>, GoalRouteError> {
     match value {
         None => Ok(None),
         Some(v) if v.is_null() => Ok(Some(None)),
         Some(v) => v
             .as_str()
             .ok_or_else(|| {
-                ApiErrorResponse::bad_request("agent_id must be a string or null").into_response()
+                ApiErrorResponse::bad_request("agent_id must be a string or null").into_json_tuple()
             })?
             .parse::<librefang_types::agent::AgentId>()
             .map(Some)
             .map(Some)
-            .map_err(|_| ApiErrorResponse::bad_request("Invalid agent_id").into_response()),
+            .map_err(|_| ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple()),
     }
 }
 
@@ -103,7 +106,7 @@ pub async fn get_goal(
     let account_id = account.0.as_str();
     let goal_id = match parse_goal_id(&id) {
         Ok(goal_id) => goal_id,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
     match state
         .kernel
@@ -125,7 +128,7 @@ pub async fn get_goal_children(
     let account_id = account.0.as_str();
     let goal_id = match parse_goal_id(&id) {
         Ok(goal_id) => goal_id,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
     if state
         .kernel
@@ -160,7 +163,7 @@ pub async fn create_goal(
     let description = req["description"].as_str().unwrap_or("").to_string();
     let status = match parse_goal_status(req["status"].as_str()) {
         Ok(status) => status,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
     let progress = req["progress"].as_u64().unwrap_or(0) as u8;
     if progress > 100 {
@@ -169,12 +172,12 @@ pub async fn create_goal(
     let parent_id = match parse_optional_goal_id(req.get("parent_id")) {
         Ok(Some(parent_id)) => parent_id,
         Ok(None) => None,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
     let agent_id = match parse_optional_agent_id(req.get("agent_id")) {
         Ok(Some(agent_id)) => agent_id,
         Ok(None) => None,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
 
     let goal = Goal {
@@ -206,7 +209,7 @@ pub async fn update_goal_by_id(
     let account_id = account.0.as_str();
     let goal_id = match parse_goal_id(&id) {
         Ok(goal_id) => goal_id,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
 
     if let Some(title) = req.get("title").and_then(|value| value.as_str()) {
@@ -223,17 +226,17 @@ pub async fn update_goal_by_id(
     let status = match req.get("status") {
         Some(value) => match parse_goal_status(value.as_str()) {
             Ok(status) => Some(status),
-            Err(resp) => return resp,
+            Err(err) => return err.into_response(),
         },
         None => None,
     };
     let parent_id = match parse_optional_goal_id(req.get("parent_id")) {
         Ok(parent_id) => parent_id,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
     let agent_id = match parse_optional_agent_id(req.get("agent_id")) {
         Ok(agent_id) => agent_id,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
 
     let updates = GoalUpdate {
@@ -276,7 +279,7 @@ pub async fn delete_goal(
     let account_id = account.0.as_str();
     let goal_id = match parse_goal_id(&id) {
         Ok(goal_id) => goal_id,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
     match state
         .kernel

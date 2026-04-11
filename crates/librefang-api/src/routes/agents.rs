@@ -175,9 +175,7 @@ fn agent_action_failed_response(message: &str) -> serde_json::Value {
     serde_json::json!({ "error": message })
 }
 
-fn tenant_owner<'a>(
-    account: &'a AccountId,
-) -> Result<&'a str, (StatusCode, Json<serde_json::Value>)> {
+fn tenant_owner(account: &AccountId) -> Result<&str, (StatusCode, Json<serde_json::Value>)> {
     require_concrete_account(account)
 }
 
@@ -906,12 +904,19 @@ pub async fn list_agents(
         )
     };
 
-    let owner_id = match tenant_owner(&account) {
-        Ok(owner_id) => owner_id,
-        Err((code, json)) => return (code, json),
-    };
+    // In single-tenant mode without an account header, list all agents.
+    // In multi-tenant mode, a concrete account is always required.
+    let multi_tenant = state.kernel.config_ref().multi_tenant;
     let mut agents: Vec<librefang_types::agent::AgentEntry> =
-        state.kernel.agent_registry().list_by_account(owner_id);
+        if let Some(owner_id) = account.0.as_deref() {
+            state.kernel.agent_registry().list_by_account(owner_id)
+        } else if !multi_tenant {
+            state.kernel.agent_registry().list()
+        } else {
+            return crate::routes::shared::require_concrete_account(&account)
+                .map(|_| unreachable!())
+                .unwrap_or_else(|(code, json)| (code, json));
+        };
 
     // -- Filtering --
     // Exclude hand agents by default; pass ?include_hands=true to include them.

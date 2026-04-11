@@ -2550,37 +2550,17 @@
         }
       }
     },
-    "/api/channels/wechat/qr/start": {
+    "/api/channels/wechat/{instance_key}/bootstrap/cancel": {
       "post": {
         "tags": [
           "channels"
         ],
-        "summary": "POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.",
-        "operationId": "wechat_qr_start",
-        "responses": {
-          "200": {
-            "description": "WeChat QR login initiated",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/channels/wechat/qr/status": {
-      "get": {
-        "tags": [
-          "channels"
-        ],
-        "summary": "GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.",
-        "operationId": "wechat_qr_status",
+        "operationId": "wechat_bootstrap_cancel",
         "parameters": [
           {
-            "name": "qr_code",
-            "in": "query",
-            "description": "QR code value from /qr/start",
+            "name": "instance_key",
+            "in": "path",
+            "description": "Owned WeChat instance key, e.g. wechat:tenant-a",
             "required": true,
             "schema": {
               "type": "string"
@@ -2589,7 +2569,15 @@
         ],
         "responses": {
           "200": {
-            "description": "WeChat QR scan status",
+            "description": "WeChat bootstrap session cancelled",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Owned WeChat bootstrap session not found",
             "content": {
               "application/json": {
                 "schema": {}
@@ -2599,40 +2587,18 @@
         }
       }
     },
-    "/api/channels/whatsapp/qr/start": {
+    "/api/channels/wechat/{instance_key}/bootstrap/start": {
       "post": {
         "tags": [
           "channels"
         ],
-        "summary": "POST /api/channels/whatsapp/qr/start — Start a WhatsApp Web QR login session.",
-        "description": "If a WhatsApp Web gateway is available (e.g. a Baileys-based bridge process),\nthis proxies the request and returns a base64 QR code data URL. If no gateway\nis running, it returns instructions to set one up.",
-        "operationId": "whatsapp_qr_start",
-        "responses": {
-          "200": {
-            "description": "WhatsApp QR session started",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/channels/whatsapp/qr/status": {
-      "get": {
-        "tags": [
-          "channels"
-        ],
-        "summary": "GET /api/channels/whatsapp/qr/status — Poll for QR scan completion.",
-        "description": "After calling `/qr/start`, the frontend polls this to check if the user\nhas scanned the QR code and the WhatsApp Web session is connected.",
-        "operationId": "whatsapp_qr_status",
+        "operationId": "wechat_bootstrap_start",
         "parameters": [
           {
-            "name": "session_id",
-            "in": "query",
-            "description": "WhatsApp login session ID",
-            "required": false,
+            "name": "instance_key",
+            "in": "path",
+            "description": "Owned WeChat instance key, e.g. wechat:tenant-a",
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -2640,7 +2606,163 @@
         ],
         "responses": {
           "200": {
-            "description": "WhatsApp QR scan status",
+            "description": "WeChat bootstrap session created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Owned WeChat instance not found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/wechat/{instance_key}/bootstrap/status": {
+      "get": {
+        "tags": [
+          "channels"
+        ],
+        "operationId": "wechat_bootstrap_status",
+        "parameters": [
+          {
+            "name": "instance_key",
+            "in": "path",
+            "description": "Owned WeChat instance key, e.g. wechat:tenant-a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "WeChat bootstrap status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Owned WeChat bootstrap session not found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/whatsapp/{instance_key}/bootstrap/cancel": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "operationId": "whatsapp_bootstrap_cancel",
+        "parameters": [
+          {
+            "name": "instance_key",
+            "in": "path",
+            "description": "Owned WhatsApp instance key, e.g. whatsapp:tenant-a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "WhatsApp bootstrap session cancelled",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Owned WhatsApp bootstrap session not found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/whatsapp/{instance_key}/bootstrap/start": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "operationId": "whatsapp_bootstrap_start",
+        "parameters": [
+          {
+            "name": "instance_key",
+            "in": "path",
+            "description": "Owned WhatsApp instance key, e.g. whatsapp:tenant-a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "WhatsApp bootstrap session created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Owned WhatsApp instance not found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/whatsapp/{instance_key}/bootstrap/status": {
+      "get": {
+        "tags": [
+          "channels"
+        ],
+        "operationId": "whatsapp_bootstrap_status",
+        "parameters": [
+          {
+            "name": "instance_key",
+            "in": "path",
+            "description": "Owned WhatsApp instance key, e.g. whatsapp:tenant-a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "WhatsApp bootstrap status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Owned WhatsApp bootstrap session not found",
             "content": {
               "application/json": {
                 "schema": {}
@@ -3491,7 +3613,8 @@
         "tags": [
           "hands"
         ],
-        "summary": "GET /api/hands — List all hand definitions (marketplace).",
+        "summary": "GET /api/hands — List daemon-global hand catalog definitions.",
+        "description": "This is intentionally global catalog metadata served from the hands\nsubsystem. Tenant-owned behavior lives under active hand instances,\nsettings, and activation flows.",
         "operationId": "list_hands",
         "responses": {
           "200": {
@@ -3725,7 +3848,8 @@
         "tags": [
           "hands"
         ],
-        "summary": "GET /api/hands/{hand_id} — Get a single hand definition with requirements check.",
+        "summary": "GET /api/hands/{hand_id} — Get daemon-global hand definition metadata with requirements check.",
+        "description": "Like `list_hands`, this is catalog metadata from the global hands subsystem.\nTenant-owned behavior stays in active instances, activation, and settings\nroutes.",
         "operationId": "get_hand",
         "parameters": [
           {
@@ -3793,7 +3917,8 @@
         "tags": [
           "hands"
         ],
-        "summary": "POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a hand.",
+        "summary": "POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a\ndaemon-global hand definition.",
+        "description": "This endpoint inspects global catalog requirements only. It does not expose\nor mutate tenant-owned hand instance state.",
         "operationId": "check_hand_deps",
         "parameters": [
           {
