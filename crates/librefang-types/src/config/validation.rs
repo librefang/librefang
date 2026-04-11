@@ -660,6 +660,12 @@ impl KernelConfig {
         // Validate terminal.allowed_origins: warn if http (non-localhost) is used
         if !self.terminal.allowed_origins.is_empty() {
             for origin in &self.terminal.allowed_origins {
+                if origin == "*" && !self.terminal.allow_remote {
+                    warnings.push(
+                        "terminal.allowed_origins contains '*', which is only useful when terminal.allow_remote is true"
+                            .to_string(),
+                    );
+                }
                 if origin.starts_with("http://")
                     && !origin.contains("localhost")
                     && !origin.contains("127.0.0.1")
@@ -671,6 +677,13 @@ impl KernelConfig {
                     ));
                 }
             }
+        }
+
+        if self.terminal.allow_remote && self.terminal.allowed_origins.is_empty() {
+            warnings.push(
+                "terminal.allow_remote is true and terminal.allowed_origins is empty; remote browser access will rely on auth without an explicit origin allowlist"
+                    .to_string(),
+            );
         }
 
         warnings

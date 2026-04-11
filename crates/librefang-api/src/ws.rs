@@ -172,11 +172,18 @@ pub fn validate_ws_origin(
         return Ok(());
     }
 
+    // Wildcard "*" means allow all origins
+    if extra_origins.iter().any(|o| o == "*") {
+        return Ok(());
+    }
+
     for extra in extra_origins {
         let extra_parsed =
             Url::parse(extra).map_err(|_| format!("Invalid extra origin URL: {extra}"))?;
         let extra_scheme = extra_parsed.scheme();
-        let extra_host = extra_parsed.host_str().unwrap_or("");
+        let extra_host = extra_parsed
+            .host_str()
+            .ok_or_else(|| format!("Origin missing host in allowed origin: {extra}"))?;
         let extra_port = if extra_scheme == "https" {
             extra_parsed.port().unwrap_or(443)
         } else {
@@ -1668,6 +1675,38 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://my.domain.com".parse().unwrap());
         let result = validate_ws_origin(&headers, 4545, &["https://my.domain.com".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_wildcard_allows_any_http_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://evil.example:9999".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &["*".to_string()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_wildcard_allows_any_https_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &["*".to_string()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_wildcard_rejects_non_http_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "file://evil.example".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &["*".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_wildcard_rejects_malformed_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "not-a-url".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &["*".to_string()]);
         assert!(result.is_err());
     }
 

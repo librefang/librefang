@@ -357,7 +357,8 @@ export function App() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [terminalEnabled, setTerminalEnabled] = useState(true);
+  const terminalEnabled = useUIStore((s) => s.terminalEnabled);
+  const setTerminalEnabled = useUIStore((s) => s.setTerminalEnabled);
 
   useKeyboardShortcuts({ onShowHelp: () => setShowShortcuts(true) });
 

@@ -154,9 +154,7 @@ pub async fn terminal_ws(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    let listen_port = state
-        .kernel
-        .config_ref()
+    let listen_port = cfg
         .api_listen
         .parse::<std::net::SocketAddr>()
         .map(|addr| addr.port())
@@ -172,6 +170,13 @@ pub async fn terminal_ws(
             );
             return axum::http::StatusCode::FORBIDDEN.into_response();
         }
+        warn!(
+            ip = %locality.source_ip,
+            proxied = locality.is_proxied,
+            reason = "origin_mismatch",
+            origin = %reason,
+            "Terminal WebSocket origin mismatch — continuing to auth token check"
+        );
     }
 
     let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
@@ -678,5 +683,41 @@ mod tests {
 
 #[cfg(test)]
 mod terminal_ws_auth_tests {
-    // WebSocket auth policy helpers are tested in crate::ws tests.
+    use crate::ws::validate_ws_origin;
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn terminal_policy_rejects_origin_mismatch_when_remote_access_disabled() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://evil.example:9999".parse().unwrap());
+
+        let result = validate_ws_origin(&headers, 4545, &[]);
+        assert!(result.is_err());
+
+        let allow_remote = false;
+        let rejects_request = result.is_err() && !allow_remote;
+        assert!(rejects_request);
+    }
+
+    #[test]
+    fn terminal_policy_continues_past_origin_mismatch_when_remote_access_enabled() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://evil.example:9999".parse().unwrap());
+
+        let result = validate_ws_origin(&headers, 4545, &[]);
+        assert!(result.is_err());
+
+        let allow_remote = true;
+        let rejects_request = result.is_err() && !allow_remote;
+        assert!(!rejects_request);
+    }
+
+    #[test]
+    fn terminal_policy_wildcard_origin_allows_validation() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://evil.example:9999".parse().unwrap());
+
+        let result = validate_ws_origin(&headers, 4545, &["*".to_string()]);
+        assert!(result.is_ok());
+    }
 }
