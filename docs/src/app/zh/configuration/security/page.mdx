@@ -37,6 +37,31 @@ session_ttl_secs = 86400
 
 ---
 
+### `[terminal]`
+
+配置交互式终端 WebSocket 端点的访问控制。
+
+```toml
+[terminal]
+enabled = true
+allow_remote = false
+allowed_origins = ["https://dashboard.example.com"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 终端功能总开关。设为 `false` 时，终端 WebSocket 端点会被完全禁用。 |
+| `allow_remote` | bool | `false` | 在未配置认证时，允许来自远程或反向代理连接的未认证访问。默认行为是仅允许本地无认证访问。 |
+| `allowed_origins` | list of strings | `[]` | 除 localhost 之外，允许用于终端 WebSocket 连接的额外浏览器 `Origin` 列表。适用于 dashboard 部署在自定义域名下的情况。`["*"]` 表示允许任意 HTTP/HTTPS origin，应仅在明确知情的情况下使用。 |
+
+说明：
+
+- 对于非浏览器客户端，缺少 `Origin` 头是允许的。
+- `allow_remote = true` 不会关闭认证；如果已配置 API Key 或 dashboard 凭据，远程客户端仍然需要提供有效认证。
+- 对浏览器访问，优先使用明确的 HTTPS origin，而不是 `"*"`。
+
+---
+
 ### `[vertex_ai]`
 
 配置 Google Cloud Vertex AI 作为 LLM 提供商。
@@ -366,4 +391,3 @@ max_versions_per_agent = 50
 | `LINKEDIN_ACCESS_TOKEN` | LinkedIn | LinkedIn OAuth2 访问令牌。 |
 
 ---
-
