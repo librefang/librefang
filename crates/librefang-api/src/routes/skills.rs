@@ -4209,3 +4209,113 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librefang_types::config::{McpServerConfigEntry, McpTransportEntry};
+
+    /// Regression for #2319: adding an MCP server through the UI wrote each
+    /// entry as a JSON-stringified blob inside `mcp_servers = ['{"name":...}']`
+    /// instead of a `[[mcp_servers]]` TOML table, because the top-level object
+    /// hit the catch-all in `json_to_toml_value` and got stringified. After
+    /// the fix, the on-disk file must round-trip back into a real
+    /// `McpServerConfigEntry` via `toml::from_str`.
+    #[test]
+    fn upsert_mcp_server_writes_inline_table_not_stringified_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        let entry = McpServerConfigEntry {
+            name: "nocodb".to_string(),
+            transport: Some(McpTransportEntry::Stdio {
+                command: "npx".to_string(),
+                args: vec![
+                    "-y".to_string(),
+                    "mcp-remote".to_string(),
+                    "http://nocodb:8080/mcp/abc".to_string(),
+                ],
+            }),
+            timeout_secs: 30,
+            env: vec![],
+            headers: vec!["xc-mcp-token: secret".to_string()],
+        };
+
+        upsert_mcp_server_config(&config_path, &entry).expect("upsert should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !raw.contains("mcp_servers = ['{"),
+            "mcp_servers must not be written as stringified JSON — got:\n{raw}"
+        );
+        assert!(
+            !raw.contains("mcp_servers = [\"{"),
+            "mcp_servers must not be written as stringified JSON — got:\n{raw}"
+        );
+
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            mcp_servers: Vec<McpServerConfigEntry>,
+        }
+        let parsed: Wrapper =
+            toml::from_str(&raw).expect("config.toml must deserialize into McpServerConfigEntry");
+        assert_eq!(parsed.mcp_servers.len(), 1);
+        let roundtripped = &parsed.mcp_servers[0];
+        assert_eq!(roundtripped.name, "nocodb");
+        assert_eq!(roundtripped.timeout_secs, 30);
+        assert_eq!(roundtripped.headers, vec!["xc-mcp-token: secret"]);
+        match &roundtripped.transport {
+            Some(McpTransportEntry::Stdio { command, args }) => {
+                assert_eq!(command, "npx");
+                assert_eq!(args, &["-y", "mcp-remote", "http://nocodb:8080/mcp/abc"]);
+            }
+            other => panic!("expected stdio transport, got {other:?}"),
+        }
+    }
+
+    /// A second upsert for the same name must replace the entry in-place,
+    /// not produce a second row — this is how the user ended up with three
+    /// stale duplicate blobs in the bug report.
+    #[test]
+    fn upsert_mcp_server_replaces_existing_entry_with_same_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        let v1 = McpServerConfigEntry {
+            name: "nocodb".to_string(),
+            transport: Some(McpTransportEntry::Http {
+                url: "http://old:8080/mcp".to_string(),
+            }),
+            timeout_secs: 10,
+            env: vec![],
+            headers: vec![],
+        };
+        upsert_mcp_server_config(&config_path, &v1).unwrap();
+
+        let v2 = McpServerConfigEntry {
+            name: "nocodb".to_string(),
+            transport: Some(McpTransportEntry::Http {
+                url: "http://new:9090/mcp".to_string(),
+            }),
+            timeout_secs: 60,
+            env: vec![],
+            headers: vec![],
+        };
+        upsert_mcp_server_config(&config_path, &v2).unwrap();
+
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            mcp_servers: Vec<McpServerConfigEntry>,
+        }
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        let parsed: Wrapper = toml::from_str(&raw).unwrap();
+        assert_eq!(parsed.mcp_servers.len(), 1, "upsert must replace, not append");
+        assert_eq!(parsed.mcp_servers[0].timeout_secs, 60);
+        match &parsed.mcp_servers[0].transport {
+            Some(McpTransportEntry::Http { url }) => assert_eq!(url, "http://new:9090/mcp"),
+            other => panic!("expected http transport, got {other:?}"),
+        }
+    }
+}
