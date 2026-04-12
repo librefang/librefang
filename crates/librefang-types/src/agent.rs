@@ -383,6 +383,7 @@ impl ToolProfile {
             Self::Messaging => vec![
                 "agent_send",
                 "agent_list",
+                "channel_send",
                 "memory_store",
                 "memory_list",
                 "memory_recall",
@@ -396,6 +397,7 @@ impl ToolProfile {
                 "web_search",
                 "agent_send",
                 "agent_list",
+                "channel_send",
                 "memory_store",
                 "memory_list",
                 "memory_recall",
@@ -1053,14 +1055,16 @@ mod tests {
     fn test_tool_profile_messaging() {
         let tools = ToolProfile::Messaging.tools();
         assert!(tools.contains(&"agent_send".to_string()));
+        assert!(tools.contains(&"channel_send".to_string()));
         assert!(tools.contains(&"memory_recall".to_string()));
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 6);
     }
 
     #[test]
     fn test_tool_profile_automation() {
         let tools = ToolProfile::Automation.tools();
-        assert_eq!(tools.len(), 11);
+        assert!(tools.contains(&"channel_send".to_string()));
+        assert_eq!(tools.len(), 12);
     }
 
     #[test]
