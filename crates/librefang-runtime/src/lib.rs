@@ -36,6 +36,7 @@ pub mod llm_driver;
 pub mod llm_errors;
 pub mod loop_guard;
 pub mod mcp;
+pub mod mcp_oauth;
 pub mod mcp_server;
 pub mod media;
 pub mod media_understanding;

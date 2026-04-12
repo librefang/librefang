@@ -8893,6 +8893,8 @@ system_prompt = "You are a helpful assistant."
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
                 headers: server_config.headers.clone(),
+                oauth_provider: None,
+                oauth_config: server_config.oauth.clone(),
             };
 
             match McpConnection::connect(mcp_config).await {
@@ -9021,6 +9023,8 @@ system_prompt = "You are a helpful assistant."
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
                 headers: server_config.headers.clone(),
+                oauth_provider: None,
+                oauth_config: server_config.oauth.clone(),
             };
 
             self.extension_health.register(&server_config.name);
@@ -9165,6 +9169,8 @@ system_prompt = "You are a helpful assistant."
             timeout_secs: server_config.timeout_secs,
             env: server_config.env.clone(),
             headers: server_config.headers.clone(),
+            oauth_provider: None,
+            oauth_config: server_config.oauth.clone(),
         };
 
         match McpConnection::connect(mcp_config).await {
