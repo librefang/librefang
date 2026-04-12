@@ -160,6 +160,58 @@ impl KernelOAuthProvider {
 
         Ok(tokens)
     }
+
+    /// RFC 7591 Dynamic Client Registration.
+    ///
+    /// POSTs to the registration endpoint to obtain a client_id.
+    /// This is required by servers like Notion's MCP that don't provide
+    /// a pre-configured client_id.
+    async fn register_client(
+        &self,
+        registration_endpoint: &str,
+        redirect_uri: &str,
+        _server_url: &str,
+    ) -> Result<String, String> {
+        let client = reqwest::Client::new();
+
+        let body = serde_json::json!({
+            "client_name": "LibreFang",
+            "redirect_uris": [redirect_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none"
+        });
+
+        let resp = client
+            .post(registration_endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Client registration request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "Client registration failed (HTTP {status}): {body}"
+            ));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct RegistrationResponse {
+            client_id: String,
+            #[allow(dead_code)]
+            #[serde(default)]
+            client_secret: Option<String>,
+        }
+
+        let reg: RegistrationResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse registration response: {e}"))?;
+
+        Ok(reg.client_id)
+    }
 }
 
 #[async_trait]
@@ -256,6 +308,28 @@ impl McpOAuthProvider for KernelOAuthProvider {
             .local_addr()
             .map_err(|e| format!("Failed to get listener address: {e}"))?;
         let redirect_uri = format!("http://127.0.0.1:{}/callback", local_addr.port());
+
+        // If no client_id is known, try Dynamic Client Registration (RFC 7591)
+        let mut metadata = metadata;
+        if metadata.client_id.is_none() {
+            if let Some(ref reg_endpoint) = metadata.registration_endpoint {
+                info!(endpoint = %reg_endpoint, "No client_id configured, attempting Dynamic Client Registration");
+                match self
+                    .register_client(reg_endpoint, &redirect_uri, server_url)
+                    .await
+                {
+                    Ok(client_id) => {
+                        info!(client_id = %client_id, "Dynamic Client Registration succeeded");
+                        let _ =
+                            self.vault_set(&Self::vault_key(server_url, "client_id"), &client_id);
+                        metadata.client_id = Some(client_id);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Dynamic Client Registration failed");
+                    }
+                }
+            }
+        }
 
         // Build the authorization URL
         let mut auth_url = format!(

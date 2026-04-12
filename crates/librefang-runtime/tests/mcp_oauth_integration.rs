@@ -126,6 +126,7 @@ async fn test_noop_provider_returns_clear_error() {
         authorization_endpoint: "https://example.com/auth".into(),
         token_endpoint: "https://example.com/token".into(),
         client_id: None,
+        registration_endpoint: None,
         scopes: vec![],
         server_url: "https://example.com/mcp".into(),
     };

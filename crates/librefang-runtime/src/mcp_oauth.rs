@@ -24,6 +24,10 @@ pub struct OAuthMetadata {
     pub authorization_endpoint: String,
     pub token_endpoint: String,
     pub client_id: Option<String>,
+    /// RFC 7591 Dynamic Client Registration endpoint.
+    /// Used to obtain a `client_id` when none is configured.
+    #[serde(default)]
+    pub registration_endpoint: Option<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
     pub server_url: String,
@@ -228,6 +232,7 @@ pub fn merge_metadata_with_config(
             .clone()
             .unwrap_or(discovered.token_endpoint),
         client_id: config.client_id.clone().or(discovered.client_id),
+        registration_endpoint: discovered.registration_endpoint,
         scopes: if config.scopes.is_empty() {
             discovered.scopes
         } else {
@@ -305,6 +310,7 @@ pub fn parse_authorization_server_metadata(
         authorization_endpoint: raw.authorization_endpoint,
         token_endpoint: raw.token_endpoint,
         client_id: None,
+        registration_endpoint: raw.registration_endpoint,
         scopes: Vec::new(),
         server_url: server_url.to_string(),
     })
@@ -399,6 +405,7 @@ pub async fn discover_oauth_metadata(
                 authorization_endpoint: auth_url.clone(),
                 token_endpoint: token_url.clone(),
                 client_id: cfg.client_id.clone(),
+                registration_endpoint: None,
                 scopes: cfg.scopes.clone(),
                 server_url: server_url.to_string(),
             });
@@ -596,6 +603,7 @@ mod tests {
             authorization_endpoint: "https://discovered.com/auth".to_string(),
             token_endpoint: "https://discovered.com/token".to_string(),
             client_id: Some("discovered-client".to_string()),
+            registration_endpoint: None,
             scopes: vec!["read".to_string()],
             server_url: "https://server.com/mcp".to_string(),
         };
@@ -619,6 +627,7 @@ mod tests {
             authorization_endpoint: "https://discovered.com/auth".to_string(),
             token_endpoint: "https://discovered.com/token".to_string(),
             client_id: Some("discovered-client".to_string()),
+            registration_endpoint: None,
             scopes: vec!["read".to_string(), "write".to_string()],
             server_url: "https://server.com/mcp".to_string(),
         };
