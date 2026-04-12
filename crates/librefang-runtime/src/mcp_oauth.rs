@@ -11,6 +11,7 @@ use librefang_types::config::McpOAuthConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use tracing::{debug, warn};
 use url::Url;
 
 // ---------------------------------------------------------------------------
@@ -236,6 +237,144 @@ pub trait McpOAuthProvider: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// .well-known metadata discovery
+// ---------------------------------------------------------------------------
+
+/// Raw OAuth Authorization Server Metadata (RFC 8414) response.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct AuthorizationServerMetadata {
+    authorization_endpoint: String,
+    token_endpoint: String,
+    #[serde(default)]
+    registration_endpoint: Option<String>,
+    #[serde(default)]
+    code_challenge_methods_supported: Vec<String>,
+}
+
+/// Parse a JSON body into `OAuthMetadata`.
+///
+/// Expects the body to be a valid OAuth Authorization Server Metadata document
+/// (RFC 8414). Extracts the required endpoints and converts to our internal type.
+pub fn parse_authorization_server_metadata(
+    body: &str,
+    server_url: &str,
+) -> Result<OAuthMetadata, String> {
+    let raw: AuthorizationServerMetadata =
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse metadata JSON: {e}"))?;
+
+    Ok(OAuthMetadata {
+        authorization_endpoint: raw.authorization_endpoint,
+        token_endpoint: raw.token_endpoint,
+        client_id: None,
+        scopes: Vec::new(),
+        server_url: server_url.to_string(),
+    })
+}
+
+/// Discover OAuth metadata for an MCP server using three-tier resolution.
+///
+/// 1. **Tier 1**: Parse `www_authenticate` header -> extract `resource_metadata` URL -> fetch -> parse.
+/// 2. **Tier 2**: Construct `.well-known/oauth-authorization-server` URL from server_url -> fetch -> parse.
+/// 3. **Tier 3**: Fall back to config (requires both `auth_url` and `token_url`).
+///
+/// If config is provided, it is merged with discovery results (config values take precedence).
+/// Returns an error if all tiers fail.
+pub async fn discover_oauth_metadata(
+    server_url: &str,
+    www_authenticate: Option<&str>,
+    config: Option<&McpOAuthConfig>,
+) -> Result<OAuthMetadata, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    // Tier 1: WWW-Authenticate header -> resource_metadata URL
+    if let Some(header) = www_authenticate {
+        let params = parse_www_authenticate(header);
+        if let Some(metadata_url) = extract_metadata_url(&params) {
+            debug!(url = %metadata_url, "Tier 1: fetching metadata from WWW-Authenticate resource_metadata");
+            match client.get(&metadata_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(body) = resp.text().await {
+                        match parse_authorization_server_metadata(&body, server_url) {
+                            Ok(meta) => {
+                                let meta = if let Some(cfg) = config {
+                                    merge_metadata_with_config(meta, cfg)
+                                } else {
+                                    meta
+                                };
+                                return Ok(meta);
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Tier 1: failed to parse metadata");
+                            }
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    warn!(status = %resp.status(), "Tier 1: metadata fetch returned non-success");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Tier 1: metadata fetch failed");
+                }
+            }
+        }
+    }
+
+    // Tier 2: .well-known URL
+    if let Some(wk_url) = well_known_url(server_url) {
+        debug!(url = %wk_url, "Tier 2: fetching .well-known metadata");
+        match client.get(&wk_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(body) = resp.text().await {
+                    match parse_authorization_server_metadata(&body, server_url) {
+                        Ok(meta) => {
+                            let meta = if let Some(cfg) = config {
+                                merge_metadata_with_config(meta, cfg)
+                            } else {
+                                meta
+                            };
+                            return Ok(meta);
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Tier 2: failed to parse .well-known metadata");
+                        }
+                    }
+                }
+            }
+            Ok(resp) => {
+                warn!(status = %resp.status(), "Tier 2: .well-known fetch returned non-success");
+            }
+            Err(e) => {
+                warn!(error = %e, "Tier 2: .well-known fetch failed");
+            }
+        }
+    }
+
+    // Tier 3: Config fallback
+    if let Some(cfg) = config {
+        if let (Some(auth_url), Some(token_url)) = (&cfg.auth_url, &cfg.token_url) {
+            debug!("Tier 3: using config fallback");
+            return Ok(OAuthMetadata {
+                authorization_endpoint: auth_url.clone(),
+                token_endpoint: token_url.clone(),
+                client_id: cfg.client_id.clone(),
+                scopes: cfg.scopes.clone(),
+                server_url: server_url.to_string(),
+            });
+        }
+    }
+
+    Err(format!(
+        "OAuth metadata discovery failed for {server_url}: \
+         no resource_metadata in WWW-Authenticate, .well-known fetch failed, \
+         and no config fallback (auth_url + token_url) provided"
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -451,5 +590,42 @@ mod tests {
         assert_eq!(merged.token_endpoint, "https://discovered.com/token");
         assert_eq!(merged.client_id.unwrap(), "discovered-client");
         assert_eq!(merged.scopes, vec!["read", "write"]);
+    }
+
+    // -- parse_authorization_server_metadata tests --
+
+    #[test]
+    fn test_parse_authorization_server_metadata_success() {
+        let body = r#"{
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint": "https://auth.example.com/token",
+            "registration_endpoint": "https://auth.example.com/register",
+            "code_challenge_methods_supported": ["S256"]
+        }"#;
+        let meta = parse_authorization_server_metadata(body, "https://server.com/mcp").unwrap();
+        assert_eq!(
+            meta.authorization_endpoint,
+            "https://auth.example.com/authorize"
+        );
+        assert_eq!(meta.token_endpoint, "https://auth.example.com/token");
+        assert!(meta.client_id.is_none());
+        assert!(meta.scopes.is_empty());
+        assert_eq!(meta.server_url, "https://server.com/mcp");
+    }
+
+    #[test]
+    fn test_parse_authorization_server_metadata_missing_fields() {
+        let body = r#"{"authorization_endpoint": "https://auth.example.com/authorize"}"#;
+        let result = parse_authorization_server_metadata(body, "https://server.com/mcp");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("Failed to parse metadata JSON"));
+    }
+
+    #[test]
+    fn test_parse_authorization_server_metadata_invalid_json() {
+        let result = parse_authorization_server_metadata("not json", "https://server.com/mcp");
+        assert!(result.is_err());
     }
 }
