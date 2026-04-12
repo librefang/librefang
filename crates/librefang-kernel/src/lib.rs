@@ -16,6 +16,7 @@ pub mod event_bus;
 pub mod heartbeat;
 pub mod inbox;
 pub mod kernel;
+pub mod mcp_oauth_provider;
 pub mod metering;
 pub mod orchestration;
 pub mod pairing;

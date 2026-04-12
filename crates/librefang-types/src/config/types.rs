@@ -3148,6 +3148,9 @@ pub struct McpServerConfigEntry {
     /// Each entry is `"Header-Name: value"` (e.g., `"Authorization: Bearer <token>"`).
     #[serde(default)]
     pub headers: Vec<String>,
+    /// Optional OAuth configuration for this MCP server.
+    #[serde(default)]
+    pub oauth: Option<McpOAuthConfig>,
 }
 
 fn default_mcp_timeout() -> u64 {
@@ -3238,6 +3241,37 @@ pub enum McpTransportEntry {
         #[serde(default)]
         tools: Vec<HttpCompatToolConfig>,
     },
+}
+
+/// Optional OAuth configuration for an MCP server.
+///
+/// Used as fallback when the server doesn't support `.well-known` discovery,
+/// or to override specific values from discovery. All fields are optional —
+/// discovery results fill gaps, config values take precedence.
+///
+/// # Example (config.toml)
+///
+/// ```toml
+/// [[mcp_servers]]
+/// name = "custom-server"
+/// transport = { type = "http", url = "https://my-server.com/mcp" }
+///
+/// [mcp_servers.oauth]
+/// auth_url = "https://my-server.com/oauth/authorize"
+/// token_url = "https://my-server.com/oauth/token"
+/// client_id = "my-client-id"
+/// scopes = ["read", "write"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpOAuthConfig {
+    #[serde(default)]
+    pub auth_url: Option<String>,
+    #[serde(default)]
+    pub token_url: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 /// A2A (Agent-to-Agent) protocol configuration.
