@@ -5,6 +5,12 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [Unreleased]
+
+### Added
+
+- Config-driven session mode for agent triggers (`session_mode = "new" | "persistent"`) — per-agent default with per-trigger override
+
 ## [2026.4.11] - 2026-04-11
 
 ### Added

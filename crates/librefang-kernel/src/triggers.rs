@@ -97,6 +97,22 @@ pub struct Trigger {
     /// Set to `Some(0)` to disable cooldown for this trigger.
     #[serde(default)]
     pub cooldown_secs: Option<u64>,
+    /// Per-trigger session mode override.
+    /// `None` inherits from the target agent's manifest `session_mode`.
+    /// `Some(mode)` overrides for this specific trigger.
+    #[serde(default)]
+    pub session_mode: Option<librefang_types::agent::SessionMode>,
+}
+
+/// A trigger match result with optional session mode override.
+#[derive(Debug, Clone)]
+pub struct TriggerMatch {
+    /// The agent to dispatch the triggered message to.
+    pub agent_id: AgentId,
+    /// The rendered message to send.
+    pub message: String,
+    /// Per-trigger session mode override (None = inherit from agent manifest).
+    pub session_mode_override: Option<librefang_types::agent::SessionMode>,
 }
 
 /// The trigger engine manages event-to-agent routing.
@@ -183,6 +199,7 @@ impl TriggerEngine {
             max_fires,
             target_agent,
             cooldown_secs: None,
+            session_mode: None,
         };
         let id = trigger.id;
         self.triggers.insert(id, trigger);
@@ -278,6 +295,7 @@ impl TriggerEngine {
                 max_fires: old.max_fires,
                 target_agent: old.target_agent,
                 cooldown_secs: old.cooldown_secs,
+                session_mode: old.session_mode,
             };
             self.triggers.insert(new_id, trigger);
             self.agent_triggers
@@ -365,7 +383,7 @@ impl TriggerEngine {
     ///    on a trigger to disable its cooldown.
     /// 2. **Per-event budget** — at most `max_triggers_per_event` triggers may fire
     ///    from a single event evaluation. Excess matches are dropped with a warning.
-    pub fn evaluate(&self, event: &Event) -> Vec<(AgentId, String)> {
+    pub fn evaluate(&self, event: &Event) -> Vec<TriggerMatch> {
         let event_description = describe_event(event);
         let mut matches = Vec::new();
         let now = Instant::now();
@@ -430,7 +448,11 @@ impl TriggerEngine {
                     .replace("{{event}}", &event_description);
                 // Route to target_agent if set (cross-session wake), else owner.
                 let recipient = trigger.target_agent.unwrap_or(trigger.agent_id);
-                matches.push((recipient, message));
+                matches.push(TriggerMatch {
+                    agent_id: recipient,
+                    message,
+                    session_mode_override: trigger.session_mode,
+                });
                 trigger.fire_count += 1;
                 self.last_fired.insert(trigger.id, now);
 
@@ -648,8 +670,8 @@ mod tests {
 
         let matches = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].0, watcher);
-        assert!(matches[0].1.contains("new-agent"));
+        assert_eq!(matches[0].agent_id, watcher);
+        assert!(matches[0].message.contains("new-agent"));
     }
 
     #[test]
@@ -787,7 +809,7 @@ mod tests {
         );
         let matches = engine.evaluate(&event);
         assert_eq!(matches.len(), 2);
-        assert!(matches.iter().all(|(id, _)| *id == new_agent));
+        assert!(matches.iter().all(|m| m.agent_id == new_agent));
     }
 
     #[test]
@@ -909,7 +931,7 @@ mod tests {
         let matches = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(
-            matches[0].0, owner,
+            matches[0].agent_id, owner,
             "Without target_agent, owner should be woken"
         );
     }
@@ -937,10 +959,10 @@ mod tests {
         let matches = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(
-            matches[0].0, target,
+            matches[0].agent_id, target,
             "With target_agent set, target should be woken"
         );
-        assert!(matches[0].1.contains("Cross-wake"));
+        assert!(matches[0].message.contains("Cross-wake"));
     }
 
     #[test]
@@ -973,7 +995,7 @@ mod tests {
         );
         let matches = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].0, target);
+        assert_eq!(matches[0].agent_id, target);
     }
 
     #[test]

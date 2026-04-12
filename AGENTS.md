@@ -64,6 +64,13 @@ The web dashboard is a React + TypeScript SPA built with Vite, located at
 ### Agent manifests
 Agent definitions live in `agents/` as directories containing `agent.toml` files.
 
+### Session mode
+Agents can control whether automated invocations (cron ticks, triggers, `agent_send`)
+reuse the persistent session or start fresh. Set `session_mode = "new"` in `agent.toml`
+for a fresh session per invocation, or `"persistent"` (default) to reuse the existing session.
+Per-trigger overrides are supported via the trigger registration API. Hands also support
+`session_mode` since they share the same `AgentManifest` and execution pipeline.
+
 ### Config pattern
 Adding a config field requires: struct field with `#[serde(default)]`, a `Default` impl
 entry, and `Serialize`/`Deserialize` derives. Fields go in `KernelConfig` in `librefang-kernel`.
