@@ -2477,6 +2477,7 @@ impl LibreFangKernel {
         };
 
         let workflow_home_dir = config.home_dir.clone();
+        let oauth_home_dir = config.home_dir.clone();
         let trigger_config = config.triggers.clone();
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
@@ -2504,7 +2505,9 @@ impl LibreFangKernel {
             running_tasks: dashmap::DashMap::new(),
             mcp_connections: tokio::sync::Mutex::new(Vec::new()),
             mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            mcp_oauth_provider: Arc::new(librefang_runtime::mcp_oauth::NoOpOAuthProvider),
+            mcp_oauth_provider: Arc::new(crate::mcp_oauth_provider::KernelOAuthProvider::new(
+                oauth_home_dir,
+            )),
             mcp_tools: std::sync::Mutex::new(Vec::new()),
             a2a_task_store: librefang_runtime::a2a::A2aTaskStore::default(),
             a2a_external_agents: std::sync::Mutex::new(Vec::new()),
@@ -9245,7 +9248,7 @@ system_prompt = "You are a helpful assistant."
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
                 headers: server_config.headers.clone(),
-                oauth_provider: None,
+                oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
             };
 
@@ -9391,7 +9394,7 @@ system_prompt = "You are a helpful assistant."
             timeout_secs: server_config.timeout_secs,
             env: server_config.env.clone(),
             headers: server_config.headers.clone(),
-            oauth_provider: None,
+            oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
         };
 
