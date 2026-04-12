@@ -1250,6 +1250,38 @@ impl Default for ExecPolicy {
     }
 }
 
+/// Terminal/WebSocket security configuration.
+///
+/// Controls access to the interactive terminal WebSocket endpoint — a critical
+/// security-sensitive feature that allows executing arbitrary code on the host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Master switch — set to false to disable the terminal entirely.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Additional allowed WebSocket origins beyond auto-detected localhost.
+    /// Use when the dashboard is served from a custom domain (e.g. "https://my.domain.com").
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+
+    /// Allow terminal access from remote/proxied connections when no auth is configured.
+    /// Default: false (local-only when unauthenticated).
+    #[serde(default)]
+    pub allow_remote: bool,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowed_origins: Vec::new(),
+            allow_remote: false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Gap 2: No-output idle timeout for subprocess sandbox
 // ---------------------------------------------------------------------------
@@ -2037,6 +2069,9 @@ pub struct KernelConfig {
     /// Individual endpoints may enforce tighter limits.
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// Terminal/WebSocket access configuration (security-sensitive).
+    #[serde(default)]
+    pub terminal: TerminalConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -3401,6 +3436,7 @@ impl Default for KernelConfig {
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
+            terminal: TerminalConfig::default(),
         }
     }
 }

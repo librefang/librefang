@@ -637,11 +637,7 @@ impl HandRegistry {
     /// Returns `HandError::NotFound` if no such hand is registered,
     /// `HandError::BuiltinHand` if the target is a built-in, and
     /// `HandError::AlreadyActive` if there is still a live instance.
-    pub fn uninstall_hand(
-        &self,
-        home_dir: &std::path::Path,
-        hand_id: &str,
-    ) -> HandResult<()> {
+    pub fn uninstall_hand(&self, home_dir: &std::path::Path, hand_id: &str) -> HandResult<()> {
         if !self.definitions.contains_key(hand_id) {
             return Err(HandError::NotFound(hand_id.to_string()));
         }
@@ -657,10 +653,7 @@ impl HandRegistry {
 
         // Refuse if any instance is still alive — the kernel would be
         // holding a stale reference to a definition we're about to drop.
-        let has_live_instance = self
-            .instances
-            .iter()
-            .any(|e| e.value().hand_id == hand_id);
+        let has_live_instance = self.instances.iter().any(|e| e.value().hand_id == hand_id);
         if has_live_instance {
             return Err(HandError::AlreadyActive(format!(
                 "Deactivate hand '{hand_id}' before uninstalling"
@@ -1340,11 +1333,7 @@ system_prompt = "Test"
         // reload. After reload, the definition exists in memory, but the
         // `home/workspaces/{id}/HAND.toml` file does NOT — that is exactly
         // the state uninstall_hand treats as "built-in".
-        let reg_hand_dir = tmp
-            .path()
-            .join("registry")
-            .join("hands")
-            .join("builtin-x");
+        let reg_hand_dir = tmp.path().join("registry").join("hands").join("builtin-x");
         std::fs::create_dir_all(&reg_hand_dir).unwrap();
         std::fs::write(
             reg_hand_dir.join("HAND.toml"),
@@ -1358,9 +1347,7 @@ system_prompt = "Test"
             "pre-check: hand should be loaded from registry/hands/"
         );
         assert!(
-            !tmp.path()
-                .join("workspaces/builtin-x/HAND.toml")
-                .exists(),
+            !tmp.path().join("workspaces/builtin-x/HAND.toml").exists(),
             "pre-check: no user-installed copy should exist"
         );
 
@@ -1399,10 +1386,7 @@ system_prompt = "Test"
         // Nothing should be touched on a refused uninstall — both the
         // in-memory definition and the on-disk workspace must survive.
         assert!(reg.get_definition("test-hand").is_some());
-        assert!(tmp
-            .path()
-            .join("workspaces/test-hand/HAND.toml")
-            .exists());
+        assert!(tmp.path().join("workspaces/test-hand/HAND.toml").exists());
     }
 
     #[test]

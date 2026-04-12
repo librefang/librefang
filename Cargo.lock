@@ -3915,6 +3915,7 @@ dependencies = [
  "http-body-util",
  "include_dir",
  "jsonwebtoken",
+ "libc",
  "librefang-channels",
  "librefang-extensions",
  "librefang-hands",

@@ -145,6 +145,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": cfg.log_level,
         "network_enabled": cfg.network_enabled,
+        "terminal_enabled": cfg.terminal.enabled,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
         "agents": agents,
     }))
@@ -1934,6 +1935,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         "default_model": cfg.default_model.model,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
         "network_enabled": cfg.network_enabled,
+        "terminal_enabled": cfg.terminal.enabled,
     });
 
     // Agents list — fully enriched (same fields as /api/agents) so AgentsPage

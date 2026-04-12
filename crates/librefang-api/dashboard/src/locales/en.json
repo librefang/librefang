@@ -1419,7 +1419,8 @@
     "error_unknown": "Unknown error",
     "websocket_error": "WebSocket connection error",
     "connection_closed_non_recoverable": "Connection closed due to a non-recoverable error",
-    "max_reconnect_exceeded": "Max reconnection attempts reached. Please connect manually."
+    "max_reconnect_exceeded": "Max reconnection attempts reached. Please connect manually.",
+    "root_warning": "Warning: The daemon is running as root. Terminal commands execute with full privileges."
   },
   "mcp": {
     "title": "MCP Servers",

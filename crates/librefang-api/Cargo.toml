@@ -140,6 +140,9 @@ mini = [
     "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
 ]
 
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2" }
+
 [dev-dependencies]
 tokio-test = { workspace = true }
 tempfile = { workspace = true }

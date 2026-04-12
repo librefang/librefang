@@ -150,3 +150,17 @@ pub fn shell_for_current_os() -> (String, &'static str) {
         (shell, "-c")
     }
 }
+
+/// Check if the daemon is running as root (Unix only).
+/// Always returns false on Windows.
+pub fn is_running_as_root() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid() is a simple read of process metadata, no UB possible.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}

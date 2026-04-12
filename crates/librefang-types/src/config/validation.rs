@@ -91,6 +91,7 @@ impl KernelConfig {
             "max_concurrent_bg_llm",
             "max_agent_call_depth",
             "max_request_body_bytes",
+            "terminal",
         ]
     }
 
@@ -654,6 +655,35 @@ impl KernelConfig {
         // Validate network config: shared_secret must be set if network is enabled
         if self.network_enabled && self.network.shared_secret.is_empty() {
             warnings.push("network_enabled is true but network.shared_secret is empty".to_string());
+        }
+
+        // Validate terminal.allowed_origins: warn if http (non-localhost) is used
+        if !self.terminal.allowed_origins.is_empty() {
+            for origin in &self.terminal.allowed_origins {
+                if origin == "*" && !self.terminal.allow_remote {
+                    warnings.push(
+                        "terminal.allowed_origins contains '*', which is only useful when terminal.allow_remote is true"
+                            .to_string(),
+                    );
+                }
+                if origin.starts_with("http://")
+                    && !origin.contains("localhost")
+                    && !origin.contains("127.0.0.1")
+                    && !origin.contains("[::1]")
+                {
+                    warnings.push(format!(
+                        "terminal.allowed_origins contains an http origin ('{origin}'); \
+                        WebSocket clients must use https for non-localhost origins",
+                    ));
+                }
+            }
+        }
+
+        if self.terminal.allow_remote && self.terminal.allowed_origins.is_empty() {
+            warnings.push(
+                "terminal.allow_remote is true and terminal.allowed_origins is empty; remote browser access will rely on auth without an explicit origin allowlist"
+                    .to_string(),
+            );
         }
 
         warnings

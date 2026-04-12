@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+use url::Url;
 
 // ---------------------------------------------------------------------------
 // Verbose Level
@@ -135,6 +136,135 @@ pub fn ws_auth_token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(ToOwned::to_owned)
         .or_else(|| ws_query_param(uri, "token"))
+}
+
+/// Validates the WebSocket `Origin` header against allowed origins.
+/// Returns Ok(()) if: (a) no Origin header (non-browser client), or (b) Origin matches.
+/// Returns Err(reason) if Origin is present but doesn't match any allowed origin.
+pub fn validate_ws_origin(
+    headers: &HeaderMap,
+    listen_port: u16,
+    extra_origins: &[String],
+) -> Result<(), String> {
+    let origin = match headers.get("origin") {
+        Some(v) => v.to_str().map_err(|_| "Invalid origin header encoding")?,
+        None => return Ok(()),
+    };
+
+    let parsed = Url::parse(origin).map_err(|_| format!("Invalid origin URL: {origin}"))?;
+    let origin_scheme = parsed.scheme();
+    let origin_host = parsed
+        .host_str()
+        .ok_or_else(|| format!("Origin missing host: {origin}"))?;
+    if origin_scheme != "http" && origin_scheme != "https" {
+        return Err(format!("Origin {origin} not in allowed list"));
+    }
+
+    let origin_port = if origin_scheme == "https" {
+        parsed.port().unwrap_or(443)
+    } else {
+        parsed.port().unwrap_or(80)
+    };
+
+    let normalized_origin_host = normalize_origin_host(origin_host);
+
+    if origin_port == listen_port && normalized_origin_host == "localhost" {
+        return Ok(());
+    }
+
+    // Wildcard "*" means allow all origins
+    if extra_origins.iter().any(|o| o == "*") {
+        return Ok(());
+    }
+
+    for extra in extra_origins {
+        let extra_parsed =
+            Url::parse(extra).map_err(|_| format!("Invalid extra origin URL: {extra}"))?;
+        let extra_scheme = extra_parsed.scheme();
+        let extra_host = extra_parsed
+            .host_str()
+            .ok_or_else(|| format!("Origin missing host in allowed origin: {extra}"))?;
+        let extra_port = if extra_scheme == "https" {
+            extra_parsed.port().unwrap_or(443)
+        } else {
+            extra_parsed.port().unwrap_or(80)
+        };
+
+        let normalized_extra_host = normalize_origin_host(extra_host);
+
+        if normalized_extra_host == normalized_origin_host
+            && extra_scheme == origin_scheme
+            && origin_port == extra_port
+        {
+            return Ok(());
+        }
+    }
+
+    Err(format!("Origin {origin} not in allowed list"))
+}
+
+fn normalize_origin_host(host: &str) -> &str {
+    match host {
+        "localhost" | "127.0.0.1" | "::1" | "[::1]" => "localhost",
+        _ => host,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connection Locality Detection
+// ---------------------------------------------------------------------------
+
+pub struct ConnectionLocality {
+    pub source_ip: IpAddr,
+    pub is_loopback: bool,
+    pub is_proxied: bool,
+    pub forwarded_ip: Option<IpAddr>,
+}
+
+impl ConnectionLocality {
+    pub fn is_local(&self) -> bool {
+        self.is_loopback && !self.is_proxied
+    }
+}
+
+pub fn detect_connection_locality(addr: &SocketAddr, headers: &HeaderMap) -> ConnectionLocality {
+    let source_ip = addr.ip();
+    let is_loopback = source_ip.is_loopback();
+
+    let proxy_headers = [
+        "x-forwarded-for",
+        "x-real-ip",
+        "cf-connecting-ip",
+        "fly-client-ip",
+        "true-client-ip",
+    ];
+
+    let is_proxied = proxy_headers.iter().any(|h| headers.contains_key(*h));
+
+    let forwarded_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .and_then(|v| v.trim().parse().ok())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .or_else(|| {
+            headers
+                .get("cf-connecting-ip")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse().ok())
+        });
+
+    ConnectionLocality {
+        source_ip,
+        is_loopback,
+        is_proxied,
+        forwarded_ip,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1468,6 +1598,180 @@ mod tests {
             "Hello  world"
         );
         assert_eq!(strip_think_tags("No thinking here"), "No thinking here");
-        assert_eq!(strip_think_tags("<think>all thinking</think>"), "");
+        assert_eq!(
+            strip_think_tags(
+                "<think>all thinking
+</think>"
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn validate_ws_origin_missing_origin_allowed() {
+        let headers = HeaderMap::new();
+        let result = validate_ws_origin(&headers, 4545, &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_localhost_valid() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://localhost:4545".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_127_0_0_1_valid() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://127.0.0.1:4545".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_ipv6_loopback_valid() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://[::1]:4545".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_wrong_host_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://evil.com:4545".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_port_mismatch_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://localhost:9999".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_https_with_default_port_allowed() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "https://localhost".parse().unwrap());
+        let result = validate_ws_origin(&headers, 443, &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_extra_origins_valid() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://my.domain.com:8080".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &["http://my.domain.com:8080".to_string()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_extra_origins_scheme_mismatch() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://my.domain.com".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &["https://my.domain.com".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_wildcard_allows_any_http_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://evil.example:9999".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &["*".to_string()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_wildcard_allows_any_https_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &["*".to_string()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_wildcard_rejects_non_http_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "file://evil.example".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &["*".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_wildcard_rejects_malformed_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "not-a-url".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &["*".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn detect_locality_direct_loopback() {
+        use std::net::SocketAddr;
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = HeaderMap::new();
+        let locality = detect_connection_locality(&addr, &headers);
+        assert!(locality.is_local());
+        assert!(!locality.is_proxied);
+        assert!(locality.forwarded_ip.is_none());
+    }
+
+    #[test]
+    fn detect_locality_loopback_with_xff() {
+        use std::net::SocketAddr;
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "8.8.8.8".parse().unwrap());
+        let locality = detect_connection_locality(&addr, &headers);
+        assert!(!locality.is_local());
+        assert!(locality.is_proxied);
+    }
+
+    #[test]
+    fn detect_locality_direct_remote() {
+        use std::net::SocketAddr;
+        let addr: SocketAddr = "8.8.8.8:12345".parse().unwrap();
+        let headers = HeaderMap::new();
+        let locality = detect_connection_locality(&addr, &headers);
+        assert!(!locality.is_local());
+        assert!(!locality.is_proxied);
+    }
+
+    #[test]
+    fn detect_locality_ipv6_loopback() {
+        use std::net::SocketAddr;
+        let addr: SocketAddr = "[::1]:12345".parse().unwrap();
+        let headers = HeaderMap::new();
+        let locality = detect_connection_locality(&addr, &headers);
+        assert!(locality.is_local());
+    }
+
+    #[test]
+    fn detect_locality_x_real_ip_sets_forwarded() {
+        use std::net::SocketAddr;
+        let addr: SocketAddr = "10.0.0.1:12345".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "1.2.3.4".parse().unwrap());
+        let locality = detect_connection_locality(&addr, &headers);
+        assert!(locality.is_proxied);
+        assert_eq!(locality.forwarded_ip.unwrap().to_string(), "1.2.3.4");
+    }
+
+    #[test]
+    fn detect_locality_xff_first_ip_parsed() {
+        use std::net::SocketAddr;
+        let addr: SocketAddr = "10.0.0.1:12345".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "1.1.1.1, 8.8.8.8, 9.9.9.9".parse().unwrap(),
+        );
+        let locality = detect_connection_locality(&addr, &headers);
+        assert_eq!(locality.forwarded_ip.unwrap().to_string(), "1.1.1.1");
     }
 }

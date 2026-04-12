@@ -1426,7 +1426,8 @@
     "error_unknown": "未知错误",
     "websocket_error": "WebSocket 连接错误",
     "connection_closed_non_recoverable": "由于不可恢复的错误，连接已关闭",
-    "max_reconnect_exceeded": "已达到最大重连次数，请手动连接。"
+    "max_reconnect_exceeded": "已达到最大重连次数，请手动连接。",
+    "root_warning": "警告：守护进程以 root 身份运行。终端命令将以完整权限执行。"
   },
   "mcp": {
     "title": "MCP 服务器",

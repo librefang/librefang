@@ -20,6 +20,7 @@ export interface StatusResponse {
   home_dir?: string;
   log_level?: string;
   network_enabled?: boolean;
+  terminal_enabled?: boolean;
   session_count?: number;
   config_exists?: boolean;
 }
@@ -1322,6 +1323,10 @@ export async function listCronJobs(agentId?: string): Promise<CronJobItem[]> {
 
 export async function getVersionInfo(): Promise<VersionResponse> {
   return get<VersionResponse>("/api/version");
+}
+
+export async function getStatus(): Promise<StatusResponse> {
+  return get<StatusResponse>("/api/status");
 }
 
 export async function getQueueStatus(): Promise<QueueStatusResponse> {

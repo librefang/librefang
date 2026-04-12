@@ -6,7 +6,7 @@ import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
 import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
-import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, getDashboardUsername, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
+import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, getDashboardUsername, getStatus, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 import { NotificationCenter } from "./components/NotificationCenter";
 
 function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
@@ -357,6 +357,8 @@ export function App() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const terminalEnabled = useUIStore((s) => s.terminalEnabled);
+  const setTerminalEnabled = useUIStore((s) => s.setTerminalEnabled);
 
   useKeyboardShortcuts({ onShowHelp: () => setShowShortcuts(true) });
 
@@ -403,6 +405,10 @@ export function App() {
       setHostname(v.hostname ?? "");
     }).catch(() => {});
 
+    getStatus().then((s) => {
+      setTerminalEnabled(s.terminal_enabled !== false);
+    }).catch(() => {});
+
     return () => {
       cancelled = true;
       setOnUnauthorized(null);
@@ -423,7 +429,15 @@ export function App() {
   }`;
   const navActive = "border-brand/20 bg-brand/10 text-brand font-semibold shadow-sm shadow-brand/5";
 
-  const navGroups = useMemo(() => [
+  const navGroups = useMemo(() => {
+    const advancedItems = [
+      { to: "/comms", label: t("nav.comms"), icon: Activity },
+      ...(terminalEnabled ? [{ to: "/terminal" as const, label: t("nav.terminal"), icon: Terminal }] : []),
+      { to: "/network", label: t("nav.network"), icon: Share2 },
+      { to: "/a2a", label: t("nav.a2a"), icon: Globe },
+      { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
+    ];
+    return [
     {
       key: "core",
       label: t("nav.core"),
@@ -470,15 +484,9 @@ export function App() {
     {
       key: "advanced",
       label: t("nav.advanced"),
-      items: [
-        { to: "/comms", label: t("nav.comms"), icon: Activity },
-        { to: "/terminal", label: t("nav.terminal"), icon: Terminal },
-        { to: "/network", label: t("nav.network"), icon: Share2 },
-        { to: "/a2a", label: t("nav.a2a"), icon: Globe },
-        { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
-      ],
+      items: advancedItems,
     },
-  ], [t]);
+  ]; }, [t, terminalEnabled]);
 
   return (
     <div className="flex h-screen flex-col bg-main text-slate-900 dark:text-slate-100 lg:flex-row transition-colors duration-300 overflow-hidden">
