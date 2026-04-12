@@ -1,0 +1,495 @@
+//! Kernel-side OAuth provider for MCP servers.
+//!
+//! Implements `McpOAuthProvider` using the extensions vault for encrypted
+//! token storage and a browser-based PKCE authorization flow with a
+//! localhost callback listener.
+
+use async_trait::async_trait;
+use librefang_runtime::mcp_oauth::{
+    generate_pkce, generate_state, AuthFlowHandle, McpOAuthProvider, OAuthMetadata, OAuthTokens,
+};
+use std::path::PathBuf;
+use tracing::{debug, info, warn};
+
+/// Percent-encode a string for use as a URL query parameter value.
+fn percent_encode_param(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(byte as char);
+            }
+            _ => {
+                result.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    result
+}
+
+/// Percent-decode a URL-encoded string.
+fn percent_decode_param(s: &str) -> String {
+    let mut result = Vec::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                result.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            result.push(b' ');
+        } else {
+            result.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
+/// Vault key prefix for MCP OAuth tokens.
+const VAULT_PREFIX: &str = "mcp_oauth";
+
+/// OAuth provider backed by the librefang encrypted credential vault.
+///
+/// Each instance is stateless — it opens and unlocks the vault on every
+/// operation, mirroring the pattern used by `LibreFangKernel::vault_get`
+/// and `vault_set`.
+pub struct KernelOAuthProvider {
+    /// Path to `~/.librefang` (home directory).
+    home_dir: PathBuf,
+}
+
+impl KernelOAuthProvider {
+    /// Create a new provider that stores tokens in the vault at `home_dir/vault.enc`.
+    pub fn new(home_dir: PathBuf) -> Self {
+        Self { home_dir }
+    }
+
+    /// Convenience: vault key for a specific server URL and field.
+    fn vault_key(server_url: &str, field: &str) -> String {
+        format!("{VAULT_PREFIX}:{server_url}:{field}")
+    }
+
+    /// Read a value from the vault. Returns `None` if the vault cannot be
+    /// unlocked or the key is missing.
+    fn vault_get(&self, key: &str) -> Option<String> {
+        let vault_path = self.home_dir.join("vault.enc");
+        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if vault.unlock().is_err() {
+            return None;
+        }
+        vault.get(key).map(|s| s.to_string())
+    }
+
+    /// Write a value to the vault. Creates the vault if it does not exist.
+    fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
+        let vault_path = self.home_dir.join("vault.enc");
+        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if !vault.exists() {
+            vault
+                .init()
+                .map_err(|e| format!("Vault init failed: {e}"))?;
+        } else {
+            vault
+                .unlock()
+                .map_err(|e| format!("Vault unlock failed: {e}"))?;
+        }
+        vault
+            .set(key.to_string(), zeroize::Zeroizing::new(value.to_string()))
+            .map_err(|e| format!("Vault write failed: {e}"))
+    }
+
+    /// Remove a value from the vault. Returns `Ok(true)` if the key existed.
+    fn vault_remove(&self, key: &str) -> Result<bool, String> {
+        let vault_path = self.home_dir.join("vault.enc");
+        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if !vault.exists() {
+            return Ok(false);
+        }
+        vault
+            .unlock()
+            .map_err(|e| format!("Vault unlock failed: {e}"))?;
+        vault
+            .remove(key)
+            .map_err(|e| format!("Vault remove failed: {e}"))
+    }
+
+    /// Try to refresh the access token using a stored refresh token.
+    async fn try_refresh(
+        &self,
+        server_url: &str,
+        refresh_token: &str,
+    ) -> Result<OAuthTokens, String> {
+        // We need the token_endpoint — read it from vault metadata
+        let token_endpoint = self
+            .vault_get(&Self::vault_key(server_url, "token_endpoint"))
+            .ok_or_else(|| "No token_endpoint stored for refresh".to_string())?;
+
+        let client_id = self.vault_get(&Self::vault_key(server_url, "client_id"));
+
+        let client = reqwest::Client::new();
+        let mut params = vec![
+            ("grant_type", "refresh_token".to_string()),
+            ("refresh_token", refresh_token.to_string()),
+        ];
+        if let Some(cid) = &client_id {
+            params.push(("client_id", cid.clone()));
+        }
+
+        let resp = client
+            .post(&token_endpoint)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| format!("Refresh token request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Token refresh failed (HTTP {status}): {body}"));
+        }
+
+        let tokens: OAuthTokens = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse refresh response: {e}"))?;
+
+        Ok(tokens)
+    }
+}
+
+#[async_trait]
+impl McpOAuthProvider for KernelOAuthProvider {
+    async fn load_token(&self, server_url: &str) -> Option<String> {
+        let access_token = self.vault_get(&Self::vault_key(server_url, "access_token"))?;
+
+        // Check expiration if stored
+        if let Some(expires_at_str) = self.vault_get(&Self::vault_key(server_url, "expires_at")) {
+            if let Ok(expires_at) = expires_at_str.parse::<i64>() {
+                let now = chrono::Utc::now().timestamp();
+                // Token expired or within 60s of expiry
+                if now >= expires_at - 60 {
+                    debug!(server = %server_url, "MCP OAuth token expired or near expiry, attempting refresh");
+
+                    // Try refresh if we have a refresh token
+                    if let Some(refresh_token) =
+                        self.vault_get(&Self::vault_key(server_url, "refresh_token"))
+                    {
+                        match self.try_refresh(server_url, &refresh_token).await {
+                            Ok(new_tokens) => {
+                                // Store the refreshed tokens
+                                if let Err(e) =
+                                    self.store_tokens(server_url, new_tokens.clone()).await
+                                {
+                                    warn!(error = %e, "Failed to store refreshed tokens");
+                                }
+                                return Some(new_tokens.access_token);
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Token refresh failed");
+                                return None;
+                            }
+                        }
+                    }
+                    // No refresh token and expired
+                    return None;
+                }
+            }
+        }
+        // No expires_at stored (e.g. Notion) — return token as-is
+        Some(access_token)
+    }
+
+    async fn store_tokens(&self, server_url: &str, tokens: OAuthTokens) -> Result<(), String> {
+        self.vault_set(
+            &Self::vault_key(server_url, "access_token"),
+            &tokens.access_token,
+        )?;
+
+        if let Some(ref rt) = tokens.refresh_token {
+            self.vault_set(&Self::vault_key(server_url, "refresh_token"), rt)?;
+        }
+
+        if tokens.expires_in > 0 {
+            let expires_at = chrono::Utc::now().timestamp() + tokens.expires_in as i64;
+            self.vault_set(
+                &Self::vault_key(server_url, "expires_at"),
+                &expires_at.to_string(),
+            )?;
+        }
+
+        debug!(server = %server_url, "MCP OAuth tokens stored in vault");
+        Ok(())
+    }
+
+    async fn clear_tokens(&self, server_url: &str) -> Result<(), String> {
+        for field in &[
+            "access_token",
+            "refresh_token",
+            "expires_at",
+            "token_endpoint",
+            "client_id",
+        ] {
+            let _ = self.vault_remove(&Self::vault_key(server_url, field));
+        }
+        debug!(server = %server_url, "MCP OAuth tokens cleared from vault");
+        Ok(())
+    }
+
+    async fn start_auth_flow(
+        &self,
+        server_url: &str,
+        metadata: OAuthMetadata,
+    ) -> Result<AuthFlowHandle, String> {
+        let (verifier, challenge) = generate_pkce();
+        let state = generate_state();
+
+        // Bind a localhost TCP listener on a random port for the callback
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("Failed to bind callback listener: {e}"))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| format!("Failed to get listener address: {e}"))?;
+        let redirect_uri = format!("http://127.0.0.1:{}/callback", local_addr.port());
+
+        // Build the authorization URL
+        let mut auth_url = format!(
+            "{}?response_type=code&redirect_uri={}&code_challenge={}&code_challenge_method=S256&state={}",
+            metadata.authorization_endpoint,
+            percent_encode_param(&redirect_uri),
+            percent_encode_param(&challenge),
+            percent_encode_param(&state),
+        );
+        if let Some(ref client_id) = metadata.client_id {
+            auth_url.push_str(&format!("&client_id={}", percent_encode_param(client_id)));
+        }
+        if !metadata.scopes.is_empty() {
+            let scope_str = metadata.scopes.join(" ");
+            auth_url.push_str(&format!("&scope={}", percent_encode_param(&scope_str)));
+        }
+
+        // Store metadata for later use (token exchange, refresh)
+        let _ = self.vault_set(
+            &Self::vault_key(server_url, "token_endpoint"),
+            &metadata.token_endpoint,
+        );
+        if let Some(ref cid) = metadata.client_id {
+            let _ = self.vault_set(&Self::vault_key(server_url, "client_id"), cid);
+        }
+
+        // Try to open the browser
+        if let Err(e) = open_browser(&auth_url) {
+            warn!(error = %e, "Could not open browser for OAuth flow");
+        }
+
+        info!(
+            server = %server_url,
+            port = local_addr.port(),
+            "OAuth flow started, waiting for callback"
+        );
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        // Spawn a task to handle the callback
+        let token_endpoint = metadata.token_endpoint.clone();
+        let client_id = metadata.client_id.clone();
+        let expected_state = state.clone();
+        let auth_url_clone = auth_url.clone();
+
+        tokio::spawn(async move {
+            let result = handle_oauth_callback(
+                listener,
+                &expected_state,
+                &token_endpoint,
+                client_id.as_deref(),
+                &verifier,
+                &redirect_uri,
+            )
+            .await;
+            let _ = tx.send(result);
+        });
+
+        Ok(AuthFlowHandle {
+            auth_url: auth_url_clone,
+            completion: rx,
+        })
+    }
+}
+
+/// Handle the OAuth callback on the localhost listener.
+///
+/// Accepts one TCP connection, parses the authorization code from the
+/// GET request, exchanges it for tokens, and returns a success HTML page.
+async fn handle_oauth_callback(
+    listener: tokio::net::TcpListener,
+    expected_state: &str,
+    token_endpoint: &str,
+    client_id: Option<&str>,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> Result<OAuthTokens, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Set a timeout for the callback (5 minutes)
+    let accept_result =
+        tokio::time::timeout(std::time::Duration::from_secs(300), listener.accept())
+            .await
+            .map_err(|_| "OAuth callback timed out after 5 minutes".to_string())?
+            .map_err(|e| format!("Failed to accept callback connection: {e}"))?;
+
+    let (mut stream, _addr) = accept_result;
+
+    // Read the HTTP request
+    let mut buf = vec![0u8; 4096];
+    let n = stream
+        .read(&mut buf)
+        .await
+        .map_err(|e| format!("Failed to read callback request: {e}"))?;
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    // Parse the first line: GET /callback?code=...&state=... HTTP/1.1
+    let first_line = request.lines().next().unwrap_or("");
+    let path = first_line.split_whitespace().nth(1).unwrap_or("");
+
+    // Parse query parameters from the path
+    let query_str = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let params: std::collections::HashMap<String, String> = query_str
+        .split('&')
+        .filter_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            Some((percent_decode_param(k), percent_decode_param(v)))
+        })
+        .collect();
+
+    // Check for error response
+    if let Some(error) = params.get("error") {
+        let desc = params.get("error_description").cloned().unwrap_or_default();
+        let error_html = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
+             <html><body><h1>OAuth Error</h1><p>{error}: {desc}</p>\
+             <p>You can close this window.</p></body></html>"
+        );
+        let _ = stream.write_all(error_html.as_bytes()).await;
+        let _ = stream.shutdown().await;
+        return Err(format!("OAuth error: {error} - {desc}"));
+    }
+
+    // Validate state
+    let received_state = params
+        .get("state")
+        .ok_or_else(|| "Missing state parameter in callback".to_string())?;
+    if received_state != expected_state {
+        let error_html =
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
+             <html><body><h1>Invalid State</h1>\
+             <p>The OAuth state parameter did not match. This may be a CSRF attack.</p>\
+             </body></html>";
+        let _ = stream.write_all(error_html.as_bytes()).await;
+        let _ = stream.shutdown().await;
+        return Err("OAuth state mismatch — possible CSRF".to_string());
+    }
+
+    // Extract authorization code
+    let code = params
+        .get("code")
+        .ok_or_else(|| "Missing code parameter in callback".to_string())?;
+
+    // Exchange authorization code for tokens
+    let client = reqwest::Client::new();
+    let mut form_params = vec![
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code.clone()),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("code_verifier", code_verifier.to_string()),
+    ];
+    if let Some(cid) = client_id {
+        form_params.push(("client_id", cid.to_string()));
+    }
+
+    let token_resp = client
+        .post(token_endpoint)
+        .form(&form_params)
+        .send()
+        .await
+        .map_err(|e| format!("Token exchange request failed: {e}"))?;
+
+    if !token_resp.status().is_success() {
+        let status = token_resp.status();
+        let body = token_resp.text().await.unwrap_or_default();
+        let error_html = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
+             <html><body><h1>Token Exchange Failed</h1><p>HTTP {status}: {body}</p>\
+             <p>You can close this window.</p></body></html>"
+        );
+        let _ = stream.write_all(error_html.as_bytes()).await;
+        let _ = stream.shutdown().await;
+        return Err(format!("Token exchange failed (HTTP {status}): {body}"));
+    }
+
+    let tokens: OAuthTokens = token_resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse token response: {e}"))?;
+
+    // Send success response to browser
+    let success_html = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
+         <html><body>\
+         <h1>Authorization Successful</h1>\
+         <p>LibreFang has been authorized. You can close this window.</p>\
+         <script>window.close();</script>\
+         </body></html>";
+    let _ = stream.write_all(success_html.as_bytes()).await;
+    let _ = stream.shutdown().await;
+
+    Ok(tokens)
+}
+
+/// Try to open a URL in the default browser.
+fn open_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+
+    #[cfg(target_os = "linux")]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", url])
+        .spawn();
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let result: Result<std::process::Child, std::io::Error> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "unsupported platform",
+    ));
+
+    match result {
+        Ok(_) => {
+            debug!(url = %url, "Opened browser for OAuth flow");
+            Ok(())
+        }
+        Err(e) => Err(format!("Failed to open browser: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vault_key_format() {
+        let key = KernelOAuthProvider::vault_key("https://example.com/mcp", "access_token");
+        assert_eq!(key, "mcp_oauth:https://example.com/mcp:access_token");
+    }
+
+    #[test]
+    fn vault_key_refresh_token() {
+        let key = KernelOAuthProvider::vault_key("https://example.com/mcp", "refresh_token");
+        assert_eq!(key, "mcp_oauth:https://example.com/mcp:refresh_token");
+    }
+}

@@ -1810,12 +1810,10 @@ pub async fn uninstall_hand(
         Err(librefang_hands::HandError::NotFound(id)) => {
             ApiErrorResponse::not_found(format!("Hand not found: {id}")).into_json_tuple()
         }
-        Err(librefang_hands::HandError::BuiltinHand(id)) => {
-            ApiErrorResponse::not_found(format!(
-                "Hand '{id}' is a built-in and cannot be uninstalled"
-            ))
-            .into_json_tuple()
-        }
+        Err(librefang_hands::HandError::BuiltinHand(id)) => ApiErrorResponse::not_found(format!(
+            "Hand '{id}' is a built-in and cannot be uninstalled"
+        ))
+        .into_json_tuple(),
         Err(librefang_hands::HandError::AlreadyActive(msg)) => {
             ApiErrorResponse::conflict(msg).into_json_tuple()
         }

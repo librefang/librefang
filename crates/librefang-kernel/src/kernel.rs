@@ -308,6 +308,10 @@ pub struct LibreFangKernel {
     pub(crate) mcp_connections: tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>>,
     /// MCP tool definitions cache (populated after connections are established).
     pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
+    /// Per-server OAuth authentication state for MCP connections.
+    pub(crate) mcp_auth_states: tokio::sync::Mutex<
+        std::collections::HashMap<String, librefang_runtime::mcp_oauth::McpAuthState>,
+    >,
     /// A2A task store for tracking task lifecycle.
     pub a2a_task_store: librefang_runtime::a2a::A2aTaskStore,
     /// Discovered external A2A agent cards.
@@ -1349,6 +1353,25 @@ impl LibreFangKernel {
     #[inline]
     pub fn mcp_tools_ref(&self) -> &std::sync::Mutex<Vec<ToolDefinition>> {
         &self.mcp_tools
+    }
+
+    /// Per-server MCP OAuth authentication states.
+    #[inline]
+    pub fn mcp_auth_states_ref(
+        &self,
+    ) -> &tokio::sync::Mutex<
+        std::collections::HashMap<String, librefang_runtime::mcp_oauth::McpAuthState>,
+    > {
+        &self.mcp_auth_states
+    }
+
+    /// Create a new `KernelOAuthProvider` backed by this kernel's vault.
+    pub fn oauth_provider(
+        &self,
+    ) -> std::sync::Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider> {
+        std::sync::Arc::new(crate::mcp_oauth_provider::KernelOAuthProvider::new(
+            self.home_dir_boot.clone(),
+        ))
     }
 
     /// Effective MCP server list (config + extensions merged).
@@ -2476,6 +2499,7 @@ impl LibreFangKernel {
             running_tasks: dashmap::DashMap::new(),
             mcp_connections: tokio::sync::Mutex::new(Vec::new()),
             mcp_tools: std::sync::Mutex::new(Vec::new()),
+            mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             a2a_task_store: librefang_runtime::a2a::A2aTaskStore::default(),
             a2a_external_agents: std::sync::Mutex::new(Vec::new()),
             web_ctx,
@@ -8915,13 +8939,44 @@ system_prompt = "You are a helpful assistant."
                     self.mcp_connections.lock().await.push(conn);
                 }
                 Err(e) => {
-                    warn!(
-                        server = %server_config.name,
-                        error = %e,
-                        "Failed to connect to MCP server"
-                    );
+                    let err_str = e.to_string();
+
+                    // Check if this is an OAuth-pending error (HTTP 401 from an
+                    // MCP server that supports OAuth). The MCP connection layer
+                    // may signal this by prefixing the error with "OAUTH_PENDING:".
+                    if err_str.starts_with("OAUTH_PENDING:") {
+                        let auth_url = err_str
+                            .strip_prefix("OAUTH_PENDING:")
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        info!(
+                            server = %server_config.name,
+                            "MCP server requires OAuth — authorization pending"
+                        );
+                        self.mcp_auth_states.lock().await.insert(
+                            server_config.name.clone(),
+                            librefang_runtime::mcp_oauth::McpAuthState::PendingAuth {
+                                auth_url: auth_url.clone(),
+                            },
+                        );
+                        // Spawn a watcher task that will retry once the OAuth
+                        // flow completes (poll vault for token every 10s,
+                        // up to 5 minutes).
+                        let kernel = Arc::clone(self);
+                        let server_name = server_config.name.clone();
+                        tokio::spawn(async move {
+                            kernel.watch_oauth_completion(&server_name).await;
+                        });
+                    } else {
+                        warn!(
+                            server = %server_config.name,
+                            error = %e,
+                            "Failed to connect to MCP server"
+                        );
+                    }
                     self.extension_health
-                        .report_error(&server_config.name, e.to_string());
+                        .report_error(&server_config.name, err_str);
                 }
             }
         }
@@ -8932,6 +8987,162 @@ system_prompt = "You are a helpful assistant."
                 "MCP: {tool_count} tools available from {} server(s)",
                 self.mcp_connections.lock().await.len()
             );
+        }
+    }
+
+    /// Watch for OAuth completion by polling the vault for a stored access token.
+    ///
+    /// Polls every 10 seconds for up to 5 minutes. When a token appears, calls
+    /// `retry_mcp_connection` to establish the MCP connection.
+    async fn watch_oauth_completion(self: &Arc<Self>, server_name: &str) {
+        let provider = self.oauth_provider();
+        // Determine the server URL from effective_mcp_servers config
+        let server_url = {
+            let servers = self
+                .effective_mcp_servers
+                .read()
+                .map(|s| s.clone())
+                .unwrap_or_default();
+            servers
+                .iter()
+                .find(|s| s.name == server_name)
+                .and_then(|s| {
+                    s.transport.as_ref().and_then(|t| match t {
+                        librefang_types::config::McpTransportEntry::Sse { url } => {
+                            Some(url.clone())
+                        }
+                        librefang_types::config::McpTransportEntry::Http { url } => {
+                            Some(url.clone())
+                        }
+                        _ => None,
+                    })
+                })
+        };
+
+        let server_url = match server_url {
+            Some(url) => url,
+            None => {
+                debug!(server = %server_name, "No HTTP/SSE URL for OAuth watcher");
+                return;
+            }
+        };
+
+        let max_attempts = 30; // 30 * 10s = 5 minutes
+        for attempt in 1..=max_attempts {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+            if let Some(_token) = provider.load_token(&server_url).await {
+                info!(
+                    server = %server_name,
+                    attempt,
+                    "OAuth token found in vault, retrying MCP connection"
+                );
+                self.retry_mcp_connection(server_name).await;
+                return;
+            }
+        }
+
+        warn!(
+            server = %server_name,
+            "OAuth completion watcher timed out after 5 minutes"
+        );
+        self.mcp_auth_states.lock().await.insert(
+            server_name.to_string(),
+            librefang_runtime::mcp_oauth::McpAuthState::Expired,
+        );
+    }
+
+    /// Retry connecting to a specific MCP server by name.
+    ///
+    /// Looks up the server config, builds an `McpServerConfig`, and attempts
+    /// to connect. On success, adds the connection and updates auth state.
+    pub async fn retry_mcp_connection(self: &Arc<Self>, server_name: &str) {
+        use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
+        use librefang_types::config::McpTransportEntry;
+
+        let server_config = {
+            let servers = self
+                .effective_mcp_servers
+                .read()
+                .map(|s| s.clone())
+                .unwrap_or_default();
+            servers.into_iter().find(|s| s.name == server_name)
+        };
+
+        let server_config = match server_config {
+            Some(c) => c,
+            None => {
+                warn!(server = %server_name, "MCP server config not found for retry");
+                return;
+            }
+        };
+
+        let transport_entry = match &server_config.transport {
+            Some(t) => t,
+            None => {
+                warn!(server = %server_name, "MCP server has no transport for retry");
+                return;
+            }
+        };
+
+        let transport = match transport_entry {
+            McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
+                command: command.clone(),
+                args: args.clone(),
+            },
+            McpTransportEntry::Sse { url } => McpTransport::Sse { url: url.clone() },
+            McpTransportEntry::Http { url } => McpTransport::Http { url: url.clone() },
+            McpTransportEntry::HttpCompat {
+                base_url,
+                headers,
+                tools,
+            } => McpTransport::HttpCompat {
+                base_url: base_url.clone(),
+                headers: headers.clone(),
+                tools: tools.clone(),
+            },
+        };
+
+        let mcp_config = McpServerConfig {
+            name: server_config.name.clone(),
+            transport,
+            timeout_secs: server_config.timeout_secs,
+            env: server_config.env.clone(),
+            headers: server_config.headers.clone(),
+        };
+
+        match McpConnection::connect(mcp_config).await {
+            Ok(conn) => {
+                let tool_count = conn.tools().len();
+                if let Ok(mut tools) = self.mcp_tools.lock() {
+                    tools.extend(conn.tools().iter().cloned());
+                    self.mcp_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                info!(
+                    server = %server_name,
+                    tools = tool_count,
+                    "MCP server connected after OAuth"
+                );
+                self.extension_health
+                    .report_ok(&server_config.name, tool_count);
+                self.mcp_connections.lock().await.push(conn);
+
+                // Update auth state to Authorized
+                self.mcp_auth_states.lock().await.insert(
+                    server_name.to_string(),
+                    librefang_runtime::mcp_oauth::McpAuthState::Authorized { expires_at: None },
+                );
+            }
+            Err(e) => {
+                warn!(
+                    server = %server_name,
+                    error = %e,
+                    "MCP server retry after OAuth failed"
+                );
+                self.extension_health
+                    .report_error(&server_config.name, e.to_string());
+            }
         }
     }
 
