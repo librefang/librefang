@@ -1856,7 +1856,14 @@ pub async fn config_set(
     )
 }
 
-/// Convert a serde_json::Value to a toml::Value.
+/// Convert a `serde_json::Value` to a `toml::Value`.
+///
+/// Objects map to `toml::Value::Table` recursively. Previously objects fell
+/// through to the catch-all `_ => Value::String(value.to_string())` arm, which
+/// silently serialised the entire object as a JSON blob inside a TOML string.
+/// That's what produced the corrupt `mcp_servers = ['{"name":"..."}']` entries
+/// in #2319 when the MCP add-server endpoint persisted a server through this
+/// helper.
 pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
     match value {
         serde_json::Value::String(s) => toml::Value::String(s.clone()),
@@ -1875,7 +1882,14 @@ pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
         serde_json::Value::Array(arr) => {
             toml::Value::Array(arr.iter().map(json_to_toml_value).collect())
         }
-        _ => toml::Value::String(value.to_string()),
+        serde_json::Value::Object(map) => {
+            let mut table = toml::map::Map::new();
+            for (k, v) in map {
+                table.insert(k.clone(), json_to_toml_value(v));
+            }
+            toml::Value::Table(table)
+        }
+        serde_json::Value::Null => toml::Value::String(String::new()),
     }
 }
 
@@ -2009,4 +2023,90 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         "skillCount": skill_count,
         "workflowCount": workflow_count,
     })
+}
+
+#[cfg(test)]
+mod json_to_toml_value_tests {
+    use super::json_to_toml_value;
+    use librefang_types::config::McpServerConfigEntry;
+
+    #[test]
+    fn object_value_becomes_toml_table_not_stringified_json() {
+        // Regression for #2319: objects used to fall through to the catch-all
+        // `_` arm and get serialised via `value.to_string()`, producing
+        // `toml::Value::String("{\"name\":\"nocodb\",...}")` which the kernel
+        // then failed to deserialise back into `McpServerConfigEntry`.
+        let input = serde_json::json!({
+            "name": "nocodb",
+            "timeout_secs": 30,
+            "env": [],
+            "headers": ["xc-mcp-token: abc"],
+            "transport": {
+                "type": "http",
+                "url": "http://nocodb:8080/mcp/x"
+            }
+        });
+
+        let toml_val = json_to_toml_value(&input);
+        let table = toml_val
+            .as_table()
+            .expect("object must convert to a toml table, not a string");
+        assert_eq!(table.get("name").and_then(|v| v.as_str()), Some("nocodb"));
+        assert_eq!(
+            table.get("timeout_secs").and_then(|v| v.as_integer()),
+            Some(30)
+        );
+        let transport = table
+            .get("transport")
+            .and_then(|v| v.as_table())
+            .expect("transport must be a nested table");
+        assert_eq!(
+            transport.get("type").and_then(|v| v.as_str()),
+            Some("http")
+        );
+        assert_eq!(
+            transport.get("url").and_then(|v| v.as_str()),
+            Some("http://nocodb:8080/mcp/x")
+        );
+    }
+
+    #[test]
+    fn mcp_server_entry_roundtrips_through_toml() {
+        // Full end-to-end: serialise a strongly-typed MCP entry the same way
+        // upsert_mcp_server_config does (via JSON), round-trip it through the
+        // helper, render it to a TOML document using `[[mcp_servers]]`, and
+        // reparse it back into the typed struct. Before the #2319 fix this
+        // produced `mcp_servers = ['{"name":"..."}']` and failed to reparse.
+        let entry_json = serde_json::json!({
+            "name": "nocodb",
+            "timeout_secs": 30,
+            "env": [],
+            "headers": ["xc-mcp-token: abc"],
+            "transport": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "mcp-remote", "http://nocodb:8080/mcp/x"]
+            }
+        });
+
+        let toml_val = json_to_toml_value(&entry_json);
+        let mut root = toml::value::Table::new();
+        root.insert(
+            "mcp_servers".into(),
+            toml::Value::Array(vec![toml_val]),
+        );
+        let rendered = toml::to_string_pretty(&root).expect("serialise root");
+
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            mcp_servers: Vec<McpServerConfigEntry>,
+        }
+        let parsed: Wrapper = toml::from_str(&rendered).unwrap_or_else(|e| {
+            panic!("round-trip TOML failed to reparse: {e}\n---\n{rendered}")
+        });
+        assert_eq!(parsed.mcp_servers.len(), 1);
+        assert_eq!(parsed.mcp_servers[0].name, "nocodb");
+        assert_eq!(parsed.mcp_servers[0].timeout_secs, 30);
+        assert_eq!(parsed.mcp_servers[0].headers, vec!["xc-mcp-token: abc"]);
+    }
 }
