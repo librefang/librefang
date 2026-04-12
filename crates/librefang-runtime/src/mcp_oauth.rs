@@ -60,31 +60,6 @@ pub enum McpAuthState {
 /// Shared map of per-server MCP OAuth authentication states.
 pub type McpAuthStates = tokio::sync::Mutex<std::collections::HashMap<String, McpAuthState>>;
 
-/// No-op OAuth provider that never stores or loads tokens.
-///
-/// Used as the default when no real provider is configured.
-pub struct NoOpOAuthProvider;
-
-#[async_trait]
-impl McpOAuthProvider for NoOpOAuthProvider {
-    async fn load_token(&self, _server_url: &str) -> Option<String> {
-        None
-    }
-    async fn store_tokens(&self, _server_url: &str, _tokens: OAuthTokens) -> Result<(), String> {
-        Ok(())
-    }
-    async fn clear_tokens(&self, _server_url: &str) -> Result<(), String> {
-        Ok(())
-    }
-    async fn start_auth_flow(
-        &self,
-        _server_url: &str,
-        _metadata: OAuthMetadata,
-    ) -> Result<AuthFlowHandle, String> {
-        Err("No OAuth provider configured".to_string())
-    }
-}
-
 /// OAuth token response from the token endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
@@ -250,20 +225,11 @@ pub fn merge_metadata_with_config(
 // Auth flow handle + provider trait
 // ---------------------------------------------------------------------------
 
-/// Handle returned when initiating an OAuth authorization flow.
+/// Trait for OAuth token storage and management.
 ///
-/// Contains the authorization URL to present to the user and a oneshot
-/// receiver that resolves when the flow completes (e.g., callback received).
-pub struct AuthFlowHandle {
-    pub auth_url: String,
-    pub completion: tokio::sync::oneshot::Receiver<Result<OAuthTokens, String>>,
-}
-
-/// Trait for OAuth token storage and flow management.
-///
-/// Implementors handle persistence of tokens (e.g., to SQLite or filesystem)
-/// and orchestration of the authorization flow (e.g., spawning a local HTTP
-/// server for the callback).
+/// Implementors handle persistence of tokens (e.g., encrypted vault on disk).
+/// The actual OAuth flow (PKCE, browser redirect) is driven by the API layer,
+/// not by the provider — the provider only handles token CRUD.
 #[async_trait]
 pub trait McpOAuthProvider: Send + Sync {
     /// Load a cached access token for the given server URL.
@@ -274,13 +240,6 @@ pub trait McpOAuthProvider: Send + Sync {
 
     /// Clear stored tokens for the given server URL.
     async fn clear_tokens(&self, server_url: &str) -> Result<(), String>;
-
-    /// Initiate the OAuth authorization flow and return a handle.
-    async fn start_auth_flow(
-        &self,
-        server_url: &str,
-        metadata: OAuthMetadata,
-    ) -> Result<AuthFlowHandle, String>;
 }
 
 // ---------------------------------------------------------------------------

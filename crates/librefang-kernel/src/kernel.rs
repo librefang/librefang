@@ -1370,15 +1370,6 @@ impl LibreFangKernel {
         &self.mcp_tools
     }
 
-    /// Create a new `KernelOAuthProvider` backed by this kernel's vault.
-    pub fn oauth_provider(
-        &self,
-    ) -> std::sync::Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider> {
-        std::sync::Arc::new(crate::mcp_oauth_provider::KernelOAuthProvider::new(
-            self.home_dir_boot.clone(),
-        ))
-    }
-
     /// Effective MCP server list (config + extensions merged).
     #[inline]
     pub fn effective_mcp_servers_ref(
@@ -8994,65 +8985,6 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Note: Currently unused — the API layer drives OAuth completion via the
     /// callback endpoint. Retained for potential future use by non-API flows.
-    #[allow(dead_code)]
-    async fn watch_oauth_completion(self: &Arc<Self>, server_name: &str) {
-        let provider = self.oauth_provider();
-        // Determine the server URL from effective_mcp_servers config
-        let server_url = {
-            let servers = self
-                .effective_mcp_servers
-                .read()
-                .map(|s| s.clone())
-                .unwrap_or_default();
-            servers
-                .iter()
-                .find(|s| s.name == server_name)
-                .and_then(|s| {
-                    s.transport.as_ref().and_then(|t| match t {
-                        librefang_types::config::McpTransportEntry::Sse { url } => {
-                            Some(url.clone())
-                        }
-                        librefang_types::config::McpTransportEntry::Http { url } => {
-                            Some(url.clone())
-                        }
-                        _ => None,
-                    })
-                })
-        };
-
-        let server_url = match server_url {
-            Some(url) => url,
-            None => {
-                debug!(server = %server_name, "No HTTP/SSE URL for OAuth watcher");
-                return;
-            }
-        };
-
-        let max_attempts = 30; // 30 * 10s = 5 minutes
-        for attempt in 1..=max_attempts {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-
-            if let Some(_token) = provider.load_token(&server_url).await {
-                info!(
-                    server = %server_name,
-                    attempt,
-                    "OAuth token found in vault, retrying MCP connection"
-                );
-                self.retry_mcp_connection(server_name).await;
-                return;
-            }
-        }
-
-        warn!(
-            server = %server_name,
-            "OAuth completion watcher timed out after 5 minutes"
-        );
-        self.mcp_auth_states.lock().await.insert(
-            server_name.to_string(),
-            librefang_runtime::mcp_oauth::McpAuthState::Expired,
-        );
-    }
-
     /// Retry connecting to a specific MCP server by name.
     ///
     /// Looks up the server config, builds an `McpServerConfig`, and attempts

@@ -12,7 +12,6 @@ use axum::response::IntoResponse;
 use axum::Json;
 use librefang_kernel::mcp_oauth_provider::KernelOAuthProvider;
 use librefang_runtime::mcp_oauth::{self, McpAuthState, OAuthTokens};
-use librefang_types::config::McpOAuthConfig;
 use std::sync::Arc;
 
 /// GET /api/mcp/servers/{name}/auth/status
@@ -170,8 +169,8 @@ pub async fn auth_start(
         }
     };
 
-    // Discover OAuth metadata
-    let oauth_config = McpOAuthConfig::default();
+    // Discover OAuth metadata (use config.toml overrides if present)
+    let oauth_config = entry.oauth.clone().unwrap_or_default();
     let metadata =
         match mcp_oauth::discover_oauth_metadata(&server_url, None, Some(&oauth_config)).await {
             Ok(m) => m,
@@ -251,10 +250,16 @@ pub async fn auth_start(
         return ApiErrorResponse::internal(format!("Failed to store auth state: {e}"))
             .into_json_tuple();
     }
-    let _ = store("token_endpoint", &metadata.token_endpoint);
-    let _ = store("redirect_uri", &redirect_uri);
+    if let Err(e) = store("token_endpoint", &metadata.token_endpoint) {
+        tracing::warn!(error = %e, "Failed to store token_endpoint in vault");
+    }
+    if let Err(e) = store("redirect_uri", &redirect_uri) {
+        tracing::warn!(error = %e, "Failed to store redirect_uri in vault");
+    }
     if let Some(ref cid) = client_id {
-        let _ = store("client_id", cid);
+        if let Err(e) = store("client_id", cid) {
+            tracing::warn!(error = %e, "Failed to store client_id in vault");
+        }
     }
 
     // Build authorization URL
@@ -550,6 +555,11 @@ pub async fn auth_callback(
         tracing::warn!(error = %e, "Failed to store OAuth tokens");
     }
 
+    // Clean up one-time PKCE values from vault
+    for field in &["pkce_verifier", "pkce_state", "redirect_uri"] {
+        let _ = provider.vault_remove(&KernelOAuthProvider::vault_key(&server_url, field));
+    }
+
     // Update auth state to Authorized
     {
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
@@ -598,16 +608,23 @@ pub async fn auth_revoke(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    // Verify server exists
+    // Find server and resolve its URL
     let cfg = state.kernel.config_snapshot();
-    if !cfg.mcp_servers.iter().any(|s| s.name == name) {
-        return ApiErrorResponse::not_found(format!("MCP server '{}' not found", name))
-            .into_json_tuple();
-    }
+    let server_url = match cfg.mcp_servers.iter().find(|s| s.name == name) {
+        Some(entry) => match &entry.transport {
+            Some(librefang_types::config::McpTransportEntry::Http { url }) => url.clone(),
+            Some(librefang_types::config::McpTransportEntry::Sse { url }) => url.clone(),
+            _ => name.clone(), // fallback to name for non-HTTP transports
+        },
+        None => {
+            return ApiErrorResponse::not_found(format!("MCP server '{}' not found", name))
+                .into_json_tuple();
+        }
+    };
 
-    // Clear tokens via provider
+    // Clear tokens via provider (keyed by server URL, not name)
     let provider = state.kernel.oauth_provider_ref();
-    if let Err(e) = provider.clear_tokens(&name).await {
+    if let Err(e) = provider.clear_tokens(&server_url).await {
         tracing::warn!(server = %name, error = %e, "Failed to clear OAuth tokens");
     }
 
