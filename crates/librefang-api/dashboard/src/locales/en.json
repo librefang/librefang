@@ -196,6 +196,8 @@
     "core_agents": "Core Agents",
     "hands": "Hands",
     "hand_badge": "HAND",
+    "show_hand_agents": "Show hand agents",
+    "hand_agent_hint": "You are editing the active runtime agent created by a hand.",
     "tools_cap": "Tools",
     "network": "Network",
     "help": "Manage all agents in the system. Create, suspend, resume, and delete agents. View their status and configuration.",
