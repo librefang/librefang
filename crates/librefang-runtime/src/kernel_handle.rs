@@ -478,4 +478,35 @@ pub trait KernelHandle: Send + Sync {
     ) -> Result<serde_json::Value, String> {
         Err("Goal system not available".to_string())
     }
+
+    /// Upsert a member into the persistent group roster.
+    fn roster_upsert(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+        _display_name: &str,
+        _username: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// List members of a group chat from the persistent roster.
+    fn roster_members(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Remove a member from the persistent group roster.
+    fn roster_remove_member(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }

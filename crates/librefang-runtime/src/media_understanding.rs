@@ -251,6 +251,11 @@ impl MediaEngine {
     }
 }
 
+/// Check whether any vision-capable provider is configured.
+pub fn has_vision_provider() -> bool {
+    detect_vision_provider().is_some()
+}
+
 /// Detect which vision provider is available based on environment variables.
 fn detect_vision_provider() -> Option<&'static str> {
     let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());

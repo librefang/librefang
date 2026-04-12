@@ -470,7 +470,16 @@ pub fn compute_next_run_after(
     after: chrono::DateTime<Utc>,
 ) -> chrono::DateTime<Utc> {
     match schedule {
-        CronSchedule::At { at } => *at,
+        CronSchedule::At { at } => {
+            if *at > after {
+                *at
+            } else {
+                // Already fired — push next_run far into the future so
+                // the job never fires again on subsequent ticks.
+                // (If one_shot, record_success removes it entirely.)
+                after + Duration::days(36500)
+            }
+        }
         CronSchedule::Every { every_secs } => after + Duration::seconds(*every_secs as i64),
         CronSchedule::Cron { expr, tz } => {
             // Convert standard 5/6-field cron to 7-field for the `cron` crate.

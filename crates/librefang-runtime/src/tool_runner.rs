@@ -133,6 +133,7 @@ pub struct ToolExecContext<'a> {
     pub process_manager: Option<&'a crate::process_manager::ProcessManager>,
     pub sender_id: Option<&'a str>,
     pub channel: Option<&'a str>,
+    pub chat_id: Option<&'a str>,
 }
 
 /// Execute a tool without running the approval / capability / taint gate.
@@ -165,7 +166,8 @@ pub async fn execute_tool_raw(
         docker_config,
         process_manager,
         sender_id,
-        channel: _,
+        channel,
+        chat_id,
     } = ctx;
 
     let result = match tool_name {
@@ -302,6 +304,9 @@ pub async fn execute_tool_raw(
         "memory_recall" => tool_memory_recall(input, *kernel, *sender_id),
         "memory_list" => tool_memory_list(*kernel, *sender_id),
 
+        // Group roster tool
+        "group_members" => tool_group_members(input, *kernel),
+
         // Collaboration tools
         "agent_find" => tool_agent_find(input, *kernel),
         "task_post" => tool_task_post(input, *kernel, *caller_agent_id).await,
@@ -311,7 +316,9 @@ pub async fn execute_tool_raw(
         "event_publish" => tool_event_publish(input, *kernel).await,
 
         // Scheduling tools (delegate to CronScheduler via kernel handle)
-        "schedule_create" => tool_schedule_create(input, *kernel, *caller_agent_id).await,
+        "schedule_create" => {
+            tool_schedule_create(input, *kernel, *caller_agent_id, *channel, *chat_id).await
+        }
         "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
         "schedule_delete" => tool_schedule_delete(input, *kernel).await,
 
@@ -351,7 +358,9 @@ pub async fn execute_tool_raw(
         "system_time" => Ok(tool_system_time()),
 
         // Cron scheduling tools
-        "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id).await,
+        "cron_create" => {
+            tool_cron_create(input, *kernel, *caller_agent_id, *channel, *chat_id).await
+        }
         "cron_list" => tool_cron_list(*kernel, *caller_agent_id).await,
         "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
 
@@ -620,6 +629,7 @@ pub async fn execute_tool(
     process_manager: Option<&crate::process_manager::ProcessManager>,
     sender_id: Option<&str>,
     channel: Option<&str>,
+    chat_id: Option<&str>,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -762,6 +772,7 @@ pub async fn execute_tool(
         process_manager,
         sender_id,
         channel,
+        chat_id,
     };
     execute_tool_raw(tool_use_id, tool_name, input, &ctx).await
 }
@@ -952,6 +963,25 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
+            }),
+        },
+        // --- Group roster tool ---
+        ToolDefinition {
+            name: "group_members".to_string(),
+            description: "List the known members of a group chat. Returns the roster of people seen in a specific channel and chat. Use this when you need to know who is in the group.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "description": "Channel type (e.g. 'telegram', 'discord')"
+                    },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "The chat/group ID"
+                    }
+                },
+                "required": ["channel", "chat_id"]
             }),
         },
         // --- Collaboration tools ---
@@ -2168,6 +2198,28 @@ fn tool_memory_list(
 }
 
 // ---------------------------------------------------------------------------
+// Group roster tool
+// ---------------------------------------------------------------------------
+
+fn tool_group_members(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let channel = input["channel"]
+        .as_str()
+        .ok_or("Missing 'channel' parameter")?;
+    let chat_id = input["chat_id"]
+        .as_str()
+        .ok_or("Missing 'chat_id' parameter")?;
+    let members = kh.roster_members(channel, chat_id)?;
+    if members.is_empty() {
+        return Ok("No known members for this chat yet.".to_string());
+    }
+    serde_json::to_string_pretty(&members).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Collaboration tools
 // ---------------------------------------------------------------------------
 
@@ -2614,6 +2666,8 @@ async fn tool_schedule_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
+    channel: Option<&str>,
+    chat_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_create")?;
@@ -2641,11 +2695,16 @@ async fn tool_schedule_create(
     };
 
     // Build CronJob JSON compatible with kh.cron_create()
+    let delivery = if let (Some(ch), Some(cid)) = (channel, chat_id) {
+        serde_json::json!({ "kind": "channel", "channel": ch, "to": cid })
+    } else {
+        serde_json::json!({ "kind": "last_channel" })
+    };
     let job_json = serde_json::json!({
         "name": name,
         "schedule": { "kind": "cron", "expr": cron_expr },
         "action": { "kind": "agent_turn", "message": message },
-        "delivery": { "kind": "none" },
+        "delivery": delivery,
     });
 
     let result = kh.cron_create(agent_id, job_json).await?;
@@ -2708,10 +2767,21 @@ async fn tool_cron_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
+    channel: Option<&str>,
+    chat_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let agent_id = caller_agent_id.ok_or("Agent ID required for cron_create")?;
-    kh.cron_create(agent_id, input.clone()).await
+    // Auto-inject delivery from sender context if not already specified in input
+    let mut job = input.clone();
+    if !job.get("delivery").is_some_and(|d| d.is_object()) {
+        if let (Some(ch), Some(cid)) = (channel, chat_id) {
+            job["delivery"] = serde_json::json!({ "kind": "channel", "channel": ch, "to": cid });
+        } else {
+            job["delivery"] = serde_json::json!({ "kind": "last_channel" });
+        }
+    }
+    kh.cron_create(agent_id, job).await
 }
 
 async fn tool_cron_list(
@@ -4628,6 +4698,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(
@@ -4661,6 +4732,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(result.is_error);
@@ -4691,6 +4763,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(result.is_error);
@@ -4721,6 +4794,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(result.is_error);
@@ -4750,6 +4824,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         // web_search now attempts a real fetch; may succeed or fail depending on network
@@ -4779,6 +4854,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(result.is_error);
@@ -4808,6 +4884,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(result.is_error);
@@ -4838,6 +4915,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(result.is_error);
@@ -4869,6 +4947,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         // Should fail for path resolution, NOT for permission denied
@@ -4926,6 +5005,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(
@@ -4961,6 +5041,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(result.is_error);
@@ -5003,6 +5084,7 @@ mod tests {
             None,
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
 
@@ -5046,6 +5128,7 @@ mod tests {
             None,
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
 
@@ -5100,6 +5183,7 @@ mod tests {
             None,
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
 
@@ -5290,6 +5374,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(result.is_error);
@@ -5342,6 +5427,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(result.is_error);
@@ -5553,6 +5639,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(
@@ -5590,6 +5677,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(
@@ -5627,6 +5715,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(
@@ -5673,6 +5762,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(
@@ -5723,6 +5813,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(
@@ -5816,6 +5907,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(result.is_error);
@@ -5852,6 +5944,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"
@@ -5897,6 +5990,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         // Should NOT be a permission-denied error
@@ -5932,6 +6026,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(result.is_error);
@@ -5967,6 +6062,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(
@@ -6001,6 +6097,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         assert!(
@@ -6035,6 +6132,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // chat_id
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"

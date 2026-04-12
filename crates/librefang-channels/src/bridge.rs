@@ -5,11 +5,12 @@
 
 use crate::formatter;
 use crate::rate_limiter::ChannelRateLimiter;
+use crate::roster::GroupRosterStore;
 use crate::router::AgentRouter;
 use crate::sanitizer::{InputSanitizer, SanitizeResult};
 use crate::types::{
     default_phase_emoji, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser,
-    LifecycleReaction, SenderContext,
+    GroupMember, LifecycleReaction, SenderContext,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -104,6 +105,15 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// List providers and their auth status as formatted text for channel display.
     async fn list_providers_text(&self) -> String {
         "Provider listing not available.".to_string()
+    }
+
+    /// Return the uploads directory for an agent's workspace.
+    ///
+    /// Channel files (images, documents) are saved here so agent tools can
+    /// access them inside the workspace sandbox.  Returns `None` if the agent
+    /// has no workspace configured.
+    async fn agent_upload_dir(&self, _agent_id: AgentId) -> Option<std::path::PathBuf> {
+        None
     }
 
     /// Send an ephemeral "side question" (`/btw`) — answered with the agent's system
@@ -344,6 +354,47 @@ pub trait ChannelBridgeHandle: Send + Sync {
     ) -> Result<String, String> {
         Err("Channel push not available".to_string())
     }
+
+    /// Lightweight LLM precheck: should the agent reply to this group message?
+    ///
+    /// `context` contains recent conversation lines (e.g. the message being
+    /// replied to) so the classifier can detect continuations.
+    ///
+    /// Returns `Ok(true)` → reply, `Ok(false)` → stay silent.
+    /// On error the caller fails open (replies anyway).
+    /// Default: always reply (opt-in via `reply_precheck = true` in channel config).
+    async fn classify_reply_intent(
+        &self,
+        _agent_id: AgentId,
+        _message: &str,
+        _context: Option<&str>,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    /// Read the custom precheck prompt from the agent's workspace
+    /// (`PRECHECK.md`). Returns `None` if the file doesn't exist.
+    async fn get_precheck_prompt(&self, _agent_id: AgentId) -> Option<String> {
+        None
+    }
+
+    /// Get the routing aliases for an agent (from `[metadata.routing].aliases`).
+    /// Default: empty (no aliases).
+    async fn get_agent_aliases(&self, _agent_id: AgentId) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Upsert a member into the persistent group roster (SQLite-backed).
+    async fn roster_upsert(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+        _display_name: &str,
+        _username: Option<&str>,
+    ) {
+        // default no-op
+    }
 }
 
 struct PendingMessage {
@@ -583,7 +634,14 @@ fn content_to_text(content: &ChannelContent) -> String {
             Some(c) => format!("[Photo: {url}]\n{c}"),
             None => format!("[Photo: {url}]"),
         },
-        ChannelContent::File { url, filename } => format!("[File ({filename}): {url}]"),
+        ChannelContent::File { url, filename } => {
+            // After download_file_to_local, url is a local path
+            if url.starts_with('/') || url.starts_with("./") {
+                format!("[File: {filename} — saved at {url}]")
+            } else {
+                format!("[File ({filename}): {url}]")
+            }
+        }
         ChannelContent::Voice {
             url,
             duration_seconds,
@@ -642,7 +700,17 @@ fn flush_debounced(
         };
 
         if let Some(mut blocks) = blocks {
-            let text = content_to_text(&merged_msg.content);
+            // When we already have image content blocks, only prepend the
+            // caption text — NOT the `[Photo: URL]` string that
+            // `content_to_text` would produce, because the raw Telegram URL
+            // confuses vision models into thinking they must fetch it.
+            let text = match &merged_msg.content {
+                ChannelContent::Image {
+                    caption: Some(c), ..
+                } => c.clone(),
+                ChannelContent::Image { caption: None, .. } => String::new(),
+                other => content_to_text(other),
+            };
             if !text.is_empty() {
                 blocks.insert(
                     0,
@@ -964,11 +1032,35 @@ impl BridgeManager {
                                         message.sender.platform_id
                                     );
 
+                                    // Resolve workspace uploads dir for the channel's
+                                    // default agent so downloaded files land inside the
+                                    // sandbox where agent tools can read them.
+                                    // Router keys use Debug format ("Telegram"), not
+                                    // the lowercase config key ("telegram").
+                                    let ct_key = format!("{:?}", message.channel);
+                                    let ws_upload_dir = match router.channel_default(&ct_key) {
+                                        Some(aid) => handle.agent_upload_dir(aid).await,
+                                        None => None,
+                                    };
+
+                                    // Download remote files to local storage so
+                                    // agent tools (file_read, media_describe) can
+                                    // access them after the remote URL expires.
+                                    let mut message = message;
+                                    if let ChannelContent::File { ref url, ref filename } = message.content {
+                                        if let Some(local_path) = download_file_to_local(url, filename, ws_upload_dir.as_deref()).await {
+                                            message.content = ChannelContent::File {
+                                                url: local_path,
+                                                filename: filename.clone(),
+                                            };
+                                        }
+                                    }
+
                                     let image_blocks = if let ChannelContent::Image {
                                         ref url, ref caption, ref mime_type
                                     } = message.content {
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await {
-                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })) => Some(blocks),
+                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), ws_upload_dir.as_deref()).await {
+                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
                                             _ => None,
                                         }
                                     } else {
@@ -1258,6 +1350,22 @@ fn text_content(message: &ChannelMessage) -> Option<&str> {
     }
 }
 
+/// Convert plain alias strings into case-insensitive word-boundary regex patterns
+/// suitable for use in `group_trigger_patterns`.
+///
+/// This lets operators avoid manually translating agent aliases into regex syntax:
+/// `aliases_to_trigger_patterns(&["fandango", "oye fandango"])` produces
+/// `["(?i)\\bfandango\\b", "(?i)\\boye fandango\\b"]`.
+pub fn aliases_to_trigger_patterns(aliases: &[String]) -> Vec<String> {
+    aliases
+        .iter()
+        .map(|alias| {
+            let escaped = regex::escape(alias);
+            format!("(?i)\\b{escaped}\\b")
+        })
+        .collect()
+}
+
 fn matches_group_trigger_pattern(
     ct_str: &str,
     message: &ChannelMessage,
@@ -1327,6 +1435,7 @@ fn should_process_group_message(
     ct_str: &str,
     overrides: &ChannelOverrides,
     message: &ChannelMessage,
+    agent_aliases: &[String],
 ) -> bool {
     match overrides.group_policy {
         GroupPolicy::Ignore => {
@@ -1356,7 +1465,23 @@ fn should_process_group_message(
                     message,
                     &overrides.group_trigger_patterns,
                 );
-            if !was_mentioned && !is_command && !regex_triggered {
+            let alias_triggered = !was_mentioned
+                && !is_command
+                && !regex_triggered
+                && text_content(message).is_some_and(|text| {
+                    let lower = text.to_lowercase();
+                    agent_aliases
+                        .iter()
+                        .any(|alias| lower.contains(&alias.to_lowercase()))
+                });
+            if alias_triggered {
+                debug!(
+                    channel = ct_str,
+                    user = %message.sender.display_name,
+                    "Group message matched agent alias trigger"
+                );
+            }
+            if !was_mentioned && !is_command && !regex_triggered && !alias_triggered {
                 debug!(
                     "Ignoring group message on {ct_str} (group_policy=mention_only, not mentioned)"
                 );
@@ -1372,6 +1497,18 @@ fn should_process_group_message(
 ///
 /// Per-channel auto-routing fields are populated from `overrides` when provided,
 /// and default to `AutoRouteStrategy::Off` / zeros otherwise.
+/// Singleton in-memory group roster shared across all channel adapters.
+///
+/// Populated on every incoming group message from `build_sender_context`. The
+/// accumulated roster is then handed to the agent's system prompt so the LLM
+/// can distinguish the current message sender from other group members it has
+/// seen before (e.g. when a user writes `@pepe` meaning another human, not an
+/// agent in the system).
+fn group_roster() -> &'static GroupRosterStore {
+    static ROSTER: OnceLock<GroupRosterStore> = OnceLock::new();
+    ROSTER.get_or_init(GroupRosterStore::new)
+}
+
 fn build_sender_context(
     message: &ChannelMessage,
     overrides: Option<&ChannelOverrides>,
@@ -1392,8 +1529,47 @@ fn build_sender_context(
         ),
         None => (AutoRouteStrategy::Off, 0, 0, 0, 0),
     };
+
+    let channel = channel_type_str(&message.channel).to_string();
+    let chat_id = message
+        .metadata
+        .get("chat_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let bot_username = message
+        .metadata
+        .get("bot_username")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sender_username = message
+        .metadata
+        .get("sender_username")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // For group messages, upsert the current sender into the roster and then
+    // read back all known members. For DMs the roster stays empty — the LLM
+    // only needs the current sender and doesn't gain anything from a roster
+    // with a single member.
+    let group_members: Vec<GroupMember> = if message.is_group {
+        if let Some(ref cid) = chat_id {
+            let current = GroupMember {
+                user_id: sender_user_id(message).to_string(),
+                display_name: message.sender.display_name.clone(),
+                username: sender_username.clone(),
+            };
+            let store = group_roster();
+            store.upsert(&channel, cid, current);
+            Vec::new() // Roster is now tool-based, not injected into prompt
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     SenderContext {
-        channel: channel_type_str(&message.channel).to_string(),
+        channel,
         user_id: sender_user_id(message).to_string(),
         display_name: message.sender.display_name.clone(),
         is_group: message.is_group,
@@ -1413,6 +1589,10 @@ fn build_sender_context(
         auto_route_confidence_threshold,
         auto_route_sticky_bonus,
         auto_route_divergence_count,
+        bot_username,
+        sender_username,
+        group_members,
+        chat_id,
     }
 }
 
@@ -1759,7 +1939,7 @@ async fn dispatch_message(
     // --- DM/Group policy check ---
     if let Some(ref ov) = overrides {
         if message.is_group {
-            if !should_process_group_message(ct_str, ov, message) {
+            if !should_process_group_message(ct_str, ov, message, &[]) {
                 return;
             }
         } else {
@@ -1821,6 +2001,39 @@ async fn dispatch_message(
         );
     }
 
+    // Resolve workspace uploads dir so downloaded files land inside the sandbox.
+    // Router keys use Debug format ("Telegram"), not the lowercase config key.
+    let ct_key = format!("{:?}", message.channel);
+    let ws_upload_dir = match router.channel_default(&ct_key) {
+        Some(aid) => handle.agent_upload_dir(aid).await,
+        None => None,
+    };
+
+    // For files: download to local storage so agent tools can access them
+    // after the remote URL expires (e.g. Telegram file links are short-lived).
+    // We create a modified copy since `message` is borrowed immutably.
+    let message = if let ChannelContent::File {
+        ref url,
+        ref filename,
+    } = message.content
+    {
+        if let Some(local_path) =
+            download_file_to_local(url, filename, ws_upload_dir.as_deref()).await
+        {
+            let mut m = message.clone();
+            m.content = ChannelContent::File {
+                url: local_path,
+                filename: filename.clone(),
+            };
+            std::borrow::Cow::Owned(m)
+        } else {
+            std::borrow::Cow::Borrowed(message)
+        }
+    } else {
+        std::borrow::Cow::Borrowed(message)
+    };
+    let message = message.as_ref();
+
     // For images: download, base64 encode, and send as multimodal content blocks
     if let ChannelContent::Image {
         ref url,
@@ -1828,11 +2041,19 @@ async fn dispatch_message(
         ref mime_type,
     } = message.content
     {
-        let blocks = download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await;
-        if blocks
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Image { .. }))
-        {
+        let blocks = download_image_to_blocks(
+            url,
+            caption.as_deref(),
+            mime_type.as_deref(),
+            ws_upload_dir.as_deref(),
+        )
+        .await;
+        if blocks.iter().any(|b| {
+            matches!(
+                b,
+                ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
+            )
+        }) {
             // We have actual image data — send as structured blocks for vision
             dispatch_with_blocks(
                 blocks,
@@ -2079,6 +2300,72 @@ async fn dispatch_message(
             return;
         }
     };
+
+    // --- Post-resolution group filters (alias awareness + reply-intent precheck) ---
+    if message.is_group {
+        let was_mentioned = message
+            .metadata
+            .get("was_mentioned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Reply-intent precheck: lightweight LLM call to decide if the agent
+        // should reply. Only for non-mentioned group messages when enabled.
+        // Skipped for @mentions, commands, and DMs (those always get a reply).
+        if !was_mentioned && !matches!(message.content, ChannelContent::Command { .. }) {
+            // Check agent aliases first — if a message contains an alias like
+            // "oye fandango", treat it as an implicit mention (skip precheck).
+            let aliases = handle.get_agent_aliases(agent_id).await;
+            let alias_hit = !aliases.is_empty()
+                && text_content(message).is_some_and(|text| {
+                    let lower = text.to_lowercase();
+                    aliases.iter().any(|a| lower.contains(&a.to_lowercase()))
+                });
+
+            if alias_hit {
+                debug!(
+                    channel = ct_str,
+                    "Group message matched agent alias — treating as mention"
+                );
+            } else if let Some(ref ov) = overrides {
+                if ov.reply_precheck {
+                    // No mention, no alias — run LLM precheck.
+                    // Include reply-to context so the classifier can detect
+                    // conversation continuations (e.g. user replying to the bot).
+                    let reply_context: Option<String> =
+                        message.metadata.get("reply_to").and_then(|rt| {
+                            let sender = rt
+                                .get("sender")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("someone");
+                            let text = rt.get("text").and_then(|t| t.as_str())?;
+                            Some(format!("[Replying to {sender}: \"{text}\"]"))
+                        });
+                    if let Some(text) = text_content(message) {
+                        match handle
+                            .classify_reply_intent(agent_id, text, reply_context.as_deref())
+                            .await
+                        {
+                            Ok(true) => {
+                                debug!(channel = ct_str, "Reply-intent precheck: REPLY");
+                            }
+                            Ok(false) => {
+                                debug!(
+                                    channel = ct_str,
+                                    "Reply-intent precheck: NO_REPLY — staying silent"
+                                );
+                                return;
+                            }
+                            Err(e) => {
+                                warn!(channel = ct_str, error = %e, "Reply-intent precheck failed — proceeding with reply");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let channel_key = format!("{:?}", message.channel);
 
     // RBAC: authorize the user before forwarding to agent
@@ -2145,6 +2432,21 @@ async fn dispatch_message(
 
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides.as_ref());
+
+    // Persist roster member to SQLite
+    if message.is_group {
+        if let Some(ref cid) = sender_ctx.chat_id {
+            handle
+                .roster_upsert(
+                    ct_str,
+                    cid,
+                    &sender_ctx.user_id,
+                    &sender_ctx.display_name,
+                    sender_ctx.sender_username.as_deref(),
+                )
+                .await;
+        }
+    }
 
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
@@ -2387,6 +2689,74 @@ fn media_type_from_url(url: &str) -> String {
     }
 }
 
+/// Download a file from a URL and save it locally so agent tools can access it
+/// after the remote URL expires (e.g. Telegram file links are short-lived).
+///
+/// Returns the local path on success, or `None` if the download fails.
+/// Compatible with all channels — any `ChannelContent::File` gets persisted.
+async fn download_file_to_local(
+    url: &str,
+    filename: &str,
+    upload_dir: Option<&std::path::Path>,
+) -> Option<String> {
+    const MAX_FILE_BYTES: usize = 50 * 1024 * 1024; // 50 MB limit
+
+    let client = crate::http_client::new_client();
+    let resp = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to download file from channel: {e}");
+            return None;
+        }
+    };
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Failed to read file bytes: {e}");
+            return None;
+        }
+    };
+
+    if bytes.len() > MAX_FILE_BYTES {
+        warn!(
+            size = bytes.len(),
+            limit = MAX_FILE_BYTES,
+            "File too large, skipping download"
+        );
+        return None;
+    }
+
+    // Save to workspace uploads/ dir (inside sandbox) or /tmp/ as fallback
+    let fallback = std::env::temp_dir().join("librefang_uploads");
+    let upload_dir = upload_dir.unwrap_or(&fallback);
+    if let Err(e) = tokio::fs::create_dir_all(upload_dir).await {
+        warn!("Failed to create upload dir: {e}");
+        return None;
+    }
+
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+    let local_name = format!("{}_{}.{}", uuid::Uuid::new_v4(), filename, ext);
+    let local_path = upload_dir.join(&local_name);
+
+    if let Err(e) = tokio::fs::write(&local_path, &bytes).await {
+        warn!("Failed to write file to {}: {e}", local_path.display());
+        return None;
+    }
+
+    debug!(
+        filename = filename,
+        path = %local_path.display(),
+        size = bytes.len(),
+        "Downloaded channel file to local storage"
+    );
+
+    Some(local_path.to_string_lossy().to_string())
+}
+
 /// Download an image from a URL and build content blocks for multimodal LLM input.
 ///
 /// Returns a `Vec<ContentBlock>` containing an image block (base64-encoded) and
@@ -2400,6 +2770,7 @@ async fn download_image_to_blocks(
     url: &str,
     caption: Option<&str>,
     mime_type_hint: Option<&str>,
+    upload_dir: Option<&std::path::Path>,
 ) -> Vec<ContentBlock> {
     use base64::Engine;
 
@@ -2522,7 +2893,9 @@ async fn download_image_to_blocks(
 
     // Save image to disk instead of base64-encoding into the session.
     // A 3 MB photo becomes ~100 KB on disk with only a short path in the session.
-    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+    // Use workspace uploads/ dir (inside sandbox) or /tmp/ as fallback.
+    let fallback = std::env::temp_dir().join("librefang_uploads");
+    let upload_dir = upload_dir.unwrap_or(&fallback).to_path_buf();
 
     let ext = match final_media_type.as_str() {
         "image/jpeg" => "jpg",
@@ -2656,6 +3029,21 @@ async fn dispatch_with_blocks(
 
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides);
+
+    // Persist roster member to SQLite
+    if message.is_group {
+        if let Some(ref cid) = sender_ctx.chat_id {
+            handle
+                .roster_upsert(
+                    ct_str,
+                    cid,
+                    &sender_ctx.user_id,
+                    &sender_ctx.display_name,
+                    sender_ctx.sender_username.as_deref(),
+                )
+                .await;
+        }
+    }
 
     match handle
         .send_message_with_blocks_and_sender(agent_id, blocks.clone(), &sender_ctx)
@@ -3334,7 +3722,10 @@ mod tests {
             ..Default::default()
         };
         assert!(should_process_group_message(
-            "whatsapp", &overrides, &message
+            "whatsapp",
+            &overrides,
+            &message,
+            &[]
         ));
     }
 
@@ -3346,7 +3737,10 @@ mod tests {
             ..Default::default()
         };
         assert!(!should_process_group_message(
-            "whatsapp", &overrides, &message
+            "whatsapp",
+            &overrides,
+            &message,
+            &[]
         ));
     }
 
@@ -3358,7 +3752,10 @@ mod tests {
             ..Default::default()
         };
         assert!(should_process_group_message(
-            "telegram", &overrides, &message
+            "telegram",
+            &overrides,
+            &message,
+            &[]
         ));
     }
 
@@ -3370,8 +3767,74 @@ mod tests {
             .insert("was_mentioned".to_string(), serde_json::Value::Bool(true));
         let overrides = ChannelOverrides::default();
         assert!(should_process_group_message(
-            "telegram", &overrides, &message
+            "telegram",
+            &overrides,
+            &message,
+            &[]
         ));
+    }
+
+    #[test]
+    fn test_mention_only_triggers_on_agent_alias() {
+        let message = group_text_message("hey fandango what do you think?");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["fandango".to_string()];
+        assert!(should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_alias_is_case_insensitive() {
+        let message = group_text_message("FANDANGO help me");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["Fandango".to_string()];
+        assert!(should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_rejects_no_alias_match() {
+        let message = group_text_message("hello there, anyone?");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["fandango".to_string(), "rodelo".to_string()];
+        assert!(!should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_alias_does_not_override_regex_trigger() {
+        // regex trigger and alias can independently activate — alias fires here
+        let message = group_text_message("oye fandango");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["oye fandango".to_string()];
+        assert!(should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_produces_word_boundary_regex() {
+        let aliases = vec!["fandango".to_string(), "oye fandango".to_string()];
+        let patterns = aliases_to_trigger_patterns(&aliases);
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0], r"(?i)\bfandango\b");
+        assert_eq!(patterns[1], r"(?i)\boye fandango\b");
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_escapes_special_chars() {
+        let aliases = vec!["bot.v2".to_string()];
+        let patterns = aliases_to_trigger_patterns(&aliases);
+        assert_eq!(patterns[0], r"(?i)\bbot\.v2\b");
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_empty() {
+        let patterns = aliases_to_trigger_patterns(&[]);
+        assert!(patterns.is_empty());
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub mod session;
 pub mod structured;
 pub mod usage;
 
+pub mod roster_store;
+
 mod substrate;
 pub use substrate::MemorySubstrate;
 
