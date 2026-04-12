@@ -391,7 +391,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
                 <p className="text-xs font-black uppercase tracking-widest text-text-dim/60">{provider.id}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}>
+            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close")}>
               <X className="w-5 h-5 text-text-dim" />
             </button>
           </div>
