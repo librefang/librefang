@@ -26,6 +26,9 @@ pub struct OpenAIDriver {
     /// Optional query string appended to the request URL (e.g., "api-version=2024-02-01").
     /// Used by Azure OpenAI.
     url_query: Option<String>,
+    /// Cache of uploaded file IDs for Moonshot/Kimi (hash of bytes → file_id).
+    /// Avoids re-uploading the same file across agent loop iterations.
+    moonshot_file_cache: std::sync::Arc<tokio::sync::Mutex<HashMap<u64, String>>>,
 }
 
 impl OpenAIDriver {
@@ -38,6 +41,7 @@ impl OpenAIDriver {
             extra_headers: Vec::new(),
             use_api_key_header: false,
             url_query: None,
+            moonshot_file_cache: Default::default(),
         }
     }
 
@@ -63,12 +67,133 @@ impl OpenAIDriver {
             extra_headers: Vec::new(),
             use_api_key_header: true,
             url_query: Some(format!("api-version={}", api_version)),
+            moonshot_file_cache: Default::default(),
         }
     }
 
     /// True if this provider is Moonshot/Kimi and requires reasoning_content on assistant messages with tool_calls.
     fn kimi_needs_reasoning_content(&self, model: &str) -> bool {
-        self.base_url.contains("moonshot") || model.to_lowercase().contains("kimi")
+        self.is_moonshot() || model.to_lowercase().contains("kimi")
+    }
+
+    /// True if the base URL points to Moonshot/Kimi.
+    fn is_moonshot(&self) -> bool {
+        self.base_url.contains("moonshot")
+    }
+
+    /// Upload a file to Moonshot's `/v1/files` endpoint and return the file ID.
+    async fn upload_file_to_moonshot(
+        &self,
+        data: &[u8],
+        filename: &str,
+        mime: &str,
+    ) -> Result<String, LlmError> {
+        let url = format!("{}/files", self.base_url);
+        let part = reqwest::multipart::Part::bytes(data.to_vec())
+            .file_name(filename.to_string())
+            .mime_str(mime)
+            .map_err(|e| LlmError::Http(format!("Invalid MIME type: {e}")))?;
+        let form = reqwest::multipart::Form::new()
+            .text("purpose", "file-extract")
+            .part("file", part);
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(self.api_key.as_str())
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(format!("Moonshot file upload failed: {e}")))?;
+
+        let status = resp.status();
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::Http(format!("Moonshot file upload parse error: {e}")))?;
+
+        if !status.is_success() {
+            return Err(LlmError::Http(format!(
+                "Moonshot file upload returned {status}: {body}"
+            )));
+        }
+
+        body["id"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| LlmError::Http(format!("Moonshot file upload: missing 'id' in {body}")))
+    }
+
+    /// Pre-process a CompletionRequest for Moonshot: upload images/files and
+    /// replace ContentBlock::Image/ImageFile with a text marker that
+    /// `build_request()` converts to `OaiContentPart::File`.
+    async fn preprocess_moonshot_files(
+        &self,
+        request: &mut CompletionRequest,
+    ) -> Result<(), LlmError> {
+        use base64::Engine;
+        use std::hash::{Hash, Hasher};
+
+        for msg in &mut request.messages {
+            let blocks = match &mut msg.content {
+                MessageContent::Blocks(b) => b,
+                _ => continue,
+            };
+
+            let mut i = 0;
+            while i < blocks.len() {
+                let (bytes, mime, filename) = match &blocks[i] {
+                    ContentBlock::Image { media_type, data } => {
+                        let decoded = base64::engine::general_purpose::STANDARD
+                            .decode(data)
+                            .map_err(|e| LlmError::Http(format!("base64 decode: {e}")))?;
+                        (decoded, media_type.clone(), "image.jpg".to_string())
+                    }
+                    ContentBlock::ImageFile { media_type, path } => {
+                        let bytes = std::fs::read(path)
+                            .map_err(|e| LlmError::Http(format!("Read {path}: {e}")))?;
+                        let fname = std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("file")
+                            .to_string();
+                        (bytes, media_type.clone(), fname)
+                    }
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+
+                // Hash bytes to check cache
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                bytes.len().hash(&mut hasher);
+                bytes.get(..256.min(bytes.len())).hash(&mut hasher);
+                let hash = hasher.finish();
+
+                let file_id = {
+                    let mut cache = self.moonshot_file_cache.lock().await;
+                    if let Some(cached) = cache.get(&hash) {
+                        cached.clone()
+                    } else {
+                        let id = self
+                            .upload_file_to_moonshot(&bytes, &filename, &mime)
+                            .await?;
+                        debug!(file_id = %id, filename = %filename, "Uploaded file to Moonshot");
+                        cache.insert(hash, id.clone());
+                        id
+                    }
+                };
+
+                // Replace the block with a text marker
+                blocks[i] = ContentBlock::Text {
+                    text: format!("<<moonshot_file:{file_id}>>"),
+                    provider_metadata: None,
+                };
+                i += 1;
+            }
+        }
+        Ok(())
     }
 
     /// True if this model is DeepSeek-reasoner (R1).
@@ -213,11 +338,20 @@ enum OaiContentPart {
     Text { text: String },
     #[serde(rename = "image_url")]
     ImageUrl { image_url: OaiImageUrl },
+    /// Moonshot/Kimi file reference (uploaded via /v1/files).
+    #[serde(rename = "file")]
+    File { file_url: OaiFileUrl },
 }
 
 #[derive(Debug, Serialize)]
 struct OaiImageUrl {
     url: String,
+}
+
+/// Moonshot/Kimi file URL reference.
+#[derive(Debug, Serialize)]
+struct OaiFileUrl {
+    url: String, // "fileid://file-abc123"
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -362,7 +496,20 @@ impl OpenAIDriver {
                                 });
                             }
                             ContentBlock::Text { text, .. } => {
-                                parts.push(OaiContentPart::Text { text: text.clone() });
+                                // Detect Moonshot file markers injected by
+                                // preprocess_moonshot_files()
+                                if let Some(file_id) = text
+                                    .strip_prefix("<<moonshot_file:")
+                                    .and_then(|s| s.strip_suffix(">>"))
+                                {
+                                    parts.push(OaiContentPart::File {
+                                        file_url: OaiFileUrl {
+                                            url: format!("fileid://{file_id}"),
+                                        },
+                                    });
+                                } else {
+                                    parts.push(OaiContentPart::Text { text: text.clone() });
+                                }
                             }
                             ContentBlock::Image { media_type, data } => {
                                 parts.push(OaiContentPart::ImageUrl {
@@ -546,7 +693,14 @@ impl OpenAIDriver {
 
 #[async_trait]
 impl LlmDriver for OpenAIDriver {
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+    async fn complete(
+        &self,
+        mut request: CompletionRequest,
+    ) -> Result<CompletionResponse, LlmError> {
+        // Moonshot/Kimi: upload images/files via /v1/files before building request
+        if self.is_moonshot() {
+            self.preprocess_moonshot_files(&mut request).await?;
+        }
         let mut oai_request = self.build_request(&request)?;
 
         let max_retries = 3;
@@ -881,9 +1035,13 @@ impl LlmDriver for OpenAIDriver {
 
     async fn stream(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
+        // Moonshot/Kimi: upload images/files via /v1/files before building request
+        if self.is_moonshot() {
+            self.preprocess_moonshot_files(&mut request).await?;
+        }
         let mut oai_request = self.build_request(&request)?;
         oai_request.stream = true;
         oai_request.stream_options = Some(serde_json::json!({"include_usage": true}));
