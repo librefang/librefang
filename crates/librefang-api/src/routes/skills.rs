@@ -117,6 +117,19 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
                 .put(update_mcp_server)
                 .delete(delete_mcp_server),
         )
+        // MCP OAuth auth endpoints
+        .route(
+            "/mcp/servers/{name}/auth/status",
+            axum::routing::get(super::mcp_auth::auth_status),
+        )
+        .route(
+            "/mcp/servers/{name}/auth/start",
+            axum::routing::post(super::mcp_auth::auth_start),
+        )
+        .route(
+            "/mcp/servers/{name}/auth/revoke",
+            axum::routing::delete(super::mcp_auth::auth_revoke),
+        )
         // Integrations
         .route("/integrations", axum::routing::get(list_integrations))
         .route(
@@ -1810,12 +1823,10 @@ pub async fn uninstall_hand(
         Err(librefang_hands::HandError::NotFound(id)) => {
             ApiErrorResponse::not_found(format!("Hand not found: {id}")).into_json_tuple()
         }
-        Err(librefang_hands::HandError::BuiltinHand(id)) => {
-            ApiErrorResponse::not_found(format!(
-                "Hand '{id}' is a built-in and cannot be uninstalled"
-            ))
-            .into_json_tuple()
-        }
+        Err(librefang_hands::HandError::BuiltinHand(id)) => ApiErrorResponse::not_found(format!(
+            "Hand '{id}' is a built-in and cannot be uninstalled"
+        ))
+        .into_json_tuple(),
         Err(librefang_hands::HandError::AlreadyActive(msg)) => {
             ApiErrorResponse::conflict(msg).into_json_tuple()
         }
@@ -2754,6 +2765,19 @@ fn serialize_mcp_transport(
     )
 )]
 pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Snapshot auth states so we can include them in the response
+    let auth_states = state.kernel.mcp_auth_states_ref().lock().await;
+    let auth_snapshot: std::collections::HashMap<String, serde_json::Value> = auth_states
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                serde_json::to_value(v).unwrap_or(serde_json::json!({"state": "not_required"})),
+            )
+        })
+        .collect();
+    drop(auth_states);
+
     // Get configured servers from config
     let config_servers: Vec<serde_json::Value> = state
         .kernel
@@ -2762,11 +2786,16 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         .iter()
         .map(|s| {
             let transport = s.transport.as_ref().map(serialize_mcp_transport);
+            let auth_state = auth_snapshot
+                .get(&s.name)
+                .cloned()
+                .unwrap_or(serde_json::json!({"state": "not_required"}));
             serde_json::json!({
                 "name": s.name,
                 "transport": transport,
                 "timeout_secs": s.timeout_secs,
                 "env": s.env,
+                "auth_state": auth_state,
             })
         })
         .collect();
