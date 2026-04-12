@@ -2256,3 +2256,94 @@ git commit -m "fix: address clippy warnings and test failures from MCP OAuth fea
 | 9 | Dashboard auth badges | `dashboard/src/pages/McpServersPage.tsx` |
 | 10 | Integration tests | `runtime/tests/mcp_oauth_integration.rs` |
 | 11 | Full build verification | (verification only) |
+| 12 | **DELTA:** UI-driven auth + API callback | `mcp.rs`, `kernel.rs`, `mcp_oauth_provider.rs`, `mcp_auth.rs` |
+
+---
+
+## Task 12 (DELTA): UI-Driven Auth Flow + API Callback
+
+**Supersedes:** The daemon-initiated PKCE flow from Tasks 5-7. The daemon
+no longer starts OAuth flows at boot — it only detects 401 and marks the
+server as `NeedsAuth`. The full OAuth handshake is UI-driven via
+`POST /api/mcp/servers/{name}/auth/start`, with the callback routed through
+`GET /api/mcp/servers/{name}/auth/callback` on the API port (4545).
+
+### Rationale
+
+The previous approach bound a localhost TCP listener on a random ephemeral
+port for the OAuth callback. In Docker/remote server deployments, this port
+is unreachable from the user's browser, making the auth flow impossible to
+complete. Routing the callback through the API server's existing port solves
+this without extra port forwarding.
+
+### Changes Required
+
+**A) `crates/librefang-runtime/src/mcp.rs` — daemon boot stops at detection**
+
+In `connect_streamable_http`, when auth is required and no cached token:
+- Do NOT call `provider.start_auth_flow()`
+- Return `Err("OAUTH_NEEDS_AUTH")` (not `OAUTH_PENDING:{url}`)
+- The kernel sets state to `NeedsAuth` without any auth URL
+
+**B) `crates/librefang-kernel/src/kernel.rs` — handle `OAUTH_NEEDS_AUTH`**
+
+In `connect_mcp_servers`, replace the `OAUTH_PENDING:` handler:
+- On `OAUTH_NEEDS_AUTH`: set state to `McpAuthState::PendingAuth { auth_url: String::new() }`
+- No watcher task spawned — flow is entirely UI-driven
+- Remove `watch_oauth_completion` if unused
+
+**C) `crates/librefang-kernel/src/mcp_oauth_provider.rs` — remove localhost listener**
+
+Remove the `start_auth_flow` implementation's TCP listener, callback handler,
+and `open_browser` logic. The `start_auth_flow` trait method can be simplified
+or replaced with a new method that just generates the PKCE challenge and
+returns it without starting a server.
+
+Instead, add a new method or restructure so the API layer can:
+1. Call `generate_pkce()` and `generate_state()` (already public in runtime)
+2. Store verifier + state in vault keyed by server name
+3. Build the auth URL with `redirect_uri` pointing to the API callback
+4. Return the auth URL
+
+**D) `crates/librefang-api/src/routes/mcp_auth.rs` — full flow in API**
+
+`POST /api/mcp/servers/{name}/auth/start`:
+1. Discover OAuth metadata
+2. Dynamic Client Registration if needed
+3. Generate PKCE verifier/challenge + state
+4. Store verifier + state in vault: `mcp_oauth:{url}:pkce_verifier`, `mcp_oauth:{url}:pkce_state`
+5. Build auth URL with `redirect_uri` derived from the request's `Origin`,
+   `X-Forwarded-Host`, or `Host` header: `{origin}/api/mcp/servers/{name}/auth/callback`
+   - No hardcoded port — works behind reverse proxies and in Docker
+6. Set state to `PendingAuth { auth_url }`
+7. Return `{ "auth_url": "..." }`
+
+`GET /api/mcp/servers/{name}/auth/callback` (NEW):
+1. Read `code` and `state` from query params
+2. Load stored `pkce_state` from vault — validate it matches
+3. Load stored `pkce_verifier` from vault
+4. Load stored `client_id` and `token_endpoint` from vault
+5. POST to token_endpoint: `grant_type=authorization_code`, `code`, `code_verifier`, `redirect_uri`, `client_id`
+6. Store tokens in vault
+7. Call `kernel.retry_mcp_connection(name)`
+8. Set state to `Authorized`
+9. Return HTML: "Authorization complete. You can close this tab."
+
+Register the callback route:
+```rust
+.route("/mcp/servers/{name}/auth/callback", axum::routing::get(super::mcp_auth::auth_callback))
+```
+
+**E) Dashboard — no changes needed**
+
+The dashboard already calls `POST /auth/start` and opens the returned URL.
+The callback now goes through the API, so the polling will pick up the
+state change to `Authorized` automatically.
+
+### Verification
+
+1. `cargo build --workspace --lib`
+2. `cargo test --workspace`
+3. `cargo clippy --workspace --all-targets -- -D warnings`
+4. Manual test: deploy to Docker, click "Authorize" in dashboard, complete
+   Notion consent, verify callback reaches API and server connects

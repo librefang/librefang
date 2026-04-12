@@ -34,7 +34,8 @@ servers that don't.
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Where does OAuth logic live? | `runtime/mcp_oauth.rs` with trait injection | Keeps runtime dependency-free; follows `KernelHandle` pattern |
-| When does auth trigger? | Eager on startup + 401 retry on tool calls | Matches existing `connect_mcp_servers()` boot-time behavior |
+| When does auth trigger? | UI-initiated only; daemon detects 401 but does not start flows | Avoids unreachable callback ports in Docker; user drives auth from dashboard |
+| Callback routing? | Through API server on port 4545, not ephemeral localhost port | Works in Docker/headless — same port as dashboard, no extra forwarding |
 | Blocking or non-blocking? | Non-blocking with degraded state | Daemon shouldn't wait on browser interaction |
 | Discovery or config? | Discovery first, config.toml fallback | Zero-config for spec-compliant servers, explicit for others |
 | How to detect 401? | Match rmcp's `AuthRequired` error type | rmcp already parses 401 and extracts `WWW-Authenticate` header |
@@ -169,7 +170,10 @@ endpoints, for example.
 
 ## Connection Flow
 
-### Initial Connect (daemon startup)
+### Initial Connect (daemon startup) — detection only
+
+At boot, the daemon **only detects** whether a server needs OAuth. It does
+**not** start PKCE flows or generate auth URLs — that is entirely UI-driven.
 
 ```
 connect_mcp_servers() for each Http transport:
@@ -183,22 +187,43 @@ connect_mcp_servers() for each Http transport:
 │  ├─ Success → state = Authorized or NotRequired, done
 │  │
 │  └─ Error: AuthRequired(AuthRequiredError { www_authenticate_header })
-│     ├─ Discover OAuth metadata (tiers 1→2→3)
-│     │  └─ All tiers fail → state = error, log, skip server
-│     │
-│     ├─ provider.start_auth_flow(url, metadata)
-│     │  ├─ Browser available → open auth_url
-│     │  └─ No browser → log auth_url to terminal
-│     │
-│     ├─ state = PendingAuth { auth_url }
-│     │  (daemon continues booting, does not block)
-│     │
-│     └─ On auth completion (callback received):
-│        ├─ provider.store_tokens(url, tokens)
-│        ├─ Retry connection with Bearer token
-│        └─ state = Authorized
+│     ├─ state = NeedsAuth (no flow started, no auth URL generated)
+│     ├─ Log: "MCP server {name} requires OAuth — authorize via dashboard"
+│     └─ Daemon continues booting
 │
 └─ Other error → log, skip server (existing behavior)
+```
+
+### UI-Initiated Auth Flow
+
+The entire OAuth handshake is initiated from the dashboard, ensuring the
+callback goes through the API server's exposed port (4545):
+
+```
+User clicks "Authorize" in dashboard:
+│
+├─ Dashboard calls POST /api/mcp/{name}/auth/start
+│  ├─ Discover OAuth metadata (tiers 1→2→3)
+│  ├─ Dynamic Client Registration (RFC 7591) if no client_id
+│  ├─ Generate PKCE verifier/challenge + state
+│  ├─ Store verifier + state in vault (keyed by server name)
+│  ├─ Build auth URL with redirect_uri = {origin}/api/mcp/servers/{name}/auth/callback
+│  │   (origin derived from request Host header — works behind proxies)
+│  ├─ state = PendingAuth { auth_url }
+│  └─ Return { auth_url } to dashboard
+│
+├─ Dashboard opens auth_url in new browser tab
+│  └─ User completes consent on OAuth provider's page
+│
+├─ Provider redirects to GET /api/mcp/{name}/auth/callback?code=...&state=...
+│  ├─ Validate state matches stored value
+│  ├─ Exchange code for tokens (POST to token_endpoint with code_verifier)
+│  ├─ provider.store_tokens(url, tokens)
+│  ├─ Retry MCP connection with Bearer token
+│  ├─ state = Authorized
+│  └─ Return HTML: "Authorization complete. You can close this tab."
+│
+└─ Dashboard polls /auth/status → sees "authorized" → updates badge
 ```
 
 ### Tool Call with Expired Token
@@ -212,7 +237,7 @@ call_tool(name, args):
 │  └─ Error matches AuthRequired or auth-related?
 │     ├─ provider.load_token(url) with force refresh
 │     │  ├─ Got new token → reconnect with new token, retry tool call once
-│     │  └─ No refresh token → state = PendingAuth, return error
+│     │  └─ No refresh token → state = NeedsAuth, return error
 │     │     "MCP server {name} requires re-authorization"
 │     │
 │     └─ Retry succeeded → return result
@@ -318,36 +343,45 @@ Returns the current auth state for a named MCP server.
 ### `POST /api/mcp/{name}/auth/start`
 
 Initiates OAuth discovery and PKCE flow for a server. Returns the auth URL.
-Called by the dashboard "Authorize" button.
+Called by the dashboard "Authorize" button. This is the **only** entry point
+for starting an OAuth flow — the daemon never initiates flows at boot.
 
-If the server is already authorized, returns its current state without
-re-triggering the flow.
+Steps performed server-side:
+1. Discover OAuth metadata (tiers 1→2→3)
+2. Dynamic Client Registration (RFC 7591) if no `client_id` cached or configured
+3. Generate PKCE verifier/challenge + CSRF state
+4. Store verifier + state in vault keyed by server name
+5. Build authorization URL with `redirect_uri` derived from the incoming
+   request's `Origin` / `X-Forwarded-Host` / `Host` header:
+   `{origin}/api/mcp/servers/{name}/auth/callback`
+   (no hardcoded port — works behind reverse proxies and in Docker)
+6. Return the auth URL to the dashboard
 
 **Response:**
 
 ```json
 {
-  "auth_url": "https://mcp.notion.com/oauth/authorize?client_id=...&code_challenge=...&state=...",
-  "callback_port": 52341
+  "auth_url": "https://mcp.notion.com/authorize?client_id=...&code_challenge=...&state=...&redirect_uri=https%3A%2F%2Fyour-host%2Fapi%2Fmcp%2Fservers%2Fnotion%2Fauth%2Fcallback"
 }
 ```
 
-### `GET /api/mcp/{name}/auth/callback`
+### `GET /api/mcp/servers/{name}/auth/callback`
 
-OAuth redirect callback. When the user completes consent in the browser, the
-OAuth provider redirects here with the authorization code. This endpoint
-exchanges the code for tokens via the provider's token endpoint, stores them in
-the vault, and triggers the MCP server connection.
+OAuth redirect callback on the API server. After the user completes consent,
+the OAuth provider redirects the browser here. The URL is derived from the
+request host at `/auth/start` time, so it works regardless of port or proxy.
 
-This is separate from the localhost PKCE callback in `extensions/oauth.rs`.
-That callback is used for extension OAuth flows (Google, GitHub, etc.) on an
-ephemeral random port. This callback runs on the daemon's main API port (4545)
-so it works in Docker/headless setups where the dashboard is the auth entry
-point. The redirect URI registered with the OAuth provider must match this
-endpoint.
+This runs on the **same port as the API server**, so it works in Docker and
+headless setups with no extra port forwarding. No ephemeral localhost listener
+is needed.
 
-For the browser-initiated flow (non-API, `start_auth_flow` via trait), the
-existing `extensions/oauth.rs` localhost callback is reused as-is.
+Steps performed:
+1. Validate `state` matches the stored value (CSRF protection)
+2. Load stored PKCE `code_verifier` from vault
+3. Exchange authorization `code` for tokens (POST to token_endpoint)
+4. Store tokens in vault
+5. Retry MCP server connection with the new Bearer token
+6. Update auth state to `Authorized`
 
 **Query params:** `code`, `state`
 
@@ -436,21 +470,21 @@ existing vault fallback behavior — no new failure modes introduced.
 
 ## Headless / Docker Support
 
-When no browser is available (`open`/`xdg-open` fails or is not present):
+The OAuth flow is **entirely UI-driven** — initiated from the dashboard, with
+the callback routed through the API server on port 4545 (the same port the
+dashboard is served on). No ephemeral localhost listener is needed.
 
-1. The auth URL is logged at `WARN` level:
-   ```
-   MCP server "notion" requires authorization.
-   Open this URL in your browser: https://mcp.notion.com/oauth/authorize?...
-   ```
-2. The callback server still binds to `127.0.0.1:{random_port}`
-3. For Docker: user needs port forwarding or to use the dashboard's
-   `POST /auth/start` endpoint from the host browser, which proxies
-   the flow through the API
+This means:
+- **No extra port forwarding** — if you can reach the dashboard, OAuth works
+- **No browser on the server** — the user's browser handles the consent page
+- **Docker-friendly** — only port 4545 needs to be exposed (already required)
 
-The dashboard `POST /auth/start` endpoint is the primary headless path — the
-user accesses the dashboard from their browser on the host, clicks "Authorize",
-and the callback goes through the API.
+At daemon startup, if an MCP server returns 401, it is marked as `NeedsAuth`
+and a log message directs the user to the dashboard:
+
+```
+MCP server "notion" requires OAuth — authorize via dashboard
+```
 
 ---
 
