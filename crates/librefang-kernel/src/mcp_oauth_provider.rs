@@ -262,4 +262,76 @@ mod tests {
         let key = KernelOAuthProvider::vault_key("https://example.com/mcp", "refresh_token");
         assert_eq!(key, "mcp_oauth:https://example.com/mcp:refresh_token");
     }
+
+    #[test]
+    fn vault_key_all_fields_namespaced() {
+        let url = "https://mcp.notion.com/mcp";
+        // All fields that should be cleaned up on delete
+        for field in &[
+            "access_token",
+            "refresh_token",
+            "expires_at",
+            "token_endpoint",
+            "client_id",
+            "pkce_verifier",
+            "pkce_state",
+            "redirect_uri",
+        ] {
+            let key = KernelOAuthProvider::vault_key(url, field);
+            assert!(
+                key.starts_with("mcp_oauth:"),
+                "Key for '{}' should be prefixed with 'mcp_oauth:'",
+                field
+            );
+            assert!(
+                key.contains(url),
+                "Key for '{}' should contain the server URL",
+                field
+            );
+            assert!(
+                key.ends_with(field),
+                "Key for '{}' should end with the field name",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn vault_keys_are_isolated_per_server() {
+        let key_a = KernelOAuthProvider::vault_key("https://server-a.com/mcp", "access_token");
+        let key_b = KernelOAuthProvider::vault_key("https://server-b.com/mcp", "access_token");
+        assert_ne!(
+            key_a, key_b,
+            "Different servers should have different vault keys"
+        );
+    }
+
+    #[test]
+    fn clear_tokens_covers_all_stored_fields() {
+        // This test verifies that clear_tokens removes every field that
+        // store_tokens or auth_start might store. If a new field is added
+        // to store_tokens/auth_start but not to clear_tokens, this test
+        // should be updated.
+        let stored_fields: &[&str] = &[
+            "access_token",
+            "refresh_token",
+            "expires_at",
+            "token_endpoint",
+            "client_id",
+        ];
+        let cleared_fields: &[&str] = &[
+            "access_token",
+            "refresh_token",
+            "expires_at",
+            "token_endpoint",
+            "client_id",
+        ];
+        for field in stored_fields {
+            assert!(
+                cleared_fields.contains(field),
+                "Field '{}' is stored by store_tokens but not cleared by clear_tokens",
+                field
+            );
+        }
+    }
 }

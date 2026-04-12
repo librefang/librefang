@@ -97,3 +97,137 @@ async fn test_http_connect_calls_oauth_provider_load_token() {
         "OAuth provider's load_token was never called — oauth_provider is likely None"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Token lifecycle tests via mock provider
+// ---------------------------------------------------------------------------
+
+/// Mock provider that stores tokens in memory (no vault dependency).
+struct InMemoryOAuthProvider {
+    tokens: tokio::sync::Mutex<std::collections::HashMap<String, OAuthTokens>>,
+}
+
+impl InMemoryOAuthProvider {
+    fn new() -> Self {
+        Self {
+            tokens: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl McpOAuthProvider for InMemoryOAuthProvider {
+    async fn load_token(&self, server_url: &str) -> Option<String> {
+        let tokens = self.tokens.lock().await;
+        tokens.get(server_url).map(|t| t.access_token.clone())
+    }
+
+    async fn store_tokens(&self, server_url: &str, tokens: OAuthTokens) -> Result<(), String> {
+        self.tokens
+            .lock()
+            .await
+            .insert(server_url.to_string(), tokens);
+        Ok(())
+    }
+
+    async fn clear_tokens(&self, server_url: &str) -> Result<(), String> {
+        self.tokens.lock().await.remove(server_url);
+        Ok(())
+    }
+}
+
+/// Verify store_tokens followed by load_token returns the token.
+#[tokio::test]
+async fn test_provider_store_then_load() {
+    let provider = InMemoryOAuthProvider::new();
+    let url = "https://mcp.notion.com/mcp";
+
+    // Initially no token
+    assert!(provider.load_token(url).await.is_none());
+
+    // Store a token
+    let tokens = OAuthTokens {
+        access_token: "test_access_token".to_string(),
+        refresh_token: Some("test_refresh".to_string()),
+        token_type: "Bearer".to_string(),
+        expires_in: 3600,
+        scope: "".to_string(),
+    };
+    provider.store_tokens(url, tokens).await.unwrap();
+
+    // Should return the stored token
+    assert_eq!(provider.load_token(url).await.unwrap(), "test_access_token");
+}
+
+/// Verify clear_tokens removes the token.
+#[tokio::test]
+async fn test_provider_clear_removes_token() {
+    let provider = InMemoryOAuthProvider::new();
+    let url = "https://mcp.notion.com/mcp";
+
+    let tokens = OAuthTokens {
+        access_token: "tok".to_string(),
+        refresh_token: None,
+        token_type: "Bearer".to_string(),
+        expires_in: 0,
+        scope: "".to_string(),
+    };
+    provider.store_tokens(url, tokens).await.unwrap();
+    assert!(provider.load_token(url).await.is_some());
+
+    provider.clear_tokens(url).await.unwrap();
+    assert!(
+        provider.load_token(url).await.is_none(),
+        "Token should be gone after clear"
+    );
+}
+
+/// Verify clear_tokens only affects the target server.
+#[tokio::test]
+async fn test_provider_clear_is_isolated() {
+    let provider = InMemoryOAuthProvider::new();
+    let url_a = "https://server-a.com/mcp";
+    let url_b = "https://server-b.com/mcp";
+
+    let make_token = |name: &str| OAuthTokens {
+        access_token: name.to_string(),
+        refresh_token: None,
+        token_type: "Bearer".to_string(),
+        expires_in: 0,
+        scope: "".to_string(),
+    };
+
+    provider
+        .store_tokens(url_a, make_token("tok_a"))
+        .await
+        .unwrap();
+    provider
+        .store_tokens(url_b, make_token("tok_b"))
+        .await
+        .unwrap();
+
+    // Clear only A
+    provider.clear_tokens(url_a).await.unwrap();
+
+    assert!(provider.load_token(url_a).await.is_none());
+    assert_eq!(provider.load_token(url_b).await.unwrap(), "tok_b");
+}
+
+/// Verify that NeedsAuth is a distinct state from PendingAuth.
+/// This is a regression test for the bug where the dashboard showed
+/// "Authorizing..." at boot before the user clicked Authorize.
+#[test]
+fn test_needs_auth_serializes_differently_from_pending_auth() {
+    let needs = serde_json::to_value(McpAuthState::NeedsAuth).unwrap();
+    let pending = serde_json::to_value(McpAuthState::PendingAuth {
+        auth_url: "https://example.com/auth".to_string(),
+    })
+    .unwrap();
+
+    assert_eq!(needs["state"].as_str().unwrap(), "needs_auth");
+    assert_eq!(pending["state"].as_str().unwrap(), "pending_auth");
+    assert_ne!(
+        needs["state"], pending["state"],
+        "NeedsAuth and PendingAuth must serialize to different state values"
+    );
+}
