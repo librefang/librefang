@@ -3313,6 +3313,9 @@ system_prompt = "You are a helpful assistant."
                 channel_type: None,
                 sender_display_name: None,
                 sender_user_id: None,
+                sender_username: None,
+                bot_username: None,
+                group_members: Vec::new(),
                 is_subagent: false,
                 is_autonomous: manifest.autonomous.is_some(),
                 agents_md: ws_meta.as_ref().and_then(|m| m.agents_md.clone()),
@@ -3923,8 +3926,24 @@ system_prompt = "You are a helpful assistant."
                 channel_type: sender_context.map(|s| s.channel.clone()),
                 sender_user_id: sender_context.map(|s| s.user_id.clone()),
                 sender_display_name: sender_context.map(|s| s.display_name.clone()),
+                sender_username: sender_context.and_then(|s| s.sender_username.clone()),
                 is_group: sender_context.map(|s| s.is_group).unwrap_or(false),
                 was_mentioned: sender_context.map(|s| s.was_mentioned).unwrap_or(false),
+                bot_username: sender_context.and_then(|s| s.bot_username.clone()),
+                group_members: sender_context
+                    .map(|s| {
+                        s.group_members
+                            .iter()
+                            .map(|m| {
+                                (
+                                    m.user_id.clone(),
+                                    m.display_name.clone(),
+                                    m.username.clone(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 is_subagent: manifest
                     .metadata
                     .get("is_subagent")
@@ -5033,8 +5052,24 @@ system_prompt = "You are a helpful assistant."
                 channel_type: sender_context.map(|s| s.channel.clone()),
                 sender_display_name: sender_context.map(|s| s.display_name.clone()),
                 sender_user_id: sender_context.map(|s| s.user_id.clone()),
+                sender_username: sender_context.and_then(|s| s.sender_username.clone()),
                 is_group: sender_context.map(|s| s.is_group).unwrap_or(false),
                 was_mentioned: sender_context.map(|s| s.was_mentioned).unwrap_or(false),
+                bot_username: sender_context.and_then(|s| s.bot_username.clone()),
+                group_members: sender_context
+                    .map(|s| {
+                        s.group_members
+                            .iter()
+                            .map(|m| {
+                                (
+                                    m.user_id.clone(),
+                                    m.display_name.clone(),
+                                    m.username.clone(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 is_subagent: manifest
                     .metadata
                     .get("is_subagent")
