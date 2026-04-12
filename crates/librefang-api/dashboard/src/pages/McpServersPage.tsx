@@ -123,9 +123,9 @@ function AuthBadge({
   const [polling, setPolling] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Poll when pending_auth
+  // Poll only when auth flow is in progress (not for needs_auth)
   useEffect(() => {
-    if (authState === "pending_auth" || polling) {
+    if ((authState === "pending_auth" && polling) || polling) {
       pollRef.current = setInterval(async () => {
         try {
           const status = await getMcpAuthStatus(server.name);
@@ -188,7 +188,19 @@ function AuthBadge({
     );
   }
 
-  if (authState === "pending_auth") {
+  if (authState === "needs_auth") {
+    return (
+      <button
+        onClick={handleStartAuth}
+        className="inline-flex items-center gap-1 rounded-lg border border-warning/30 bg-warning/5 px-2 py-1 text-[10px] font-bold text-warning hover:bg-warning/10 transition-colors"
+      >
+        <Shield className="h-3 w-3" />
+        {t("mcp.auth_authorize")}
+      </button>
+    );
+  }
+
+  if (authState === "pending_auth" || polling) {
     return (
       <Badge variant="warning" dot className="animate-pulse">
         <Shield className="h-3 w-3 mr-1" />

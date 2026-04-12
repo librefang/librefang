@@ -8963,9 +8963,7 @@ system_prompt = "You are a helpful assistant."
                         );
                         self.mcp_auth_states.lock().await.insert(
                             server_config.name.clone(),
-                            librefang_runtime::mcp_oauth::McpAuthState::PendingAuth {
-                                auth_url: String::new(),
-                            },
+                            librefang_runtime::mcp_oauth::McpAuthState::NeedsAuth,
                         );
                     } else {
                         warn!(

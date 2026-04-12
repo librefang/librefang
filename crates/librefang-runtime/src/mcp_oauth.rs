@@ -44,6 +44,10 @@ pub enum McpAuthState {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens: Option<OAuthTokens>,
     },
+    /// Server requires OAuth but the user hasn't started the flow yet.
+    /// Set at daemon boot when a 401 is detected.
+    NeedsAuth,
+    /// OAuth flow is in progress — user clicked Authorize.
     PendingAuth {
         auth_url: String,
     },
