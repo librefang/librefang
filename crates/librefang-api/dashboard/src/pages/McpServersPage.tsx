@@ -147,12 +147,25 @@ function AuthBadge({
   }, [authState, polling, server.name, onAuthSuccess, addToast]);
 
   const handleStartAuth = useCallback(async () => {
+    // Open the window immediately on user click to avoid popup blocker.
+    // The async API call can take several seconds (discovery + registration),
+    // and browsers block window.open() if it's not in the click handler's
+    // synchronous call stack.
+    const authWindow = window.open("about:blank", "_blank");
     try {
       const result = await startMcpAuth(server.name);
-      window.open(result.auth_url, "_blank");
+      if (authWindow && !authWindow.closed) {
+        authWindow.location.href = result.auth_url;
+      } else {
+        // Popup was blocked — fall back to same-tab redirect
+        window.location.href = result.auth_url;
+      }
       setPolling(true);
       addToast(t("mcp.auth_started"), "info");
     } catch (e: any) {
+      if (authWindow && !authWindow.closed) {
+        authWindow.close();
+      }
       addToast(e?.message || "Failed to start auth", "error");
     }
   }, [server.name, addToast, t]);
