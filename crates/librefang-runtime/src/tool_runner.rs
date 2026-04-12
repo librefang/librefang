@@ -302,6 +302,9 @@ pub async fn execute_tool_raw(
         "memory_recall" => tool_memory_recall(input, *kernel, *sender_id),
         "memory_list" => tool_memory_list(*kernel, *sender_id),
 
+        // Group roster tool
+        "group_members" => tool_group_members(input, *kernel),
+
         // Collaboration tools
         "agent_find" => tool_agent_find(input, *kernel),
         "task_post" => tool_task_post(input, *kernel, *caller_agent_id).await,
@@ -952,6 +955,25 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
+            }),
+        },
+        // --- Group roster tool ---
+        ToolDefinition {
+            name: "group_members".to_string(),
+            description: "List the known members of a group chat. Returns the roster of people seen in a specific channel and chat. Use this when you need to know who is in the group.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "description": "Channel type (e.g. 'telegram', 'discord')"
+                    },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "The chat/group ID"
+                    }
+                },
+                "required": ["channel", "chat_id"]
             }),
         },
         // --- Collaboration tools ---
@@ -2165,6 +2187,28 @@ fn tool_memory_list(
         return Ok("No entries found in shared memory.".to_string());
     }
     Ok(serde_json::to_string_pretty(&keys).unwrap_or_else(|_| format!("{:?}", keys)))
+}
+
+// ---------------------------------------------------------------------------
+// Group roster tool
+// ---------------------------------------------------------------------------
+
+fn tool_group_members(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let channel = input["channel"]
+        .as_str()
+        .ok_or("Missing 'channel' parameter")?;
+    let chat_id = input["chat_id"]
+        .as_str()
+        .ok_or("Missing 'chat_id' parameter")?;
+    let members = kh.roster_members(channel, chat_id)?;
+    if members.is_empty() {
+        return Ok("No known members for this chat yet.".to_string());
+    }
+    serde_json::to_string_pretty(&members).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

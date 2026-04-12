@@ -5,11 +5,12 @@
 
 use crate::formatter;
 use crate::rate_limiter::ChannelRateLimiter;
+use crate::roster::GroupRosterStore;
 use crate::router::AgentRouter;
 use crate::sanitizer::{InputSanitizer, SanitizeResult};
 use crate::types::{
     default_phase_emoji, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser,
-    LifecycleReaction, SenderContext,
+    GroupMember, LifecycleReaction, SenderContext,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -343,6 +344,47 @@ pub trait ChannelBridgeHandle: Send + Sync {
         _thread_id: Option<&str>,
     ) -> Result<String, String> {
         Err("Channel push not available".to_string())
+    }
+
+    /// Lightweight LLM precheck: should the agent reply to this group message?
+    ///
+    /// `context` contains recent conversation lines (e.g. the message being
+    /// replied to) so the classifier can detect continuations.
+    ///
+    /// Returns `Ok(true)` → reply, `Ok(false)` → stay silent.
+    /// On error the caller fails open (replies anyway).
+    /// Default: always reply (opt-in via `reply_precheck = true` in channel config).
+    async fn classify_reply_intent(
+        &self,
+        _agent_id: AgentId,
+        _message: &str,
+        _context: Option<&str>,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    /// Read the custom precheck prompt from the agent's workspace
+    /// (`PRECHECK.md`). Returns `None` if the file doesn't exist.
+    async fn get_precheck_prompt(&self, _agent_id: AgentId) -> Option<String> {
+        None
+    }
+
+    /// Get the routing aliases for an agent (from `[metadata.routing].aliases`).
+    /// Default: empty (no aliases).
+    async fn get_agent_aliases(&self, _agent_id: AgentId) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Upsert a member into the persistent group roster (SQLite-backed).
+    async fn roster_upsert(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+        _display_name: &str,
+        _username: Option<&str>,
+    ) {
+        // default no-op
     }
 }
 
@@ -1258,6 +1300,22 @@ fn text_content(message: &ChannelMessage) -> Option<&str> {
     }
 }
 
+/// Convert plain alias strings into case-insensitive word-boundary regex patterns
+/// suitable for use in `group_trigger_patterns`.
+///
+/// This lets operators avoid manually translating agent aliases into regex syntax:
+/// `aliases_to_trigger_patterns(&["fandango", "oye fandango"])` produces
+/// `["(?i)\\bfandango\\b", "(?i)\\boye fandango\\b"]`.
+pub fn aliases_to_trigger_patterns(aliases: &[String]) -> Vec<String> {
+    aliases
+        .iter()
+        .map(|alias| {
+            let escaped = regex::escape(alias);
+            format!("(?i)\\b{escaped}\\b")
+        })
+        .collect()
+}
+
 fn matches_group_trigger_pattern(
     ct_str: &str,
     message: &ChannelMessage,
@@ -1327,6 +1385,7 @@ fn should_process_group_message(
     ct_str: &str,
     overrides: &ChannelOverrides,
     message: &ChannelMessage,
+    agent_aliases: &[String],
 ) -> bool {
     match overrides.group_policy {
         GroupPolicy::Ignore => {
@@ -1356,7 +1415,23 @@ fn should_process_group_message(
                     message,
                     &overrides.group_trigger_patterns,
                 );
-            if !was_mentioned && !is_command && !regex_triggered {
+            let alias_triggered = !was_mentioned
+                && !is_command
+                && !regex_triggered
+                && text_content(message).is_some_and(|text| {
+                    let lower = text.to_lowercase();
+                    agent_aliases
+                        .iter()
+                        .any(|alias| lower.contains(&alias.to_lowercase()))
+                });
+            if alias_triggered {
+                debug!(
+                    channel = ct_str,
+                    user = %message.sender.display_name,
+                    "Group message matched agent alias trigger"
+                );
+            }
+            if !was_mentioned && !is_command && !regex_triggered && !alias_triggered {
                 debug!(
                     "Ignoring group message on {ct_str} (group_policy=mention_only, not mentioned)"
                 );
@@ -1372,6 +1447,18 @@ fn should_process_group_message(
 ///
 /// Per-channel auto-routing fields are populated from `overrides` when provided,
 /// and default to `AutoRouteStrategy::Off` / zeros otherwise.
+/// Singleton in-memory group roster shared across all channel adapters.
+///
+/// Populated on every incoming group message from `build_sender_context`. The
+/// accumulated roster is then handed to the agent's system prompt so the LLM
+/// can distinguish the current message sender from other group members it has
+/// seen before (e.g. when a user writes `@pepe` meaning another human, not an
+/// agent in the system).
+fn group_roster() -> &'static GroupRosterStore {
+    static ROSTER: OnceLock<GroupRosterStore> = OnceLock::new();
+    ROSTER.get_or_init(GroupRosterStore::new)
+}
+
 fn build_sender_context(
     message: &ChannelMessage,
     overrides: Option<&ChannelOverrides>,
@@ -1392,8 +1479,47 @@ fn build_sender_context(
         ),
         None => (AutoRouteStrategy::Off, 0, 0, 0, 0),
     };
+
+    let channel = channel_type_str(&message.channel).to_string();
+    let chat_id = message
+        .metadata
+        .get("chat_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let bot_username = message
+        .metadata
+        .get("bot_username")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sender_username = message
+        .metadata
+        .get("sender_username")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // For group messages, upsert the current sender into the roster and then
+    // read back all known members. For DMs the roster stays empty — the LLM
+    // only needs the current sender and doesn't gain anything from a roster
+    // with a single member.
+    let group_members: Vec<GroupMember> = if message.is_group {
+        if let Some(ref cid) = chat_id {
+            let current = GroupMember {
+                user_id: sender_user_id(message).to_string(),
+                display_name: message.sender.display_name.clone(),
+                username: sender_username.clone(),
+            };
+            let store = group_roster();
+            store.upsert(&channel, cid, current);
+            Vec::new() // Roster is now tool-based, not injected into prompt
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     SenderContext {
-        channel: channel_type_str(&message.channel).to_string(),
+        channel,
         user_id: sender_user_id(message).to_string(),
         display_name: message.sender.display_name.clone(),
         is_group: message.is_group,
@@ -1413,6 +1539,10 @@ fn build_sender_context(
         auto_route_confidence_threshold,
         auto_route_sticky_bonus,
         auto_route_divergence_count,
+        bot_username,
+        sender_username,
+        group_members,
+        chat_id,
     }
 }
 
@@ -1759,7 +1889,7 @@ async fn dispatch_message(
     // --- DM/Group policy check ---
     if let Some(ref ov) = overrides {
         if message.is_group {
-            if !should_process_group_message(ct_str, ov, message) {
+            if !should_process_group_message(ct_str, ov, message, &[]) {
                 return;
             }
         } else {
@@ -2079,6 +2209,72 @@ async fn dispatch_message(
             return;
         }
     };
+
+    // --- Post-resolution group filters (alias awareness + reply-intent precheck) ---
+    if message.is_group {
+        let was_mentioned = message
+            .metadata
+            .get("was_mentioned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Reply-intent precheck: lightweight LLM call to decide if the agent
+        // should reply. Only for non-mentioned group messages when enabled.
+        // Skipped for @mentions, commands, and DMs (those always get a reply).
+        if !was_mentioned && !matches!(message.content, ChannelContent::Command { .. }) {
+            // Check agent aliases first — if a message contains an alias like
+            // "oye fandango", treat it as an implicit mention (skip precheck).
+            let aliases = handle.get_agent_aliases(agent_id).await;
+            let alias_hit = !aliases.is_empty()
+                && text_content(message).is_some_and(|text| {
+                    let lower = text.to_lowercase();
+                    aliases.iter().any(|a| lower.contains(&a.to_lowercase()))
+                });
+
+            if alias_hit {
+                debug!(
+                    channel = ct_str,
+                    "Group message matched agent alias — treating as mention"
+                );
+            } else if let Some(ref ov) = overrides {
+                if ov.reply_precheck {
+                    // No mention, no alias — run LLM precheck.
+                    // Include reply-to context so the classifier can detect
+                    // conversation continuations (e.g. user replying to the bot).
+                    let reply_context: Option<String> =
+                        message.metadata.get("reply_to").and_then(|rt| {
+                            let sender = rt
+                                .get("sender")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("someone");
+                            let text = rt.get("text").and_then(|t| t.as_str())?;
+                            Some(format!("[Replying to {sender}: \"{text}\"]"))
+                        });
+                    if let Some(text) = text_content(message) {
+                        match handle
+                            .classify_reply_intent(agent_id, text, reply_context.as_deref())
+                            .await
+                        {
+                            Ok(true) => {
+                                debug!(channel = ct_str, "Reply-intent precheck: REPLY");
+                            }
+                            Ok(false) => {
+                                debug!(
+                                    channel = ct_str,
+                                    "Reply-intent precheck: NO_REPLY — staying silent"
+                                );
+                                return;
+                            }
+                            Err(e) => {
+                                warn!(channel = ct_str, error = %e, "Reply-intent precheck failed — proceeding with reply");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let channel_key = format!("{:?}", message.channel);
 
     // RBAC: authorize the user before forwarding to agent
@@ -2145,6 +2341,21 @@ async fn dispatch_message(
 
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides.as_ref());
+
+    // Persist roster member to SQLite
+    if message.is_group {
+        if let Some(ref cid) = sender_ctx.chat_id {
+            handle
+                .roster_upsert(
+                    ct_str,
+                    cid,
+                    &sender_ctx.user_id,
+                    &sender_ctx.display_name,
+                    sender_ctx.sender_username.as_deref(),
+                )
+                .await;
+        }
+    }
 
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
@@ -2656,6 +2867,21 @@ async fn dispatch_with_blocks(
 
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides);
+
+    // Persist roster member to SQLite
+    if message.is_group {
+        if let Some(ref cid) = sender_ctx.chat_id {
+            handle
+                .roster_upsert(
+                    ct_str,
+                    cid,
+                    &sender_ctx.user_id,
+                    &sender_ctx.display_name,
+                    sender_ctx.sender_username.as_deref(),
+                )
+                .await;
+        }
+    }
 
     match handle
         .send_message_with_blocks_and_sender(agent_id, blocks.clone(), &sender_ctx)
@@ -3334,7 +3560,10 @@ mod tests {
             ..Default::default()
         };
         assert!(should_process_group_message(
-            "whatsapp", &overrides, &message
+            "whatsapp",
+            &overrides,
+            &message,
+            &[]
         ));
     }
 
@@ -3346,7 +3575,10 @@ mod tests {
             ..Default::default()
         };
         assert!(!should_process_group_message(
-            "whatsapp", &overrides, &message
+            "whatsapp",
+            &overrides,
+            &message,
+            &[]
         ));
     }
 
@@ -3358,7 +3590,10 @@ mod tests {
             ..Default::default()
         };
         assert!(should_process_group_message(
-            "telegram", &overrides, &message
+            "telegram",
+            &overrides,
+            &message,
+            &[]
         ));
     }
 
@@ -3370,8 +3605,74 @@ mod tests {
             .insert("was_mentioned".to_string(), serde_json::Value::Bool(true));
         let overrides = ChannelOverrides::default();
         assert!(should_process_group_message(
-            "telegram", &overrides, &message
+            "telegram",
+            &overrides,
+            &message,
+            &[]
         ));
+    }
+
+    #[test]
+    fn test_mention_only_triggers_on_agent_alias() {
+        let message = group_text_message("hey fandango what do you think?");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["fandango".to_string()];
+        assert!(should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_alias_is_case_insensitive() {
+        let message = group_text_message("FANDANGO help me");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["Fandango".to_string()];
+        assert!(should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_rejects_no_alias_match() {
+        let message = group_text_message("hello there, anyone?");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["fandango".to_string(), "rodelo".to_string()];
+        assert!(!should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_alias_does_not_override_regex_trigger() {
+        // regex trigger and alias can independently activate — alias fires here
+        let message = group_text_message("oye fandango");
+        let overrides = ChannelOverrides::default();
+        let aliases = vec!["oye fandango".to_string()];
+        assert!(should_process_group_message(
+            "telegram", &overrides, &message, &aliases
+        ));
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_produces_word_boundary_regex() {
+        let aliases = vec!["fandango".to_string(), "oye fandango".to_string()];
+        let patterns = aliases_to_trigger_patterns(&aliases);
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0], r"(?i)\bfandango\b");
+        assert_eq!(patterns[1], r"(?i)\boye fandango\b");
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_escapes_special_chars() {
+        let aliases = vec!["bot.v2".to_string()];
+        let patterns = aliases_to_trigger_patterns(&aliases);
+        assert_eq!(patterns[0], r"(?i)\bbot\.v2\b");
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_empty() {
+        let patterns = aliases_to_trigger_patterns(&[]);
+        assert!(patterns.is_empty());
     }
 
     #[test]

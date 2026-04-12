@@ -41,10 +41,20 @@ pub struct PromptContext {
     pub sender_display_name: Option<String>,
     /// Sender's platform user ID (from channel message).
     pub sender_user_id: Option<String>,
+    /// Sender's `@handle` on the platform (Telegram/Discord/Slack, when available).
+    pub sender_username: Option<String>,
     /// Whether the current message originated from a group chat.
     pub is_group: bool,
     /// Whether the bot was @mentioned in a group message.
     pub was_mentioned: bool,
+    /// The bot's own platform `@handle` (e.g. `fandangorodelo_bot` on Telegram).
+    /// Injected into the system prompt so the LLM recognises mentions of itself
+    /// as a valid alias, not as a reference to some other entity.
+    pub bot_username: Option<String>,
+    /// Known members of the current group chat, accumulated from past
+    /// messages. Empty in DMs and on the first message of a fresh group.
+    /// Each entry is `(user_id, display_name, username)`.
+    pub group_members: Vec<(String, String, Option<String>)>,
     /// Whether this agent was spawned as a subagent.
     pub is_subagent: bool,
     /// Whether this agent has autonomous config.
@@ -164,8 +174,11 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
                 channel,
                 ctx.sender_display_name.as_deref(),
                 ctx.sender_user_id.as_deref(),
+                ctx.sender_username.as_deref(),
                 ctx.is_group,
                 ctx.was_mentioned,
+                ctx.bot_username.as_deref(),
+                &ctx.group_members,
             ));
         }
     }
@@ -466,12 +479,16 @@ fn build_user_section(user_name: Option<&str>) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_channel_section(
     channel: &str,
     sender_name: Option<&str>,
     sender_id: Option<&str>,
+    sender_username: Option<&str>,
     is_group: bool,
     was_mentioned: bool,
+    bot_username: Option<&str>,
+    _group_members: &[(String, String, Option<String>)],
 ) -> String {
     let (limit, hints) = match channel {
         "telegram" => (
@@ -506,22 +523,45 @@ fn build_channel_section(
          You are responding via {channel}. Keep messages under {limit} chars.\n\
          {hints}"
     );
+
+    // Self-awareness: tell the agent its own platform handle so it recognises
+    // mentions of itself as a valid alias, not as a reference to another entity.
+    if let Some(handle) = bot_username {
+        let clean = sanitize_identity(handle);
+        section.push_str(&format!(
+            "\nYour own `@{clean}` handle on {channel} is a valid alias for you. \
+             When users address you with it, they are talking TO you — do not \
+             interpret it as a reference to some other user or agent."
+        ));
+    }
+
     // Append sender identity when available from channel bridge.
     // Both fields originate from the channel platform's user profile —
     // they are attacker-controlled in any public-facing deployment,
     // so sanitize before interpolating into the system prompt.
+    let sender_handle = sender_username.map(sanitize_identity);
     match (sender_name, sender_id) {
         (Some(name), Some(id)) => {
+            let handle_bit = sender_handle
+                .as_ref()
+                .map(|h| format!(", @{h}"))
+                .unwrap_or_default();
             section.push_str(&format!(
-                "\nThe current message is from user \"{}\" (platform ID: {}).",
+                "\nThe current message is from user \"{}\"{} (platform ID: {}).",
                 sanitize_identity(name),
+                handle_bit,
                 sanitize_identity(id)
             ));
         }
         (Some(name), None) => {
+            let handle_bit = sender_handle
+                .as_ref()
+                .map(|h| format!(" (@{h})"))
+                .unwrap_or_default();
             section.push_str(&format!(
-                "\nThe current message is from user \"{}\".",
-                sanitize_identity(name)
+                "\nThe current message is from user \"{}\"{}.",
+                sanitize_identity(name),
+                handle_bit
             ));
         }
         (None, Some(id)) => {
@@ -532,6 +572,7 @@ fn build_channel_section(
         }
         (None, None) => {}
     }
+
     if is_group {
         section.push_str(
             "\nThis message is from a group chat. \
@@ -544,7 +585,11 @@ fn build_channel_section(
         if was_mentioned {
             section.push_str(" You were @mentioned directly — respond to this message.");
         }
+
+        // Group roster is now available via the `group_members` tool.
+        // No longer injected into the system prompt (saves context tokens).
     }
+
     section
 }
 
@@ -1003,35 +1048,45 @@ mod tests {
 
     #[test]
     fn test_channel_telegram() {
-        let section = build_channel_section("telegram", None, None, false, false);
+        let section = build_channel_section("telegram", None, None, None, false, false, None, &[]);
         assert!(section.contains("4096"));
         assert!(section.contains("Telegram"));
     }
 
     #[test]
     fn test_channel_discord() {
-        let section = build_channel_section("discord", None, None, false, false);
+        let section = build_channel_section("discord", None, None, None, false, false, None, &[]);
         assert!(section.contains("2000"));
         assert!(section.contains("Discord"));
     }
 
     #[test]
     fn test_channel_irc() {
-        let section = build_channel_section("irc", None, None, false, false);
+        let section = build_channel_section("irc", None, None, None, false, false, None, &[]);
         assert!(section.contains("512"));
         assert!(section.contains("plain text"));
     }
 
     #[test]
     fn test_channel_unknown_gets_default() {
-        let section = build_channel_section("smoke_signal", None, None, false, false);
+        let section =
+            build_channel_section("smoke_signal", None, None, None, false, false, None, &[]);
         assert!(section.contains("4096"));
         assert!(section.contains("smoke_signal"));
     }
 
     #[test]
     fn test_channel_group_chat_context() {
-        let section = build_channel_section("whatsapp", Some("Alice"), None, true, false);
+        let section = build_channel_section(
+            "whatsapp",
+            Some("Alice"),
+            None,
+            None,
+            true,
+            false,
+            None,
+            &[],
+        );
         assert!(section.contains("group chat"));
         // Not mentioned — the "respond to this message" directive must be absent.
         assert!(!section.contains("respond to this message"));
@@ -1039,9 +1094,87 @@ mod tests {
 
     #[test]
     fn test_channel_group_mentioned() {
-        let section = build_channel_section("whatsapp", Some("Bob"), None, true, true);
+        let section =
+            build_channel_section("whatsapp", Some("Bob"), None, None, true, true, None, &[]);
         assert!(section.contains("group chat"));
         assert!(section.contains("respond to this message"));
+    }
+
+    #[test]
+    fn test_channel_bot_handle_self_awareness() {
+        let section = build_channel_section(
+            "telegram",
+            Some("Pakman"),
+            Some("123"),
+            Some("pakman"),
+            true,
+            true,
+            Some("fandangorodelo_bot"),
+            &[],
+        );
+        assert!(section.contains("@fandangorodelo_bot"));
+        assert!(section.contains("valid alias"));
+        // Current sender rendered with its @handle
+        assert!(section.contains("Pakman"));
+        assert!(section.contains("@pakman"));
+    }
+
+    #[test]
+    fn test_channel_group_roster_not_rendered() {
+        // Roster is now tool-based — passing members should NOT inject them
+        // into the system prompt.
+        let members = vec![
+            (
+                "1".to_string(),
+                "Pakman".to_string(),
+                Some("pakman".to_string()),
+            ),
+            (
+                "2".to_string(),
+                "Jorge Pablo".to_string(),
+                Some("jorgepablo".to_string()),
+            ),
+            ("3".to_string(), "dvpablo".to_string(), None),
+        ];
+        let section = build_channel_section(
+            "telegram",
+            Some("Pakman"),
+            Some("1"),
+            Some("pakman"),
+            true,
+            true,
+            Some("fandangorodelo_bot"),
+            &members,
+        );
+        assert!(
+            !section.contains("### Known members of this group"),
+            "Roster should not be rendered in system prompt"
+        );
+        assert!(
+            !section.contains("real humans"),
+            "Roster instructions should not appear in system prompt"
+        );
+    }
+
+    #[test]
+    fn test_channel_dm_has_no_roster() {
+        // DMs should never get a roster block even if one is passed.
+        let members = vec![(
+            "1".to_string(),
+            "Solo".to_string(),
+            Some("solo".to_string()),
+        )];
+        let section = build_channel_section(
+            "telegram",
+            Some("Pakman"),
+            Some("1"),
+            Some("pakman"),
+            false, // is_group = false
+            false,
+            Some("fandangorodelo_bot"),
+            &members,
+        );
+        assert!(!section.contains("### Known members of this group"));
     }
 
     #[test]
