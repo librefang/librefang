@@ -107,6 +107,43 @@ jobs:
             exit 0
           fi
 
+          # Split Release / Docker into image-build vs deploy sub-statuses so the
+          # notification doesn't blame "Docker" when only a deploy smoke check failed.
+          DOCKER_IMAGE_STATUS="$DOCKER_STATUS"
+          DEPLOY_STATUS="$DOCKER_STATUS"
+          DOCKER_RUN_ID=$(gh run list \
+            --repo "${{ github.repository }}" \
+            --workflow "Release / Docker" \
+            --branch "$TAG" \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId' 2>/dev/null) || true
+
+          if [ -n "$DOCKER_RUN_ID" ]; then
+            DOCKER_JOBS=$(gh run view "$DOCKER_RUN_ID" \
+              --repo "${{ github.repository }}" \
+              --json jobs 2>/dev/null) || DOCKER_JOBS=""
+
+            aggregate() {
+              local lines="$1"
+              [ -z "$lines" ] && { echo "not_found"; return; }
+              echo "$lines" | grep -q "failure"  && { echo "failure";   return; }
+              echo "$lines" | grep -q "cancelled" && { echo "cancelled"; return; }
+              echo "$lines" | grep -vxE "success" | grep -q . && { echo "running"; return; }
+              echo "success"
+            }
+
+            if [ -n "$DOCKER_JOBS" ]; then
+              IMAGE_LINES=$(echo "$DOCKER_JOBS" | jq -r '.jobs[] | select(.name == "Docker / linux/amd64" or .name == "Docker / linux/arm64" or .name == "Docker Manifest") | .conclusion')
+              DEPLOY_LINES=$(echo "$DOCKER_JOBS" | jq -r '.jobs[] | select(.name == "Deploy to Fly.io" or .name == "Deploy to Render") | .conclusion')
+              DOCKER_IMAGE_STATUS=$(aggregate "$IMAGE_LINES")
+              DEPLOY_STATUS=$(aggregate "$DEPLOY_LINES")
+            fi
+          fi
+
+          echo "Docker image: $DOCKER_IMAGE_STATUS"
+          echo "Deploy:       $DEPLOY_STATUS"
+
           # All workflows completed — build consolidated notification
           emoji() {
             if [ "$1" = "success" ]; then echo "✅"; else echo "❌"; fi
@@ -117,10 +154,10 @@ jobs:
             CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
           fi
 
-          # Count successes
-          TOTAL=4
+          # Count successes (deploy tracked separately from image build)
+          TOTAL=5
           SUCCESS=0
-          for s in "$SHELL_STATUS" "$DESKTOP_STATUS" "$DOCKER_STATUS" "$SDK_STATUS"; do
+          for s in "$SHELL_STATUS" "$DESKTOP_STATUS" "$DOCKER_IMAGE_STATUS" "$DEPLOY_STATUS" "$SDK_STATUS"; do
             [ "$s" = "success" ] && SUCCESS=$((SUCCESS + 1))
           done
 
@@ -138,7 +175,8 @@ jobs:
           **Build Status:**
           $(emoji "$SHELL_STATUS") CLI (macOS / Linux / Windows)
           $(emoji "$DESKTOP_STATUS") Desktop (.msi / .dmg / .AppImage / .deb)
-          $(emoji "$DOCKER_STATUS") Docker + Deploy (Fly.io / Render)
+          $(emoji "$DOCKER_IMAGE_STATUS") Docker image (ghcr.io linux/amd64 + arm64)
+          $(emoji "$DEPLOY_STATUS") Deploy (Fly.io / Render)
           $(emoji "$SDK_STATUS") SDKs (npm / PyPI / crates.io / Go)
 
           📦 [Download](https://github.com/librefang/librefang/releases/tag/$TAG) | 📖 [Changelog](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) | ⭐ [Star us](https://github.com/librefang/librefang)
