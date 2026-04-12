@@ -1980,7 +1980,25 @@ async fn dispatch_message(
             ref poll_id,
             ref option_ids,
         } => {
-            format!("[User answered poll {poll_id}: options {option_ids:?}]")
+            let question = message
+                .metadata
+                .get("poll_question")
+                .and_then(|v| v.as_str())
+                .unwrap_or(poll_id);
+            let options: Vec<String> = message
+                .metadata
+                .get("poll_options")
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+                .unwrap_or_default();
+            if options.is_empty() {
+                format!("[User answered poll {poll_id}: options {option_ids:?}]")
+            } else {
+                let selected: Vec<&str> = option_ids
+                    .iter()
+                    .filter_map(|&i| options.get(i as usize).map(|s| s.as_str()))
+                    .collect();
+                format!("[User answered poll \"{question}\": selected {selected:?}]")
+            }
         }
     };
 

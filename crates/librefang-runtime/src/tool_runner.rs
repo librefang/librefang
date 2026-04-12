@@ -1365,7 +1365,12 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "file_url": { "type": "string", "description": "URL of a file to send as attachment" },
                     "file_path": { "type": "string", "description": "Local file path to send as attachment (reads from disk; use instead of file_url for local files)" },
                     "filename": { "type": "string", "description": "Filename for file attachments (defaults to the basename of file_path, or 'file')" },
-                    "thread_id": { "type": "string", "description": "Thread/topic ID to reply in (e.g., Telegram message_thread_id, Slack thread_ts)" }
+                    "thread_id": { "type": "string", "description": "Thread/topic ID to reply in (e.g., Telegram message_thread_id, Slack thread_ts)" },
+                    "poll_question": { "type": "string", "description": "Question for a poll (starts a poll, mutually exclusive with image_url/file_url/file_path)" },
+                    "poll_options": { "type": "array", "items": { "type": "string" }, "description": "Answer options for the poll (2-10 items, required with poll_question)" },
+                    "poll_is_quiz": { "type": "boolean", "description": "Set to true for a quiz mode (one correct answer)" },
+                    "poll_correct_option": { "type": "integer", "description": "Index of the correct answer (0-based, for quiz mode)" },
+                    "poll_explanation": { "type": "string", "description": "Explanation shown after answering (quiz mode)" }
                 },
                 "required": ["channel", "recipient"]
             }),
@@ -2855,6 +2860,49 @@ async fn tool_channel_send(
         return kh
             .send_channel_file_data(&channel, recipient, data, &filename, mime_type, thread_id)
             .await;
+    }
+
+    if let Some(poll_question) = input.get("poll_question").and_then(|v| v.as_str()) {
+        let poll_options: Vec<String> = input
+            .get("poll_options")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if poll_options.len() < 2 {
+            return Err("poll_options must have at least 2 options".to_string());
+        }
+
+        let is_quiz = input
+            .get("poll_is_quiz")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let correct_option_id = input
+            .get("poll_correct_option")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u8);
+        let explanation = input.get("poll_explanation").and_then(|v| v.as_str());
+
+        kh.send_channel_poll(
+            &channel,
+            recipient,
+            poll_question,
+            &poll_options,
+            is_quiz,
+            correct_option_id,
+            explanation,
+        )
+        .await?;
+
+        let mut result = format!("Poll sent to {recipient} on {channel}: {poll_question}");
+        if is_quiz {
+            result.push_str(" (quiz mode)");
+        }
+        return Ok(result);
     }
 
     // Text-only message

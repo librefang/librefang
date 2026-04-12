@@ -9,6 +9,7 @@ use crate::types::{
     InteractiveButton, InteractiveMessage, LifecycleReaction,
 };
 use async_trait::async_trait;
+use dashmap::DashMap;
 use futures::Stream;
 use librefang_types::config::OutputFormat;
 use std::collections::HashMap;
@@ -222,6 +223,12 @@ pub struct TelegramAdapter {
     clear_done_reaction: bool,
     /// Bot commands registered in the Telegram command menu.
     commands: Vec<BotCommand>,
+    poll_contexts: Arc<DashMap<String, PollContext>>,
+}
+
+struct PollContext {
+    question: String,
+    options: Vec<String>,
 }
 
 /// Parameters for `api_send_poll` — grouped to satisfy clippy's argument limit.
@@ -269,6 +276,7 @@ impl TelegramAdapter {
             poll_handle: Arc::new(tokio::sync::Mutex::new(None)),
             clear_done_reaction: false,
             commands: Vec::new(),
+            poll_contexts: Arc::new(DashMap::new()),
         }
     }
 
@@ -751,7 +759,7 @@ impl TelegramAdapter {
     async fn api_send_poll(
         &self,
         params: &PollParams<'_>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/bot{}/sendPoll", self.api_base_url, self.token.as_str());
         let option_values: Vec<serde_json::Value> = params
             .options
@@ -778,8 +786,8 @@ impl TelegramAdapter {
         }
 
         let resp = self.client.post(&url).json(&body).send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        if !status.is_success() {
             let body_text = resp.text().await.unwrap_or_default();
 
             if status.as_u16() == 429 {
@@ -794,12 +802,23 @@ impl TelegramAdapter {
                         format!("Telegram sendPoll failed after retry: {body_text2}").into(),
                     );
                 }
-                return Ok(());
+                let resp_body: serde_json::Value = resp2.json().await.unwrap_or_default();
+                let poll_id = resp_body["result"]["poll"]["id"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                return Ok(poll_id);
             }
 
             warn!("Telegram sendPoll failed ({status}): {body_text}");
+            return Ok(String::new());
         }
-        Ok(())
+        let resp_body: serde_json::Value = resp.json().await.unwrap_or_default();
+        let poll_id = resp_body["result"]["poll"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        Ok(poll_id)
     }
 
     /// Call `sendLocation` on the Telegram API.
@@ -1293,7 +1312,19 @@ impl TelegramAdapter {
                     explanation: explanation.as_deref(),
                     thread_id,
                 };
-                self.api_send_poll(&params).await?;
+                match self.api_send_poll(&params).await {
+                    Ok(poll_id) if !poll_id.is_empty() => {
+                        self.poll_contexts.insert(
+                            poll_id,
+                            PollContext {
+                                question: question.clone(),
+                                options: options.clone(),
+                            },
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => return Err(e),
+                }
             }
             ChannelContent::PollAnswer { .. } => {
                 debug!("Telegram: ignoring outbound PollAnswer");
@@ -1382,6 +1413,7 @@ impl ChannelAdapter for TelegramAdapter {
         let long_poll_timeout = self.long_poll_timeout;
         let poll_handle = self.poll_handle.clone();
         let bot_commands = effective_commands;
+        let poll_contexts = self.poll_contexts.clone();
 
         let handle = tokio::spawn(async move {
             let ctx = TelegramApiCtx {
@@ -1580,6 +1612,17 @@ impl ChannelAdapter for TelegramAdapter {
                             if let Some(ref aid) = account_id {
                                 msg.metadata
                                     .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+
+                            if let Some(ctx) = poll_contexts.get(&msg.platform_message_id) {
+                                msg.metadata.insert(
+                                    "poll_question".to_string(),
+                                    serde_json::json!(ctx.question),
+                                );
+                                msg.metadata.insert(
+                                    "poll_options".to_string(),
+                                    serde_json::json!(ctx.options),
+                                );
                             }
 
                             debug!(

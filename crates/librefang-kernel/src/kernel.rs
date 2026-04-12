@@ -11348,6 +11348,44 @@ impl KernelHandle for LibreFangKernel {
         ))
     }
 
+    async fn send_channel_poll(
+        &self,
+        channel: &str,
+        recipient: &str,
+        question: &str,
+        options: &[String],
+        is_quiz: bool,
+        correct_option_id: Option<u8>,
+        explanation: Option<&str>,
+    ) -> Result<(), String> {
+        let adapter = self
+            .channel_adapters
+            .get(channel)
+            .ok_or_else(|| format!("Channel adapter '{channel}' not found"))?
+            .clone();
+
+        let user = librefang_channels::types::ChannelUser {
+            platform_id: recipient.to_string(),
+            display_name: recipient.to_string(),
+            librefang_user: None,
+        };
+
+        let content = librefang_channels::types::ChannelContent::Poll {
+            question: question.to_string(),
+            options: options.to_vec(),
+            is_quiz,
+            correct_option_id,
+            explanation: explanation.map(|s| s.to_string()),
+        };
+
+        adapter
+            .send(&user, content)
+            .await
+            .map_err(|e| format!("Channel poll send failed: {e}"))?;
+
+        Ok(())
+    }
+
     async fn spawn_agent_checked(
         &self,
         manifest_toml: &str,

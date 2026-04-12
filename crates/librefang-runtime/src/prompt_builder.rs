@@ -555,17 +555,19 @@ fn build_channel_section(
     if has_channel_send {
         if let Some(id) = sender_id {
             section.push_str(&format!(
-                "\n\nTo send images, files, or other media to the user, use the `channel_send` tool \
+                "\n\nTo send images, files, polls, or other media to the user, use the `channel_send` tool \
                  with channel=\"{channel}\" and recipient=\"{id}\". Set `image_url` for photos, \
-                 `file_url` or `file_path` for file attachments. Your normal text replies are sent \
-                 automatically — only use `channel_send` when you need to send media.",
+                 `file_url` or `file_path` for file attachments, `poll_question` + `poll_options` \
+                 to create a poll (add `poll_is_quiz` and `poll_correct_option` for a quiz). \
+                 Your normal text replies are sent automatically — only use `channel_send` when you need to send media.",
             ));
         } else {
             section.push_str(
-                "\n\nTo send images, files, or other media to the user, use the `channel_send` tool. \
-                 Set `image_url` for photos, `file_url` or `file_path` for file attachments. \
-                 Your normal text replies are sent automatically — only use `channel_send` when you \
-                 need to send media.",
+                "\n\nTo send images, files, polls, or other media to the user, use the `channel_send` tool. \
+                 Set `image_url` for photos, `file_url` or `file_path` for file attachments, \
+                 `poll_question` + `poll_options` to create a poll (add `poll_is_quiz` and \
+                 `poll_correct_option` for a quiz). Your normal text replies are sent automatically \
+                 — only use `channel_send` when you need to send media.",
             );
         }
     }
@@ -710,7 +712,7 @@ pub fn tool_hint(name: &str) -> &'static str {
         "agent_kill" => "terminate an agent",
 
         // Channel
-        "channel_send" => "send a message, image, or file to a channel user",
+        "channel_send" => "send a message, image, file, or poll to a channel user",
 
         // Media
         "image_describe" => "describe an image",
