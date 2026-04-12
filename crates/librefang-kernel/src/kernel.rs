@@ -3798,12 +3798,10 @@ system_prompt = "You are a helpful assistant."
         // per-channel. For non-channel invocations, respect the agent's session_mode.
         let effective_session_id = match sender_context {
             Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
-            _ => {
-                match entry.manifest.session_mode {
-                    librefang_types::agent::SessionMode::Persistent => entry.session_id,
-                    librefang_types::agent::SessionMode::New => SessionId::new(),
-                }
-            }
+            _ => match entry.manifest.session_mode {
+                librefang_types::agent::SessionMode::Persistent => entry.session_id,
+                librefang_types::agent::SessionMode::New => SessionId::new(),
+            },
         };
 
         let mut session = self
@@ -4905,8 +4903,7 @@ system_prompt = "You are a helpful assistant."
         let effective_session_id = match sender_context {
             Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
             _ => {
-                let mode = session_mode_override
-                    .unwrap_or(entry.manifest.session_mode);
+                let mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
                 match mode {
                     librefang_types::agent::SessionMode::Persistent => entry.session_id,
                     librefang_types::agent::SessionMode::New => SessionId::new(),
