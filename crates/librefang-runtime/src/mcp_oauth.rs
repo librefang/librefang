@@ -34,9 +34,47 @@ pub struct OAuthMetadata {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum McpAuthState {
     NotRequired,
-    Authorized { expires_at: Option<String> },
-    PendingAuth { auth_url: String },
+    Authorized {
+        #[serde(default)]
+        expires_at: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<OAuthTokens>,
+    },
+    PendingAuth {
+        auth_url: String,
+    },
     Expired,
+    Error {
+        message: String,
+    },
+}
+
+/// Shared map of per-server MCP OAuth authentication states.
+pub type McpAuthStates = tokio::sync::Mutex<std::collections::HashMap<String, McpAuthState>>;
+
+/// No-op OAuth provider that never stores or loads tokens.
+///
+/// Used as the default when no real provider is configured.
+pub struct NoOpOAuthProvider;
+
+#[async_trait]
+impl McpOAuthProvider for NoOpOAuthProvider {
+    async fn load_token(&self, _server_url: &str) -> Option<String> {
+        None
+    }
+    async fn store_tokens(&self, _server_url: &str, _tokens: OAuthTokens) -> Result<(), String> {
+        Ok(())
+    }
+    async fn clear_tokens(&self, _server_url: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn start_auth_flow(
+        &self,
+        _server_url: &str,
+        _metadata: OAuthMetadata,
+    ) -> Result<AuthFlowHandle, String> {
+        Err("No OAuth provider configured".to_string())
+    }
 }
 
 /// OAuth token response from the token endpoint.

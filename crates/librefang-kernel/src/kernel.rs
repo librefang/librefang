@@ -313,10 +313,6 @@ pub struct LibreFangKernel {
         Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync>,
     /// MCP tool definitions cache (populated after connections are established).
     pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
-    /// Per-server OAuth authentication state for MCP connections.
-    pub(crate) mcp_auth_states: tokio::sync::Mutex<
-        std::collections::HashMap<String, librefang_runtime::mcp_oauth::McpAuthState>,
-    >,
     /// A2A task store for tracking task lifecycle.
     pub a2a_task_store: librefang_runtime::a2a::A2aTaskStore,
     /// Discovered external A2A agent cards.
@@ -1368,32 +1364,10 @@ impl LibreFangKernel {
         Arc::clone(&self.mcp_oauth_provider)
     }
 
-    /// Retry a pending MCP server connection (e.g. after OAuth tokens are obtained).
-    pub async fn retry_mcp_connection(&self, name: &str) {
-        tracing::info!(server = name, "Retrying MCP connection after OAuth");
-        // Remove any existing connection for this server so reconnect picks it up
-        {
-            let mut conns = self.mcp_connections.lock().await;
-            conns.retain(|c| c.name() != name);
-        }
-        // The next agent loop iteration or background MCP init will reconnect.
-        // For now we just clear the old connection so it can be re-established.
-    }
-
     /// MCP tool definitions cache.
     #[inline]
     pub fn mcp_tools_ref(&self) -> &std::sync::Mutex<Vec<ToolDefinition>> {
         &self.mcp_tools
-    }
-
-    /// Per-server MCP OAuth authentication states.
-    #[inline]
-    pub fn mcp_auth_states_ref(
-        &self,
-    ) -> &tokio::sync::Mutex<
-        std::collections::HashMap<String, librefang_runtime::mcp_oauth::McpAuthState>,
-    > {
-        &self.mcp_auth_states
     }
 
     /// Create a new `KernelOAuthProvider` backed by this kernel's vault.
@@ -2532,7 +2506,6 @@ impl LibreFangKernel {
             mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             mcp_oauth_provider: Arc::new(librefang_runtime::mcp_oauth::NoOpOAuthProvider),
             mcp_tools: std::sync::Mutex::new(Vec::new()),
-            mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             a2a_task_store: librefang_runtime::a2a::A2aTaskStore::default(),
             a2a_external_agents: std::sync::Mutex::new(Vec::new()),
             web_ctx,
@@ -9144,6 +9117,8 @@ system_prompt = "You are a helpful assistant."
             timeout_secs: server_config.timeout_secs,
             env: server_config.env.clone(),
             headers: server_config.headers.clone(),
+            oauth_provider: Some(self.oauth_provider_ref()),
+            oauth_config: server_config.oauth.clone(),
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -9166,7 +9141,10 @@ system_prompt = "You are a helpful assistant."
                 // Update auth state to Authorized
                 self.mcp_auth_states.lock().await.insert(
                     server_name.to_string(),
-                    librefang_runtime::mcp_oauth::McpAuthState::Authorized { expires_at: None },
+                    librefang_runtime::mcp_oauth::McpAuthState::Authorized {
+                        expires_at: None,
+                        tokens: None,
+                    },
                 );
             }
             Err(e) => {

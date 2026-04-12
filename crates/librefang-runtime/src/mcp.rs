@@ -527,7 +527,10 @@ impl McpConnection {
                     .map_err(|e| format!("MCP tools/list failed: {e}"))?;
 
                 let auth_state = if used_oauth_token {
-                    crate::mcp_oauth::McpAuthState::Authorized { expires_at: None }
+                    crate::mcp_oauth::McpAuthState::Authorized {
+                        expires_at: None,
+                        tokens: None,
+                    }
                 } else {
                     crate::mcp_oauth::McpAuthState::NotRequired
                 };

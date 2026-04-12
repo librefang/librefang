@@ -9,7 +9,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::mcp_oauth::{self, McpAuthState, McpOAuthConfig};
+use librefang_runtime::mcp_oauth::{self, McpAuthState};
+use librefang_types::config::McpOAuthConfig;
 use std::sync::Arc;
 
 /// GET /api/mcp/servers/{name}/auth/status
@@ -57,7 +58,7 @@ pub async fn auth_status(
     let state_label = if is_connected {
         "not_required"
     } else {
-        "not_required"
+        "unknown"
     };
 
     (
@@ -115,23 +116,21 @@ pub async fn auth_start(
 
     // Discover OAuth metadata
     let oauth_config = McpOAuthConfig::default();
-    let metadata = match mcp_oauth::discover_oauth_metadata(&server_url, &oauth_config).await {
-        Ok(m) => m,
-        Err(e) => {
-            // Store error state
-            let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
-            auth_states.insert(name.clone(), McpAuthState::Error { message: e.clone() });
-            return ApiErrorResponse::bad_request(format!("OAuth discovery failed: {e}"))
-                .into_json_tuple();
-        }
-    };
+    let metadata =
+        match mcp_oauth::discover_oauth_metadata(&server_url, None, Some(&oauth_config)).await {
+            Ok(m) => m,
+            Err(e) => {
+                // Store error state
+                let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
+                auth_states.insert(name.clone(), McpAuthState::Error { message: e.clone() });
+                return ApiErrorResponse::bad_request(format!("OAuth discovery failed: {e}"))
+                    .into_json_tuple();
+            }
+        };
 
     // Start auth flow via provider
     let provider = state.kernel.oauth_provider_ref();
-    let handle = match provider
-        .start_auth_flow(&name, &metadata, &oauth_config)
-        .await
-    {
+    let handle = match provider.start_auth_flow(&name, metadata.clone()).await {
         Ok(h) => h,
         Err(e) => {
             let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
@@ -165,6 +164,7 @@ pub async fn auth_start(
                 auth_states.insert(
                     server_name.clone(),
                     McpAuthState::Authorized {
+                        expires_at: None,
                         tokens: Some(tokens),
                     },
                 );
