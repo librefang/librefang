@@ -306,6 +306,11 @@ pub struct LibreFangKernel {
     pub(crate) running_tasks: dashmap::DashMap<AgentId, tokio::task::AbortHandle>,
     /// MCP server connections (lazily initialized at start_background_agents).
     pub(crate) mcp_connections: tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>>,
+    /// Per-server MCP OAuth authentication state.
+    pub(crate) mcp_auth_states: librefang_runtime::mcp_oauth::McpAuthStates,
+    /// Pluggable OAuth provider for MCP server authorization flows.
+    pub(crate) mcp_oauth_provider:
+        Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync>,
     /// MCP tool definitions cache (populated after connections are established).
     pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
     /// Per-server OAuth authentication state for MCP connections.
@@ -1347,6 +1352,32 @@ impl LibreFangKernel {
         &self,
     ) -> &tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>> {
         &self.mcp_connections
+    }
+
+    /// Per-server MCP OAuth authentication states.
+    #[inline]
+    pub fn mcp_auth_states_ref(&self) -> &librefang_runtime::mcp_oauth::McpAuthStates {
+        &self.mcp_auth_states
+    }
+
+    /// Pluggable OAuth provider for MCP server auth flows.
+    #[inline]
+    pub fn oauth_provider_ref(
+        &self,
+    ) -> Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync> {
+        Arc::clone(&self.mcp_oauth_provider)
+    }
+
+    /// Retry a pending MCP server connection (e.g. after OAuth tokens are obtained).
+    pub async fn retry_mcp_connection(&self, name: &str) {
+        tracing::info!(server = name, "Retrying MCP connection after OAuth");
+        // Remove any existing connection for this server so reconnect picks it up
+        {
+            let mut conns = self.mcp_connections.lock().await;
+            conns.retain(|c| c.name() != name);
+        }
+        // The next agent loop iteration or background MCP init will reconnect.
+        // For now we just clear the old connection so it can be re-established.
     }
 
     /// MCP tool definitions cache.
@@ -2498,6 +2529,8 @@ impl LibreFangKernel {
             skill_registry: std::sync::RwLock::new(skill_registry),
             running_tasks: dashmap::DashMap::new(),
             mcp_connections: tokio::sync::Mutex::new(Vec::new()),
+            mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            mcp_oauth_provider: Arc::new(librefang_runtime::mcp_oauth::NoOpOAuthProvider),
             mcp_tools: std::sync::Mutex::new(Vec::new()),
             mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             a2a_task_store: librefang_runtime::a2a::A2aTaskStore::default(),

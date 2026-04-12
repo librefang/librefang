@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "2026.4.10-beta17"
+    "version": "2026.4.11-beta18"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -7657,6 +7657,13 @@
           "manifest_toml": {
             "type": "string",
             "description": "Agent manifest as TOML string (optional if `template` is provided)."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional custom name for the agent. Overrides the name from the template\nor manifest, allowing multiple agents from the same template."
           },
           "signed_manifest": {
             "type": [
