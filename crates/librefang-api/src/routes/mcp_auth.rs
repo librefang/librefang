@@ -236,15 +236,25 @@ pub async fn auth_start(
     let pkce_state = mcp_oauth::generate_state();
 
     // Store PKCE state in vault for the callback to retrieve
-    let store = |field: &str, value: &str| {
-        let _ = provider.vault_set(&KernelOAuthProvider::vault_key(&server_url, field), value);
+    let store = |field: &str, value: &str| -> Result<(), String> {
+        provider.vault_set(&KernelOAuthProvider::vault_key(&server_url, field), value)
     };
-    store("pkce_verifier", &pkce_verifier);
-    store("pkce_state", &pkce_state);
-    store("token_endpoint", &metadata.token_endpoint);
-    store("redirect_uri", &redirect_uri);
+    if let Err(e) = store("pkce_verifier", &pkce_verifier) {
+        tracing::error!(error = %e, "Failed to store PKCE verifier in vault");
+        return ApiErrorResponse::internal(format!(
+            "Failed to store auth state: {e}. Ensure LIBREFANG_VAULT_KEY is set in Docker."
+        ))
+        .into_json_tuple();
+    }
+    if let Err(e) = store("pkce_state", &pkce_state) {
+        tracing::error!(error = %e, "Failed to store PKCE state in vault");
+        return ApiErrorResponse::internal(format!("Failed to store auth state: {e}"))
+            .into_json_tuple();
+    }
+    let _ = store("token_endpoint", &metadata.token_endpoint);
+    let _ = store("redirect_uri", &redirect_uri);
     if let Some(ref cid) = client_id {
-        store("client_id", cid);
+        let _ = store("client_id", cid);
     }
 
     // Build authorization URL
@@ -387,10 +397,17 @@ pub async fn auth_callback(
     let stored_state = match load("pkce_state") {
         Some(s) => s,
         None => {
+            tracing::error!(
+                server = %name,
+                server_url = %server_url,
+                "PKCE state not found in vault — vault may not be initialized or \
+                 LIBREFANG_VAULT_KEY not set"
+            );
             return axum::response::Html(
                 "<html><body>\
                  <h2>Authorization Failed</h2>\
                  <p>No pending auth flow found (PKCE state missing from vault).</p>\
+                 <p>Check that LIBREFANG_VAULT_KEY is set in your environment.</p>\
                  <p>You can close this tab.</p>\
                  </body></html>"
                     .to_string(),
