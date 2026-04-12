@@ -8952,33 +8952,21 @@ system_prompt = "You are a helpful assistant."
                 Err(e) => {
                     let err_str = e.to_string();
 
-                    // Check if this is an OAuth-pending error (HTTP 401 from an
+                    // Check if this is an OAuth-needed signal (HTTP 401 from an
                     // MCP server that supports OAuth). The MCP connection layer
-                    // may signal this by prefixing the error with "OAUTH_PENDING:".
-                    if err_str.starts_with("OAUTH_PENDING:") {
-                        let auth_url = err_str
-                            .strip_prefix("OAUTH_PENDING:")
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
+                    // returns "OAUTH_NEEDS_AUTH" when auth is required but defers
+                    // the actual PKCE flow to the API layer.
+                    if err_str == "OAUTH_NEEDS_AUTH" {
                         info!(
                             server = %server_config.name,
-                            "MCP server requires OAuth — authorization pending"
+                            "MCP server requires OAuth — waiting for UI-driven auth"
                         );
                         self.mcp_auth_states.lock().await.insert(
                             server_config.name.clone(),
                             librefang_runtime::mcp_oauth::McpAuthState::PendingAuth {
-                                auth_url: auth_url.clone(),
+                                auth_url: String::new(),
                             },
                         );
-                        // Spawn a watcher task that will retry once the OAuth
-                        // flow completes (poll vault for token every 10s,
-                        // up to 5 minutes).
-                        let kernel = Arc::clone(self);
-                        let server_name = server_config.name.clone();
-                        tokio::spawn(async move {
-                            kernel.watch_oauth_completion(&server_name).await;
-                        });
                     } else {
                         warn!(
                             server = %server_config.name,
@@ -9005,6 +8993,10 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Polls every 10 seconds for up to 5 minutes. When a token appears, calls
     /// `retry_mcp_connection` to establish the MCP connection.
+    ///
+    /// Note: Currently unused — the API layer drives OAuth completion via the
+    /// callback endpoint. Retained for potential future use by non-API flows.
+    #[allow(dead_code)]
     async fn watch_oauth_completion(self: &Arc<Self>, server_name: &str) {
         let provider = self.oauth_provider();
         // Determine the server URL from effective_mcp_servers config

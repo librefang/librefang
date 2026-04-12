@@ -570,31 +570,14 @@ impl McpConnection {
                     )
                 })?;
 
-                // If we have an OAuth provider, start the auth flow.
-                if let Some(provider) = oauth_provider {
-                    match provider.start_auth_flow(url, metadata).await {
-                        Ok(handle) => {
-                            warn!(
-                                url = %url,
-                                auth_url = %handle.auth_url,
-                                "MCP server requires OAuth — visit the auth URL to authenticate"
-                            );
-                            Err(format!("OAUTH_PENDING:{}", handle.auth_url))
-                        }
-                        Err(flow_err) => Err(format!(
-                            "MCP Streamable HTTP connection failed (OAuth flow start \
-                             failed): {flow_err}"
-                        )),
-                    }
-                } else {
-                    // No provider — report the auth URL from metadata so callers can handle it.
-                    warn!(
-                        url = %url,
-                        auth_endpoint = %metadata.authorization_endpoint,
-                        "MCP server requires OAuth but no provider configured"
-                    );
-                    Err(format!("OAUTH_PENDING:{}", metadata.authorization_endpoint))
-                }
+                // Signal that auth is needed — the API layer will drive the
+                // PKCE flow via the UI instead of the daemon opening a browser.
+                warn!(
+                    url = %url,
+                    auth_endpoint = %metadata.authorization_endpoint,
+                    "MCP server requires OAuth — deferring to API layer"
+                );
+                Err("OAUTH_NEEDS_AUTH".to_string())
             }
         }
     }

@@ -70,13 +70,13 @@ impl KernelOAuthProvider {
     }
 
     /// Convenience: vault key for a specific server URL and field.
-    fn vault_key(server_url: &str, field: &str) -> String {
+    pub fn vault_key(server_url: &str, field: &str) -> String {
         format!("{VAULT_PREFIX}:{server_url}:{field}")
     }
 
     /// Read a value from the vault. Returns `None` if the vault cannot be
     /// unlocked or the key is missing.
-    fn vault_get(&self, key: &str) -> Option<String> {
+    pub fn vault_get(&self, key: &str) -> Option<String> {
         let vault_path = self.home_dir.join("vault.enc");
         let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
         if vault.unlock().is_err() {
@@ -86,7 +86,7 @@ impl KernelOAuthProvider {
     }
 
     /// Write a value to the vault. Creates the vault if it does not exist.
-    fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
+    pub fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
         let vault_path = self.home_dir.join("vault.enc");
         let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
         if !vault.exists() {
@@ -166,7 +166,7 @@ impl KernelOAuthProvider {
     /// POSTs to the registration endpoint to obtain a client_id.
     /// This is required by servers like Notion's MCP that don't provide
     /// a pre-configured client_id.
-    async fn register_client(
+    pub async fn register_client(
         &self,
         registration_endpoint: &str,
         redirect_uri: &str,
