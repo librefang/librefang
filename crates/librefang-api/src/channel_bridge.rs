@@ -642,6 +642,119 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(agent_id)
     }
 
+    async fn get_agent_aliases(&self, agent_id: AgentId) -> Vec<String> {
+        self.kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|entry| {
+                entry
+                    .manifest
+                    .metadata
+                    .get("routing")
+                    .and_then(|r| r.get("aliases"))
+                    .and_then(|a| a.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn roster_upsert(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+        display_name: &str,
+        username: Option<&str>,
+    ) {
+        use librefang_runtime::kernel_handle::KernelHandle;
+        let _ = self
+            .kernel
+            .roster_upsert(channel, chat_id, user_id, display_name, username);
+    }
+
+    async fn classify_reply_intent(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        context: Option<&str>,
+    ) -> Result<bool, String> {
+        // Use the agent's custom PRECHECK.md prompt if it exists, otherwise a
+        // sensible default.  This lets operators tune sensitivity per-agent
+        // without recompiling.
+        let custom_prompt = self.get_precheck_prompt(agent_id).await;
+
+        const DEFAULT_SYSTEM: &str = "\
+            Decide whether the assistant should reply to this group chat message.\n\
+            Return exactly one word: REPLY or NO_REPLY.\n\n\
+            Rules:\n\
+            - If the message is addressed to the assistant, asks a question, or \
+              continues a conversation the assistant is part of → REPLY\n\
+            - If the message is casual chat between humans that doesn't concern \
+              the assistant → NO_REPLY\n\
+            - When in doubt, prefer NO_REPLY to avoid being noisy.";
+
+        let system = custom_prompt.as_deref().unwrap_or(DEFAULT_SYSTEM);
+
+        // Build the user message, optionally prepending conversation context
+        // so the classifier can detect replies/continuations.
+        let user_msg = match context {
+            Some(ctx) => format!("{ctx}\n\n{message}"),
+            None => message.to_string(),
+        };
+
+        match self
+            .kernel
+            .classify_text(agent_id, system, &user_msg, 10)
+            .await
+        {
+            Ok(response) => {
+                let trimmed = response.trim().to_uppercase();
+                Ok(!trimmed.contains("NO_REPLY"))
+            }
+            Err(e) => {
+                // Fail-open: if LLM fails, fall back to heuristic
+                tracing::warn!(
+                    error = %e,
+                    "LLM reply-intent classification failed — falling back to heuristic"
+                );
+                // If replying to the bot, always respond
+                if context.is_some() {
+                    return Ok(true);
+                }
+                let trimmed = message.trim();
+                if trimmed.len() < 5 {
+                    return Ok(false);
+                }
+                if trimmed.contains('?') {
+                    return Ok(true);
+                }
+                let lower = trimmed.to_lowercase();
+                let greetings = ["hola", "buenas", "hey", "hi", "hello", "oye", "ayuda"];
+                Ok(greetings.iter().any(|g| lower.starts_with(g)))
+            }
+        }
+    }
+
+    async fn get_precheck_prompt(&self, agent_id: AgentId) -> Option<String> {
+        let registry = self.kernel.agent_registry();
+        let entry = registry.get(agent_id)?;
+        let workspace = entry.manifest.workspace.as_ref()?;
+        let path = workspace.join("PRECHECK.md");
+        tokio::fs::read_to_string(&path).await.ok()
+    }
+
+    async fn agent_upload_dir(&self, agent_id: AgentId) -> Option<std::path::PathBuf> {
+        let registry = self.kernel.agent_registry();
+        let entry = registry.get(agent_id)?;
+        let workspace = entry.manifest.workspace.as_ref()?;
+        Some(workspace.join("uploads"))
+    }
+
     async fn uptime_info(&self) -> String {
         let uptime = self.started_at.elapsed();
         let agents = self.list_agents().await.unwrap_or_default();

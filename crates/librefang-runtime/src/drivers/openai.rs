@@ -68,7 +68,12 @@ impl OpenAIDriver {
 
     /// True if this provider is Moonshot/Kimi and requires reasoning_content on assistant messages with tool_calls.
     fn kimi_needs_reasoning_content(&self, model: &str) -> bool {
-        self.base_url.contains("moonshot") || model.to_lowercase().contains("kimi")
+        self.is_moonshot() || model.to_lowercase().contains("kimi")
+    }
+
+    /// True if the base URL points to Moonshot/Kimi.
+    fn is_moonshot(&self) -> bool {
+        self.base_url.contains("moonshot")
     }
 
     /// True if this model is DeepSeek-reasoner (R1).
@@ -339,6 +344,19 @@ impl OpenAIDriver {
                 }
                 (Role::User, MessageContent::Blocks(blocks)) => {
                     // Handle tool results and images in user messages
+                    let block_summary: Vec<&str> = blocks
+                        .iter()
+                        .map(|b| match b {
+                            ContentBlock::Text { .. } => "Text",
+                            ContentBlock::Image { .. } => "Image(base64)",
+                            ContentBlock::ImageFile { .. } => "ImageFile",
+                            ContentBlock::ToolResult { .. } => "ToolResult",
+                            ContentBlock::ToolUse { .. } => "ToolUse",
+                            ContentBlock::Thinking { .. } => "Thinking",
+                            _ => "Other",
+                        })
+                        .collect();
+                    tracing::debug!(blocks = ?block_summary, "build_request: user Blocks content");
                     let mut parts: Vec<OaiContentPart> = Vec::new();
                     let mut has_tool_results = false;
                     for block in blocks {
@@ -884,6 +902,7 @@ impl LlmDriver for OpenAIDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
+        // Kimi vision accepts base64 image_url natively — no file upload needed.
         let mut oai_request = self.build_request(&request)?;
         oai_request.stream = true;
         oai_request.stream_options = Some(serde_json::json!({"include_usage": true}));
