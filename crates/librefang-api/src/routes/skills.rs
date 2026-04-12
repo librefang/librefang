@@ -127,6 +127,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::post(super::mcp_auth::auth_start),
         )
         .route(
+            "/mcp/servers/{name}/auth/callback",
+            axum::routing::get(super::mcp_auth::auth_callback),
+        )
+        .route(
             "/mcp/servers/{name}/auth/revoke",
             axum::routing::delete(super::mcp_auth::auth_revoke),
         )
