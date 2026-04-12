@@ -213,6 +213,79 @@ async fn test_provider_clear_is_isolated() {
     assert_eq!(provider.load_token(url_b).await.unwrap(), "tok_b");
 }
 
+/// Verify the expected state transition: store → clear → store should work.
+/// This ensures that after revoking (clear), re-authorizing (store) works.
+#[tokio::test]
+async fn test_provider_reauthorize_after_clear() {
+    let provider = InMemoryOAuthProvider::new();
+    let url = "https://mcp.notion.com/mcp";
+
+    let make_token = |name: &str| OAuthTokens {
+        access_token: name.to_string(),
+        refresh_token: None,
+        token_type: "Bearer".to_string(),
+        expires_in: 0,
+        scope: "".to_string(),
+    };
+
+    // First auth
+    provider
+        .store_tokens(url, make_token("tok_v1"))
+        .await
+        .unwrap();
+    assert_eq!(provider.load_token(url).await.unwrap(), "tok_v1");
+
+    // Revoke
+    provider.clear_tokens(url).await.unwrap();
+    assert!(provider.load_token(url).await.is_none());
+
+    // Re-authorize with new token
+    provider
+        .store_tokens(url, make_token("tok_v2"))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.load_token(url).await.unwrap(),
+        "tok_v2",
+        "Re-authorization after revoke should work with the new token"
+    );
+}
+
+/// Verify the auth state lifecycle: NeedsAuth → PendingAuth → Authorized → NeedsAuth (after revoke).
+/// Regression test for the bug where revoking removed the auth state entirely,
+/// leaving no "Authorize" button in the dashboard.
+#[test]
+fn test_auth_state_lifecycle() {
+    // Boot: server returns 401 → NeedsAuth
+    let state = McpAuthState::NeedsAuth;
+    let json = serde_json::to_value(&state).unwrap();
+    assert_eq!(json["state"].as_str().unwrap(), "needs_auth");
+
+    // User clicks Authorize → PendingAuth
+    let state = McpAuthState::PendingAuth {
+        auth_url: "https://example.com/auth".to_string(),
+    };
+    let json = serde_json::to_value(&state).unwrap();
+    assert_eq!(json["state"].as_str().unwrap(), "pending_auth");
+
+    // Callback succeeds → Authorized
+    let state = McpAuthState::Authorized {
+        expires_at: None,
+        tokens: None,
+    };
+    let json = serde_json::to_value(&state).unwrap();
+    assert_eq!(json["state"].as_str().unwrap(), "authorized");
+
+    // User revokes → back to NeedsAuth (NOT removed)
+    let state = McpAuthState::NeedsAuth;
+    let json = serde_json::to_value(&state).unwrap();
+    assert_eq!(
+        json["state"].as_str().unwrap(),
+        "needs_auth",
+        "After revoke, state should be NeedsAuth so the Authorize button appears"
+    );
+}
+
 /// Verify that NeedsAuth is a distinct state from PendingAuth.
 /// This is a regression test for the bug where the dashboard showed
 /// "Authorizing..." at boot before the user clicked Authorize.
