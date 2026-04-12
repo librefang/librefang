@@ -572,12 +572,10 @@ pub async fn auth_callback(
         );
     }
 
-    // Retry the MCP connection now that we have tokens
-    let kernel = Arc::clone(&state.kernel);
-    let server_name = name.clone();
-    tokio::spawn(async move {
-        kernel.retry_mcp_connection(&server_name).await;
-    });
+    // Retry the MCP connection now that we have tokens.
+    // Await inline so the connection is established before the response,
+    // avoiding the brief "Authorized but Disconnected" state in the dashboard.
+    state.kernel.retry_mcp_connection(&name).await;
 
     axum::response::Html(
         "<html><body>\
@@ -628,10 +626,10 @@ pub async fn auth_revoke(
         tracing::warn!(server = %name, error = %e, "Failed to clear OAuth tokens");
     }
 
-    // Remove auth state
+    // Set auth state to NeedsAuth so the dashboard shows the Authorize button
     {
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
-        auth_states.remove(&name);
+        auth_states.insert(name.clone(), McpAuthState::NeedsAuth);
     }
 
     // Remove from MCP connections so next reconnect is clean
