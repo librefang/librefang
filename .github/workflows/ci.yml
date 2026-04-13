@@ -29,6 +29,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       docs: ${{ steps.filter.outputs.docs }}
       ci: ${{ steps.filter.outputs.ci }}
+      install: ${{ steps.filter.outputs.install }}
       crates: ${{ steps.crates.outputs.crates }}
     steps:
       - uses: actions/checkout@v6
@@ -48,6 +49,10 @@ jobs:
               - '*.md'
             ci:
               - '.github/workflows/**'
+            install:
+              - 'web/public/install.sh'
+              - 'web/public/install.ps1'
+              - 'scripts/tests/install_sh_test.sh'
       - name: Detect affected crates
         id: crates
         if: steps.filter.outputs.rust == 'true'
@@ -140,6 +145,8 @@ jobs:
   # ── Security audit (independent) ─────────────────────────────────────────────────────
   security:
     name: Security
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -191,6 +198,8 @@ jobs:
   # ── Installer smoke test (fast, independent) ────────────────────────────────────────
   install-smoke:
     name: Install Smoke
+    needs: changes
+    if: needs.changes.outputs.install == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
