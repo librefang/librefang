@@ -3898,7 +3898,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "argon2",
  "async-trait",
@@ -3958,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "aes",
  "async-trait",
@@ -4007,7 +4007,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "clap",
  "clap_complete",
@@ -4036,14 +4036,13 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "unic-langid",
- "ureq",
  "uuid",
  "zeroize",
 ]
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "axum",
  "clap",
@@ -4073,7 +4072,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4106,7 +4105,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4125,7 +4124,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4168,7 +4167,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4189,7 +4188,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-migrate"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4208,7 +4207,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4260,7 +4259,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4287,7 +4286,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -4296,7 +4295,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "async-trait",
  "axum",
@@ -4323,7 +4322,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4344,7 +4343,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "async-trait",
  "chrono",
@@ -8899,16 +8898,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-serde"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
-dependencies = [
- "serde",
- "tracing-core",
-]
-
-[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8918,15 +8907,12 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
- "serde",
- "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
- "tracing-serde",
 ]
 
 [[package]]
@@ -10810,7 +10796,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "base64 0.22.1",
  "chrono",
