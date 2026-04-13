@@ -106,6 +106,16 @@ pub trait ChannelBridgeHandle: Send + Sync {
         "Provider listing not available.".to_string()
     }
 
+    /// Return (provider_id, display_name, auth_ok) for each provider.
+    async fn list_providers_interactive(&self) -> Vec<(String, String, bool)> {
+        Vec::new()
+    }
+
+    /// Return (model_id, display_name) for models belonging to the given provider.
+    async fn list_models_by_provider(&self, _provider_id: &str) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Send an ephemeral "side question" (`/btw`) — answered with the agent's system
     /// prompt but without loading or saving session history.
     async fn send_message_ephemeral(
@@ -612,6 +622,7 @@ fn content_to_text(content: &ChannelContent) -> String {
         ChannelContent::DeleteMessage { message_id } => {
             format!("[Delete message: {message_id}]")
         }
+        ChannelContent::EditInteractive { text, .. } => text.clone(),
         ChannelContent::Audio {
             url,
             caption,
@@ -1874,6 +1885,47 @@ async fn dispatch_message(
                 }
                 // Empty agent list — fall through to handle_command for plain text response.
             }
+            // Special-case /models: send an inline keyboard with one button per provider.
+            if name == "models" {
+                let providers = handle.list_providers_interactive().await;
+                if !providers.is_empty() {
+                    let buttons: Vec<Vec<InteractiveButton>> = providers
+                        .into_iter()
+                        .map(|(pid, pname, _auth_ok)| {
+                            let action = {
+                                let prefix = "prov:";
+                                let max_id_bytes = 64 - prefix.len();
+                                let safe_id = if pid.len() > max_id_bytes {
+                                    &pid[..max_id_bytes]
+                                } else {
+                                    &pid
+                                };
+                                format!("{prefix}{safe_id}")
+                            };
+                            vec![InteractiveButton {
+                                label: pname,
+                                action,
+                                style: None,
+                                url: None,
+                            }]
+                        })
+                        .collect();
+                    let content = ChannelContent::Interactive {
+                        text: "Select a provider:".to_string(),
+                        buttons,
+                    };
+                    let result = if let Some(tid) = thread_id {
+                        adapter.send_in_thread(&message.sender, content, tid).await
+                    } else {
+                        adapter.send(&message.sender, content).await
+                    };
+                    if let Err(e) = result {
+                        error!("Failed to send /models interactive message: {e}");
+                    }
+                    return;
+                }
+                // Empty provider list — fall through to handle_command for plain text response.
+            }
             let result = handle_command(
                 name,
                 args,
@@ -1922,6 +1974,137 @@ async fn dispatch_message(
             return;
         }
         // Image download failed — fall through to text description below
+    }
+
+    // Intercept interactive menu callbacks before forwarding to LLM.
+    if let ChannelContent::ButtonCallback { ref action, .. } = message.content {
+        if action.starts_with("prov:") || action.starts_with("model:") || action == "back:providers"
+        {
+            let mid = message
+                .metadata
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            let Some(message_id) = mid else {
+                debug!("ButtonCallback menu: missing message_id in metadata, ignoring");
+                return;
+            };
+            if action.starts_with("prov:") {
+                let provider_id = action.strip_prefix("prov:").unwrap_or("");
+                let models = handle.list_models_by_provider(provider_id).await;
+                let provider_label = provider_id.to_string();
+                let mut buttons: Vec<Vec<InteractiveButton>> = models
+                    .iter()
+                    .map(|(mid_str, mlabel)| {
+                        let action_str = {
+                            let prefix = "model:";
+                            let max_bytes = 64 - prefix.len();
+                            let safe_id = if mid_str.len() > max_bytes {
+                                &mid_str[..max_bytes]
+                            } else {
+                                mid_str.as_str()
+                            };
+                            format!("{prefix}{safe_id}")
+                        };
+                        vec![InteractiveButton {
+                            label: mlabel.clone(),
+                            action: action_str,
+                            style: None,
+                            url: None,
+                        }]
+                    })
+                    .collect();
+                buttons.push(vec![InteractiveButton {
+                    label: "\u{2B05} Back".to_string(),
+                    action: "back:providers".to_string(),
+                    style: None,
+                    url: None,
+                }]);
+                let content = ChannelContent::EditInteractive {
+                    message_id,
+                    text: format!("{provider_label} \u{2014} select a model:"),
+                    buttons,
+                };
+                let result = if let Some(tid) = thread_id {
+                    adapter.send_in_thread(&message.sender, content, tid).await
+                } else {
+                    adapter.send(&message.sender, content).await
+                };
+                if let Err(e) = result {
+                    error!("Failed to send provider models menu: {e}");
+                }
+            } else if action == "back:providers" {
+                let providers = handle.list_providers_interactive().await;
+                let buttons: Vec<Vec<InteractiveButton>> = providers
+                    .into_iter()
+                    .map(|(pid, pname, _auth_ok)| {
+                        let action_str = {
+                            let prefix = "prov:";
+                            let max_id_bytes = 64 - prefix.len();
+                            let safe_id = if pid.len() > max_id_bytes {
+                                &pid[..max_id_bytes]
+                            } else {
+                                &pid
+                            };
+                            format!("{prefix}{safe_id}")
+                        };
+                        vec![InteractiveButton {
+                            label: pname,
+                            action: action_str,
+                            style: None,
+                            url: None,
+                        }]
+                    })
+                    .collect();
+                let content = ChannelContent::EditInteractive {
+                    message_id,
+                    text: "Select a provider:".to_string(),
+                    buttons,
+                };
+                let result = if let Some(tid) = thread_id {
+                    adapter.send_in_thread(&message.sender, content, tid).await
+                } else {
+                    adapter.send(&message.sender, content).await
+                };
+                if let Err(e) = result {
+                    error!("Failed to send providers back menu: {e}");
+                }
+            } else if action.starts_with("model:") {
+                let model_id = action.strip_prefix("model:").unwrap_or("");
+                let agent_id = router.resolve(
+                    &message.channel,
+                    &message.sender.platform_id,
+                    message.sender.librefang_user.as_deref(),
+                );
+                let label = {
+                    // Best-effort: look up display name from all providers
+                    // (we don't know which provider this model belongs to here)
+                    model_id.to_string()
+                };
+                let confirmation = if let Some(aid) = agent_id {
+                    match handle.set_model(aid, model_id).await {
+                        Ok(_) => format!("\u{2705} Active model: {label}"),
+                        Err(e) => format!("\u{274C} Could not set model: {e}"),
+                    }
+                } else {
+                    format!("\u{2705} Active model: {label}\n(No agent selected \u{2014} use /agent to choose one)")
+                };
+                let content = ChannelContent::EditInteractive {
+                    message_id,
+                    text: confirmation,
+                    buttons: vec![],
+                };
+                let result = if let Some(tid) = thread_id {
+                    adapter.send_in_thread(&message.sender, content, tid).await
+                } else {
+                    adapter.send(&message.sender, content).await
+                };
+                if let Err(e) = result {
+                    error!("Failed to send model confirmation: {e}");
+                }
+            }
+            return;
+        }
     }
 
     let text = match &message.content {
@@ -1995,6 +2178,7 @@ async fn dispatch_message(
         ChannelContent::DeleteMessage { ref message_id } => {
             format!("[Delete message: {message_id}]")
         }
+        ChannelContent::EditInteractive { ref text, .. } => text.clone(),
         ChannelContent::Audio {
             ref url,
             ref caption,
@@ -2130,6 +2314,47 @@ async fn dispatch_message(
                         return;
                     }
                     // Empty agent list — fall through to handle_command for plain text response.
+                }
+                // Special-case /models: send an inline keyboard with one button per provider.
+                if cmd == "models" {
+                    let providers = handle.list_providers_interactive().await;
+                    if !providers.is_empty() {
+                        let buttons: Vec<Vec<InteractiveButton>> = providers
+                            .into_iter()
+                            .map(|(pid, pname, _auth_ok)| {
+                                let action = {
+                                    let prefix = "prov:";
+                                    let max_id_bytes = 64 - prefix.len();
+                                    let safe_id = if pid.len() > max_id_bytes {
+                                        &pid[..max_id_bytes]
+                                    } else {
+                                        &pid
+                                    };
+                                    format!("{prefix}{safe_id}")
+                                };
+                                vec![InteractiveButton {
+                                    label: pname,
+                                    action,
+                                    style: None,
+                                    url: None,
+                                }]
+                            })
+                            .collect();
+                        let content = ChannelContent::Interactive {
+                            text: "Select a provider:".to_string(),
+                            buttons,
+                        };
+                        let result = if let Some(tid) = thread_id {
+                            adapter.send_in_thread(&message.sender, content, tid).await
+                        } else {
+                            adapter.send(&message.sender, content).await
+                        };
+                        if let Err(e) = result {
+                            error!("Failed to send /models interactive message: {e}");
+                        }
+                        return;
+                    }
+                    // Empty provider list — fall through to handle_command for plain text response.
                 }
                 let result = handle_command(
                     cmd,

@@ -706,6 +706,33 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         msg
     }
 
+    async fn list_providers_interactive(&self) -> Vec<(String, String, bool)> {
+        let catalog = self
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog
+            .list_providers()
+            .iter()
+            .filter(|p| p.auth_status.is_available())
+            .map(|p| (p.id.clone(), p.display_name.clone(), true))
+            .collect()
+    }
+
+    async fn list_models_by_provider(&self, provider_id: &str) -> Vec<(String, String)> {
+        let catalog = self
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog
+            .models_by_provider(provider_id)
+            .into_iter()
+            .map(|e| (e.id.clone(), e.display_name.clone()))
+            .collect()
+    }
+
     async fn list_providers_text(&self) -> String {
         let catalog = self
             .kernel

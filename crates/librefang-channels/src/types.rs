@@ -164,6 +164,13 @@ pub enum ChannelContent {
     DeleteMessage {
         message_id: String,
     },
+    /// Edit an existing interactive message in place (outbound only).
+    /// Telegram maps this to editMessageText with a new reply_markup.
+    EditInteractive {
+        message_id: String,
+        text: String,
+        buttons: Vec<Vec<InteractiveButton>>,
+    },
     /// Audio file (music/podcast — distinct from Voice messages).
     /// Voice is for voice memos; Audio is for music files with metadata.
     Audio {

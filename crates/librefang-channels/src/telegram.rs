@@ -907,6 +907,60 @@ impl TelegramAdapter {
         Ok(())
     }
 
+    /// Call `editMessageText` to replace an interactive message with new text and keyboard.
+    ///
+    /// When `buttons` is empty, sends `inline_keyboard: []` which removes the keyboard.
+    /// Silently swallows "message is not modified" errors like `api_edit_message` does.
+    async fn api_edit_interactive_message(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+        buttons: &[Vec<InteractiveButton>],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/bot{}/editMessageText",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        let sanitized = sanitize_telegram_html(text);
+        let keyboard: Vec<Vec<serde_json::Value>> = buttons
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|btn| {
+                        if let Some(ref u) = btn.url {
+                            serde_json::json!({ "text": btn.label, "url": u })
+                        } else {
+                            let action = if btn.action.len() > 64 {
+                                btn.action[..64].to_string()
+                            } else {
+                                btn.action.clone()
+                            };
+                            serde_json::json!({ "text": btn.label, "callback_data": action })
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": sanitized,
+            "parse_mode": PARSE_MODE_HTML,
+            "reply_markup": { "inline_keyboard": keyboard },
+        });
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            if !body_text.contains("message is not modified") {
+                warn!("Telegram editMessageText (interactive) failed ({status}): {body_text}");
+            }
+        }
+        Ok(())
+    }
+
     /// Call `sendChatAction` to show "typing..." indicator.
     ///
     /// When `thread_id` is provided, the typing indicator appears in the forum topic.
@@ -1260,6 +1314,21 @@ impl TelegramAdapter {
             ChannelContent::ButtonCallback { action, .. } => {
                 // Outbound ButtonCallback doesn't make sense — log and skip
                 debug!("Telegram: ignoring outbound ButtonCallback (action={action})");
+            }
+            ChannelContent::EditInteractive {
+                message_id,
+                text,
+                buttons,
+            } => {
+                match message_id.parse::<i64>() {
+                    Ok(mid) => {
+                        self.api_edit_interactive_message(chat_id, mid, &text, &buttons)
+                            .await?;
+                    }
+                    Err(_) => {
+                        warn!("Telegram: EditInteractive has invalid message_id '{message_id}', ignoring");
+                    }
+                }
             }
             ChannelContent::DeleteMessage { message_id } => {
                 let msg_id: i64 = message_id
