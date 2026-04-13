@@ -9747,7 +9747,7 @@ system_prompt = "You are a helpful assistant."
     }
 
     fn build_skill_summary(&self, skill_allowlist: &[String]) -> String {
-        use librefang_runtime::prompt_builder::sanitize_for_prompt;
+        use librefang_runtime::prompt_builder::{sanitize_for_prompt, SKILL_NAME_DISPLAY_CAP};
 
         let skills = self.sorted_enabled_skills(skill_allowlist);
         if skills.is_empty() {
@@ -9759,7 +9759,7 @@ system_prompt = "You are a helpful assistant."
             // a malicious skill author could otherwise smuggle newlines or
             // `[...]` markers through the name/description/tool name slots
             // and forge fake trust-boundary headers in the system prompt.
-            let name = sanitize_for_prompt(&skill.manifest.skill.name, 80);
+            let name = sanitize_for_prompt(&skill.manifest.skill.name, SKILL_NAME_DISPLAY_CAP);
             let desc = sanitize_for_prompt(&skill.manifest.skill.description, 200);
             let tools: Vec<String> = skill
                 .manifest
@@ -9868,7 +9868,7 @@ system_prompt = "You are a helpful assistant."
 
     pub fn collect_prompt_context(&self, skill_allowlist: &[String]) -> String {
         use librefang_runtime::prompt_builder::{
-            sanitize_for_prompt, SKILL_PROMPT_CONTEXT_PER_SKILL_CAP,
+            sanitize_for_prompt, SKILL_NAME_DISPLAY_CAP, SKILL_PROMPT_CONTEXT_PER_SKILL_CAP,
         };
 
         let skills = self.sorted_enabled_skills(skill_allowlist);
@@ -9900,9 +9900,10 @@ system_prompt = "You are a helpful assistant."
             // smuggle bracket/newline sequences through the boilerplate
             // header and forge a fake `[END EXTERNAL SKILL CONTEXT]`
             // marker — the cap math defends the *content*, this defends
-            // the *name*. Tracked overhead in `prompt_builder` already
-            // accounts for the 80-char ceiling.
-            let safe_name = sanitize_for_prompt(&skill.manifest.skill.name, 80);
+            // the *name*. The `SKILL_BOILERPLATE_OVERHEAD` constant in
+            // `prompt_builder` is computed against this same display cap
+            // so the total budget cannot drift out of sync.
+            let safe_name = sanitize_for_prompt(&skill.manifest.skill.name, SKILL_NAME_DISPLAY_CAP);
 
             // SECURITY: Wrap skill context in a trust boundary so the model
             // treats the third-party content as data, not instructions.

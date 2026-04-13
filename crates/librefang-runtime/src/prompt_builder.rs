@@ -26,25 +26,38 @@
 /// Maximum characters in a single skill's `prompt_context` block.
 pub const SKILL_PROMPT_CONTEXT_PER_SKILL_CAP: usize = 4000;
 
+/// Maximum characters allowed in the sanitized skill name displayed in
+/// the `--- Skill: NAME ---` header. Both the kernel call site
+/// (`sanitize_for_prompt(name, SKILL_NAME_DISPLAY_CAP)`) and the
+/// total-cap math below derive from this single constant so the two
+/// cannot drift.
+pub const SKILL_NAME_DISPLAY_CAP: usize = 80;
+
 /// Number of full-cap skills the total budget is sized to fit.
 const MAX_SKILLS_IN_PROMPT_CONTEXT: usize = 3;
 
-/// Approximate per-skill trust-boundary boilerplate in characters:
-/// `--- Skill: <name> ---\n` + the EXTERNAL CONTEXT marker + the closing
-/// `\n[END EXTERNAL SKILL CONTEXT]` line. Measured at ~224 chars; rounded
-/// up to 250 to leave headroom for skill-name length variance.
-const SKILL_BOILERPLATE_OVERHEAD: usize = 250;
+/// Per-skill trust-boundary boilerplate in characters, computed exactly:
+///
+/// - `--- Skill:  ---\n`                                      = 16
+/// - `[EXTERNAL SKILL CONTEXT: ... contained within.]\n`      = 175
+/// - `\n[END EXTERNAL SKILL CONTEXT]`                         = 29
+/// - sanitized name (up to `SKILL_NAME_DISPLAY_CAP`) + `...`  = N + 3
+///
+/// Total = 220 + SKILL_NAME_DISPLAY_CAP + 3 (the `...` ellipsis appended
+/// by `cap_str` when the original name overflowed the per-name cap).
+const SKILL_BOILERPLATE_OVERHEAD: usize = 220 + SKILL_NAME_DISPLAY_CAP + 3;
 
 /// `\n\n` separator between blocks in `context_parts.join("\n\n")`.
 const SKILL_BLOCK_SEPARATOR: usize = 2;
 
 /// Total character budget for the joined skill prompt context. Sized so
 /// `MAX_SKILLS_IN_PROMPT_CONTEXT` skills at full per-skill cap fit with
-/// their boilerplate, separators, and a small safety margin.
+/// their per-block boilerplate, the inter-block `\n\n` separators, and
+/// a small safety margin for future boilerplate tweaks.
 pub const SKILL_PROMPT_CONTEXT_TOTAL_CAP: usize = MAX_SKILLS_IN_PROMPT_CONTEXT
     * (SKILL_PROMPT_CONTEXT_PER_SKILL_CAP + SKILL_BOILERPLATE_OVERHEAD)
     + (MAX_SKILLS_IN_PROMPT_CONTEXT - 1) * SKILL_BLOCK_SEPARATOR
-    + 250; // margin for name length + future boilerplate tweaks
+    + 200; // safety margin for future boilerplate tweaks
 
 /// Sanitize a third-party-authored string for inclusion in a system prompt
 /// boilerplate slot (skill name, skill description, tool name, etc.) and
@@ -1382,20 +1395,28 @@ mod tests {
 
     #[test]
     fn test_skill_prompt_context_total_cap_fits_max_skills_with_boilerplate() {
-        // Regression for the cap-math bug closed alongside the deterministic
-        // ordering fix: the original PR raised the total cap to 12000 but
-        // forgot to account for the trust-boundary boilerplate (~225 chars
-        // per block + the indentation runs from `\<newline>` continuations).
-        // The third skill's `[END EXTERNAL SKILL CONTEXT]` marker would get
-        // truncated mid-block, silently breaking containment.
+        // Regression for two compounding cap-math bugs closed alongside
+        // the deterministic ordering fix:
         //
-        // This test asserts that the published constants leave room for
-        // MAX_SKILLS_IN_PROMPT_CONTEXT skills at the per-skill cap, with a
-        // realistic block built the same way `collect_prompt_context` does
-        // it. If anyone shrinks the total cap or grows the boilerplate
-        // without rerunning the math, this test fires.
-        let name = "test-skill-with-typical-name";
-        let body = "x".repeat(SKILL_PROMPT_CONTEXT_PER_SKILL_CAP);
+        // 1. The original PR raised the total cap to 12000 but forgot to
+        //    account for the trust-boundary boilerplate (~225 chars per
+        //    block + the indentation runs from `\<newline>` continuations).
+        //    The third skill's `[END EXTERNAL SKILL CONTEXT]` marker would
+        //    get truncated mid-block, silently breaking containment.
+        //
+        // 2. The follow-up sanitize fix raised the per-name display cap
+        //    to 80 chars, but the boilerplate constant was still sized
+        //    for ~28-char names. This test exercises the **worst case**:
+        //    every skill has the maximum-length sanitized name plus the
+        //    `...` ellipsis cap_str appends.
+        //
+        // If anyone shrinks the total cap, grows the boilerplate, or
+        // raises the name display cap without rerunning the math, this
+        // test fires.
+        let name = "x".repeat(SKILL_NAME_DISPLAY_CAP) + "..."; // worst case: 80 chars + cap_str ellipsis
+        assert_eq!(name.chars().count(), SKILL_NAME_DISPLAY_CAP + 3);
+
+        let body = "y".repeat(SKILL_PROMPT_CONTEXT_PER_SKILL_CAP) + "..."; // 4000 chars + ellipsis
         let block = format!(
             concat!(
                 "--- Skill: {} ---\n",
