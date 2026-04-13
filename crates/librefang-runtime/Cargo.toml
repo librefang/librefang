@@ -7,6 +7,7 @@ description = "Agent runtime and execution environment for LibreFang"
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
+librefang-http = { path = "../librefang-http" }
 librefang-channels = { path = "../librefang-channels" }
 librefang-memory = { path = "../librefang-memory" }
 librefang-skills = { path = "../librefang-skills" }

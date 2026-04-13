@@ -28,7 +28,7 @@ pub mod embedding;
 pub mod graceful_shutdown;
 pub mod hooks;
 pub mod host_functions;
-pub mod http_client;
+pub use librefang_http as http_client;
 pub mod image_gen;
 pub mod kernel_handle;
 pub mod link_understanding;

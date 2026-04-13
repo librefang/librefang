@@ -17,6 +17,8 @@ use librefang_types::config::ProxyConfig;
 use reqwest::Proxy;
 use std::sync::{OnceLock, RwLock};
 
+const USER_AGENT: &str = concat!("librefang/", env!("CARGO_PKG_VERSION"));
+
 // ── TLS configuration ──────────────────────────────────────────────────
 
 /// Cached TLS config — loaded once, reused for every client.
@@ -181,7 +183,7 @@ pub fn new_client() -> reqwest::Client {
 pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder()
         .use_preconfigured_tls(tls_config())
-        .user_agent(crate::USER_AGENT);
+        .user_agent(USER_AGENT);
 
     // Build the NoProxy filter from explicit config only.
     let no_proxy_filter = proxy
