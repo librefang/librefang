@@ -28,6 +28,7 @@ jobs:
           BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
           BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
           WORKFLOW_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
             echo "No Discord release webhook configured, skipping"
@@ -109,6 +110,8 @@ jobs:
 
           # Split Release / Docker into image-build vs deploy sub-statuses so the
           # notification doesn't blame "Docker" when only a deploy smoke check failed.
+          # NOTE: job-name filters below MUST stay in sync with .github/workflows/release-docker.yml
+          # (jobs: docker / docker-manifest / deploy_fly / deploy_render).
           DOCKER_IMAGE_STATUS="$DOCKER_STATUS"
           DEPLOY_STATUS="$DOCKER_STATUS"
           DOCKER_RUN_ID=$(gh run list \
@@ -119,17 +122,52 @@ jobs:
             --json databaseId \
             --jq '.[0].databaseId' 2>/dev/null) || true
 
+          # Fallback: --branch on tag-triggered runs is historically unreliable.
+          # Retry by commit SHA using head_sha from the workflow_run event payload
+          # (always available, no git fetch needed).
+          if [ -z "$DOCKER_RUN_ID" ] && [ -n "$WORKFLOW_SHA" ]; then
+            DOCKER_RUN_ID=$(gh run list \
+              --repo "${{ github.repository }}" \
+              --workflow "Release / Docker" \
+              --commit "$WORKFLOW_SHA" \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId' 2>/dev/null) || true
+          fi
+
+          if [ -z "$DOCKER_RUN_ID" ]; then
+            echo "WARN: could not locate Release / Docker run for $TAG, falling back to parent conclusion"
+          fi
+
           if [ -n "$DOCKER_RUN_ID" ]; then
             DOCKER_JOBS=$(gh run view "$DOCKER_RUN_ID" \
               --repo "${{ github.repository }}" \
               --json jobs 2>/dev/null) || DOCKER_JOBS=""
 
+            if [ -z "$DOCKER_JOBS" ]; then
+              echo "WARN: gh run view $DOCKER_RUN_ID failed, falling back to parent conclusion"
+            fi
+
+            # Aggregate GitHub job conclusions. Valid values:
+            # success, failure, cancelled, skipped, neutral, timed_out, action_required.
+            # skipped/neutral → treat as success (optional/intentionally-skipped jobs should
+            # not block the release-success count, e.g. Render deploy when secret is unset).
+            # timed_out/action_required → treat as failure.
             aggregate() {
               local lines="$1"
               [ -z "$lines" ] && { echo "not_found"; return; }
-              echo "$lines" | grep -q "failure"  && { echo "failure";   return; }
-              echo "$lines" | grep -q "cancelled" && { echo "cancelled"; return; }
-              echo "$lines" | grep -vxE "success" | grep -q . && { echo "running"; return; }
+              if echo "$lines" | grep -Fxq "failure" \
+                 || echo "$lines" | grep -Fxq "timed_out" \
+                 || echo "$lines" | grep -Fxq "action_required"; then
+                echo "failure"; return
+              fi
+              if echo "$lines" | grep -Fxq "cancelled"; then
+                echo "cancelled"; return
+              fi
+              # Anything left that isn't success/skipped/neutral means a job is still running.
+              if echo "$lines" | grep -vxE "success|skipped|neutral" | grep -q .; then
+                echo "running"; return
+              fi
               echo "success"
             }
 
@@ -175,7 +213,7 @@ jobs:
           **Build Status:**
           $(emoji "$SHELL_STATUS") CLI (macOS / Linux / Windows)
           $(emoji "$DESKTOP_STATUS") Desktop (.msi / .dmg / .AppImage / .deb)
-          $(emoji "$DOCKER_IMAGE_STATUS") Docker image (ghcr.io linux/amd64 + arm64)
+          $(emoji "$DOCKER_IMAGE_STATUS") Docker image + manifest (ghcr.io linux/amd64 + arm64)
           $(emoji "$DEPLOY_STATUS") Deploy (Fly.io / Render)
           $(emoji "$SDK_STATUS") SDKs (npm / PyPI / crates.io / Go)
 
