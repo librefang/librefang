@@ -760,6 +760,7 @@ export interface AgentDetail {
   tags?: string[];
   mode?: string;
   thinking?: { budget_tokens?: number; stream_thinking?: boolean };
+  is_hand?: boolean;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
