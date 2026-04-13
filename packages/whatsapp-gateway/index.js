@@ -715,7 +715,89 @@ async function startConnection() {
   const QRCode = (await import('qrcode')).default || await import('qrcode');
   const pino = (await import('pino')).default || await import('pino');
 
-  const logger = pino({ level: 'warn' });
+  // Tracks per-JID Signal session-recovery attempts so we don't spam
+  // assertSessions() in a tight loop when a peer is genuinely unreachable.
+  //   remoteJid → { attempts, lastAttemptAt, lastMsgId, notified }
+  const sessionRecoveryMap = new Map();
+  const SESSION_RECOVERY_COOLDOWN_MS = 20_000;
+  const SESSION_RECOVERY_MAX_ATTEMPTS = 3;
+
+  // Called whenever Baileys' internal decrypt path logs a SessionError for
+  // an incoming message. The default retry-request path re-asks the sender
+  // to resend the same ciphertext, which is useless when the root cause is
+  // a missing Signal session for a new device — we force a full session
+  // renegotiation via assertSessions(..., true) and back off if the peer
+  // stays silent.
+  const handleDecryptFailure = async (remoteJid, msgId) => {
+    if (!remoteJid || !sock || typeof sock.assertSessions !== 'function') {
+      return;
+    }
+    const baseJid = remoteJid.replace(/:\d+@/, '@');
+    const now = Date.now();
+    const entry = sessionRecoveryMap.get(baseJid) || {
+      attempts: 0,
+      lastAttemptAt: 0,
+      lastMsgId: null,
+      notified: false,
+    };
+    if (now - entry.lastAttemptAt < SESSION_RECOVERY_COOLDOWN_MS) {
+      return;
+    }
+    if (entry.attempts >= SESSION_RECOVERY_MAX_ATTEMPTS) {
+      if (!entry.notified && OWNER_JID) {
+        entry.notified = true;
+        sessionRecoveryMap.set(baseJid, entry);
+        const body = [
+          `⚠️ Unable to decrypt messages from ${baseJid.replace(/@.*/, '')}`,
+          `Tried ${entry.attempts} session renegotiations — peer hasn't resent with a fresh Signal session.`,
+          `Last failed message id: ${entry.lastMsgId || 'unknown'}`,
+          `Hint: ask the contact to send a new message, or unlink/relink this device if it's you.`,
+        ].join('\n');
+        try {
+          await sock.sendMessage(OWNER_JID, { text: body });
+          console.warn(`[gateway][decrypt-session] Notified owner about persistent decrypt failure from ${baseJid}`);
+        } catch (e) {
+          console.warn(`[gateway][decrypt-session] Could not notify owner: ${e?.message || e}`);
+        }
+      }
+      return;
+    }
+    entry.attempts += 1;
+    entry.lastAttemptAt = now;
+    entry.lastMsgId = msgId || entry.lastMsgId;
+    sessionRecoveryMap.set(baseJid, entry);
+    console.warn(`[gateway][decrypt-session] SessionError for ${remoteJid} (msgId=${msgId || 'n/a'}) — forcing session renegotiation, attempt ${entry.attempts}/${SESSION_RECOVERY_MAX_ATTEMPTS}`);
+    try {
+      await sock.assertSessions([baseJid], true);
+    } catch (e) {
+      console.warn(`[gateway][decrypt-session] assertSessions(${baseJid}) failed: ${e?.message || e}`);
+    }
+  };
+
+  const basePinoLogger = pino({ level: 'warn' });
+  // Wrap pino's error sink so we catch Baileys' SessionError log without
+  // having to fork the library — the log line is the only signal Baileys
+  // emits when a signal-cipher decrypt fails, messages.upsert arrives with
+  // msg.message=null and the default handler silently continues.
+  const logger = new Proxy(basePinoLogger, {
+    get(target, prop, receiver) {
+      if (prop !== 'error') {
+        return Reflect.get(target, prop, receiver);
+      }
+      return function wrappedError(obj, msg, ...rest) {
+        target.error.call(target, obj, msg, ...rest);
+        try {
+          const errMsg = (obj && (obj.err?.message || obj.message)) || (typeof msg === 'string' ? msg : '') || '';
+          const remoteJid = obj?.key?.remoteJid;
+          if (remoteJid && /No matching sessions|failed to decrypt message|MessageCounterError/i.test(errMsg)) {
+            handleDecryptFailure(remoteJid, obj.key.id);
+          }
+        } catch (_) {
+          // Never let the hook throw — logging must stay fire-and-forget.
+        }
+      };
+    },
+  });
 
   const { state, saveCreds } = await useMultiFileAuthState(
     require('node:path').join(__dirname, 'auth_store')
