@@ -358,7 +358,7 @@ fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
     }
     if !prompt_context.is_empty() {
         out.push('\n');
-        out.push_str(&cap_str(prompt_context, 2000));
+        out.push_str(&cap_str(prompt_context, 12000));
     }
     out
 }
