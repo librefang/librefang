@@ -4,6 +4,7 @@ members = [
     "crates/librefang-types",
     "crates/librefang-memory",
     "crates/librefang-runtime",
+    "crates/librefang-runtime-oauth",
     "crates/librefang-http",
     "crates/librefang-wire",
     "crates/librefang-api",
