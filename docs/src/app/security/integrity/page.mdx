@@ -1,0 +1,444 @@
+# Integrity & Content Safety
+
+This page covers tamper evidence, signed content, taint propagation, secret handling, and skill-content scanning.
+
+## Included Topics
+
+- Merkle Hash Chain Audit Trail
+- Information Flow Taint Tracking
+- Ed25519 Manifest Signing
+- Secret Zeroization
+- Prompt Injection Scanner
+
+---
+
+## Merkle Hash Chain Audit Trail
+
+**Source:** `librefang-runtime/src/audit.rs`
+
+Every security-critical action is appended to a tamper-evident Merkle hash
+chain, similar to a blockchain.  Each entry contains the SHA-256 hash of its
+own contents concatenated with the hash of the previous entry.
+
+### Auditable Actions
+
+```rust
+pub enum AuditAction {
+    ToolInvoke,
+    CapabilityCheck,
+    AgentSpawn,
+    AgentKill,
+    AgentMessage,
+    MemoryAccess,
+    FileAccess,
+    NetworkAccess,
+    ShellExec,
+    AuthAttempt,
+    WireConnect,
+    ConfigChange,
+}
+```
+
+### Entry Structure
+
+```rust
+pub struct AuditEntry {
+    pub seq: u64,          // Monotonically increasing sequence number
+    pub timestamp: String, // ISO-8601
+    pub agent_id: String,
+    pub action: AuditAction,
+    pub detail: String,    // e.g. tool name, file path
+    pub outcome: String,   // "ok", "denied", error message
+    pub prev_hash: String, // SHA-256 of previous entry (or 64 zeros)
+    pub hash: String,      // SHA-256 of this entry + prev_hash
+}
+```
+
+### Hash Computation
+
+Each entry's hash is computed from all of its fields concatenated with the
+previous entry's hash:
+
+```rust
+fn compute_entry_hash(
+    seq: u64, timestamp: &str, agent_id: &str,
+    action: &AuditAction, detail: &str,
+    outcome: &str, prev_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(seq.to_string().as_bytes());
+    hasher.update(timestamp.as_bytes());
+    hasher.update(agent_id.as_bytes());
+    hasher.update(action.to_string().as_bytes());
+    hasher.update(detail.as_bytes());
+    hasher.update(outcome.as_bytes());
+    hasher.update(prev_hash.as_bytes());
+    hex::encode(hasher.finalize())
+}
+```
+
+### Chain Integrity Verification
+
+`AuditLog::verify_integrity()` walks the entire chain and recomputes every
+hash.  If any entry has been tampered with, the recomputed hash will not match
+the stored hash, or the `prev_hash` linkage will be broken:
+
+```rust
+pub fn verify_integrity(&self) -> Result<(), String> {
+    let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+    let mut expected_prev = "0".repeat(64);  // Genesis sentinel
+
+    for entry in entries.iter() {
+        if entry.prev_hash != expected_prev {
+            return Err(format!(
+                "chain break at seq {}: expected prev_hash {} but found {}",
+                entry.seq, expected_prev, entry.prev_hash
+            ));
+        }
+        let recomputed = compute_entry_hash(/* ... */);
+        if recomputed != entry.hash {
+            return Err(format!(
+                "hash mismatch at seq {}: expected {} but found {}",
+                entry.seq, recomputed, entry.hash
+            ));
+        }
+        expected_prev = entry.hash.clone();
+    }
+    Ok(())
+}
+```
+
+### Thread Safety
+
+`AuditLog` uses `Mutex<Vec<AuditEntry>>` and `Mutex<String>` for the tip hash.
+Both locks use `unwrap_or_else(|e| e.into_inner())` to recover from poisoned
+mutexes, ensuring the audit log remains available even after a panic.
+
+### API
+
+| Method | Description |
+|--------|-------------|
+| `AuditLog::new()` | Creates an empty log with genesis sentinel (`"0" * 64`) |
+| `record(agent_id, action, detail, outcome)` | Appends an entry, returns its hash |
+| `verify_integrity()` | Validates the entire chain |
+| `tip_hash()` | Returns the hash of the most recent entry |
+| `len()` / `is_empty()` | Entry count |
+| `recent(n)` | Returns the most recent `n` entries (cloned) |
+
+---
+
+## Information Flow Taint Tracking
+
+**Source:** `librefang-types/src/taint.rs`
+
+LibreFang implements a lattice-based taint propagation model that prevents
+tainted values from flowing into sensitive sinks without explicit
+declassification.  This guards against prompt injection, data exfiltration,
+and confused-deputy attacks.
+
+### Taint Labels
+
+```rust
+pub enum TaintLabel {
+    ExternalNetwork,  // Data from external network requests
+    UserInput,        // Direct user input
+    Pii,              // Personally identifiable information
+    Secret,           // API keys, tokens, passwords
+    UntrustedAgent,   // Data from sandboxed/untrusted agents
+}
+```
+
+### Tainted Values
+
+```rust
+pub struct TaintedValue {
+    pub value: String,              // The payload
+    pub labels: HashSet<TaintLabel>, // Attached taint labels
+    pub source: String,             // Human-readable origin
+}
+```
+
+Key methods:
+
+| Method | Description |
+|--------|-------------|
+| `TaintedValue::new(value, labels, source)` | Create with labels |
+| `TaintedValue::clean(value, source)` | Create with no labels (untainted) |
+| `merge_taint(&mut self, other)` | Union of labels (for concatenation) |
+| `check_sink(&self, sink)` | Check if value can flow to sink |
+| `declassify(&mut self, label)` | Remove a specific label (explicit security decision) |
+| `is_tainted(&self) -> bool` | True if any labels present |
+
+### Taint Sinks
+
+A `TaintSink` defines which labels are **blocked** from reaching it:
+
+| Sink | Blocked Labels | Rationale |
+|------|---------------|-----------|
+| `TaintSink::shell_exec()` | `ExternalNetwork`, `UntrustedAgent`, `UserInput` | Prevents command injection |
+| `TaintSink::net_fetch()` | `Secret`, `Pii` | Prevents data exfiltration |
+| `TaintSink::agent_message()` | `Secret` | Prevents secret leakage to other agents |
+
+### Violation Handling
+
+When `check_sink()` finds a blocked label, it returns a `TaintViolation`:
+
+```rust
+pub struct TaintViolation {
+    pub label: TaintLabel,    // The offending label
+    pub sink_name: String,    // "shell_exec", "net_fetch", etc.
+    pub source: String,       // Where the tainted value came from
+}
+```
+
+Display: `taint violation: label 'Secret' from source 'env_var' is not allowed to reach sink 'net_fetch'`
+
+### Declassification
+
+Declassification is an **explicit security decision**.  The caller asserts
+that the value has been sanitized:
+
+```rust
+tainted.declassify(&TaintLabel::ExternalNetwork);
+tainted.declassify(&TaintLabel::UserInput);
+// After declassification, value can flow to shell_exec
+assert!(tainted.check_sink(&TaintSink::shell_exec()).is_ok());
+```
+
+### Taint Propagation
+
+When two values are combined (concatenation, interpolation), the result must
+carry the union of both label sets:
+
+```rust
+let mut combined = TaintedValue::new(/* ... */);
+combined.merge_taint(&other_value);
+// combined.labels is now the union of both
+```
+
+---
+
+## Ed25519 Manifest Signing
+
+**Source:** `librefang-types/src/manifest_signing.rs`
+
+Agent manifests define an agent's capabilities, tools, and configuration.
+A compromised manifest can grant elevated privileges.  This module provides
+Ed25519-based cryptographic signing.
+
+### Signing Scheme
+
+1. Compute SHA-256 of the manifest content (raw TOML text).
+2. Sign the hash with Ed25519 (via `ed25519-dalek`).
+3. Bundle the signature, public key, and content hash into a `SignedManifest` envelope.
+
+### SignedManifest Structure
+
+```rust
+pub struct SignedManifest {
+    pub manifest: String,           // Raw TOML content
+    pub content_hash: String,       // Hex SHA-256 of manifest
+    pub signature: Vec<u8>,         // Ed25519 signature (64 bytes)
+    pub signer_public_key: Vec<u8>, // Ed25519 public key (32 bytes)
+    pub signer_id: String,          // Human-readable signer ID
+}
+```
+
+### Signing
+
+```rust
+let signing_key = SigningKey::generate(&mut OsRng);
+let signed = SignedManifest::sign(manifest_toml, &signing_key, "admin@org.com");
+```
+
+Internally:
+
+```rust
+pub fn sign(manifest: impl Into<String>, signing_key: &SigningKey, signer_id: impl Into<String>) -> Self {
+    let manifest = manifest.into();
+    let content_hash = hash_manifest(&manifest);  // SHA-256
+    let signature = signing_key.sign(content_hash.as_bytes());
+    let verifying_key = signing_key.verifying_key();
+    Self {
+        manifest,
+        content_hash,
+        signature: signature.to_bytes().to_vec(),
+        signer_public_key: verifying_key.to_bytes().to_vec(),
+        signer_id: signer_id.into(),
+    }
+}
+```
+
+### Verification
+
+Two-phase verification:
+
+1. **Hash check:** Recompute SHA-256 of `manifest` and compare to `content_hash`.
+2. **Signature check:** Verify the Ed25519 signature over `content_hash` using `signer_public_key`.
+
+```rust
+pub fn verify(&self) -> Result<(), String> {
+    let recomputed = hash_manifest(&self.manifest);
+    if recomputed != self.content_hash {
+        return Err("content hash mismatch: ...");
+    }
+    let verifying_key = VerifyingKey::from_bytes(&pk_bytes)?;
+    let signature = Signature::from_bytes(&sig_bytes);
+    verifying_key.verify(self.content_hash.as_bytes(), &signature)
+        .map_err(|e| format!("signature verification failed: {}", e))
+}
+```
+
+### Tamper Detection
+
+- Modifying the manifest content after signing causes a **content hash mismatch**.
+- Replacing the public key with a different key causes a **signature verification failure**.
+- Both attacks are caught by `verify()`.
+
+---
+
+## Secret Zeroization
+
+**Source:** All LLM driver modules, channel adapters, and web search modules.
+
+LibreFang uses `Zeroizing<String>` from the `zeroize` crate on every field
+that holds secret material.  When the value is dropped, its memory is
+overwritten with zeros, preventing secrets from lingering in memory.
+
+### How It Works
+
+`Zeroizing<T>` is a smart-pointer wrapper from the `zeroize` crate.  It
+implements `Deref<Target=T>` for transparent usage and `Drop` for automatic
+zeroization:
+
+```rust
+// On Drop, the inner String's buffer is overwritten with zeros
+let key = Zeroizing::new("sk-secret-key".to_string());
+// Use key transparently via Deref
+client.post(url).header("authorization", format!("Bearer {}", &*key));
+// When key goes out of scope, memory is zeroed
+```
+
+### Fields Using Zeroization
+
+**LLM Drivers** (`librefang-runtime/src/drivers/`):
+
+| Driver | Field |
+|--------|-------|
+| `AnthropicDriver` | `api_key: Zeroizing<String>` |
+| `GeminiDriver` | `api_key: Zeroizing<String>` |
+| `OpenAiCompatDriver` | `api_key: Zeroizing<String>` |
+
+**Channel Adapters** (`librefang-channels/src/`):
+
+| Adapter | Field(s) |
+|---------|----------|
+| `DiscordAdapter` | `token: Zeroizing<String>` |
+| `EmailAdapter` | `password: Zeroizing<String>` |
+| `BlueskyAdapter` | `app_password: Zeroizing<String>` |
+| `DingTalkAdapter` | `access_token: Zeroizing<String>`, `secret: Zeroizing<String>`, `client_id: Zeroizing<String>`, `client_secret: Zeroizing<String>` |
+| `FeishuAdapter` | `app_secret: Zeroizing<String>` |
+| `FlockAdapter` | `bot_token: Zeroizing<String>` |
+| `GitterAdapter` | `token: Zeroizing<String>` |
+| `GotifyAdapter` | `app_token: Zeroizing<String>`, `client_token: Zeroizing<String>` |
+
+**Web Search** (`librefang-runtime/src/web_search.rs`):
+
+```rust
+fn resolve_api_key(env_var: &str) -> Option<Zeroizing<String>> {
+    std::env::var(env_var).ok().filter(|k| !k.is_empty()).map(Zeroizing::new)
+}
+```
+
+**Embedding** (`librefang-runtime/src/embedding.rs`):
+
+| Struct | Field |
+|--------|-------|
+| `EmbeddingClient` | `api_key: Zeroizing<String>` |
+
+### Why It Matters
+
+Without zeroization, secrets remain in memory after use until the OS
+reclaims the page.  An attacker with access to a core dump, swap file, or
+memory forensics tool can recover API keys.  `Zeroizing<String>` ensures
+the secret is overwritten as soon as it is no longer needed.
+
+---
+
+## Prompt Injection Scanner
+
+**Source:** `librefang-skills/src/verify.rs`
+
+The `SkillVerifier` provides two scanning functions: `security_scan()` for
+skill manifests and `scan_prompt_content()` for skill prompt text (SKILL.md
+body).
+
+### Manifest Security Scan
+
+`SkillVerifier::security_scan(manifest)` inspects a skill's declared
+requirements:
+
+| Check | Severity | Trigger |
+|-------|----------|---------|
+| Node.js runtime | Warning | `runtime_type == SkillRuntime::Node` |
+| Shell execution capability | Critical | Capability contains `shellexec` or `shell_exec` |
+| Unrestricted network | Warning | Capability contains `netconnect(*)` |
+| Shell tool | Critical | Tool is `shell_exec` or `bash` |
+| Filesystem write tool | Warning | Tool is `file_write` or `file_delete` |
+| Too many tools | Info | More than 10 tools required |
+
+### Prompt Injection Scan
+
+`SkillVerifier::scan_prompt_content(content)` detects common attack patterns
+in skill prompt text:
+
+**Critical -- Prompt override attempts:**
+
+```
+"ignore previous instructions", "ignore all previous",
+"disregard previous", "forget your instructions",
+"you are now", "new instructions:", "system prompt override",
+"ignore the above", "do not follow", "override system"
+```
+
+**Warning -- Data exfiltration patterns:**
+
+```
+"send to http", "send to https", "post to http", "post to https",
+"exfiltrate", "forward all", "send all data",
+"base64 encode and send", "upload to"
+```
+
+**Warning -- Shell command references:**
+
+```
+"rm -rf", "chmod ", "sudo "
+```
+
+**Info -- Excessive length:**
+
+Content over 50,000 bytes triggers an info-level warning about potential LLM
+performance degradation.
+
+### SHA256 Checksum Verification
+
+```rust
+pub fn verify_checksum(data: &[u8], expected_sha256: &str) -> bool {
+    let actual = Self::sha256_hex(data);
+    actual == expected_sha256.to_lowercase()
+}
+```
+
+Skills installed from ClawHub have their content verified against a known
+SHA256 hash to detect tampering during download.
+
+### Warning Structure
+
+```rust
+pub struct SkillWarning {
+    pub severity: WarningSeverity,  // Info, Warning, Critical
+    pub message: String,
+}
+```
+
+---
