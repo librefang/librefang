@@ -4178,6 +4178,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "librefang-kernel-handle"
+version = "2026.4.13-beta19"
+dependencies = [
+ "async-trait",
+ "librefang-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "librefang-llm-driver"
 version = "2026.4.13-beta19"
 dependencies = [
@@ -4249,10 +4262,12 @@ dependencies = [
  "landlock",
  "librefang-channels",
  "librefang-http",
+ "librefang-kernel-handle",
  "librefang-llm-driver",
  "librefang-memory",
  "librefang-runtime-drivers",
  "librefang-runtime-oauth",
+ "librefang-runtime-wasm",
  "librefang-skills",
  "librefang-types",
  "once_cell",
@@ -4333,6 +4348,23 @@ dependencies = [
  "tokio",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-wasm"
+version = "2026.4.13-beta19"
+dependencies = [
+ "anyhow",
+ "librefang-http",
+ "librefang-kernel-handle",
+ "librefang-types",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wasmtime",
 ]
 
 [[package]]
