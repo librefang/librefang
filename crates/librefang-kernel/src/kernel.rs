@@ -6018,9 +6018,40 @@ system_prompt = "You are a helpful assistant."
         };
 
         if let Some(provider) = provider {
-            self.registry
-                .update_model_and_provider(agent_id, normalized_model.clone(), provider.clone())
-                .map_err(KernelError::LibreFang)?;
+            // When the provider changes, also clear any per-agent api_key_env
+            // and base_url overrides — they belonged to the previous provider
+            // and would route subsequent requests to the wrong endpoint with
+            // the wrong credentials. resolve_driver falls back to the global
+            // [provider_api_keys] / [provider_urls] tables (or convention) for
+            // the new provider, which is what the user expects when picking a
+            // model from the dashboard. When the provider is unchanged we
+            // leave the override fields alone so that genuine per-agent
+            // overrides on the same provider are preserved.
+            let prev_provider = self
+                .registry
+                .get(agent_id)
+                .map(|e| e.manifest.model.provider.clone());
+            let provider_changed =
+                prev_provider.as_deref() != Some(provider.as_str());
+            if provider_changed {
+                self.registry
+                    .update_model_provider_config(
+                        agent_id,
+                        normalized_model.clone(),
+                        provider.clone(),
+                        None,
+                        None,
+                    )
+                    .map_err(KernelError::LibreFang)?;
+            } else {
+                self.registry
+                    .update_model_and_provider(
+                        agent_id,
+                        normalized_model.clone(),
+                        provider.clone(),
+                    )
+                    .map_err(KernelError::LibreFang)?;
+            }
             info!(agent_id = %agent_id, model = %normalized_model, provider = %provider, "Agent model+provider updated");
         } else {
             self.registry
@@ -12766,6 +12797,150 @@ mod tests {
         assert_eq!(entry.manifest.model.model, "default");
         assert!(entry.manifest.model.base_url.is_none());
         assert!(entry.manifest.model.api_key_env.is_none());
+
+        kernel.shutdown();
+    }
+
+    /// Regression: switching an agent's provider via `set_agent_model` must
+    /// clear any stale per-agent `api_key_env` / `base_url` overrides. Before
+    /// the fix, `update_model_and_provider` only touched `model.provider` and
+    /// `model.model`, so an agent that had been booted under a custom default
+    /// provider (which seeded those fields onto the manifest) would carry the
+    /// old credentials and URL into the new provider, sending requests to the
+    /// previous endpoint with the wrong key — surfacing as the upstream's
+    /// "Missing Authentication header" 401 (issue #2380).
+    #[test]
+    fn test_set_agent_model_clears_overrides_when_provider_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-provider-switch-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        // Spawn an agent that already carries the previous provider's
+        // connection overrides — this mirrors the boot-time state of an
+        // agent loaded from disk with provider="default" against a custom
+        // default provider like "cloudverse".
+        let agent_id = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "switch-provider-agent".to_string(),
+                    description: "carries stale overrides from prior provider".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    model: ModelConfig {
+                        provider: "cloudverse".to_string(),
+                        model: "anthropic-claude-4-5-sonnet".to_string(),
+                        max_tokens: 4096,
+                        temperature: 0.7,
+                        system_prompt: String::new(),
+                        api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
+                        base_url: Some(
+                            "https://cloudverse.freshworkscorp.com/api/v1".to_string(),
+                        ),
+                        extra_params: std::collections::HashMap::new(),
+                    },
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn");
+
+        // Sanity: stale overrides are present.
+        let pre = kernel
+            .registry
+            .get(agent_id)
+            .expect("agent registry entry");
+        assert_eq!(pre.manifest.model.provider, "cloudverse");
+        assert_eq!(
+            pre.manifest.model.api_key_env.as_deref(),
+            Some("CLOUDVERSE_API_KEY")
+        );
+        assert_eq!(
+            pre.manifest.model.base_url.as_deref(),
+            Some("https://cloudverse.freshworkscorp.com/api/v1")
+        );
+
+        // Switch to an entirely different provider via the same path the
+        // dashboard's model picker uses.
+        kernel
+            .set_agent_model(
+                agent_id,
+                "anthropic/claude-3.5-sonnet",
+                Some("openrouter"),
+            )
+            .expect("provider switch should succeed");
+
+        let post = kernel
+            .registry
+            .get(agent_id)
+            .expect("agent registry entry after switch");
+        assert_eq!(post.manifest.model.provider, "openrouter");
+        assert_eq!(
+            post.manifest.model.model,
+            "anthropic/claude-3.5-sonnet",
+            "model name should be updated (and prefix-stripped)"
+        );
+        assert!(
+            post.manifest.model.api_key_env.is_none(),
+            "stale CLOUDVERSE_API_KEY override must be cleared so resolve_driver \
+             falls back to the new provider's key from [provider_api_keys] / convention"
+        );
+        assert!(
+            post.manifest.model.base_url.is_none(),
+            "stale cloudverse base_url override must be cleared so resolve_driver \
+             routes to openrouter's URL from [provider_urls] instead of cloudverse"
+        );
+
+        // Re-applying the same provider (model-only swap) must NOT clear the
+        // override fields — they may be legitimate per-agent overrides on a
+        // single provider.
+        kernel
+            .set_agent_model(agent_id, "anthropic/claude-3.7-sonnet", Some("openrouter"))
+            .expect("same-provider model swap should succeed");
+
+        // Seed an override on the now-openrouter agent so we can confirm the
+        // same-provider branch leaves it alone.
+        kernel
+            .registry
+            .update_model_provider_config(
+                agent_id,
+                "anthropic/claude-3.7-sonnet".to_string(),
+                "openrouter".to_string(),
+                Some("CUSTOM_OPENROUTER_KEY".to_string()),
+                Some("https://my-proxy.example/v1".to_string()),
+            )
+            .expect("seed override");
+
+        kernel
+            .set_agent_model(
+                agent_id,
+                "anthropic/claude-3.7-sonnet-v2",
+                Some("openrouter"),
+            )
+            .expect("same-provider swap should succeed");
+
+        let same_provider = kernel
+            .registry
+            .get(agent_id)
+            .expect("agent after same-provider swap");
+        assert_eq!(
+            same_provider.manifest.model.api_key_env.as_deref(),
+            Some("CUSTOM_OPENROUTER_KEY"),
+            "same-provider swap must preserve per-agent api_key_env override"
+        );
+        assert_eq!(
+            same_provider.manifest.model.base_url.as_deref(),
+            Some("https://my-proxy.example/v1"),
+            "same-provider swap must preserve per-agent base_url override"
+        );
 
         kernel.shutdown();
     }

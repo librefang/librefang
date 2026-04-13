@@ -3332,51 +3332,30 @@ pub async fn patch_agent_config(
         }
     }
 
-    // Update model/provider — use set_agent_model for catalog-based provider
-    // resolution when provider is not explicitly provided (fixes #387/#466:
-    // changing model from another provider without specifying provider now
-    // auto-resolves the correct provider from the model catalog).
+    // Update model/provider — always go through set_agent_model so that
+    // provider-change semantics (prefix stripping, canonical-session cleanup,
+    // and clearing of stale per-agent api_key_env / base_url overrides) are
+    // applied uniformly. Bypassing it via update_model_and_provider was the
+    // root cause of #2380: switching to a non-default provider via the
+    // dashboard left stale CLOUDVERSE_API_KEY / cloudverse base_url on the
+    // manifest, so the new provider's request was sent to the old URL with
+    // the old credentials and rejected with "Missing Authentication header".
     if let Some(ref new_model) = req.model {
         if !new_model.is_empty() {
-            if let Some(ref new_provider) = req.provider {
-                if !new_provider.is_empty() {
-                    // Explicit provider given — use it directly
-                    if state
-                        .kernel
-                        .agent_registry()
-                        .update_model_and_provider(
-                            agent_id,
-                            new_model.clone(),
-                            new_provider.clone(),
-                        )
-                        .is_err()
-                    {
-                        return (
-                            StatusCode::NOT_FOUND,
-                            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-                        );
-                    }
-                } else {
-                    // Provider is empty string — resolve from catalog
-                    if let Err(e) = state.kernel.set_agent_model(agent_id, new_model, None) {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(
-                                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                            ),
-                        );
-                    }
-                }
-            } else {
-                // No provider field at all — resolve from catalog
-                if let Err(e) = state.kernel.set_agent_model(agent_id, new_model, None) {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                        ),
-                    );
-                }
+            let explicit_provider = req
+                .provider
+                .as_deref()
+                .filter(|p| !p.is_empty());
+            if let Err(e) = state
+                .kernel
+                .set_agent_model(agent_id, new_model, explicit_provider)
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                    ),
+                );
             }
         }
     }
