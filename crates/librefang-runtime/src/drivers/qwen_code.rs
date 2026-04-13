@@ -277,6 +277,13 @@ impl QwenCodeDriver {
                                         Ok(d) => d,
                                         Err(e) => {
                                             warn!(error = %e, "Failed to decode base64 image");
+                                            // Surface the failure in the prompt so the model
+                                            // knows an image was intended — otherwise it replies
+                                            // based on the surrounding text alone as if the user
+                                            // never attached anything.
+                                            msg_parts.push(format!(
+                                                "[image omitted: base64 decode failed — {e}]"
+                                            ));
                                             continue;
                                         }
                                     };
@@ -293,6 +300,9 @@ impl QwenCodeDriver {
                                                 error = %e,
                                                 "Failed to create Qwen Code image temp dir"
                                             );
+                                            msg_parts.push(format!(
+                                                "[image omitted: could not allocate temp dir — {e}]"
+                                            ));
                                             continue;
                                         }
                                         image_dir = Some(d.clone());
@@ -320,6 +330,9 @@ impl QwenCodeDriver {
                                         error = %e,
                                         "Failed to write Qwen Code temp image"
                                     );
+                                    msg_parts.push(format!(
+                                        "[image omitted: could not write temp file — {e}]"
+                                    ));
                                     continue;
                                 }
                                 image_count = next_index;
@@ -345,6 +358,12 @@ impl QwenCodeDriver {
                                             "ImageFile path missing or not canonicalizable, \
                                              skipping"
                                         );
+                                        // Same reasoning as the inline-image failure paths:
+                                        // leave a trail so the model can acknowledge the
+                                        // intended attachment instead of silently ignoring it.
+                                        msg_parts.push(format!(
+                                            "[image omitted: referenced file '{path}' not readable — {e}]"
+                                        ));
                                         continue;
                                     }
                                 };
@@ -1068,6 +1087,102 @@ mod tests {
     fn test_display_cli_path_noop_on_unix() {
         let p = std::path::PathBuf::from("/tmp/librefang/pic.png");
         assert_eq!(display_cli_path(&p), "/tmp/librefang/pic.png");
+    }
+
+    #[test]
+    fn test_build_prompt_with_invalid_base64_image_emits_marker() {
+        // Malformed base64 must not silently drop the image. Before this
+        // fix the block was logged to warn and dropped on the floor — the
+        // prompt reaching the CLI looked as if the user never attached
+        // anything, so the model replied based on the surrounding text
+        // alone.
+        use librefang_types::message::{Message, MessageContent};
+
+        let request = CompletionRequest {
+            model: "qwen-code/qwen-vl-max".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "Describe this:".to_string(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        // Not valid base64.
+                        data: "this-is-not-base64!!!".to_string(),
+                    },
+                ]),
+                pinned: false,
+            }],
+            tools: vec![],
+            max_tokens: 1024,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+        };
+
+        let prepared = QwenCodeDriver::build_prompt(&request);
+        assert!(prepared.text.contains("Describe this:"));
+        assert!(
+            prepared.text.contains("[image omitted:"),
+            "prompt must contain an error marker so the model knows an \
+             image was intended — got: {}",
+            prepared.text
+        );
+        // A rejected image must not leave a stray temp dir behind.
+        assert!(
+            prepared.image_dir.is_none(),
+            "temp dir must not be allocated for an image that failed to decode"
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_with_missing_image_file_emits_marker() {
+        // ImageFile block whose path doesn't exist must also surface as
+        // a marker in the prompt rather than silently disappearing.
+        use librefang_types::message::{Message, MessageContent};
+
+        let request = CompletionRequest {
+            model: "qwen-code/qwen-vl-max".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ImageFile {
+                    media_type: "image/png".to_string(),
+                    path: "/definitely/does/not/exist/image.png".to_string(),
+                }]),
+                pinned: false,
+            }],
+            tools: vec![],
+            max_tokens: 1024,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+        };
+
+        let prepared = QwenCodeDriver::build_prompt(&request);
+        assert!(
+            prepared.text.contains("[image omitted:"),
+            "prompt must contain an error marker for missing file — got: {}",
+            prepared.text
+        );
+        assert!(
+            prepared
+                .text
+                .contains("/definitely/does/not/exist/image.png"),
+            "marker should include the referenced path — got: {}",
+            prepared.text
+        );
+        // No temp dir should be allocated for an unresolvable ImageFile.
+        assert!(prepared.image_dir.is_none());
     }
 
     #[test]
