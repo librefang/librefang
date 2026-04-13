@@ -151,6 +151,7 @@ impl SetupWizard {
             author: "wizard".to_string(),
             module: "builtin:chat".to_string(),
             schedule,
+            session_mode: librefang_types::agent::SessionMode::default(),
             model: ModelConfig {
                 provider: provider.to_string(),
                 model: model.to_string(),

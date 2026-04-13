@@ -5,10 +5,11 @@
 
 use crate::formatter;
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
-    InteractiveButton, InteractiveMessage, LifecycleReaction,
+    split_message, truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType,
+    ChannelUser, InteractiveButton, InteractiveMessage, LifecycleReaction,
 };
 use async_trait::async_trait;
+use dashmap::DashMap;
 use futures::Stream;
 use librefang_types::config::OutputFormat;
 use std::collections::HashMap;
@@ -51,6 +52,55 @@ fn extract_retry_after(body: &str, default: u64) -> u64 {
 
 /// Telegram `parse_mode` for HTML formatting.
 const PARSE_MODE_HTML: &str = "HTML";
+
+/// A Telegram bot command definition for the command menu.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BotCommand {
+    /// Command name without the leading `/` (e.g. `"start"`, `"help"`).
+    pub command: String,
+    /// Human-readable description shown in the Telegram command menu.
+    pub description: String,
+}
+
+/// Built-in slash commands exposed in the Telegram command menu.
+///
+/// These mirror the commands handled by the channel bridge's `handle_command`.
+/// When `TelegramAdapter::commands` is empty (the default), the adapter
+/// registers these automatically on `/start` or the first incoming message.
+/// Telegram allows at most 100 commands; we list the most useful subset.
+const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("start", "Show welcome message"),
+    ("help", "Show all available commands"),
+    ("agents", "List running agents"),
+    ("agent", "Select an agent to talk to"),
+    ("new", "Reset session (clear messages)"),
+    ("reboot", "Hard reset session (full context clear)"),
+    ("compact", "Trigger LLM session compaction"),
+    ("model", "Show or switch agent model"),
+    ("stop", "Cancel current agent run"),
+    ("usage", "Show session token usage and cost"),
+    ("think", "Toggle extended thinking"),
+    ("models", "List available AI models"),
+    ("providers", "Show configured providers"),
+    ("skills", "List installed skills"),
+    ("hands", "List available and active hands"),
+    ("status", "Show system status"),
+    ("workflows", "List workflows"),
+    ("workflow", "Run a workflow"),
+    ("budget", "Show spending limits and costs"),
+    ("btw", "Ask a side question (ephemeral)"),
+];
+
+/// Build a `Vec<BotCommand>` from [`BUILTIN_COMMANDS`].
+fn builtin_bot_commands() -> Vec<BotCommand> {
+    BUILTIN_COMMANDS
+        .iter()
+        .map(|(cmd, desc)| BotCommand {
+            command: (*cmd).to_string(),
+            description: (*desc).to_string(),
+        })
+        .collect()
+}
 
 /// Check if a Telegram chat type represents a group.
 fn is_group_chat(chat_type: &str) -> bool {
@@ -114,6 +164,34 @@ impl<'a> TelegramApiCtx<'a> {
             self.api_base_url, self.token, file_path
         ))
     }
+
+    /// Register bot commands via `setMyCommands`.
+    ///
+    /// Used inside the polling loop to (re-)register commands on `/start`
+    /// or the first incoming message. Idempotent — safe to call repeatedly.
+    async fn set_my_commands(&self, commands: &[BotCommand]) {
+        let url = format!("{}/bot{}/setMyCommands", self.api_base_url, self.token);
+        let cmds: Vec<serde_json::Value> = commands
+            .iter()
+            .map(|c| serde_json::json!({"command": c.command, "description": c.description}))
+            .collect();
+        let body = serde_json::json!({ "commands": cmds });
+        match self.client.post(&url).json(&body).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                info!(
+                    "Telegram: registered {} command(s) via polling trigger",
+                    commands.len()
+                );
+            }
+            Ok(resp) => {
+                let text = resp.text().await.unwrap_or_default();
+                warn!("Telegram setMyCommands failed in polling loop: {text}");
+            }
+            Err(e) => {
+                warn!("Telegram setMyCommands request failed in polling loop: {e}");
+            }
+        }
+    }
 }
 
 /// Telegram Bot API adapter using long-polling.
@@ -143,6 +221,26 @@ pub struct TelegramAdapter {
     poll_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// When true, remove the reaction on Done instead of showing 🎉.
     clear_done_reaction: bool,
+    /// Bot commands registered in the Telegram command menu.
+    commands: Vec<BotCommand>,
+    poll_contexts: Arc<DashMap<String, PollContext>>,
+}
+
+struct PollContext {
+    question: String,
+    options: Vec<String>,
+    last_accessed: Instant,
+}
+
+/// Parameters for `api_send_poll` — grouped to satisfy clippy's argument limit.
+struct PollParams<'a> {
+    chat_id: i64,
+    question: &'a str,
+    options: &'a [String],
+    is_quiz: bool,
+    correct_option_id: Option<u8>,
+    explanation: Option<&'a str>,
+    thread_id: Option<i64>,
 }
 
 impl TelegramAdapter {
@@ -178,6 +276,8 @@ impl TelegramAdapter {
             shutdown_rx,
             poll_handle: Arc::new(tokio::sync::Mutex::new(None)),
             clear_done_reaction: false,
+            commands: Vec::new(),
+            poll_contexts: Arc::new(DashMap::new()),
         }
     }
 
@@ -185,6 +285,13 @@ impl TelegramAdapter {
     /// showing a completion emoji.  Returns self for builder chaining.
     pub fn with_clear_done_reaction(mut self, clear: bool) -> Self {
         self.clear_done_reaction = clear;
+        self
+    }
+
+    /// Set the bot commands to register in the Telegram command menu on start.
+    /// Pass an empty vec to clear existing commands. Returns self for builder chaining.
+    pub fn with_commands(mut self, commands: Vec<BotCommand>) -> Self {
+        self.commands = commands;
         self
     }
 
@@ -468,6 +575,34 @@ impl TelegramAdapter {
             .await
     }
 
+    /// Call `sendAudio` on the Telegram API.
+    ///
+    /// Sends a music file (MP3, FLAC, etc.) with optional title and performer metadata.
+    /// Distinct from `sendVoice` which is for voice memos.
+    async fn api_send_audio(
+        &self,
+        chat_id: i64,
+        audio_url: &str,
+        caption: Option<&str>,
+        title: Option<&str>,
+        performer: Option<&str>,
+        thread_id: Option<i64>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut body = serde_json::json!({ "audio": audio_url });
+        if let Some(cap) = caption {
+            body["caption"] = serde_json::Value::String(cap.to_string());
+            body["parse_mode"] = serde_json::Value::String(PARSE_MODE_HTML.to_string());
+        }
+        if let Some(t) = title {
+            body["title"] = serde_json::Value::String(t.to_string());
+        }
+        if let Some(p) = performer {
+            body["performer"] = serde_json::Value::String(p.to_string());
+        }
+        self.api_send_media_request("sendAudio", chat_id, body, thread_id)
+            .await
+    }
+
     /// Call `sendVideo` on the Telegram API.
     async fn api_send_video(
         &self,
@@ -483,6 +618,210 @@ impl TelegramAdapter {
         }
         self.api_send_media_request("sendVideo", chat_id, body, thread_id)
             .await
+    }
+
+    /// Call `sendAnimation` on the Telegram API.
+    ///
+    /// Sends an animated GIF or H.264/MPEG-4 AVC video without sound.
+    async fn api_send_animation(
+        &self,
+        chat_id: i64,
+        animation_url: &str,
+        caption: Option<&str>,
+        thread_id: Option<i64>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut body = serde_json::json!({ "animation": animation_url });
+        if let Some(cap) = caption {
+            body["caption"] = serde_json::Value::String(cap.to_string());
+            body["parse_mode"] = serde_json::Value::String(PARSE_MODE_HTML.to_string());
+        }
+        self.api_send_media_request("sendAnimation", chat_id, body, thread_id)
+            .await
+    }
+
+    /// Call `sendSticker` on the Telegram API.
+    ///
+    /// Sends a sticker by its Telegram `file_id`. Stickers are identified by
+    /// file_id (not download URL) — they cannot be sent from an external URL.
+    async fn api_send_sticker(
+        &self,
+        chat_id: i64,
+        file_id: &str,
+        thread_id: Option<i64>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let body = serde_json::json!({ "sticker": file_id });
+        self.api_send_media_request("sendSticker", chat_id, body, thread_id)
+            .await
+    }
+
+    /// Call `sendMediaGroup` on the Telegram API.
+    ///
+    /// Sends 2–10 media items as a single album. Only `Photo` and `Video`
+    /// variants of `MediaGroupItem` are supported by the Telegram API for albums.
+    ///
+    /// The caption of the first item is used as the album caption.
+    /// Includes a single retry on HTTP 429 rate-limit responses.
+    async fn api_send_media_group(
+        &self,
+        chat_id: i64,
+        items: &[crate::types::MediaGroupItem],
+        thread_id: Option<i64>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Telegram sendMediaGroup requires 2–10 items. Validate locally so
+        // callers get a readable error instead of an HTTP 400 from the API.
+        if items.is_empty() {
+            return Ok(());
+        }
+        if !(2..=10).contains(&items.len()) {
+            return Err(format!(
+                "Telegram sendMediaGroup requires 2–10 items, got {}",
+                items.len()
+            )
+            .into());
+        }
+        let url = format!(
+            "{}/bot{}/sendMediaGroup",
+            self.api_base_url,
+            self.token.as_str()
+        );
+
+        let media: Vec<serde_json::Value> = items
+            .iter()
+            .map(|item| match item {
+                crate::types::MediaGroupItem::Photo { url, caption } => {
+                    let mut v = serde_json::json!({
+                        "type": "photo",
+                        "media": url,
+                    });
+                    // Apply caption if present
+                    if let Some(cap) = caption {
+                        v["caption"] = serde_json::Value::String(cap.clone());
+                        v["parse_mode"] = serde_json::Value::String(PARSE_MODE_HTML.to_string());
+                    }
+                    v
+                }
+                crate::types::MediaGroupItem::Video {
+                    url,
+                    caption,
+                    duration_seconds,
+                } => {
+                    let mut v = serde_json::json!({
+                        "type": "video",
+                        "media": url,
+                        "duration": duration_seconds,
+                    });
+                    // Apply caption if present
+                    if let Some(cap) = caption {
+                        v["caption"] = serde_json::Value::String(cap.clone());
+                        v["parse_mode"] = serde_json::Value::String(PARSE_MODE_HTML.to_string());
+                    }
+                    v
+                }
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "media": media,
+        });
+        if let Some(tid) = thread_id {
+            body["message_thread_id"] = serde_json::json!(tid);
+        }
+
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+
+            if status.as_u16() == 429 {
+                let retry_after = extract_retry_after(&body_text, RETRY_AFTER_DEFAULT_SECS);
+                warn!("Telegram sendMediaGroup rate limited, retrying after {retry_after}s");
+                tokio::time::sleep(Duration::from_secs(retry_after)).await;
+
+                let resp2 = self.client.post(&url).json(&body).send().await?;
+                if !resp2.status().is_success() {
+                    let body_text2 = resp2.text().await.unwrap_or_default();
+                    return Err(format!(
+                        "Telegram sendMediaGroup failed after retry: {body_text2}"
+                    )
+                    .into());
+                }
+                return Ok(());
+            }
+
+            return Err(format!("Telegram sendMediaGroup failed ({status}): {body_text}").into());
+        }
+        Ok(())
+    }
+
+    /// Call `sendPoll` on the Telegram API.
+    ///
+    /// Sends a regular poll or a quiz (one correct answer). For quiz mode,
+    /// set `is_quiz: true` and provide `correct_option_id`.
+    ///
+    /// Includes a single retry on HTTP 429 rate-limit responses.
+    async fn api_send_poll(
+        &self,
+        params: &PollParams<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!("{}/bot{}/sendPoll", self.api_base_url, self.token.as_str());
+        let option_values: Vec<serde_json::Value> = params
+            .options
+            .iter()
+            .map(|o| serde_json::json!({"text": o}))
+            .collect();
+
+        let mut body = serde_json::json!({
+            "chat_id": params.chat_id,
+            "question": params.question,
+            "options": option_values,
+            "type": if params.is_quiz { "quiz" } else { "regular" },
+        });
+        if params.is_quiz {
+            if let Some(id) = params.correct_option_id {
+                body["correct_option_id"] = serde_json::json!(id);
+            }
+            if let Some(exp) = params.explanation {
+                body["explanation"] = serde_json::Value::String(exp.to_string());
+            }
+        }
+        if let Some(tid) = params.thread_id {
+            body["message_thread_id"] = serde_json::json!(tid);
+        }
+
+        let resp = self.client.post(&url).json(&body).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+
+            if status.as_u16() == 429 {
+                let retry_after = extract_retry_after(&body_text, RETRY_AFTER_DEFAULT_SECS);
+                warn!("Telegram sendPoll rate limited, retrying after {retry_after}s");
+                tokio::time::sleep(Duration::from_secs(retry_after)).await;
+
+                let resp2 = self.client.post(&url).json(&body).send().await?;
+                if !resp2.status().is_success() {
+                    let body_text2 = resp2.text().await.unwrap_or_default();
+                    return Err(
+                        format!("Telegram sendPoll failed after retry: {body_text2}").into(),
+                    );
+                }
+                let resp_body: serde_json::Value = resp2.json().await.unwrap_or_default();
+                let poll_id = resp_body["result"]["poll"]["id"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                return Ok(poll_id);
+            }
+
+            return Err(format!("Telegram sendPoll failed ({status}): {body_text}").into());
+        }
+        let resp_body: serde_json::Value = resp.json().await.unwrap_or_default();
+        let poll_id = resp_body["result"]["poll"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        Ok(poll_id)
     }
 
     /// Call `sendLocation` on the Telegram API.
@@ -535,11 +874,7 @@ impl TelegramAdapter {
                         } else {
                             // Callback button — sends callback_query to the bot
                             // Telegram limits callback_data to 64 bytes
-                            let action = if btn.action.len() > 64 {
-                                btn.action[..64].to_string()
-                            } else {
-                                btn.action.clone()
-                            };
+                            let action = truncate_utf8(&btn.action, 64).to_string();
                             serde_json::json!({
                                 "text": btn.label,
                                 "callback_data": action,
@@ -572,6 +907,56 @@ impl TelegramAdapter {
         Ok(())
     }
 
+    /// Call `editMessageText` to replace an interactive message with new text and keyboard.
+    ///
+    /// When `buttons` is empty, sends `inline_keyboard: []` which removes the keyboard.
+    /// Silently swallows "message is not modified" errors like `api_edit_message` does.
+    async fn api_edit_interactive_message(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+        buttons: &[Vec<InteractiveButton>],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/bot{}/editMessageText",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        let sanitized = sanitize_telegram_html(text);
+        let keyboard: Vec<Vec<serde_json::Value>> = buttons
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|btn| {
+                        if let Some(ref u) = btn.url {
+                            serde_json::json!({ "text": btn.label, "url": u })
+                        } else {
+                            let action = truncate_utf8(&btn.action, 64).to_string();
+                            serde_json::json!({ "text": btn.label, "callback_data": action })
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": sanitized,
+            "parse_mode": PARSE_MODE_HTML,
+            "reply_markup": { "inline_keyboard": keyboard },
+        });
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            if !body_text.contains("message is not modified") {
+                warn!("Telegram editMessageText (interactive) failed ({status}): {body_text}");
+            }
+        }
+        Ok(())
+    }
+
     /// Call `sendChatAction` to show "typing..." indicator.
     ///
     /// When `thread_id` is provided, the typing indicator appears in the forum topic.
@@ -593,6 +978,41 @@ impl TelegramAdapter {
             body["message_thread_id"] = serde_json::json!(tid);
         }
         let _ = self.client.post(&url).json(&body).send().await?;
+        Ok(())
+    }
+
+    /// Call `deleteMessage` on the Telegram API.
+    ///
+    /// Removes a previously sent message. Uses fire-and-forget semantics —
+    /// failures are logged at debug level and do not propagate to callers.
+    /// Returns Ok(()) in all cases (best-effort deletion).
+    async fn api_delete_message(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/bot{}/deleteMessage",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+        });
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            // 400 "message to delete not found" is expected when already deleted
+            if body_text.contains("message to delete not found")
+                || body_text.contains("MESSAGE_ID_INVALID")
+            {
+                debug!("Telegram deleteMessage: message already gone (chat={chat_id}, msg={message_id})");
+            } else {
+                warn!("Telegram deleteMessage failed ({status}): {body_text}");
+            }
+        }
         Ok(())
     }
 
@@ -735,6 +1155,102 @@ impl TelegramAdapter {
     fn fire_reaction_body(&self, url: String, body: serde_json::Value) {
         fire_and_forget_post(self.client.clone(), url, body);
     }
+
+    /// Call `setMyCommands` to register bot commands in the Telegram menu.
+    ///
+    /// Uses the default scope (all chats) and no language filter.
+    /// Called during `start()` with either explicitly configured commands
+    /// or the built-in defaults from [`BUILTIN_COMMANDS`].  Also re-triggered
+    /// from the polling loop on `/start` or first incoming message
+    /// (via [`TelegramApiCtx::set_my_commands`]).
+    pub async fn api_set_my_commands(
+        &self,
+        commands: &[BotCommand],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/bot{}/setMyCommands",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        let cmds: Vec<serde_json::Value> = commands
+            .iter()
+            .map(|c| serde_json::json!({"command": c.command, "description": c.description}))
+            .collect();
+        let body = serde_json::json!({ "commands": cmds });
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            warn!("Telegram setMyCommands failed: {body_text}");
+        }
+        Ok(())
+    }
+
+    /// Call `deleteMyCommands` to remove all bot commands from the Telegram menu.
+    ///
+    /// Uses the default scope (all chats) and no language filter.
+    pub async fn api_delete_my_commands(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/bot{}/deleteMyCommands",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        let body = serde_json::json!({});
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            warn!("Telegram deleteMyCommands failed: {body_text}");
+        }
+        Ok(())
+    }
+
+    /// Call `getMyCommands` and return the currently registered bot commands.
+    ///
+    /// Returns an empty vec on failure (best-effort).
+    pub async fn api_get_my_commands(&self) -> Vec<BotCommand> {
+        let url = format!(
+            "{}/bot{}/getMyCommands",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        let resp = match self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("Telegram getMyCommands request failed: {e}");
+                return vec![];
+            }
+        };
+        let body: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                debug!("Telegram getMyCommands parse failed: {e}");
+                return vec![];
+            }
+        };
+        if body["ok"].as_bool() != Some(true) {
+            return vec![];
+        }
+        body["result"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        Some(BotCommand {
+                            command: v["command"].as_str()?.to_string(),
+                            description: v["description"].as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl TelegramAdapter {
@@ -795,6 +1311,89 @@ impl TelegramAdapter {
                 // Outbound ButtonCallback doesn't make sense — log and skip
                 debug!("Telegram: ignoring outbound ButtonCallback (action={action})");
             }
+            ChannelContent::EditInteractive {
+                message_id,
+                text,
+                buttons,
+            } => {
+                match message_id.parse::<i64>() {
+                    Ok(mid) => {
+                        self.api_edit_interactive_message(chat_id, mid, &text, &buttons)
+                            .await?;
+                    }
+                    Err(_) => {
+                        warn!("Telegram: EditInteractive has invalid message_id '{message_id}', ignoring");
+                    }
+                }
+            }
+            ChannelContent::DeleteMessage { message_id } => {
+                let msg_id: i64 = message_id
+                    .parse()
+                    .map_err(|_| format!("Invalid Telegram message_id for delete: {message_id}"))?;
+                self.api_delete_message(chat_id, msg_id).await?;
+            }
+            ChannelContent::Audio {
+                url,
+                caption,
+                title,
+                performer,
+                ..
+            } => {
+                self.api_send_audio(
+                    chat_id,
+                    &url,
+                    caption.as_deref(),
+                    title.as_deref(),
+                    performer.as_deref(),
+                    thread_id,
+                )
+                .await?;
+            }
+            ChannelContent::Animation { url, caption, .. } => {
+                self.api_send_animation(chat_id, &url, caption.as_deref(), thread_id)
+                    .await?;
+            }
+            ChannelContent::Sticker { file_id } => {
+                self.api_send_sticker(chat_id, &file_id, thread_id).await?;
+            }
+            ChannelContent::MediaGroup { items } => {
+                self.api_send_media_group(chat_id, &items, thread_id)
+                    .await?;
+            }
+            ChannelContent::Poll {
+                question,
+                options,
+                is_quiz,
+                correct_option_id,
+                explanation,
+            } => {
+                let params = PollParams {
+                    chat_id,
+                    question: &question,
+                    options: &options,
+                    is_quiz,
+                    correct_option_id,
+                    explanation: explanation.as_deref(),
+                    thread_id,
+                };
+                match self.api_send_poll(&params).await {
+                    Ok(poll_id) if !poll_id.is_empty() => {
+                        self.poll_contexts.insert(
+                            poll_id,
+                            PollContext {
+                                question: question.clone(),
+                                options: options.clone(),
+                                last_accessed: Instant::now(),
+                            },
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            ChannelContent::PollAnswer { .. } => {
+                debug!("Telegram: ignoring outbound PollAnswer");
+            }
         }
         Ok(())
     }
@@ -844,8 +1443,23 @@ impl ChannelAdapter for TelegramAdapter {
                 .await
             {
                 Ok(_) => info!("Telegram: cleared webhook, polling mode active"),
-                Err(e) => tracing::warn!("Telegram: deleteWebhook failed (non-fatal): {e}"),
+                Err(e) => warn!("Telegram: deleteWebhook failed (non-fatal): {e}"),
             }
+        }
+
+        // Register bot commands in the Telegram menu.
+        // Use explicitly configured commands, or fall back to built-in defaults.
+        let effective_commands = if self.commands.is_empty() {
+            builtin_bot_commands()
+        } else {
+            self.commands.clone()
+        };
+        match self.api_set_my_commands(&effective_commands).await {
+            Ok(()) => info!(
+                "Telegram: registered {} bot command(s)",
+                effective_commands.len()
+            ),
+            Err(e) => warn!("Telegram: failed to register bot commands: {e}"),
         }
 
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
@@ -863,6 +1477,49 @@ impl ChannelAdapter for TelegramAdapter {
         let max_backoff = self.max_backoff;
         let long_poll_timeout = self.long_poll_timeout;
         let poll_handle = self.poll_handle.clone();
+        let bot_commands = effective_commands;
+        let poll_contexts = self.poll_contexts.clone();
+
+        // Spawn background cleanup task for poll_contexts
+        let poll_contexts_cleanup = poll_contexts.clone();
+        let mut shutdown_cleanup = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300)); // Every 5 minutes
+            interval.tick().await; // consume the immediate first tick
+            loop {
+                // Race tick against shutdown so a stop() call doesn't wait up
+                // to 5 minutes for the next tick before exiting the loop.
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = shutdown_cleanup.changed() => {
+                        if *shutdown_cleanup.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+                if *shutdown_cleanup.borrow() {
+                    break;
+                }
+                let now = Instant::now();
+                let mut removed = 0;
+                poll_contexts_cleanup.retain(|_k, v| {
+                    if now.duration_since(v.last_accessed) > Duration::from_secs(1800) {
+                        // 30 minutes since last interaction — drop.
+                        removed += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if removed > 0 {
+                    debug!(
+                        "Telegram: cleaned up {} stale poll_context entries",
+                        removed
+                    );
+                }
+            }
+        });
 
         let handle = tokio::spawn(async move {
             let ctx = TelegramApiCtx {
@@ -872,6 +1529,9 @@ impl ChannelAdapter for TelegramAdapter {
             };
             let mut offset: Option<i64> = None;
             let mut backoff = initial_backoff;
+            // Track whether commands have been registered in this polling session.
+            // Reset on /start to allow re-registration.
+            let mut commands_registered = false;
 
             loop {
                 if *shutdown.borrow() {
@@ -882,7 +1542,7 @@ impl ChannelAdapter for TelegramAdapter {
                 let url = format!("{}/bot{}/getUpdates", api_base_url, token.as_str());
                 let mut params = serde_json::json!({
                     "timeout": long_poll_timeout,
-                    "allowed_updates": ["message", "edited_message", "callback_query"],
+                    "allowed_updates": ["message", "edited_message", "callback_query", "poll_answer"],
                 });
                 if let Some(off) = offset {
                     params["offset"] = serde_json::json!(off);
@@ -1003,6 +1663,94 @@ impl ChannelAdapter for TelegramAdapter {
                         continue;
                     }
 
+                    // Handle poll_answer (user answered a poll)
+                    if let Some(poll_answer) = update.get("poll_answer") {
+                        let poll_id = poll_answer["poll_id"].as_str().unwrap_or("").to_string();
+                        let user_id = poll_answer["user"]["id"].as_i64().unwrap_or(0);
+                        let username = poll_answer["user"]["username"].as_str();
+                        let first_name = poll_answer["user"]["first_name"]
+                            .as_str()
+                            .unwrap_or("Unknown");
+                        let last_name = poll_answer["user"]["last_name"].as_str().unwrap_or("");
+                        let display_name = if last_name.is_empty() {
+                            first_name.to_string()
+                        } else {
+                            format!("{first_name} {last_name}")
+                        };
+
+                        if !poll_id.is_empty()
+                            && telegram_user_allowed(&allowed_users, user_id, username)
+                        {
+                            let option_ids: Vec<u8> = poll_answer["option_ids"]
+                                .as_array()
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_u64().map(|n| n as u8))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+
+                            let mut metadata = HashMap::new();
+                            metadata.insert(
+                                "user_id".to_string(),
+                                serde_json::json!(user_id.to_string()),
+                            );
+
+                            let mut msg = ChannelMessage {
+                                channel: ChannelType::Telegram,
+                                platform_message_id: poll_id.clone(),
+                                sender: ChannelUser {
+                                    platform_id: user_id.to_string(),
+                                    display_name,
+                                    librefang_user: None,
+                                },
+                                content: ChannelContent::PollAnswer {
+                                    poll_id,
+                                    option_ids,
+                                },
+                                target_agent: None,
+                                timestamp: chrono::Utc::now(),
+                                is_group: false,
+                                thread_id: None,
+                                metadata,
+                            };
+
+                            if let Some(ref aid) = account_id {
+                                msg.metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+
+                            // Use `get_mut` so each answer bumps `last_accessed`.
+                            // Without this refresh, a poll's question/options
+                            // metadata fell out of the cache exactly 30 minutes
+                            // after send, regardless of whether users were still
+                            // actively answering — long-running surveys lost
+                            // their context silently.
+                            if let Some(mut ctx) = poll_contexts.get_mut(&msg.platform_message_id) {
+                                ctx.last_accessed = Instant::now();
+                                msg.metadata.insert(
+                                    "poll_question".to_string(),
+                                    serde_json::json!(ctx.question),
+                                );
+                                msg.metadata.insert(
+                                    "poll_options".to_string(),
+                                    serde_json::json!(ctx.options),
+                                );
+                            }
+
+                            debug!(
+                                "Telegram poll_answer from {}: {:?}",
+                                msg.sender.display_name, msg.content
+                            );
+
+                            if tx.send(msg).await.is_err() {
+                                error!("Telegram dispatch channel closed — poll_answer dropped.");
+                                return;
+                            }
+                        }
+                        continue;
+                    }
+
                     let bot_uname = bot_username.clone();
                     let mut msg = match parse_telegram_update(
                         update,
@@ -1038,6 +1786,21 @@ impl ChannelAdapter for TelegramAdapter {
                                 serde_json::json!(agent_name),
                             );
                             debug!("Telegram thread {tid} routed to agent '{agent_name}'");
+                        }
+                    }
+
+                    // Auto-register bot commands on first message or /start.
+                    // This ensures the command menu is populated even if the
+                    // initial registration in start() failed, and refreshes it
+                    // whenever a user sends /start.
+                    if !bot_commands.is_empty() {
+                        let is_start = matches!(
+                            &msg.content,
+                            ChannelContent::Command { name, .. } if name == "start"
+                        );
+                        if is_start || !commands_registered {
+                            ctx.set_my_commands(&bot_commands).await;
+                            commands_registered = true;
                         }
                     }
 
@@ -1116,15 +1879,7 @@ impl ChannelAdapter for TelegramAdapter {
         let msg_id: i64 = message_id
             .parse()
             .map_err(|_| format!("Invalid Telegram message_id: {message_id}"))?;
-        // Telegram only supports a limited set of reaction emoji.
-        // Map unsupported ones to the closest Telegram-compatible alternative.
-        let emoji = match reaction.emoji.as_str() {
-            "\u{23F3}" => "\u{1F440}",        // ⏳ → 👀
-            "\u{2699}\u{FE0F}" => "\u{26A1}", // ⚙️ → ⚡
-            "\u{2705}" => "\u{1F389}",        // ✅ → 🎉
-            "\u{274C}" => "\u{1F44E}",        // ❌ → 👎
-            other => other,                   // 🤔, ✍️ etc. pass through
-        };
+        let emoji = map_reaction_emoji(&reaction.emoji);
 
         // Optionally clear the reaction on completion instead of showing 🎉.
         let is_done = reaction.emoji == "\u{2705}"; // ✅
@@ -1225,6 +1980,18 @@ impl ChannelAdapter for TelegramAdapter {
             }
         }
         Ok(())
+    }
+}
+
+fn map_reaction_emoji(emoji: &str) -> &str {
+    // Telegram only supports a limited set of reaction emoji.
+    // Map unsupported ones to the closest Telegram-compatible alternative.
+    match emoji {
+        "\u{23F3}" => "\u{1F440}",        // ⏳ → 👀
+        "\u{2699}\u{FE0F}" => "\u{26A1}", // ⚙️ → ⚡
+        "\u{2705}" => "\u{1F389}",        // ✅ → 🎉
+        "\u{274C}" => "\u{1F44E}",        // ❌ → 👎
+        other => other,                   // 🤔, ✍️ etc. pass through
     }
 }
 
@@ -1505,15 +2272,20 @@ async fn extract_telegram_content(
             ))),
         }
     } else if message.get("audio").is_some() {
-        // Audio files (mp3, etc.) — treat as voice for transcription
+        // Audio files (MP3, FLAC, etc.) with optional title/performer metadata.
+        // Distinct from voice messages — use ChannelContent::Audio.
         let file_id = message["audio"]["file_id"].as_str().unwrap_or("");
         let duration = message["audio"]["duration"].as_u64().unwrap_or(0) as u32;
         let caption = message["caption"].as_str().map(String::from);
+        let title = message["audio"]["title"].as_str().map(String::from);
+        let performer = message["audio"]["performer"].as_str().map(String::from);
         match ctx.get_file_url(file_id).await {
-            Some(url) => Ok(ChannelContent::Voice {
+            Some(url) => Ok(ChannelContent::Audio {
                 url,
                 caption,
                 duration_seconds: duration,
+                title,
+                performer,
             }),
             None => Ok(ChannelContent::Text(format!(
                 "[Audio received, {duration}s{}]",
@@ -1535,6 +2307,25 @@ async fn extract_telegram_content(
             }),
             None => Ok(ChannelContent::Text(format!(
                 "[Voice message, {duration}s]"
+            ))),
+        }
+    } else if message.get("animation").is_some() {
+        // Animated GIF or MPEG-4 video without sound.
+        let file_id = message["animation"]["file_id"].as_str().unwrap_or("");
+        let duration = message["animation"]["duration"].as_u64().unwrap_or(0) as u32;
+        let caption = message["caption"].as_str().map(String::from);
+        match ctx.get_file_url(file_id).await {
+            Some(url) => Ok(ChannelContent::Animation {
+                url,
+                caption,
+                duration_seconds: duration,
+            }),
+            None => Ok(ChannelContent::Text(format!(
+                "[Animation received, {duration}s{}]",
+                caption
+                    .as_deref()
+                    .map(|c| format!(": {c}"))
+                    .unwrap_or_default()
             ))),
         }
     } else if message.get("video").is_some() {
@@ -1574,10 +2365,23 @@ async fn extract_telegram_content(
         let lat = message["location"]["latitude"].as_f64().unwrap_or(0.0);
         let lon = message["location"]["longitude"].as_f64().unwrap_or(0.0);
         Ok(ChannelContent::Location { lat, lon })
+    } else if message.get("sticker").is_some() {
+        // Sticker — identified by file_id, not a download URL.
+        let file_id = message["sticker"]["file_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if file_id.is_empty() {
+            Err(DropReason::ParseError(format!(
+                "update {update_id}: sticker missing file_id"
+            )))
+        } else {
+            Ok(ChannelContent::Sticker { file_id })
+        }
     } else {
-        // Unsupported message type (stickers, polls, etc.)
+        // Unsupported message type (e.g. dice, contact, venue, invoice)
         Err(DropReason::Filtered(format!(
-            "update {update_id}: unsupported message type (no text/photo/document/voice/video/video_note/location)"
+            "update {update_id}: unsupported message type (no text/photo/document/audio/voice/animation/video/video_note/location/sticker)"
         )))
     }
 }
@@ -1860,17 +2664,21 @@ fn sanitize_telegram_html(text: &str) -> String {
                 if !tag_name_raw.is_empty()
                     && ALLOWED.iter().any(|a| a.eq_ignore_ascii_case(tag_name_raw))
                 {
-                    // Allowed tag — keep as-is
-                    result.push_str(&text[i..tag_end + 1]);
                     let tag_name = tag_name_raw.to_ascii_lowercase();
-                    // Track open/close for balancing
                     if is_closing {
                         if let Some(pos) = open_tags.iter().rposition(|t| t == &tag_name) {
                             open_tags.remove(pos);
+                            result.push_str(&text[i..tag_end + 1]);
+                        } else {
+                            result.push_str("&lt;");
+                            result.push_str(tag_content);
+                            result.push_str("&gt;");
                         }
-                    } else if !tag_content.ends_with('/') {
-                        // Not self-closing
+                    } else if tag_content.ends_with('/') {
+                        result.push_str(&text[i..tag_end + 1]);
+                    } else {
                         open_tags.push(tag_name);
+                        result.push_str(&text[i..tag_end + 1]);
                     }
                 } else {
                     // Unknown tag — escape both brackets
@@ -2306,15 +3114,17 @@ mod tests {
                 assert!(t.contains("Audio received"));
                 assert!(t.contains("riassumi"));
             }
-            ChannelContent::Voice {
+            ChannelContent::Audio {
                 caption,
                 duration_seconds,
+                title,
                 ..
             } => {
                 assert_eq!(*duration_seconds, 120);
                 assert_eq!(caption.as_deref(), Some("riassumi"));
+                assert_eq!(title.as_deref(), Some("recording.mp3"));
             }
-            other => panic!("Expected Text or Voice for audio message, got {other:?}"),
+            other => panic!("Expected Text or Audio for audio message, got {other:?}"),
         }
     }
 
@@ -2921,6 +3731,83 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_telegram_html_tg_spoiler_allowed() {
+        let input = "hello <tg-spoiler>hidden</tg-spoiler> world";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, input, "tg-spoiler should pass through");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_tg_emoji_allowed() {
+        let input = "<tg-emoji emoji-id=\"123\">😀</tg-emoji> hi";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, input, "tg-emoji should pass through");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_closing_tag_never_opened() {
+        let input = "hello </b> world";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "hello &lt;/b&gt; world");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_empty_input() {
+        let input = "";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_text_only() {
+        let input = "hello world";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "hello world");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_lone_open_bracket_at_end() {
+        let input = "text <";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "text &lt;");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_br_not_allowed() {
+        let input = "line <br> break";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "line &lt;br&gt; break");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_uppercase_allowed_tags() {
+        let input = "<B>BOLD</B> <I>italic</I>";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, input, "uppercase allowed tags should pass through");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_mixed_allowed_and_disallowed_nested() {
+        let input = "<b><name>John</name></b>";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "<b>&lt;name&gt;John&lt;/name&gt;</b>");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_self_closing_allowed_tag() {
+        let input = "<code/>";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "<code/>");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_unclosed_allowed_tag_is_closed() {
+        let input = "<b>hello";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "<b>hello</b>");
+    }
+
+    #[test]
     fn test_supports_streaming() {
         let adapter = TelegramAdapter::new(
             "fake:token".to_string(),
@@ -3093,5 +3980,512 @@ mod tests {
         let msg = parse_telegram_callback_query(&callback, &[], &test_ctx(&client)).unwrap();
         assert!(!msg.is_group);
         assert_eq!(msg.sender.display_name, "Bob");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_short() {
+        assert_eq!(truncate_with_ellipsis("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_long() {
+        let result = truncate_with_ellipsis("hello world", 5);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 8);
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_exactly_at_max() {
+        assert_eq!(truncate_with_ellipsis("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_empty() {
+        assert_eq!(truncate_with_ellipsis("", 10), "");
+    }
+
+    #[test]
+    fn test_extract_retry_after_present() {
+        let json = r#"{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":30}}"#;
+        assert_eq!(extract_retry_after(json, 99), 30);
+    }
+
+    #[test]
+    fn test_extract_retry_after_missing() {
+        let json = r#"{"ok":true}"#;
+        assert_eq!(extract_retry_after(json, 5), 5);
+    }
+
+    #[test]
+    fn test_extract_retry_after_invalid() {
+        assert_eq!(extract_retry_after("not json", 7), 7);
+    }
+
+    #[test]
+    fn test_is_group_chat_group() {
+        assert!(is_group_chat("group"));
+    }
+
+    #[test]
+    fn test_is_group_chat_supergroup() {
+        assert!(is_group_chat("supergroup"));
+    }
+
+    #[test]
+    fn test_is_group_chat_private() {
+        assert!(!is_group_chat("private"));
+    }
+
+    #[test]
+    fn test_is_group_chat_channel() {
+        assert!(!is_group_chat("channel"));
+    }
+
+    #[test]
+    fn test_is_group_chat_empty() {
+        assert!(!is_group_chat(""));
+    }
+
+    #[test]
+    fn test_ends_with_ascii_ci_true() {
+        assert!(ends_with_ascii_ci("photo.jpg", ".JPG"));
+    }
+
+    #[test]
+    fn test_ends_with_ascii_ci_false() {
+        assert!(!ends_with_ascii_ci("photo.jpg", ".png"));
+    }
+
+    #[test]
+    fn test_ends_with_ascii_ci_suffix_longer() {
+        assert!(!ends_with_ascii_ci("a", "longsuffix"));
+    }
+
+    #[test]
+    fn test_ends_with_ascii_ci_exact() {
+        assert!(ends_with_ascii_ci("photo.jpg", ".jpg"));
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_jpg() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.jpg"),
+            Some("image/jpeg")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_jpeg() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.jpeg"),
+            Some("image/jpeg")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_png_case_insensitive() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.PNG"),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_gif() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.gif"),
+            Some("image/gif")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_webp() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.webp"),
+            Some("image/webp")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_bmp() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.bmp"),
+            Some("image/bmp")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_tiff() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.tiff"),
+            Some("image/tiff")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_tif() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.tif"),
+            Some("image/tiff")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_unknown() {
+        assert_eq!(mime_type_from_telegram_path("/path/photo.xyz"), None);
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_no_ext() {
+        assert_eq!(mime_type_from_telegram_path("/path/photo"), None);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_ascii() {
+        assert_eq!(utf16_offset_to_byte_offset("hello", 3), 3);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_emoji() {
+        assert_eq!(utf16_offset_to_byte_offset("a😀b", 1), 1);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_mixed() {
+        assert_eq!(utf16_offset_to_byte_offset("a😀c", 2), 5);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_beyond_end() {
+        assert_eq!(utf16_offset_to_byte_offset("hello", 100), 5);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_bmp_char() {
+        assert_eq!(utf16_offset_to_byte_offset("aβc", 1), 1);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_inside_surrogate_pair_rounds_forward() {
+        assert_eq!(utf16_offset_to_byte_offset("a😀b", 2), 5);
+    }
+
+    #[test]
+    fn test_map_reaction_emoji_supported_mappings() {
+        assert_eq!(map_reaction_emoji("\u{23F3}"), "\u{1F440}");
+        assert_eq!(map_reaction_emoji("\u{2699}\u{FE0F}"), "\u{26A1}");
+        assert_eq!(map_reaction_emoji("\u{2705}"), "\u{1F389}");
+        assert_eq!(map_reaction_emoji("\u{274C}"), "\u{1F44E}");
+    }
+
+    #[test]
+    fn test_map_reaction_emoji_passes_through_supported_emoji() {
+        assert_eq!(map_reaction_emoji("\u{1F914}"), "\u{1F914}");
+    }
+
+    #[test]
+    fn test_parse_chat_id_valid() {
+        let user = ChannelUser {
+            platform_id: "123456".to_string(),
+            display_name: "Test User".to_string(),
+            librefang_user: None,
+        };
+        let result = TelegramAdapter::parse_chat_id(&user);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 123456);
+    }
+
+    #[test]
+    fn test_parse_chat_id_invalid() {
+        let user = ChannelUser {
+            platform_id: "abc".to_string(),
+            display_name: "Test User".to_string(),
+            librefang_user: None,
+        };
+        let result = TelegramAdapter::parse_chat_id(&user);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_video_message() {
+        let update = serde_json::json!({
+            "update_id": 800,
+            "message": {
+                "message_id": 1,
+                "from": { "id": 123, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1700000000,
+                "video": { "file_id": "vid_id", "file_unique_id": "v", "duration": 60, "width": 1920, "height": 1080 }
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], &test_ctx(&client), None)
+            .await
+            .unwrap();
+        match &msg.content {
+            ChannelContent::Text(t) => {
+                assert!(t.contains("Video received"), "got: {t}");
+                assert!(t.contains("60s"), "got: {t}");
+            }
+            other => panic!("Expected Text fallback for video message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_video_note_message() {
+        let update = serde_json::json!({
+            "update_id": 801,
+            "message": {
+                "message_id": 2,
+                "from": { "id": 123, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1700000000,
+                "video_note": { "file_id": "vn_id", "file_unique_id": "vn", "duration": 30, "length": 240 }
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], &test_ctx(&client), None)
+            .await
+            .unwrap();
+        match &msg.content {
+            ChannelContent::Text(t) => {
+                assert!(t.contains("Video note"), "got: {t}");
+                assert!(t.contains("30s"), "got: {t}");
+            }
+            other => panic!("Expected Text fallback for video_note message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_update_no_message_field() {
+        let update = serde_json::json!({
+            "update_id": 802
+        });
+
+        let client = test_client();
+        let result = parse_telegram_update(&update, &[], &test_ctx(&client), None).await;
+        assert!(result.is_err());
+        match result {
+            Err(DropReason::ParseError(_)) => {}
+            other => panic!("Expected DropReason::ParseError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_sender_chat_without_id() {
+        let update = serde_json::json!({
+            "update_id": 803,
+            "message": {
+                "message_id": 3,
+                "sender_chat": { "title": "My Channel", "type": "channel" },
+                "chat": { "id": -100123, "type": "supergroup" },
+                "date": 1700000000,
+                "text": "hello"
+            }
+        });
+
+        let client = test_client();
+        let result = parse_telegram_update(&update, &[], &test_ctx(&client), None).await;
+        assert!(result.is_err());
+        match result {
+            Err(DropReason::ParseError(_)) => {}
+            other => panic!("Expected DropReason::ParseError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_from_without_id() {
+        let update = serde_json::json!({
+            "update_id": 804,
+            "message": {
+                "message_id": 4,
+                "from": { "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1700000000,
+                "text": "hello"
+            }
+        });
+
+        let client = test_client();
+        let result = parse_telegram_update(&update, &[], &test_ctx(&client), None).await;
+        assert!(result.is_err());
+        match result {
+            Err(DropReason::ParseError(_)) => {}
+            other => panic!("Expected DropReason::ParseError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_with_message_thread_id() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_thread",
+            "from": { "id": 42, "first_name": "Alice" },
+            "data": "action",
+            "message": {
+                "message_id": 1,
+                "message_thread_id": 17,
+                "chat": { "id": -100123, "type": "supergroup" },
+                "text": "question",
+                "date": 1700000000
+            }
+        });
+
+        let msg = parse_telegram_callback_query(&callback, &[], &test_ctx(&client)).unwrap();
+        assert_eq!(msg.thread_id, Some("17".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_without_message_field() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_no_msg",
+            "from": { "id": 42 },
+            "data": "action"
+        });
+
+        let msg = parse_telegram_callback_query(&callback, &[], &test_ctx(&client));
+        assert!(msg.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_without_from_field() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_no_from",
+            "data": "action",
+            "message": {
+                "message_id": 1,
+                "chat": { "id": 123 },
+                "date": 1700000000
+            }
+        });
+
+        let msg = parse_telegram_callback_query(&callback, &[], &test_ctx(&client));
+        assert!(msg.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_with_last_name() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_last",
+            "from": { "id": 42, "first_name": "Alice", "last_name": "Smith" },
+            "data": "action",
+            "message": {
+                "message_id": 1,
+                "chat": { "id": 42, "type": "private" },
+                "text": "hi",
+                "date": 1700000000
+            }
+        });
+
+        let msg = parse_telegram_callback_query(&callback, &[], &test_ctx(&client)).unwrap();
+        assert_eq!(msg.sender.display_name, "Alice Smith");
+    }
+
+    #[tokio::test]
+    async fn test_apply_reply_context_text_reply_to_text_message() {
+        let client = test_client();
+        let ctx = test_ctx(&client);
+
+        let message = serde_json::json!({
+            "reply_to_message": {
+                "message_id": 99,
+                "from": { "id": 456, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1699999900,
+                "text": "The sky is blue"
+            }
+        });
+
+        let content = ChannelContent::Text("I disagree".to_string());
+        let result = apply_reply_context(content, &message, &ctx).await;
+        match result {
+            ChannelContent::Text(t) => {
+                assert!(t.starts_with("[Replying to Alice: \"The sky is blue\"]\n"));
+                assert!(t.contains("I disagree"));
+            }
+            other => panic!("expected Text with prefix, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_reply_context_text_reply_to_caption_only() {
+        let client = test_client();
+        let ctx = test_ctx(&client);
+
+        let message = serde_json::json!({
+            "reply_to_message": {
+                "message_id": 99,
+                "from": { "id": 456, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1699999900,
+                "caption": "Look at this photo"
+            }
+        });
+
+        let content = ChannelContent::Text("nice".to_string());
+        let result = apply_reply_context(content, &message, &ctx).await;
+        match result {
+            ChannelContent::Text(t) => {
+                assert!(t.starts_with("[Replying to Alice: \"Look at this photo\"]\n"));
+                assert!(t.contains("nice"));
+            }
+            other => panic!("expected Text with prefix, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_reply_context_no_reply_to_message() {
+        let client = test_client();
+        let ctx = test_ctx(&client);
+
+        let message = serde_json::json!({
+            "message_id": 100,
+            "from": { "id": 123, "first_name": "Bob" },
+            "chat": { "id": 123, "type": "private" },
+            "date": 1700000000,
+            "text": "Hello"
+        });
+
+        let content = ChannelContent::Text("Hello".to_string());
+        let result = apply_reply_context(content, &message, &ctx).await;
+        match result {
+            ChannelContent::Text(t) => assert_eq!(t, "Hello"),
+            other => panic!("expected unchanged Text, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_reply_context_text_reply_to_photo_no_url() {
+        let client = test_client();
+        let ctx = test_ctx(&client);
+
+        let message = serde_json::json!({
+            "reply_to_message": {
+                "message_id": 99,
+                "from": { "id": 456, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1699999900,
+                "photo": [
+                    { "file_id": "small_id", "file_unique_id": "a", "width": 90, "height": 90 },
+                    { "file_id": "large_id", "file_unique_id": "b", "width": 800, "height": 600 }
+                ]
+            }
+        });
+
+        let content = ChannelContent::Text("I disagree".to_string());
+        let result = apply_reply_context(content, &message, &ctx).await;
+        match result {
+            ChannelContent::Text(t) => {
+                assert_eq!(t, "I disagree");
+            }
+            other => {
+                panic!("expected unchanged Text (no photo URL with fake token), got {other:?}")
+            }
+        }
     }
 }

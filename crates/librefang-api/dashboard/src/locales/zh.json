@@ -196,6 +196,8 @@
     "core_agents": "核心智能体",
     "hands": "Hands",
     "hand_badge": "HAND",
+    "show_hand_agents": "显示 Hands 智能体",
+    "hand_agent_hint": "你正在编辑由 Hand 创建的活动运行时智能体。改动仅在内存中生效；守护进程重启或 Hand 重新加载后会回退到 Hand 的配置。",
     "tools_cap": "工具",
     "network": "网络",
     "help": "管理系统中的所有智能体。可以创建、暂停、恢复和删除智能体，查看其状态和配置。",

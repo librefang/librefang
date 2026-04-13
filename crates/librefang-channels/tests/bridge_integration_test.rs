@@ -88,12 +88,26 @@ impl ChannelAdapter for MockAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let ChannelContent::Text(text) = content {
-            self.sent
-                .lock()
-                .unwrap()
-                .push((user.platform_id.clone(), text));
-        }
+        let text = match content {
+            ChannelContent::Text(t) => t,
+            ChannelContent::Interactive { text, ref buttons } => {
+                // Flatten button labels into the text for test inspection.
+                let labels: Vec<String> = buttons
+                    .iter()
+                    .flat_map(|row| row.iter().map(|b| b.label.clone()))
+                    .collect();
+                if labels.is_empty() {
+                    text
+                } else {
+                    format!("{text}\n{}", labels.join(", "))
+                }
+            }
+            _ => return Ok(()),
+        };
+        self.sent
+            .lock()
+            .unwrap()
+            .push((user.platform_id.clone(), text));
         Ok(())
     }
 

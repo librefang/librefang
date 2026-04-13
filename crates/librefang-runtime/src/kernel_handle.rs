@@ -316,6 +316,29 @@ pub trait KernelHandle: Send + Sync {
         Err("Channel file data send not available".to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn send_channel_poll(
+        &self,
+        channel: &str,
+        recipient: &str,
+        question: &str,
+        options: &[String],
+        is_quiz: bool,
+        correct_option_id: Option<u8>,
+        explanation: Option<&str>,
+    ) -> Result<(), String> {
+        let _ = (
+            channel,
+            recipient,
+            question,
+            options,
+            is_quiz,
+            correct_option_id,
+            explanation,
+        );
+        Err("Channel poll send not available".to_string())
+    }
+
     /// Touch the agent's `last_active` timestamp to prevent heartbeat false-positives
     /// during long-running operations (e.g., LLM calls).
     fn touch_heartbeat(&self, agent_id: &str) {

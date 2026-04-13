@@ -3210,7 +3210,7 @@ system_prompt = "You are a helpful assistant."
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_full(agent_id, message, handle, None, Some(sender))
+        self.send_message_full(agent_id, message, handle, None, Some(sender), None)
             .await
     }
 
@@ -3227,7 +3227,7 @@ system_prompt = "You are a helpful assistant."
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_full(agent_id, message, handle, Some(blocks), Some(sender))
+        self.send_message_full(agent_id, message, handle, Some(blocks), Some(sender), None)
             .await
     }
 
@@ -3238,7 +3238,7 @@ system_prompt = "You are a helpful assistant."
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
     ) -> KernelResult<AgentLoopResult> {
-        self.send_message_full(agent_id, message, kernel_handle, None, None)
+        self.send_message_full(agent_id, message, kernel_handle, None, None, None)
             .await
     }
 
@@ -3258,7 +3258,26 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
     ) -> KernelResult<AgentLoopResult> {
-        self.send_message_full(agent_id, message, kernel_handle, content_blocks, None)
+        self.send_message_full(agent_id, message, kernel_handle, content_blocks, None, None)
+            .await
+    }
+
+    /// Send a message with a session mode override.
+    ///
+    /// Used by trigger dispatch to plumb per-trigger `session_mode` overrides
+    /// without changing the public `send_message` signature.
+    async fn send_message_with_session_mode(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
+    ) -> KernelResult<AgentLoopResult> {
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+        self.send_message_full(agent_id, message, handle, None, None, session_mode_override)
             .await
     }
 
@@ -3477,6 +3496,7 @@ system_prompt = "You are a helpful assistant."
     /// This is the unified entry point for all message dispatch. When `sender_context`
     /// is provided, the agent's system prompt includes the sender's identity (channel,
     /// user ID, display name) so the agent knows who is talking and from where.
+    #[allow(clippy::too_many_arguments)]
     async fn send_message_full(
         &self,
         agent_id: AgentId,
@@ -3484,6 +3504,7 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
     ) -> KernelResult<AgentLoopResult> {
         // Acquire a shared read lock on the config reload barrier.
         // This is non-blocking under normal operation (many readers proceed in
@@ -3539,6 +3560,7 @@ system_prompt = "You are a helpful assistant."
                     kernel_handle,
                     content_blocks,
                     sender_context,
+                    session_mode_override,
                 )
                 .await
             }
@@ -3796,11 +3818,14 @@ system_prompt = "You are a helpful assistant."
         }
 
         // LLM agent: true streaming via agent loop
-        // Derive session ID: use channel-specific session when SenderContext
-        // provides a non-empty channel, otherwise fall back to agent's default.
+        // Derive session ID: channel-specific sessions are always deterministic
+        // per-channel. For non-channel invocations, respect the agent's session_mode.
         let effective_session_id = match sender_context {
             Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
-            _ => entry.session_id,
+            _ => match entry.manifest.session_mode {
+                librefang_types::agent::SessionMode::Persistent => entry.session_id,
+                librefang_types::agent::SessionMode::New => SessionId::new(),
+            },
         };
 
         let mut session = self
@@ -4878,6 +4903,7 @@ system_prompt = "You are a helpful assistant."
     }
 
     /// Execute the default LLM-based agent loop.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_llm_agent(
         &self,
         entry: &AgentEntry,
@@ -4886,6 +4912,7 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
     ) -> KernelResult<AgentLoopResult> {
         let cfg = self.config.load_full();
         // Check metering quota before starting
@@ -4893,11 +4920,19 @@ system_prompt = "You are a helpful assistant."
             .check_quota(agent_id, &entry.manifest.resources)
             .map_err(KernelError::LibreFang)?;
 
-        // Derive session ID: use channel-specific session when SenderContext
-        // provides a non-empty channel, otherwise fall back to agent's default.
+        // Derive session ID: channel-specific sessions are always deterministic
+        // per-channel and are not affected by session_mode. For non-channel
+        // invocations (background ticks, triggers, agent_send), resolve the
+        // effective session mode: per-trigger override > agent manifest default.
         let effective_session_id = match sender_context {
             Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
-            _ => entry.session_id,
+            _ => {
+                let mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
+                match mode {
+                    librefang_types::agent::SessionMode::Persistent => entry.session_id,
+                    librefang_types::agent::SessionMode::New => SessionId::new(),
+                }
+            }
         };
 
         let mut session = self
@@ -6703,13 +6738,22 @@ system_prompt = "You are a helpful assistant."
                 continue;
             }
 
-            // Inherit kernel defaults when hand declares "default" provider/model.
-            // When provider is "default", api_key_env and base_url MUST also be
-            // overridden — a base template might have set them for a different provider.
+            // Inherit kernel defaults when hand declares "default" sentinel.
+            // Provider and model are resolved independently so that a hand
+            // can pin one while inheriting the other (e.g. provider="openai"
+            // with model="default" inherits the global default model name).
+            //
+            // When inheriting provider, also fill api_key_env / base_url
+            // from global config — but only if the hand didn't set them
+            // explicitly, to preserve legacy HAND.toml credential overrides.
             if manifest.model.provider == "default" {
                 manifest.model.provider = cfg.default_model.provider.clone();
-                manifest.model.api_key_env = Some(cfg.default_model.api_key_env.clone());
-                manifest.model.base_url = cfg.default_model.base_url.clone();
+                if manifest.model.api_key_env.is_none() {
+                    manifest.model.api_key_env = Some(cfg.default_model.api_key_env.clone());
+                }
+                if manifest.model.base_url.is_none() {
+                    manifest.model.base_url = cfg.default_model.base_url.clone();
+                }
             }
             if manifest.model.model == "default" {
                 manifest.model.model = cfg.default_model.model.clone();
@@ -7382,9 +7426,9 @@ system_prompt = "You are a helpful assistant."
     /// Publish an event to the bus and evaluate triggers.
     ///
     /// Any matching triggers will dispatch messages to the subscribing agents.
-    /// Returns the list of (agent_id, message) pairs that were triggered.
+    /// Returns the list of trigger matches that were dispatched.
     /// Includes depth limiting to prevent circular trigger chains.
-    pub async fn publish_event(&self, event: Event) -> Vec<(AgentId, String)> {
+    pub async fn publish_event(&self, event: Event) -> Vec<crate::triggers::TriggerMatch> {
         let cfg = self.config.load_full();
         // Depth guard: prevent circular trigger chains
         static TRIGGER_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -7417,12 +7461,16 @@ system_prompt = "You are a helpful assistant."
 
         // Actually dispatch triggered messages to agents
         if let Some(weak) = self.self_handle.get() {
-            for (agent_id, message) in &triggered {
+            for trigger_match in &triggered {
                 if let Some(kernel) = weak.upgrade() {
-                    let aid = *agent_id;
-                    let msg = message.clone();
+                    let aid = trigger_match.agent_id;
+                    let msg = trigger_match.message.clone();
+                    let mode_override = trigger_match.session_mode_override;
                     tokio::spawn(async move {
-                        if let Err(e) = kernel.send_message(aid, &msg).await {
+                        if let Err(e) = kernel
+                            .send_message_with_session_mode(aid, &msg, mode_override)
+                            .await
+                        {
                             warn!(agent = %aid, "Trigger dispatch failed: {e}");
                         }
                     });
@@ -8235,6 +8283,7 @@ system_prompt = "You are a helpful assistant."
                                         Some(kh),
                                         None,
                                         Some(&cron_sender),
+                                        None,
                                     ),
                                 )
                                 .await
@@ -11499,6 +11548,44 @@ impl KernelHandle for LibreFangKernel {
             "File '{}' sent to {} via {}",
             filename, recipient, channel
         ))
+    }
+
+    async fn send_channel_poll(
+        &self,
+        channel: &str,
+        recipient: &str,
+        question: &str,
+        options: &[String],
+        is_quiz: bool,
+        correct_option_id: Option<u8>,
+        explanation: Option<&str>,
+    ) -> Result<(), String> {
+        let adapter = self
+            .channel_adapters
+            .get(channel)
+            .ok_or_else(|| format!("Channel adapter '{channel}' not found"))?
+            .clone();
+
+        let user = librefang_channels::types::ChannelUser {
+            platform_id: recipient.to_string(),
+            display_name: recipient.to_string(),
+            librefang_user: None,
+        };
+
+        let content = librefang_channels::types::ChannelContent::Poll {
+            question: question.to_string(),
+            options: options.to_vec(),
+            is_quiz,
+            correct_option_id,
+            explanation: explanation.map(|s| s.to_string()),
+        };
+
+        adapter
+            .send(&user, content)
+            .await
+            .map_err(|e| format!("Channel poll send failed: {e}"))?;
+
+        Ok(())
     }
 
     async fn spawn_agent_checked(

@@ -1,0 +1,362 @@
+# 安全模型与沙箱
+
+本页覆盖限制 Agent 行为范围以及隔离不受信任执行的运行时控制机制。
+
+## 包含的主题
+
+- 基于能力的安全模型
+- WASM 双重计量
+- 路径遍历防护
+- 子进程沙箱
+
+---
+
+## 基于能力的安全模型
+
+**源码：** `librefang-types/src/capability.rs`
+
+LibreFang 采用基于能力的安全模型。Agent 只能执行被明确授权的操作。
+能力在 Agent 创建后不可变，并在内核层面强制执行。
+
+### 能力变体
+
+`Capability` 枚举定义了所有权限类型：
+
+```rust
+pub enum Capability {
+    // Filesystem
+    FileRead(String),       // Glob pattern, e.g. "/data/*"
+    FileWrite(String),
+
+    // Network
+    NetConnect(String),     // Host:port pattern, e.g. "*.openai.com:443"
+    NetListen(u16),
+
+    // Tools
+    ToolInvoke(String),     // Specific tool ID
+    ToolAll,                // All tools (dangerous)
+
+    // LLM
+    LlmQuery(String),
+    LlmMaxTokens(u64),
+
+    // Agent interaction
+    AgentSpawn,
+    AgentMessage(String),
+    AgentKill(String),
+
+    // Memory
+    MemoryRead(String),
+    MemoryWrite(String),
+
+    // Shell
+    ShellExec(String),
+    EnvRead(String),
+
+    // OFP Wire Protocol
+    OfpDiscover,
+    OfpConnect(String),
+    OfpAdvertise,
+
+    // Economic
+    EconSpend(f64),
+    EconEarn,
+    EconTransfer(String),
+}
+```
+
+### 模式匹配
+
+`capability_matches(granted, required)` 函数实现了 glob 风格的匹配：
+
+- **精确匹配：** `"api.openai.com:443"` 匹配 `"api.openai.com:443"`
+- **全通配符：** `"*"` 匹配任意值
+- **前缀通配符：** `"*.openai.com:443"` 匹配 `"api.openai.com:443"`
+- **后缀通配符：** `"api.*"` 匹配 `"api.openai.com"`
+- **中间通配符：** `"api.*.com"` 匹配 `"api.openai.com"`
+- **ToolAll 特殊情况：** `ToolAll` 可授权任意 `ToolInvoke(_)`
+- **数值边界：** `LlmMaxTokens(10000)` 可授权 `LlmMaxTokens(5000)`（授予值 >= 请求值）
+
+### 执行检查点
+
+在 WASM 沙箱中，每个宿主调用在执行**之前**都会通过 `host_functions.rs`
+中的 `check_capability()` 进行检查：
+
+```rust
+fn check_capability(
+    capabilities: &[Capability],
+    required: &Capability,
+) -> Result<(), serde_json::Value> {
+    for granted in capabilities {
+        if capability_matches(granted, required) {
+            return Ok(());
+        }
+    }
+    Err(json!({"error": format!("Capability denied: {required:?}")}))
+}
+```
+
+如果没有任何已授予的能力与所需能力匹配，操作会立即返回 JSON
+错误——工具永远不会被调用。
+
+### 能力继承
+
+当 Agent 生成子 Agent 时，`validate_capability_inheritance()` 会确保
+子 Agent 的能力是父 Agent 能力的**子集**。这可以防止权限提升：
+
+```rust
+pub fn validate_capability_inheritance(
+    parent_caps: &[Capability],
+    child_caps: &[Capability],
+) -> Result<(), String> {
+    for child_cap in child_caps {
+        let is_covered = parent_caps
+            .iter()
+            .any(|parent_cap| capability_matches(parent_cap, child_cap));
+        if !is_covered {
+            return Err(format!(
+                "Privilege escalation denied: child requests {:?} \
+                 but parent does not have a matching grant",
+                child_cap
+            ));
+        }
+    }
+    Ok(())
+}
+```
+
+`host_functions.rs` 中的 `host_agent_spawn()` 函数调用
+`kernel.spawn_agent_checked(manifest_toml, Some(&state.agent_id), &state.capabilities)`，
+在子 Agent 创建之前执行此验证。
+
+---
+
+## WASM 双重计量
+
+**源码：** `librefang-runtime/src/sandbox.rs`
+
+不受信任的 WASM 模块在 Wasmtime 沙箱中运行，同时启用**两个独立的**
+计量机制。
+
+### 燃料计量（确定性）
+
+燃料计量统计 WASM 指令数。引擎为每条执行的指令扣除燃料。当预算耗尽时，
+执行会以 `Trap::OutOfFuel` 中断。
+
+```rust
+// SandboxConfig defaults
+pub fuel_limit: u64,  // Default: 1_000_000
+
+// Applied at execution time
+if config.fuel_limit > 0 {
+    store.set_fuel(config.fuel_limit)?;
+}
+```
+
+执行结束后会报告燃料消耗量：
+
+```rust
+let fuel_remaining = store.get_fuel().unwrap_or(0);
+let fuel_consumed = config.fuel_limit.saturating_sub(fuel_remaining);
+```
+
+### 纪元中断（墙钟时间）
+
+看门狗线程休眠指定的超时时长，然后递增引擎纪元。当纪元超过 store 的
+截止期限时，执行会以 `Trap::Interrupt` 中断。
+
+```rust
+store.set_epoch_deadline(1);
+let engine_clone = engine.clone();
+let timeout = config.timeout_secs.unwrap_or(30);
+let _watchdog = std::thread::spawn(move || {
+    std::thread::sleep(std::time::Duration::from_secs(timeout));
+    engine_clone.increment_epoch();
+});
+```
+
+### 为什么需要两种机制？
+
+| 属性 | 燃料 | 纪元 |
+|------|------|------|
+| **度量指标** | 指令数 | 墙钟时间 |
+| **精确度** | 确定性，可复现 | 非确定性 |
+| **可捕获** | CPU 密集型循环 | 宿主调用阻塞、I/O 等待 |
+| **可规避** | 可在宿主调用中浪费时间 | 可廉价地忙等循环 |
+
+两者组合形成完整防御：燃料捕获计算密集型循环，纪元捕获宿主调用滥用或
+环境延迟。
+
+### SandboxConfig
+
+```rust
+pub struct SandboxConfig {
+    pub fuel_limit: u64,           // Default: 1_000_000
+    pub max_memory_bytes: usize,   // Default: 16 MB
+    pub capabilities: Vec<Capability>,
+    pub timeout_secs: Option<u64>, // Default: 30 seconds
+}
+```
+
+### 错误类型
+
+```rust
+pub enum SandboxError {
+    Compilation(String),
+    Instantiation(String),
+    Execution(String),
+    FuelExhausted,         // Trap::OutOfFuel
+    AbiError(String),
+}
+```
+
+---
+
+## 路径遍历防护
+
+**源码：** `librefang-runtime/src/host_functions.rs`
+
+两个函数提供纵深防御以抵御目录遍历攻击。
+
+### safe_resolve_path（用于读取）
+
+用于 `fs_read` 和 `fs_list` 操作，要求目标文件必须存在：
+
+```rust
+fn safe_resolve_path(path: &str) -> Result<std::path::PathBuf, serde_json::Value> {
+    let p = Path::new(path);
+
+    // Phase 1: Reject any path with ".." components
+    for component in p.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(json!({"error": "Path traversal denied: '..' components forbidden"}));
+        }
+    }
+
+    // Phase 2: Canonicalize to resolve symlinks and normalize
+    std::fs::canonicalize(p)
+        .map_err(|e| json!({"error": format!("Cannot resolve path: {e}")}))
+}
+```
+
+### safe_resolve_parent（用于写入）
+
+用于 `fs_write` 操作，目标文件可能尚不存在：
+
+```rust
+fn safe_resolve_parent(path: &str) -> Result<std::path::PathBuf, serde_json::Value> {
+    let p = Path::new(path);
+
+    // Phase 1: Reject ".." in any component
+    for component in p.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(json!({"error": "Path traversal denied: '..' components forbidden"}));
+        }
+    }
+
+    // Phase 2: Canonicalize the parent directory
+    let parent = p.parent().filter(|par| !par.as_os_str().is_empty())
+        .ok_or_else(|| json!({"error": "Invalid path: no parent directory"}))?;
+    let canonical_parent = std::fs::canonicalize(parent)?;
+
+    // Phase 3: Belt-and-suspenders check on filename
+    let file_name = p.file_name()
+        .ok_or_else(|| json!({"error": "Invalid path: no file name"}))?;
+    if file_name.to_string_lossy().contains("..") {
+        return Err(json!({"error": "Path traversal denied in file name"}));
+    }
+
+    Ok(canonical_parent.join(file_name))
+}
+```
+
+### 执行顺序
+
+1. **能力检查**首先使用原始路径执行。
+2. **路径遍历检查**其次执行。
+3. **操作**仅在两者都通过后才执行。
+
+这种顺序确保即使能力被错误配置为宽泛的模式（如 `"*"`），路径遍历仍然
+会被阻止。
+
+---
+
+## 子进程沙箱
+
+**源码：** `librefang-runtime/src/subprocess_sandbox.rs`
+
+当运行时生成子进程（例如用于 shell 工具或技能执行）时，必须清除继承的
+环境变量以防止意外的密钥泄露。
+
+### 环境清除
+
+```rust
+pub fn sandbox_command(cmd: &mut tokio::process::Command, allowed_env_vars: &[String]) {
+    cmd.env_clear();  // Remove ALL inherited env vars
+
+    // Re-add platform-independent safe vars
+    for var in SAFE_ENV_VARS {
+        if let Ok(val) = std::env::var(var) {
+            cmd.env(var, val);
+        }
+    }
+
+    // Re-add Windows-specific safe vars (on Windows)
+    #[cfg(windows)]
+    for var in SAFE_ENV_VARS_WINDOWS { /* ... */ }
+
+    // Re-add caller-specified allowed vars
+    for var in allowed_env_vars { /* ... */ }
+}
+```
+
+### 安全环境变量
+
+**所有平台：**
+
+```rust
+pub const SAFE_ENV_VARS: &[&str] = &[
+    "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TERM",
+];
+```
+
+**仅限 Windows：**
+
+```rust
+pub const SAFE_ENV_VARS_WINDOWS: &[&str] = &[
+    "USERPROFILE", "SYSTEMROOT", "APPDATA", "LOCALAPPDATA",
+    "COMSPEC", "WINDIR", "PATHEXT",
+];
+```
+
+不在这些列表中且不在 `allowed_env_vars` 中的变量**永远不会**传递给
+子进程。这意味着 `OPENAI_API_KEY`、`GEMINI_API_KEY`、数据库凭据以及
+所有其他密钥都会被清除。
+
+### 可执行文件路径验证
+
+```rust
+pub fn validate_executable_path(path: &str) -> Result<(), String> {
+    let p = Path::new(path);
+    for component in p.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(format!(
+                "executable path '{}' contains '..' component which is not allowed",
+                path
+            ));
+        }
+    }
+    Ok(())
+}
+```
+
+这可以防止 Agent 通过构造的路径（如 `../../bin/dangerous`）逃离其
+工作目录。
+
+### Shell 注入防护
+
+`host_shell_exec` 函数使用 `Command::new(command).args(&args)`，
+这**不会**调用 shell。每个参数直接传递给进程，防止通过 `;`、`|`、
+`&&` 等元字符进行 shell 注入。
+
+---
