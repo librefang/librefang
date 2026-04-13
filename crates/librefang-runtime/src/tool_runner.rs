@@ -1365,7 +1365,12 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "file_url": { "type": "string", "description": "URL of a file to send as attachment" },
                     "file_path": { "type": "string", "description": "Local file path to send as attachment (reads from disk; use instead of file_url for local files)" },
                     "filename": { "type": "string", "description": "Filename for file attachments (defaults to the basename of file_path, or 'file')" },
-                    "thread_id": { "type": "string", "description": "Thread/topic ID to reply in (e.g., Telegram message_thread_id, Slack thread_ts)" }
+                    "thread_id": { "type": "string", "description": "Thread/topic ID to reply in (e.g., Telegram message_thread_id, Slack thread_ts)" },
+                    "poll_question": { "type": "string", "description": "Question for a poll (starts a poll, mutually exclusive with image_url/file_url/file_path)" },
+                    "poll_options": { "type": "array", "items": { "type": "string" }, "description": "Answer options for the poll (2-10 items, required with poll_question)" },
+                    "poll_is_quiz": { "type": "boolean", "description": "Set to true for a quiz mode (one correct answer)" },
+                    "poll_correct_option": { "type": "integer", "description": "Index of the correct answer (0-based, for quiz mode)" },
+                    "poll_explanation": { "type": "string", "description": "Explanation shown after answering (quiz mode)" }
                 },
                 "required": ["channel", "recipient"]
             }),
@@ -2757,6 +2762,46 @@ async fn tool_cron_cancel(
 // Channel send tool (proactive outbound messaging via configured adapters)
 // ---------------------------------------------------------------------------
 
+/// Parse and validate `poll_options` for the `channel_send` tool.
+///
+/// Telegram requires 2–10 string options per poll. A previous version used
+/// `filter_map(as_str)` which silently dropped non-string entries — e.g.
+/// `["a", 42, "c"]` became `["a", "c"]`, slipped past the min-2 check, and
+/// sent a poll missing the user's third option. This helper fails fast
+/// when any entry is the wrong type so the agent can surface the mistake
+/// instead of producing a malformed poll.
+fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
+    let arr = raw
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "poll_options must be an array of strings".to_string())?;
+    let mut out: Vec<String> = Vec::with_capacity(arr.len());
+    for (idx, v) in arr.iter().enumerate() {
+        match v.as_str() {
+            Some(s) => out.push(s.to_string()),
+            None => {
+                return Err(format!(
+                    "poll_options[{idx}] must be a string, got {}",
+                    match v {
+                        serde_json::Value::Null => "null",
+                        serde_json::Value::Bool(_) => "boolean",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::Object(_) => "object",
+                        serde_json::Value::String(_) => unreachable!(),
+                    }
+                ));
+            }
+        }
+    }
+    if !(2..=10).contains(&out.len()) {
+        return Err(format!(
+            "poll_options must have between 2 and 10 options, got {}",
+            out.len()
+        ));
+    }
+    Ok(out)
+}
+
 async fn tool_channel_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
@@ -2855,6 +2900,64 @@ async fn tool_channel_send(
         return kh
             .send_channel_file_data(&channel, recipient, data, &filename, mime_type, thread_id)
             .await;
+    }
+
+    if let Some(poll_question) = input.get("poll_question").and_then(|v| v.as_str()) {
+        for key in ["image_url", "image_path", "file_url", "file_path"] {
+            if input
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+            {
+                return Err(format!(
+                    "poll_question cannot be combined with media/file attachments (got {key})"
+                ));
+            }
+        }
+
+        let poll_options = parse_poll_options(input.get("poll_options"))?;
+
+        let is_quiz = input
+            .get("poll_is_quiz")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let correct_option_id = input
+            .get("poll_correct_option")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u8);
+        let explanation = input.get("poll_explanation").and_then(|v| v.as_str());
+
+        // Validate quiz mode requirements
+        if is_quiz {
+            let id = correct_option_id.ok_or_else(|| {
+                "poll_correct_option is required when poll_is_quiz is true".to_string()
+            })?;
+            if id as usize >= poll_options.len() {
+                return Err(format!(
+                    "poll_correct_option {} is out of bounds (must be between 0 and {})",
+                    id,
+                    poll_options.len() - 1
+                ));
+            }
+        }
+
+        kh.send_channel_poll(
+            &channel,
+            recipient,
+            poll_question,
+            &poll_options,
+            is_quiz,
+            correct_option_id,
+            explanation,
+        )
+        .await?;
+
+        let mut result = format!("Poll sent to {recipient} on {channel}: {poll_question}");
+        if is_quiz {
+            result.push_str(" (quiz mode)");
+        }
+        return Ok(result);
     }
 
     // Text-only message
@@ -6241,5 +6344,69 @@ mod tests {
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
         }
+    }
+
+    #[test]
+    fn parse_poll_options_accepts_2_to_10_strings() {
+        let raw = serde_json::json!(["red", "green", "blue"]);
+        let opts = parse_poll_options(Some(&raw)).expect("valid options");
+        assert_eq!(opts, vec!["red", "green", "blue"]);
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_non_string_entry() {
+        // Regression: a previous version used filter_map(as_str) which
+        // silently dropped non-string entries, letting a malformed poll
+        // slip past the min-2 validation.
+        let raw = serde_json::json!(["a", 42, "c"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject number");
+        assert!(
+            err.contains("poll_options[1]"),
+            "error mentions index: {err}"
+        );
+        assert!(err.contains("number"), "error mentions type: {err}");
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_bool_entry() {
+        let raw = serde_json::json!(["a", true]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject bool");
+        assert!(err.contains("poll_options[1]"));
+        assert!(err.contains("boolean"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_null_entry() {
+        let raw = serde_json::json!(["a", null, "c"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject null");
+        assert!(err.contains("poll_options[1]"));
+        assert!(err.contains("null"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_too_few() {
+        let raw = serde_json::json!(["only one"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject single option");
+        assert!(err.contains("between 2 and 10"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_too_many() {
+        let raw = serde_json::json!(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject 11 options");
+        assert!(err.contains("between 2 and 10"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_missing() {
+        let err = parse_poll_options(None).expect_err("None should fail");
+        assert!(err.contains("must be an array"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_non_array() {
+        let raw = serde_json::json!("not an array");
+        let err = parse_poll_options(Some(&raw)).expect_err("string should fail");
+        assert!(err.contains("must be an array"));
     }
 }

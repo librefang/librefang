@@ -1648,6 +1648,13 @@ impl LibreFangKernel {
     }
 
     /// Boot the kernel with an explicit configuration.
+    ///
+    /// Callers must have loaded `.env` / `secrets.env` / vault into the
+    /// process env before calling this — use
+    /// [`librefang_extensions::dotenv::load_dotenv`] from a synchronous
+    /// `main()`. Mutating env from here would be UB: this function is
+    /// reached from inside a tokio runtime, and `std::env::set_var` is
+    /// unsound once other threads exist (Rust 1.80+).
     pub fn boot_with_config(mut config: KernelConfig) -> KernelResult<Self> {
         use librefang_types::config::KernelMode;
 
@@ -3186,7 +3193,7 @@ system_prompt = "You are a helpful assistant."
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_full(agent_id, message, handle, None, Some(sender))
+        self.send_message_full(agent_id, message, handle, None, Some(sender), None)
             .await
     }
 
@@ -3203,7 +3210,7 @@ system_prompt = "You are a helpful assistant."
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_full(agent_id, message, handle, Some(blocks), Some(sender))
+        self.send_message_full(agent_id, message, handle, Some(blocks), Some(sender), None)
             .await
     }
 
@@ -3214,7 +3221,7 @@ system_prompt = "You are a helpful assistant."
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
     ) -> KernelResult<AgentLoopResult> {
-        self.send_message_full(agent_id, message, kernel_handle, None, None)
+        self.send_message_full(agent_id, message, kernel_handle, None, None, None)
             .await
     }
 
@@ -3234,7 +3241,26 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
     ) -> KernelResult<AgentLoopResult> {
-        self.send_message_full(agent_id, message, kernel_handle, content_blocks, None)
+        self.send_message_full(agent_id, message, kernel_handle, content_blocks, None, None)
+            .await
+    }
+
+    /// Send a message with a session mode override.
+    ///
+    /// Used by trigger dispatch to plumb per-trigger `session_mode` overrides
+    /// without changing the public `send_message` signature.
+    async fn send_message_with_session_mode(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
+    ) -> KernelResult<AgentLoopResult> {
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+        self.send_message_full(agent_id, message, handle, None, None, session_mode_override)
             .await
     }
 
@@ -3453,6 +3479,7 @@ system_prompt = "You are a helpful assistant."
     /// This is the unified entry point for all message dispatch. When `sender_context`
     /// is provided, the agent's system prompt includes the sender's identity (channel,
     /// user ID, display name) so the agent knows who is talking and from where.
+    #[allow(clippy::too_many_arguments)]
     async fn send_message_full(
         &self,
         agent_id: AgentId,
@@ -3460,6 +3487,7 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
     ) -> KernelResult<AgentLoopResult> {
         // Acquire a shared read lock on the config reload barrier.
         // This is non-blocking under normal operation (many readers proceed in
@@ -3515,6 +3543,7 @@ system_prompt = "You are a helpful assistant."
                     kernel_handle,
                     content_blocks,
                     sender_context,
+                    session_mode_override,
                 )
                 .await
             }
@@ -3772,11 +3801,14 @@ system_prompt = "You are a helpful assistant."
         }
 
         // LLM agent: true streaming via agent loop
-        // Derive session ID: use channel-specific session when SenderContext
-        // provides a non-empty channel, otherwise fall back to agent's default.
+        // Derive session ID: channel-specific sessions are always deterministic
+        // per-channel. For non-channel invocations, respect the agent's session_mode.
         let effective_session_id = match sender_context {
             Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
-            _ => entry.session_id,
+            _ => match entry.manifest.session_mode {
+                librefang_types::agent::SessionMode::Persistent => entry.session_id,
+                librefang_types::agent::SessionMode::New => SessionId::new(),
+            },
         };
 
         let mut session = self
@@ -4854,6 +4886,7 @@ system_prompt = "You are a helpful assistant."
     }
 
     /// Execute the default LLM-based agent loop.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_llm_agent(
         &self,
         entry: &AgentEntry,
@@ -4862,6 +4895,7 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
     ) -> KernelResult<AgentLoopResult> {
         let cfg = self.config.load_full();
         // Check metering quota before starting
@@ -4869,11 +4903,19 @@ system_prompt = "You are a helpful assistant."
             .check_quota(agent_id, &entry.manifest.resources)
             .map_err(KernelError::LibreFang)?;
 
-        // Derive session ID: use channel-specific session when SenderContext
-        // provides a non-empty channel, otherwise fall back to agent's default.
+        // Derive session ID: channel-specific sessions are always deterministic
+        // per-channel and are not affected by session_mode. For non-channel
+        // invocations (background ticks, triggers, agent_send), resolve the
+        // effective session mode: per-trigger override > agent manifest default.
         let effective_session_id = match sender_context {
             Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
-            _ => entry.session_id,
+            _ => {
+                let mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
+                match mode {
+                    librefang_types::agent::SessionMode::Persistent => entry.session_id,
+                    librefang_types::agent::SessionMode::New => SessionId::new(),
+                }
+            }
         };
 
         let mut session = self
@@ -5983,9 +6025,35 @@ system_prompt = "You are a helpful assistant."
         };
 
         if let Some(provider) = provider {
-            self.registry
-                .update_model_and_provider(agent_id, normalized_model.clone(), provider.clone())
-                .map_err(KernelError::LibreFang)?;
+            // When the provider changes, also clear any per-agent api_key_env
+            // and base_url overrides — they belonged to the previous provider
+            // and would route subsequent requests to the wrong endpoint with
+            // the wrong credentials. resolve_driver falls back to the global
+            // [provider_api_keys] / [provider_urls] tables (or convention) for
+            // the new provider, which is what the user expects when picking a
+            // model from the dashboard. When the provider is unchanged we
+            // leave the override fields alone so that genuine per-agent
+            // overrides on the same provider are preserved.
+            let prev_provider = self
+                .registry
+                .get(agent_id)
+                .map(|e| e.manifest.model.provider.clone());
+            let provider_changed = prev_provider.as_deref() != Some(provider.as_str());
+            if provider_changed {
+                self.registry
+                    .update_model_provider_config(
+                        agent_id,
+                        normalized_model.clone(),
+                        provider.clone(),
+                        None,
+                        None,
+                    )
+                    .map_err(KernelError::LibreFang)?;
+            } else {
+                self.registry
+                    .update_model_and_provider(agent_id, normalized_model.clone(), provider.clone())
+                    .map_err(KernelError::LibreFang)?;
+            }
             info!(agent_id = %agent_id, model = %normalized_model, provider = %provider, "Agent model+provider updated");
         } else {
             self.registry
@@ -7367,9 +7435,9 @@ system_prompt = "You are a helpful assistant."
     /// Publish an event to the bus and evaluate triggers.
     ///
     /// Any matching triggers will dispatch messages to the subscribing agents.
-    /// Returns the list of (agent_id, message) pairs that were triggered.
+    /// Returns the list of trigger matches that were dispatched.
     /// Includes depth limiting to prevent circular trigger chains.
-    pub async fn publish_event(&self, event: Event) -> Vec<(AgentId, String)> {
+    pub async fn publish_event(&self, event: Event) -> Vec<crate::triggers::TriggerMatch> {
         let cfg = self.config.load_full();
         // Depth guard: prevent circular trigger chains
         static TRIGGER_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -7402,12 +7470,16 @@ system_prompt = "You are a helpful assistant."
 
         // Actually dispatch triggered messages to agents
         if let Some(weak) = self.self_handle.get() {
-            for (agent_id, message) in &triggered {
+            for trigger_match in &triggered {
                 if let Some(kernel) = weak.upgrade() {
-                    let aid = *agent_id;
-                    let msg = message.clone();
+                    let aid = trigger_match.agent_id;
+                    let msg = trigger_match.message.clone();
+                    let mode_override = trigger_match.session_mode_override;
                     tokio::spawn(async move {
-                        if let Err(e) = kernel.send_message(aid, &msg).await {
+                        if let Err(e) = kernel
+                            .send_message_with_session_mode(aid, &msg, mode_override)
+                            .await
+                        {
                             warn!(agent = %aid, "Trigger dispatch failed: {e}");
                         }
                     });
@@ -8220,6 +8292,7 @@ system_prompt = "You are a helpful assistant."
                                         Some(kh),
                                         None,
                                         Some(&cron_sender),
+                                        None,
                                     ),
                                 )
                                 .await
@@ -11357,6 +11430,44 @@ impl KernelHandle for LibreFangKernel {
         ))
     }
 
+    async fn send_channel_poll(
+        &self,
+        channel: &str,
+        recipient: &str,
+        question: &str,
+        options: &[String],
+        is_quiz: bool,
+        correct_option_id: Option<u8>,
+        explanation: Option<&str>,
+    ) -> Result<(), String> {
+        let adapter = self
+            .channel_adapters
+            .get(channel)
+            .ok_or_else(|| format!("Channel adapter '{channel}' not found"))?
+            .clone();
+
+        let user = librefang_channels::types::ChannelUser {
+            platform_id: recipient.to_string(),
+            display_name: recipient.to_string(),
+            librefang_user: None,
+        };
+
+        let content = librefang_channels::types::ChannelContent::Poll {
+            question: question.to_string(),
+            options: options.to_vec(),
+            is_quiz,
+            correct_option_id,
+            explanation: explanation.map(|s| s.to_string()),
+        };
+
+        adapter
+            .send(&user, content)
+            .await
+            .map_err(|e| format!("Channel poll send failed: {e}"))?;
+
+        Ok(())
+    }
+
     async fn spawn_agent_checked(
         &self,
         manifest_toml: &str,
@@ -12688,6 +12799,140 @@ mod tests {
         assert_eq!(entry.manifest.model.model, "default");
         assert!(entry.manifest.model.base_url.is_none());
         assert!(entry.manifest.model.api_key_env.is_none());
+
+        kernel.shutdown();
+    }
+
+    /// Regression: switching an agent's provider via `set_agent_model` must
+    /// clear any stale per-agent `api_key_env` / `base_url` overrides. Before
+    /// the fix, `update_model_and_provider` only touched `model.provider` and
+    /// `model.model`, so an agent that had been booted under a custom default
+    /// provider (which seeded those fields onto the manifest) would carry the
+    /// old credentials and URL into the new provider, sending requests to the
+    /// previous endpoint with the wrong key — surfacing as the upstream's
+    /// "Missing Authentication header" 401 (issue #2380).
+    #[test]
+    fn test_set_agent_model_clears_overrides_when_provider_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-provider-switch-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        // Spawn an agent that already carries the previous provider's
+        // connection overrides — this mirrors the boot-time state of an
+        // agent loaded from disk with provider="default" against a custom
+        // default provider like "cloudverse".
+        let agent_id = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "switch-provider-agent".to_string(),
+                    description: "carries stale overrides from prior provider".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    model: ModelConfig {
+                        provider: "cloudverse".to_string(),
+                        model: "anthropic-claude-4-5-sonnet".to_string(),
+                        max_tokens: 4096,
+                        temperature: 0.7,
+                        system_prompt: String::new(),
+                        api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
+                        base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
+                        extra_params: std::collections::HashMap::new(),
+                    },
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn");
+
+        // Sanity: stale overrides are present.
+        let pre = kernel.registry.get(agent_id).expect("agent registry entry");
+        assert_eq!(pre.manifest.model.provider, "cloudverse");
+        assert_eq!(
+            pre.manifest.model.api_key_env.as_deref(),
+            Some("CLOUDVERSE_API_KEY")
+        );
+        assert_eq!(
+            pre.manifest.model.base_url.as_deref(),
+            Some("https://cloudverse.freshworkscorp.com/api/v1")
+        );
+
+        // Switch to an entirely different provider via the same path the
+        // dashboard's model picker uses.
+        kernel
+            .set_agent_model(agent_id, "anthropic/claude-3.5-sonnet", Some("openrouter"))
+            .expect("provider switch should succeed");
+
+        let post = kernel
+            .registry
+            .get(agent_id)
+            .expect("agent registry entry after switch");
+        assert_eq!(post.manifest.model.provider, "openrouter");
+        assert_eq!(
+            post.manifest.model.model, "anthropic/claude-3.5-sonnet",
+            "model name should be updated (and prefix-stripped)"
+        );
+        assert!(
+            post.manifest.model.api_key_env.is_none(),
+            "stale CLOUDVERSE_API_KEY override must be cleared so resolve_driver \
+             falls back to the new provider's key from [provider_api_keys] / convention"
+        );
+        assert!(
+            post.manifest.model.base_url.is_none(),
+            "stale cloudverse base_url override must be cleared so resolve_driver \
+             routes to openrouter's URL from [provider_urls] instead of cloudverse"
+        );
+
+        // Re-applying the same provider (model-only swap) must NOT clear the
+        // override fields — they may be legitimate per-agent overrides on a
+        // single provider.
+        kernel
+            .set_agent_model(agent_id, "anthropic/claude-3.7-sonnet", Some("openrouter"))
+            .expect("same-provider model swap should succeed");
+
+        // Seed an override on the now-openrouter agent so we can confirm the
+        // same-provider branch leaves it alone.
+        kernel
+            .registry
+            .update_model_provider_config(
+                agent_id,
+                "anthropic/claude-3.7-sonnet".to_string(),
+                "openrouter".to_string(),
+                Some("CUSTOM_OPENROUTER_KEY".to_string()),
+                Some("https://my-proxy.example/v1".to_string()),
+            )
+            .expect("seed override");
+
+        kernel
+            .set_agent_model(
+                agent_id,
+                "anthropic/claude-3.7-sonnet-v2",
+                Some("openrouter"),
+            )
+            .expect("same-provider swap should succeed");
+
+        let same_provider = kernel
+            .registry
+            .get(agent_id)
+            .expect("agent after same-provider swap");
+        assert_eq!(
+            same_provider.manifest.model.api_key_env.as_deref(),
+            Some("CUSTOM_OPENROUTER_KEY"),
+            "same-provider swap must preserve per-agent api_key_env override"
+        );
+        assert_eq!(
+            same_provider.manifest.model.base_url.as_deref(),
+            Some("https://my-proxy.example/v1"),
+            "same-provider swap must preserve per-agent base_url override"
+        );
 
         kernel.shutdown();
     }

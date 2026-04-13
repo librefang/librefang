@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use crate::i18n;
 use crate::tui::theme;
 use crate::tui::widgets;
+use librefang_extensions::dotenv;
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -261,7 +262,7 @@ fn handle_key(state: &mut State, code: KeyCode, test_tx: &std::sync::mpsc::Sende
 /// Save the key to `.env`, set it in-process, and kick off background verification.
 fn submit_key(state: &mut State, test_tx: &std::sync::mpsc::Sender<bool>) {
     let p = state.provider();
-    state.save_warn = crate::dotenv::save_env_key(p.env_var, &state.key_input)
+    state.save_warn = dotenv::save_env_key(p.env_var, &state.key_input)
         .err()
         .map(|e| e.to_string());
     state.status_msg = i18n::t("guide-testing-key");

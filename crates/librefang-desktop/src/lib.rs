@@ -9,12 +9,12 @@
 
 mod commands;
 mod connection;
-mod dotenv;
 mod server;
 mod shortcuts;
 mod tray;
 mod updater;
 
+use librefang_extensions::dotenv;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::event::{EventPayload, LifecycleEvent, SystemEvent};
 use std::sync::Arc;
