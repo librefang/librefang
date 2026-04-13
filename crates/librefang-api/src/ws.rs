@@ -172,6 +172,12 @@ pub fn validate_ws_origin(
         return Ok(());
     }
 
+    // Allow any origin whose port matches listen_port (covers LAN IP,
+    // hostname, etc. — e.g. http://192.168.1.5:4545 when listening on 4545).
+    if origin_port == listen_port {
+        return Ok(());
+    }
+
     // Wildcard "*" means allow all origins
     if extra_origins.iter().any(|o| o == "*") {
         return Ok(());
@@ -205,7 +211,7 @@ pub fn validate_ws_origin(
 
 fn normalize_origin_host(host: &str) -> &str {
     match host {
-        "localhost" | "127.0.0.1" | "::1" | "[::1]" => "localhost",
+        "localhost" | "127.0.0.1" | "::1" => "localhost",
         _ => host,
     }
 }
@@ -258,6 +264,14 @@ pub fn detect_connection_locality(addr: &SocketAddr, headers: &HeaderMap) -> Con
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.trim().parse().ok())
         });
+
+    debug!(
+        source_ip = %source_ip,
+        is_loopback,
+        is_proxied,
+        forwarded_ip = ?forwarded_ip,
+        "WS connection locality detected"
+    );
 
     ConnectionLocality {
         source_ip,
@@ -1639,11 +1653,30 @@ mod tests {
     }
 
     #[test]
-    fn validate_ws_origin_wrong_host_rejected() {
+    fn validate_ws_origin_wrong_host_port_mismatch_rejected() {
+        // Port mismatch: origin port 9999 != listen_port 4545
         let mut headers = HeaderMap::new();
-        headers.insert("origin", "http://evil.com:4545".parse().unwrap());
+        headers.insert("origin", "http://evil.com:9999".parse().unwrap());
         let result = validate_ws_origin(&headers, 4545, &[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_ws_origin_lan_ip_same_port_allowed() {
+        // LAN IP with matching port should be allowed (Fix 1).
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://192.168.1.5:4545".parse().unwrap());
+        let result = validate_ws_origin(&headers, 4545, &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_arbitrary_host_same_port_allowed() {
+        // Any hostname with matching port is allowed (Fix 1).
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://myserver.local:8080".parse().unwrap());
+        let result = validate_ws_origin(&headers, 8080, &[]);
+        assert!(result.is_ok());
     }
 
     #[test]

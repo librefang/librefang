@@ -18,6 +18,14 @@ update_channel = "stable"      # stable | beta | rc
 dashboard_user = "librefang"
 dashboard_pass = "librefang"
 
+# ── Terminal Access Control ──────────────────────────────────
+# [terminal]
+# allow_remote = false           # false = local-only when no auth configured;
+                                 # with API keys/dashboard credentials, remote
+                                 # clients can still authenticate and connect
+# trust_proxy_headers = false    # set true only if behind a reverse proxy
+                                 # that sets X-Forwarded-For / X-Real-IP
+
 # ── Performance ──────────────────────────────────────────────
 prompt_caching = true           # Reduce LLM costs (Anthropic/OpenAI)
 stable_prefix_mode = true       # Improve prompt cache hit rate
@@ -71,18 +79,6 @@ subagent_lane = 3               # Concurrent child agents
 mode = "deny"                   # deny | allowlist | full
 timeout_secs = 30
 max_output_bytes = 102400       # 100 KB
-
-# ── Terminal Access Control ──────────────────────────────────
-# Interactive terminal is enabled by default, but unauthenticated access is
-# local-only unless you explicitly allow remote use below.
-# [terminal]
-# enabled = true
-# allow_remote = false           # false = local-only without auth
-# allowed_origins = [
-#   "https://dashboard.example.com",
-# ]                              # Optional browser Origin allowlist.
-#                                # Use ["*"] only if you intentionally allow
-#                                # any browser origin and rely on auth.
 
 # ── Config Hot-Reload ────────────────────────────────────────
 [reload]

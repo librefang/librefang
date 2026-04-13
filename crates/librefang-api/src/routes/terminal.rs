@@ -154,11 +154,17 @@ pub async fn terminal_ws(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    let listen_port = cfg
-        .api_listen
-        .parse::<std::net::SocketAddr>()
-        .map(|addr| addr.port())
-        .unwrap_or(4545);
+    // Warn if terminal is enabled without any authentication configured.
+    let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
+    let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
+    let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
+    let auth_configured = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
+    if !auth_configured {
+        warn!("Terminal is enabled without any authentication configured — any local connection gets unauthenticated shell access");
+    }
+
+    let trust_proxy_headers = cfg.terminal.trust_proxy_headers;
+    let listen_port = cfg.listen_port();
     if let Err(reason) = validate_ws_origin(&headers, listen_port, &cfg.terminal.allowed_origins) {
         if !cfg.terminal.allow_remote {
             warn!(
@@ -178,11 +184,6 @@ pub async fn terminal_ws(
             "Terminal WebSocket origin mismatch — continuing to auth token check"
         );
     }
-
-    let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
-    let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
-    let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
-    let auth_configured = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
 
     let auth_method: &'static str;
     let provided_token = ws_auth_token(&headers, &uri);
@@ -230,6 +231,13 @@ pub async fn terminal_ws(
             );
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         } else if locality.is_local() {
+            if trust_proxy_headers {
+                warn!(
+                    ip = %locality.source_ip,
+                    proxied = locality.is_proxied,
+                    "Terminal local_bypass granted despite trust_proxy_headers being enabled — connection may be proxied"
+                );
+            }
             auth_method = "local_bypass";
         } else {
             warn!(
@@ -249,6 +257,13 @@ pub async fn terminal_ws(
         );
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     } else if locality.is_local() {
+        if trust_proxy_headers {
+            warn!(
+                ip = %locality.source_ip,
+                proxied = locality.is_proxied,
+                "Terminal local_bypass granted despite trust_proxy_headers being enabled — connection may be proxied"
+            );
+        }
         auth_method = "local_bypass";
     } else if cfg.terminal.allow_remote {
         auth_method = "remote_open";
@@ -262,13 +277,23 @@ pub async fn terminal_ws(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     };
 
-    info!(
-        ip = %locality.source_ip,
-        local = locality.is_local(),
-        proxied = locality.is_proxied,
-        auth = %auth_method,
-        "Terminal WebSocket connected"
-    );
+    if auth_method == "local_bypass" {
+        warn!(
+            ip = %locality.source_ip,
+            local = locality.is_local(),
+            proxied = locality.is_proxied,
+            auth = %auth_method,
+            "Terminal WebSocket connected"
+        );
+    } else {
+        info!(
+            ip = %locality.source_ip,
+            local = locality.is_local(),
+            proxied = locality.is_proxied,
+            auth = %auth_method,
+            "Terminal WebSocket connected"
+        );
+    }
 
     let ip = addr.ip();
     let max_ws_per_ip = state.kernel.config_ref().rate_limit.max_ws_per_ip;
@@ -687,37 +712,44 @@ mod terminal_ws_auth_tests {
     use axum::http::HeaderMap;
 
     #[test]
-    fn terminal_policy_rejects_origin_mismatch_when_remote_access_disabled() {
+    fn validate_ws_origin_allows_matching_port_on_localhost() {
         let mut headers = HeaderMap::new();
-        headers.insert("origin", "http://evil.example:9999".parse().unwrap());
-
-        let result = validate_ws_origin(&headers, 4545, &[]);
-        assert!(result.is_err());
-
-        let allow_remote = false;
-        let rejects_request = result.is_err() && !allow_remote;
-        assert!(rejects_request);
+        headers.insert("origin", "http://localhost:4545".parse().unwrap());
+        assert!(validate_ws_origin(&headers, 4545, &[]).is_ok());
     }
 
     #[test]
-    fn terminal_policy_continues_past_origin_mismatch_when_remote_access_enabled() {
+    fn validate_ws_origin_rejects_mismatched_port() {
         let mut headers = HeaderMap::new();
-        headers.insert("origin", "http://evil.example:9999".parse().unwrap());
-
-        let result = validate_ws_origin(&headers, 4545, &[]);
-        assert!(result.is_err());
-
-        let allow_remote = true;
-        let rejects_request = result.is_err() && !allow_remote;
-        assert!(!rejects_request);
+        headers.insert("origin", "http://localhost:8080".parse().unwrap());
+        assert!(validate_ws_origin(&headers, 4545, &[]).is_err());
     }
 
     #[test]
-    fn terminal_policy_wildcard_origin_allows_validation() {
+    fn validate_ws_origin_wildcard_allows_any_origin() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://evil.example:9999".parse().unwrap());
+        assert!(validate_ws_origin(&headers, 4545, &["*".to_string()]).is_ok());
 
-        let result = validate_ws_origin(&headers, 4545, &["*".to_string()]);
-        assert!(result.is_ok());
+        // Also works with https
+        let mut headers2 = HeaderMap::new();
+        headers2.insert("origin", "https://other.host:1234".parse().unwrap());
+        assert!(validate_ws_origin(&headers2, 4545, &["*".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_allows_specific_allowed_origins() {
+        let allowed = vec!["https://my.domain.com".to_string()];
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "https://my.domain.com".parse().unwrap());
+        assert!(validate_ws_origin(&headers, 4545, &allowed).is_ok());
+    }
+
+    #[test]
+    fn validate_ws_origin_rejects_non_matching_allowed_origins() {
+        let allowed = vec!["https://my.domain.com".to_string()];
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        assert!(validate_ws_origin(&headers, 4545, &allowed).is_err());
     }
 }

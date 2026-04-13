@@ -1250,38 +1250,6 @@ impl Default for ExecPolicy {
     }
 }
 
-/// Terminal/WebSocket security configuration.
-///
-/// Controls access to the interactive terminal WebSocket endpoint — a critical
-/// security-sensitive feature that allows executing arbitrary code on the host.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TerminalConfig {
-    /// Master switch — set to false to disable the terminal entirely.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-
-    /// Additional allowed WebSocket origins beyond auto-detected localhost.
-    /// Use when the dashboard is served from a custom domain (e.g. "https://my.domain.com").
-    #[serde(default)]
-    pub allowed_origins: Vec<String>,
-
-    /// Allow terminal access from remote/proxied connections when no auth is configured.
-    /// Default: false (local-only when unauthenticated).
-    #[serde(default)]
-    pub allow_remote: bool,
-}
-
-impl Default for TerminalConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            allowed_origins: Vec::new(),
-            allow_remote: false,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Gap 2: No-output idle timeout for subprocess sandbox
 // ---------------------------------------------------------------------------
@@ -2069,7 +2037,7 @@ pub struct KernelConfig {
     /// Individual endpoints may enforce tighter limits.
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
-    /// Terminal/WebSocket access configuration (security-sensitive).
+    /// Terminal / CLI access control configuration.
     #[serde(default)]
     pub terminal: TerminalConfig,
 }
@@ -3457,6 +3425,19 @@ impl KernelConfig {
     /// Resolved directory for hand workspaces.
     pub fn effective_hands_workspaces_dir(&self) -> PathBuf {
         self.effective_workspaces_dir().join("hands")
+    }
+
+    /// Parse the TCP port number from `api_listen`.
+    ///
+    /// Returns the port as `u16`, falling back to `4545` if parsing fails
+    /// (e.g. malformed address string). Validation warnings for a bad port
+    /// are emitted separately by `KernelConfig::validate()`.
+    pub fn listen_port(&self) -> u16 {
+        self.api_listen
+            .rsplit(':')
+            .next()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(4545)
     }
 
     /// Resolve the API key env var name for a provider.
@@ -5667,6 +5648,45 @@ impl Default for LinkedInConfig {
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Terminal / CLI access control configuration.
+///
+/// Controls which clients may connect to the interactive terminal (WebSocket)
+/// and how locality is determined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Master switch — set to false to disable the terminal entirely.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Additional allowed WebSocket origins beyond auto-detected localhost.
+    /// Use when the dashboard is served from a custom domain (e.g. "https://my.domain.com").
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+
+    /// Allow terminal access from remote/proxied connections when no auth is configured.
+    /// Default: false (local-only when unauthenticated).
+    #[serde(default)]
+    pub allow_remote: bool,
+
+    /// When true, X-Forwarded-For / X-Real-IP headers are trusted for
+    /// locality detection. Must be explicitly enabled when running behind
+    /// a reverse proxy. Default: false.
+    #[serde(default)]
+    pub trust_proxy_headers: bool,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowed_origins: Vec::new(),
+            allow_remote: false,
+            trust_proxy_headers: false,
         }
     }
 }
