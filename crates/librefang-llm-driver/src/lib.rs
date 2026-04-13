@@ -389,3 +389,5 @@ mod tests {
         ));
     }
 }
+
+pub mod llm_errors;
