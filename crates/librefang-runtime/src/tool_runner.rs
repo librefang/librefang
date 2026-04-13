@@ -2762,6 +2762,46 @@ async fn tool_cron_cancel(
 // Channel send tool (proactive outbound messaging via configured adapters)
 // ---------------------------------------------------------------------------
 
+/// Parse and validate `poll_options` for the `channel_send` tool.
+///
+/// Telegram requires 2–10 string options per poll. A previous version used
+/// `filter_map(as_str)` which silently dropped non-string entries — e.g.
+/// `["a", 42, "c"]` became `["a", "c"]`, slipped past the min-2 check, and
+/// sent a poll missing the user's third option. This helper fails fast
+/// when any entry is the wrong type so the agent can surface the mistake
+/// instead of producing a malformed poll.
+fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
+    let arr = raw
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "poll_options must be an array of strings".to_string())?;
+    let mut out: Vec<String> = Vec::with_capacity(arr.len());
+    for (idx, v) in arr.iter().enumerate() {
+        match v.as_str() {
+            Some(s) => out.push(s.to_string()),
+            None => {
+                return Err(format!(
+                    "poll_options[{idx}] must be a string, got {}",
+                    match v {
+                        serde_json::Value::Null => "null",
+                        serde_json::Value::Bool(_) => "boolean",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::Object(_) => "object",
+                        serde_json::Value::String(_) => unreachable!(),
+                    }
+                ));
+            }
+        }
+    }
+    if !(2..=10).contains(&out.len()) {
+        return Err(format!(
+            "poll_options must have between 2 and 10 options, got {}",
+            out.len()
+        ));
+    }
+    Ok(out)
+}
+
 async fn tool_channel_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
@@ -2876,19 +2916,7 @@ async fn tool_channel_send(
             }
         }
 
-        let poll_options: Vec<String> = input
-            .get("poll_options")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if poll_options.len() < 2 || poll_options.len() > 10 {
-            return Err("poll_options must have between 2 and 10 options".to_string());
-        }
+        let poll_options = parse_poll_options(input.get("poll_options"))?;
 
         let is_quiz = input
             .get("poll_is_quiz")
@@ -6316,5 +6344,69 @@ mod tests {
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
         }
+    }
+
+    #[test]
+    fn parse_poll_options_accepts_2_to_10_strings() {
+        let raw = serde_json::json!(["red", "green", "blue"]);
+        let opts = parse_poll_options(Some(&raw)).expect("valid options");
+        assert_eq!(opts, vec!["red", "green", "blue"]);
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_non_string_entry() {
+        // Regression: a previous version used filter_map(as_str) which
+        // silently dropped non-string entries, letting a malformed poll
+        // slip past the min-2 validation.
+        let raw = serde_json::json!(["a", 42, "c"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject number");
+        assert!(
+            err.contains("poll_options[1]"),
+            "error mentions index: {err}"
+        );
+        assert!(err.contains("number"), "error mentions type: {err}");
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_bool_entry() {
+        let raw = serde_json::json!(["a", true]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject bool");
+        assert!(err.contains("poll_options[1]"));
+        assert!(err.contains("boolean"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_null_entry() {
+        let raw = serde_json::json!(["a", null, "c"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject null");
+        assert!(err.contains("poll_options[1]"));
+        assert!(err.contains("null"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_too_few() {
+        let raw = serde_json::json!(["only one"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject single option");
+        assert!(err.contains("between 2 and 10"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_too_many() {
+        let raw = serde_json::json!(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject 11 options");
+        assert!(err.contains("between 2 and 10"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_missing() {
+        let err = parse_poll_options(None).expect_err("None should fail");
+        assert!(err.contains("must be an array"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_non_array() {
+        let raw = serde_json::json!("not an array");
+        let err = parse_poll_options(Some(&raw)).expect_err("string should fail");
+        assert!(err.contains("must be an array"));
     }
 }

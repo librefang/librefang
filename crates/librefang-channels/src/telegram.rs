@@ -667,8 +667,17 @@ impl TelegramAdapter {
         items: &[crate::types::MediaGroupItem],
         thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Telegram sendMediaGroup requires 2–10 items. Validate locally so
+        // callers get a readable error instead of an HTTP 400 from the API.
         if items.is_empty() {
             return Ok(());
+        }
+        if !(2..=10).contains(&items.len()) {
+            return Err(format!(
+                "Telegram sendMediaGroup requires 2–10 items, got {}",
+                items.len()
+            )
+            .into());
         }
         let url = format!(
             "{}/bot{}/sendMediaGroup",
@@ -1473,19 +1482,30 @@ impl ChannelAdapter for TelegramAdapter {
 
         // Spawn background cleanup task for poll_contexts
         let poll_contexts_cleanup = poll_contexts.clone();
-        let shutdown_cleanup = shutdown.clone();
+        let mut shutdown_cleanup = shutdown.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300)); // Every 5 minutes
+            interval.tick().await; // consume the immediate first tick
             loop {
+                // Race tick against shutdown so a stop() call doesn't wait up
+                // to 5 minutes for the next tick before exiting the loop.
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = shutdown_cleanup.changed() => {
+                        if *shutdown_cleanup.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
                 if *shutdown_cleanup.borrow() {
                     break;
                 }
-                interval.tick().await;
                 let now = Instant::now();
                 let mut removed = 0;
                 poll_contexts_cleanup.retain(|_k, v| {
                     if now.duration_since(v.last_accessed) > Duration::from_secs(1800) {
-                        // 30 minutes
+                        // 30 minutes since last interaction — drop.
                         removed += 1;
                         false
                     } else {
@@ -1700,7 +1720,14 @@ impl ChannelAdapter for TelegramAdapter {
                                     .insert("account_id".to_string(), serde_json::json!(aid));
                             }
 
-                            if let Some(ctx) = poll_contexts.get(&msg.platform_message_id) {
+                            // Use `get_mut` so each answer bumps `last_accessed`.
+                            // Without this refresh, a poll's question/options
+                            // metadata fell out of the cache exactly 30 minutes
+                            // after send, regardless of whether users were still
+                            // actively answering — long-running surveys lost
+                            // their context silently.
+                            if let Some(mut ctx) = poll_contexts.get_mut(&msg.platform_message_id) {
+                                ctx.last_accessed = Instant::now();
                                 msg.metadata.insert(
                                     "poll_question".to_string(),
                                     serde_json::json!(ctx.question),
