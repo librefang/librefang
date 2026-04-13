@@ -1875,7 +1875,20 @@ pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
         serde_json::Value::Array(arr) => {
             toml::Value::Array(arr.iter().map(json_to_toml_value).collect())
         }
-        _ => toml::Value::String(value.to_string()),
+        serde_json::Value::Object(map) => {
+            // Convert nested JSON objects into TOML tables. Without this, the
+            // catch-all below would JSON-stringify the whole object, which is
+            // how #2319 wrote `mcp_servers = ['{"name":"..."}']` into config.toml
+            // and broke reload.
+            let mut table = toml::map::Map::new();
+            for (k, v) in map {
+                table.insert(k.clone(), json_to_toml_value(v));
+            }
+            toml::Value::Table(table)
+        }
+        // Null has no TOML analogue — emit an empty string so the key still
+        // round-trips; callers that care should filter before calling.
+        serde_json::Value::Null => toml::Value::String(String::new()),
     }
 }
 
@@ -1948,8 +1961,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
                 .unwrap_or_else(|e| e.into_inner());
             super::agents::effective_default_model(&cfg.default_model, dm_override.as_ref())
         };
-        let mut agent_entries_visible: Vec<_> =
-            agent_entries.iter().filter(|e| !e.is_hand).collect();
+        let mut agent_entries_visible: Vec<_> = agent_entries.iter().collect();
         // Sort by last_active descending — matches AgentsPage default query order.
         agent_entries_visible.sort_by(|a, b| b.last_active.cmp(&a.last_active));
         agent_entries_visible

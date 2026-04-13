@@ -247,7 +247,7 @@ function DetailsModal({ skill, onClose, onInstall, pendingId, source = "clawhub"
                 <p className="text-xs font-black uppercase tracking-widest text-text-dim/60">v{skill.version || "1.0.0"}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}>
+            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close")}>
               <X className="w-5 h-5 text-text-dim" />
             </button>
           </div>
