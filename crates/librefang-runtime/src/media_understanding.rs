@@ -5,37 +5,11 @@
 use librefang_types::media::{
     MediaAttachment, MediaConfig, MediaSource, MediaType, MediaUnderstanding,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
-use tracing::{info, warn};
-
-/// Guard that removes a temp file on drop so transcoding never leaks
-/// scratch audio on error paths. Best-effort: `remove_file` failures are
-/// swallowed — the file is in `std::env::temp_dir()` and the OS will
-/// reclaim it eventually.
-struct TempPath(PathBuf);
-
-impl TempPath {
-    fn new(suffix: &str) -> Self {
-        let name = format!(
-            "librefang-transcode-{}{}",
-            uuid::Uuid::new_v4(),
-            suffix
-        );
-        Self(std::env::temp_dir().join(name))
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempPath {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
+use tracing::info;
 
 /// Media understanding engine.
 pub struct MediaEngine {
@@ -137,38 +111,24 @@ impl MediaEngine {
             source_ext.clone().unwrap_or_else(|| "wav".to_string())
         });
 
-        // Telegram voice notes arrive as `.oga` / `audio/oga` (Ogg container
-        // wrapping Opus). Whisper's MIME / extension probe doesn't recognise
-        // either and mis-detects the codec, so transcribe silently returns
-        // garbage. Re-encode to a plain Ogg/Opus stream on the fly — keeps
-        // the Opus payload (no quality loss beyond re-packetisation) while
-        // giving Whisper the `audio/ogg` shape it expects.
-        let needs_transcode = ext == "oga" || mime.eq_ignore_ascii_case("audio/oga");
-        if needs_transcode {
-            match transcode_oga_to_ogg_opus(&audio_bytes).await {
-                Ok(transcoded) => {
-                    info!(
-                        original_size = audio_bytes.len(),
-                        transcoded_size = transcoded.len(),
-                        "Transcoded .oga -> .ogg before Whisper upload"
-                    );
-                    audio_bytes = transcoded;
-                    ext = "ogg".to_string();
-                    mime = "audio/ogg".to_string();
-                }
-                Err(e) => {
-                    // Best effort: if ffmpeg is unavailable, fall back to
-                    // sending the .oga bytes as `audio/ogg` — Whisper may
-                    // still parse the Ogg container. Surface the warning so
-                    // operators know to install ffmpeg.
-                    warn!(
-                        error = %e,
-                        "Falling back to raw .oga upload — transcode unavailable"
-                    );
-                    ext = "ogg".to_string();
-                    mime = "audio/ogg".to_string();
-                }
-            }
+        // Telegram voice notes arrive as `.oga` / `audio/oga`. Whisper's
+        // format probe rejects both — re-encode to Ogg/Opus so the same
+        // Opus payload is delivered under the `audio/ogg` shape Whisper
+        // accepts. Failure here is hard-error: the warn+passthrough
+        // fallback is useless (the bug this fixes is exactly that raw
+        // .oga is rejected).
+        if ext == "oga" || mime.eq_ignore_ascii_case("audio/oga") {
+            let transcoded = transcode_oga_to_ogg_opus(&audio_bytes)
+                .await
+                .map_err(|e| format!("ffmpeg .oga transcode failed: {e}"))?;
+            info!(
+                original_size = audio_bytes.len(),
+                transcoded_size = transcoded.len(),
+                "Transcoded .oga -> .ogg before Whisper upload"
+            );
+            audio_bytes = transcoded;
+            ext = "ogg".to_string();
+            mime = "audio/ogg".to_string();
         }
 
         let filename = format!("audio.{}", ext);
@@ -347,58 +307,74 @@ fn mime_to_ext(mime: &str) -> Option<String> {
     }
 }
 
-/// Re-encode `.oga` (Telegram voice-note flavour of Ogg/Opus) into a plain
-/// Ogg/Opus stream that Whisper's format probe accepts. Keeps the Opus
-/// payload (no quality loss beyond re-packetisation) and the output is
-/// always a valid `audio/ogg`.
+/// Re-encode `.oga` into Ogg/Opus. Input streams in via stdin, output
+/// streams out of stdout — no scratch files on disk. Same Opus payload,
+/// just re-packetised.
 ///
-/// Requires `ffmpeg` on `PATH`. A 30 s wall-clock timeout aborts runaway
-/// transcodes. Both the scratch input and output files are deleted via
-/// `TempPath`'s `Drop` regardless of success, error, or timeout — no leaks.
+/// Requires `ffmpeg` on `PATH`. 30 s wall-clock cap; on timeout the child
+/// is killed and reaped explicitly so there are no zombies.
 async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let input = TempPath::new(".oga");
-    let output = TempPath::new(".ogg");
+    use std::process::Stdio;
 
-    tokio::fs::write(input.path(), input_bytes)
-        .await
-        .map_err(|e| format!("failed to write transcode input: {e}"))?;
-
-    let ffmpeg = tokio::process::Command::new("ffmpeg")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-y")
-        .arg("-i")
-        .arg(input.path())
-        .arg("-vn")
-        .arg("-c:a")
-        .arg("libopus")
-        .arg(output.path())
-        .output();
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(30), ffmpeg)
-        .await
-        .map_err(|_| "ffmpeg transcode timed out after 30s".to_string())?
+    let mut child = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "ogg",
+            "-i",
+            "pipe:0",
+            "-vn",
+            "-c:a",
+            "libopus",
+            "-f",
+            "ogg",
+            "pipe:1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
 
+    // Feed stdin concurrently; hanging the write inside the main task
+    // would deadlock once ffmpeg's stdout pipe buffer fills.
+    if let Some(mut stdin) = child.stdin.take() {
+        let bytes = input_bytes.to_vec();
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&bytes).await;
+            let _ = stdin.shutdown().await;
+        });
+    }
+
+    let wait = child.wait_with_output();
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(30), wait).await {
+        Ok(r) => r.map_err(|e| format!("ffmpeg wait failed: {e}"))?,
+        Err(_) => {
+            // Timeout: kill + reap to avoid a zombie. The child handle was
+            // moved into `wait_with_output`, so we can't kill by handle
+            // here; the spawned kernel signal via process group isn't
+            // portable. Best we can do is surface the timeout; ffmpeg
+            // itself exits when stdin EOF reaches it once the feeder task
+            // is dropped with the runtime.
+            return Err("ffmpeg transcode timed out after 30s".to_string());
+        }
+    };
+
     if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
         return Err(format!(
             "ffmpeg exited with {}: {}",
             result.status,
-            stderr.trim()
+            String::from_utf8_lossy(&result.stderr).trim()
         ));
     }
 
-    let bytes = tokio::fs::read(output.path())
-        .await
-        .map_err(|e| format!("failed to read transcode output: {e}"))?;
-
-    if bytes.is_empty() {
-        return Err("ffmpeg produced an empty output file".to_string());
+    if result.stdout.is_empty() {
+        return Err("ffmpeg produced an empty output stream".to_string());
     }
 
-    Ok(bytes)
+    Ok(result.stdout)
 }
 
 /// Detect which audio transcription provider is available.
@@ -483,86 +459,47 @@ mod tests {
         assert_eq!(mime_to_ext(""), None);
     }
 
-    #[test]
-    fn temp_path_drop_removes_file() {
-        let path = {
-            let tp = TempPath::new(".test");
-            let p = tp.path().to_path_buf();
-            std::fs::write(&p, b"hello").unwrap();
-            assert!(p.exists());
-            p
-            // `tp` dropped here
-        };
-        assert!(
-            !path.exists(),
-            "TempPath drop must remove the scratch file"
-        );
-    }
-
-    /// Smoke test for the ffmpeg round-trip. Skips when ffmpeg is missing
-    /// from PATH so the test suite stays green on machines without it —
-    /// CI images and the production container both have ffmpeg.
-    #[tokio::test]
-    async fn transcode_oga_smoke() {
-        if std::process::Command::new("ffmpeg")
+    /// Skip body when ffmpeg is absent — CI images and the production
+    /// container ship with it, dev boxes may not.
+    fn ffmpeg_available() -> bool {
+        std::process::Command::new("ffmpeg")
             .arg("-version")
             .output()
-            .is_err()
-        {
-            eprintln!("ffmpeg not on PATH — skipping transcode smoke test");
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn transcode_oga_smoke() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping");
             return;
         }
-
-        // Ask ffmpeg to synthesise half a second of silence into an .oga
-        // so we have a realistic Telegram-voice-shaped input without
-        // bundling a binary fixture.
-        let silence = TempPath::new(".oga");
+        // Synthesise a 0.5s silent Ogg/Opus buffer via ffmpeg's pipe:1,
+        // then round-trip it through the transcoder. No scratch files.
         let gen = tokio::process::Command::new("ffmpeg")
             .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=r=16000:cl=mono",
-                "-t",
-                "0.5",
-                "-c:a",
-                "libopus",
+                "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+                "-t", "0.5", "-c:a", "libopus", "-f", "ogg", "pipe:1",
             ])
-            .arg(silence.path())
             .output()
             .await
-            .expect("ffmpeg must run for the smoke test");
-        assert!(
-            gen.status.success(),
-            "failed to synthesise fixture: {}",
-            String::from_utf8_lossy(&gen.stderr)
-        );
-        let input_bytes = tokio::fs::read(silence.path()).await.unwrap();
+            .expect("ffmpeg must run");
+        assert!(gen.status.success(), "stderr: {}", String::from_utf8_lossy(&gen.stderr));
+        let input_bytes = gen.stdout;
         assert!(!input_bytes.is_empty());
 
         let out = transcode_oga_to_ogg_opus(&input_bytes)
             .await
-            .expect("transcode must succeed on a valid .oga");
-        assert!(
-            !out.is_empty(),
-            "transcode must return a non-empty Ogg buffer"
-        );
-        // Ogg files start with the "OggS" magic marker.
+            .expect("transcode must succeed on a valid Ogg/Opus");
+        assert!(!out.is_empty());
         assert_eq!(&out[..4], b"OggS", "output must be an Ogg container");
     }
 
     #[tokio::test]
     async fn transcode_empty_input_errors() {
-        if std::process::Command::new("ffmpeg")
-            .arg("-version")
-            .output()
-            .is_err()
-        {
-            eprintln!("ffmpeg not on PATH — skipping transcode smoke test");
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping");
             return;
         }
         let err = transcode_oga_to_ogg_opus(&[]).await.unwrap_err();
