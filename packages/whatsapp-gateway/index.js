@@ -559,6 +559,31 @@ function extractNotifyOwner(responseText) {
 }
 
 // ---------------------------------------------------------------------------
+// NO_REPLY sentinel — agent-side convention to silently decline to answer.
+// ---------------------------------------------------------------------------
+// The agent prompts instruct the LLM to emit a bare `NO_REPLY` token when it
+// decides a message doesn't warrant a reply. Ideally it is the entire
+// response, but in practice we see two leaks:
+//   1. Trailing token:  "Tutto bene, Signore.\nNO_REPLY"
+//   2. Concatenated:    "...a Sua disposizione. 🎩NO_REPLY"   ← no separator
+// Both must be scrubbed before the text hits WhatsApp. The helper returns
+// the cleaned text, or `''` when the entire response was a NO_REPLY sentinel
+// and the caller should suppress delivery entirely.
+function stripNoReply(text) {
+  if (typeof text !== 'string' || !text) return text || '';
+  if (text.trim() === 'NO_REPLY') return '';
+  // `\bNO_REPLY\b` matches even when glued to an emoji (🎩NO_REPLY) because
+  // emoji code points are not word characters. Strip every standalone
+  // occurrence, collapse the whitespace it leaves behind.
+  const stripped = text
+    .replace(/\bNO_REPLY\b/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return stripped === 'NO_REPLY' ? '' : stripped;
+}
+
+// ---------------------------------------------------------------------------
 // Step E: Parse relay commands from agent response
 // ---------------------------------------------------------------------------
 
@@ -1109,6 +1134,10 @@ async function startConnection() {
               .replace(RELAY_RE, '')
               .replace(/\[no reply needed\]/gi, '');
           }
+          // Also scrub the plain `NO_REPLY` sentinel — it leaks mid-stream,
+          // trailing, and glued to emojis. When the whole chunk is a
+          // NO_REPLY (or strips down to empty), skip the edit entirely.
+          cleaned = stripNoReply(cleaned);
           cleaned = cleaned.trim();
           if (!cleaned) return;
           const formatted = markdownToWhatsApp(cleaned);
@@ -1123,7 +1152,9 @@ async function startConnection() {
         const rawResponse = await forwardToLibreFangStreaming(
           messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress, sender, { isGroup, wasMentioned },
         );
-        const response = markdownToWhatsApp(rawResponse);
+        // Scrub NO_REPLY before markdown conversion — if the model emitted it
+        // trailing or glued to an emoji it would otherwise reach WhatsApp.
+        const response = markdownToWhatsApp(stripNoReply(rawResponse));
 
         // Helper: send a new message or edit the streamed one for final delivery
         const sendOrEdit = async (jid, finalText) => {
@@ -1659,21 +1690,12 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
             }
             // The /api/agents/{id}/message endpoint returns { response: "..." }
             const responseText = data.response || data.message || data.text || '';
-            // Safety net: strip NO_REPLY token if it leaked through as text
-            const trimmed = responseText.trim();
-            if (trimmed === 'NO_REPLY' || trimmed.endsWith('\nNO_REPLY')) {
-              resolve('');
-              return;
-            }
-            resolve(responseText);
+            // Scrub NO_REPLY wherever it appears (isolated, trailing, or
+            // glued to an emoji / punctuation without a separator).
+            resolve(stripNoReply(responseText));
           } catch {
-            // Non-JSON fallback — still check for NO_REPLY
-            const fallback = body.trim() || '';
-            if (fallback === 'NO_REPLY' || fallback.endsWith('\nNO_REPLY')) {
-              resolve('');
-              return;
-            }
-            resolve(fallback);
+            // Non-JSON fallback — still scrub NO_REPLY for the same reason.
+            resolve(stripNoReply(body || ''));
           }
         });
       },
