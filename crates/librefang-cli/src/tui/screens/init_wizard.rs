@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::tui::theme;
 use crate::tui::widgets;
+use librefang_extensions::dotenv;
 use librefang_runtime::model_catalog::ModelCatalog;
 use librefang_types::model_catalog::ModelTier;
 
@@ -816,10 +817,8 @@ pub fn run() -> InitResult {
                                     && state.key_test == KeyTestState::Idle
                                 {
                                     if let Some(p) = state.provider() {
-                                        let _ = crate::dotenv::save_env_key(
-                                            p.env_var,
-                                            &state.api_key_input,
-                                        );
+                                        let _ =
+                                            dotenv::save_env_key(p.env_var, &state.api_key_input);
                                     }
                                     state.key_test = KeyTestState::Testing;
                                     let provider_name = state
