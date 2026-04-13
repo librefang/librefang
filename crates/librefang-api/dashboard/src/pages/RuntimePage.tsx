@@ -21,7 +21,7 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import {
   Activity, Cpu, HardDrive, Zap, Timer, Layers, CheckCircle2, GitCommit,
   Calendar, Server, Monitor, Settings, HeartPulse, Box, Globe, FolderOpen,
-  FileText, Gauge, Network, XCircle, RefreshCw, Power, Loader2,
+  FileText, Gauge, Network, XCircle, RefreshCw, Power,
   Shield, ShieldCheck, Archive, Download, Trash2, RotateCcw,
   AlertTriangle, Clock, Brain, Database, Lock, Eye,
 } from "lucide-react";
