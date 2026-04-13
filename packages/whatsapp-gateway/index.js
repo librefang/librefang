@@ -244,6 +244,25 @@ let cachedAgentId = null;
 let ownJid = null;
 
 // ---------------------------------------------------------------------------
+// LID ↔ phone-number JID mapping
+// ---------------------------------------------------------------------------
+// WhatsApp assigns every account an opaque `<digits>@lid` identifier that is
+// unrelated to the phone number. The `remoteJid` of an inbound message may be
+// a LID rather than an `@s.whatsapp.net` JID, and in that case we can only
+// recognise the sender (owner vs. stranger, routing key, logging) once we have
+// resolved the LID back to a phone-number JID.
+//
+// We maintain two caches:
+//   - `lidToPnJid`    — populated from `msg.key.senderPn` whenever a message
+//                       arrives that carries both the LID and the real PN JID.
+//   - `ownerLidJids`  — LIDs known to belong to an OWNER_NUMBERS entry. We
+//                       resolve these once at connect via `sock.onWhatsApp()`
+//                       so that the very first LID-addressed message from the
+//                       owner is recognised, even before any senderPn event.
+const lidToPnJid = new Map();    // '<digits>@lid' → '<digits>@s.whatsapp.net'
+const ownerLidJids = new Set();  // '<digits>@lid'
+
+// ---------------------------------------------------------------------------
 // Message store for Baileys retry mechanism
 // ---------------------------------------------------------------------------
 // Baileys needs getMessage() to re-decrypt messages on retry.  We keep a
@@ -825,6 +844,28 @@ async function startConnection() {
       // Invalidate cached agent UUID on reconnect — the daemon may have
       // restarted and agents may have new UUIDs.
       cachedAgentId = null;
+
+      // Resolve LIDs for every OWNER_NUMBERS entry so that LID-addressed
+      // messages from the owner are recognised without waiting for the first
+      // senderPn event. Best-effort: if the call fails (old Baileys, no
+      // network, number not on WhatsApp) we log and continue — subsequent
+      // senderPn events will still populate `lidToPnJid`.
+      if (OWNER_JIDS.size > 0 && typeof sock.onWhatsApp === 'function') {
+        try {
+          const results = await sock.onWhatsApp(...[...OWNER_JIDS]);
+          for (const r of results || []) {
+            if (r && r.exists && r.lid) {
+              ownerLidJids.add(r.lid);
+              if (r.jid) lidToPnJid.set(r.lid, r.jid);
+            }
+          }
+          if (ownerLidJids.size > 0) {
+            console.log(`[gateway] Owner LIDs resolved → ${[...ownerLidJids].join(', ')}`);
+          }
+        } catch (err) {
+          console.warn(`[gateway] Failed to resolve owner LIDs: ${err.message}`);
+        }
+      }
     }
   });
 
@@ -928,20 +969,56 @@ async function startConnection() {
       if (!text && !downloadableMedia && !mediaDescriptor && !innerMsg._overrideMediaText) continue;
 
       // Extract real phone number
-      const isLidJid = sender.endsWith('@lid');
-      const senderPn = msg.key.senderPn || msg.key.participant || '';
-      let phone;
-      if (isLidJid && senderPn) {
-        phone = '+' + senderPn.replace(/@.*$/, '');
-      } else {
-        phone = '+' + sender.replace(/@.*$/, '');
-      }
-      const pushName = msg.pushName || phone;
-
-      // Determine sender type
+      //
+      // `sender` (= msg.key.remoteJid) may be:
+      //   - '<digits>@s.whatsapp.net' — standard phone-number JID
+      //   - '<digits>@lid'            — WhatsApp anonymous LID (opaque)
+      //   - '<digits>@g.us'           — group JID (we handle separately below)
+      //
+      // A LID by itself is NOT a phone number — using it as such produces
+      // bogus 15-digit phone strings and causes every LID-addressed message
+      // to be mis-classified as from a stranger. Resolve via, in order:
+      //   1. `msg.key.senderPn` (sometimes provided by Baileys directly)
+      //   2. `lidToPnJid` cache populated by previous (1)s or by onWhatsApp()
+      //   3. `msg.key.participant` (groups; the actual sender inside)
+      //   4. `sender` itself when it's already an `@s.whatsapp.net` JID
+      // If none of the above yields a phone-number JID, `phone` is left as
+      // a placeholder and we flag the sender as unresolved.
       const isGroup = sender.endsWith('@g.us');
-      const senderPnJid = senderPn ? senderPn.replace(/@.*$/, '') + '@s.whatsapp.net' : '';
-      const isOwner = OWNER_JIDS.size > 0 && (OWNER_JIDS.has(sender) || (senderPnJid && OWNER_JIDS.has(senderPnJid)));
+      const isLidJid = sender.endsWith('@lid');
+      const senderPnRaw = msg.key.senderPn || '';
+
+      // Cache LID → phone-number JID when we see both on the same message.
+      if (isLidJid && senderPnRaw) {
+        lidToPnJid.set(sender, senderPnRaw);
+      }
+
+      // Resolve to a phone-number JID (or empty string if we cannot).
+      let senderPnJid = '';
+      if (senderPnRaw) {
+        senderPnJid = senderPnRaw;
+      } else if (isLidJid && lidToPnJid.has(sender)) {
+        senderPnJid = lidToPnJid.get(sender);
+      } else if (!isLidJid && !isGroup) {
+        senderPnJid = sender;
+      } else if (msg.key.participant && !msg.key.participant.endsWith('@lid')) {
+        senderPnJid = msg.key.participant;
+      }
+
+      const phone = senderPnJid ? '+' + senderPnJid.replace(/@.*$/, '') : '';
+      const phoneResolved = phone !== '';
+      const pushName = msg.pushName || phone || sender;
+
+      if (!phoneResolved) {
+        console.warn(`[gateway] Could not resolve phone for sender=${sender} senderPn=${senderPnRaw || '∅'} participant=${msg.key.participant || '∅'} — treating as unknown`);
+      }
+
+      // Determine sender type. Owner check accepts either the resolved
+      // phone-number JID or a LID previously bound to an owner number.
+      const isOwner = OWNER_JIDS.size > 0 && (
+        (senderPnJid && OWNER_JIDS.has(senderPnJid)) ||
+        (isLidJid && ownerLidJids.has(sender))
+      );
       const isStranger = !isGroup && OWNER_JIDS.size > 0 && !isOwner;
 
       // Detect @mention: check if our JID is in the mentionedJid list
@@ -1896,9 +1973,16 @@ async function runCatchUpSweep() {
       // Ensure agent ID is resolved
       if (!cachedAgentId) await resolveAgentId();
 
-      // Determine if sender is owner or stranger
+      // Determine if sender is owner or stranger. Mirror the logic used in
+      // `messages.upsert`: a LID JID is not a phone number, so accept either
+      // a resolved phone-number JID or a known owner LID.
+      const isLidMsgJid = msg.jid && msg.jid.endsWith('@lid');
       const senderPnJid = msg.phone ? msg.phone.replace(/^\+/, '') + '@s.whatsapp.net' : '';
-      const isOwner = OWNER_JIDS.size > 0 && (OWNER_JIDS.has(msg.jid) || (senderPnJid && OWNER_JIDS.has(senderPnJid)));
+      const isOwner = OWNER_JIDS.size > 0 && (
+        (!isLidMsgJid && msg.jid && OWNER_JIDS.has(msg.jid)) ||
+        (senderPnJid && OWNER_JIDS.has(senderPnJid)) ||
+        (isLidMsgJid && ownerLidJids.has(msg.jid))
+      );
 
       // Never re-forward group messages — we cannot tell if the bot was
       // mentioned, so replaying them violates group_policy and can leak
@@ -2271,16 +2355,45 @@ server.listen(PORT, '127.0.0.1', async () => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\n[gateway] Shutting down...');
-  if (sock) sock.end();
-  server.close(() => process.exit(0));
-});
+let shuttingDown = false;
+function gracefulShutdown(signal) {
+  // Re-entry guard: if SIGINT arrives during the SIGTERM 10s window (or
+  // vice versa) we'd otherwise invoke cleanupSocket() / server.close()
+  // twice — the second server.close() throws ERR_SERVER_NOT_RUNNING.
+  if (shuttingDown) {
+    console.log(`[gateway] Already shutting down, ignoring ${signal}`);
+    return;
+  }
+  shuttingDown = true;
+  console.log(`\n[gateway] Received ${signal}, shutting down...`);
 
-process.on('SIGTERM', () => {
-  if (sock) sock.end();
-  server.close(() => process.exit(0));
-});
+  // Force exit after 10 seconds no matter what
+  const forceExitTimer = setTimeout(() => {
+    console.error('[gateway] Graceful shutdown timed out, force exiting');
+    process.exit(1);
+  }, 10_000);
+  forceExitTimer.unref();
+
+  // Tear down Baileys socket properly (fire-and-forget, we don't await).
+  // Log the error message if teardown fails — a silent catch would hide a
+  // broken Baileys shutdown in production.
+  cleanupSocket().catch(e =>
+    console.warn('[gateway] cleanupSocket error:', e?.message || e),
+  );
+
+  // Close HTTP server — forcibly drain all existing connections (Node.js 18.2+)
+  if (server.closeAllConnections) {
+    server.closeAllConnections();
+  }
+  server.close(() => {
+    clearTimeout(forceExitTimer);
+    console.log('[gateway] Shutdown complete');
+    process.exit(0);
+  });
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 } // end if (require.main === module)
 
 // Export for testing
