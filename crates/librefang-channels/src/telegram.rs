@@ -1116,15 +1116,7 @@ impl ChannelAdapter for TelegramAdapter {
         let msg_id: i64 = message_id
             .parse()
             .map_err(|_| format!("Invalid Telegram message_id: {message_id}"))?;
-        // Telegram only supports a limited set of reaction emoji.
-        // Map unsupported ones to the closest Telegram-compatible alternative.
-        let emoji = match reaction.emoji.as_str() {
-            "\u{23F3}" => "\u{1F440}",        // ⏳ → 👀
-            "\u{2699}\u{FE0F}" => "\u{26A1}", // ⚙️ → ⚡
-            "\u{2705}" => "\u{1F389}",        // ✅ → 🎉
-            "\u{274C}" => "\u{1F44E}",        // ❌ → 👎
-            other => other,                   // 🤔, ✍️ etc. pass through
-        };
+        let emoji = map_reaction_emoji(&reaction.emoji);
 
         // Optionally clear the reaction on completion instead of showing 🎉.
         let is_done = reaction.emoji == "\u{2705}"; // ✅
@@ -1225,6 +1217,18 @@ impl ChannelAdapter for TelegramAdapter {
             }
         }
         Ok(())
+    }
+}
+
+fn map_reaction_emoji(emoji: &str) -> &str {
+    // Telegram only supports a limited set of reaction emoji.
+    // Map unsupported ones to the closest Telegram-compatible alternative.
+    match emoji {
+        "\u{23F3}" => "\u{1F440}",        // ⏳ → 👀
+        "\u{2699}\u{FE0F}" => "\u{26A1}", // ⚙️ → ⚡
+        "\u{2705}" => "\u{1F389}",        // ✅ → 🎉
+        "\u{274C}" => "\u{1F44E}",        // ❌ → 👎
+        other => other,                   // 🤔, ✍️ etc. pass through
     }
 }
 
@@ -1860,17 +1864,21 @@ fn sanitize_telegram_html(text: &str) -> String {
                 if !tag_name_raw.is_empty()
                     && ALLOWED.iter().any(|a| a.eq_ignore_ascii_case(tag_name_raw))
                 {
-                    // Allowed tag — keep as-is
-                    result.push_str(&text[i..tag_end + 1]);
                     let tag_name = tag_name_raw.to_ascii_lowercase();
-                    // Track open/close for balancing
                     if is_closing {
                         if let Some(pos) = open_tags.iter().rposition(|t| t == &tag_name) {
                             open_tags.remove(pos);
+                            result.push_str(&text[i..tag_end + 1]);
+                        } else {
+                            result.push_str("&lt;");
+                            result.push_str(tag_content);
+                            result.push_str("&gt;");
                         }
-                    } else if !tag_content.ends_with('/') {
-                        // Not self-closing
+                    } else if tag_content.ends_with('/') {
+                        result.push_str(&text[i..tag_end + 1]);
+                    } else {
                         open_tags.push(tag_name);
+                        result.push_str(&text[i..tag_end + 1]);
                     }
                 } else {
                     // Unknown tag — escape both brackets
@@ -2921,6 +2929,83 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_telegram_html_tg_spoiler_allowed() {
+        let input = "hello <tg-spoiler>hidden</tg-spoiler> world";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, input, "tg-spoiler should pass through");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_tg_emoji_allowed() {
+        let input = "<tg-emoji emoji-id=\"123\">😀</tg-emoji> hi";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, input, "tg-emoji should pass through");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_closing_tag_never_opened() {
+        let input = "hello </b> world";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "hello &lt;/b&gt; world");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_empty_input() {
+        let input = "";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_text_only() {
+        let input = "hello world";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "hello world");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_lone_open_bracket_at_end() {
+        let input = "text <";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "text &lt;");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_br_not_allowed() {
+        let input = "line <br> break";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "line &lt;br&gt; break");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_uppercase_allowed_tags() {
+        let input = "<B>BOLD</B> <I>italic</I>";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, input, "uppercase allowed tags should pass through");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_mixed_allowed_and_disallowed_nested() {
+        let input = "<b><name>John</name></b>";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "<b>&lt;name&gt;John&lt;/name&gt;</b>");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_self_closing_allowed_tag() {
+        let input = "<code/>";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "<code/>");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_unclosed_allowed_tag_is_closed() {
+        let input = "<b>hello";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, "<b>hello</b>");
+    }
+
+    #[test]
     fn test_supports_streaming() {
         let adapter = TelegramAdapter::new(
             "fake:token".to_string(),
@@ -3093,5 +3178,512 @@ mod tests {
         let msg = parse_telegram_callback_query(&callback, &[], &test_ctx(&client)).unwrap();
         assert!(!msg.is_group);
         assert_eq!(msg.sender.display_name, "Bob");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_short() {
+        assert_eq!(truncate_with_ellipsis("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_long() {
+        let result = truncate_with_ellipsis("hello world", 5);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 8);
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_exactly_at_max() {
+        assert_eq!(truncate_with_ellipsis("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_empty() {
+        assert_eq!(truncate_with_ellipsis("", 10), "");
+    }
+
+    #[test]
+    fn test_extract_retry_after_present() {
+        let json = r#"{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":30}}"#;
+        assert_eq!(extract_retry_after(json, 99), 30);
+    }
+
+    #[test]
+    fn test_extract_retry_after_missing() {
+        let json = r#"{"ok":true}"#;
+        assert_eq!(extract_retry_after(json, 5), 5);
+    }
+
+    #[test]
+    fn test_extract_retry_after_invalid() {
+        assert_eq!(extract_retry_after("not json", 7), 7);
+    }
+
+    #[test]
+    fn test_is_group_chat_group() {
+        assert!(is_group_chat("group"));
+    }
+
+    #[test]
+    fn test_is_group_chat_supergroup() {
+        assert!(is_group_chat("supergroup"));
+    }
+
+    #[test]
+    fn test_is_group_chat_private() {
+        assert!(!is_group_chat("private"));
+    }
+
+    #[test]
+    fn test_is_group_chat_channel() {
+        assert!(!is_group_chat("channel"));
+    }
+
+    #[test]
+    fn test_is_group_chat_empty() {
+        assert!(!is_group_chat(""));
+    }
+
+    #[test]
+    fn test_ends_with_ascii_ci_true() {
+        assert!(ends_with_ascii_ci("photo.jpg", ".JPG"));
+    }
+
+    #[test]
+    fn test_ends_with_ascii_ci_false() {
+        assert!(!ends_with_ascii_ci("photo.jpg", ".png"));
+    }
+
+    #[test]
+    fn test_ends_with_ascii_ci_suffix_longer() {
+        assert!(!ends_with_ascii_ci("a", "longsuffix"));
+    }
+
+    #[test]
+    fn test_ends_with_ascii_ci_exact() {
+        assert!(ends_with_ascii_ci("photo.jpg", ".jpg"));
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_jpg() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.jpg"),
+            Some("image/jpeg")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_jpeg() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.jpeg"),
+            Some("image/jpeg")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_png_case_insensitive() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.PNG"),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_gif() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.gif"),
+            Some("image/gif")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_webp() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.webp"),
+            Some("image/webp")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_bmp() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.bmp"),
+            Some("image/bmp")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_tiff() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.tiff"),
+            Some("image/tiff")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_tif() {
+        assert_eq!(
+            mime_type_from_telegram_path("/path/photo.tif"),
+            Some("image/tiff")
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_unknown() {
+        assert_eq!(mime_type_from_telegram_path("/path/photo.xyz"), None);
+    }
+
+    #[test]
+    fn test_mime_type_from_telegram_path_no_ext() {
+        assert_eq!(mime_type_from_telegram_path("/path/photo"), None);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_ascii() {
+        assert_eq!(utf16_offset_to_byte_offset("hello", 3), 3);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_emoji() {
+        assert_eq!(utf16_offset_to_byte_offset("a😀b", 1), 1);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_mixed() {
+        assert_eq!(utf16_offset_to_byte_offset("a😀c", 2), 5);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_beyond_end() {
+        assert_eq!(utf16_offset_to_byte_offset("hello", 100), 5);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_bmp_char() {
+        assert_eq!(utf16_offset_to_byte_offset("aβc", 1), 1);
+    }
+
+    #[test]
+    fn test_utf16_offset_to_byte_offset_inside_surrogate_pair_rounds_forward() {
+        assert_eq!(utf16_offset_to_byte_offset("a😀b", 2), 5);
+    }
+
+    #[test]
+    fn test_map_reaction_emoji_supported_mappings() {
+        assert_eq!(map_reaction_emoji("\u{23F3}"), "\u{1F440}");
+        assert_eq!(map_reaction_emoji("\u{2699}\u{FE0F}"), "\u{26A1}");
+        assert_eq!(map_reaction_emoji("\u{2705}"), "\u{1F389}");
+        assert_eq!(map_reaction_emoji("\u{274C}"), "\u{1F44E}");
+    }
+
+    #[test]
+    fn test_map_reaction_emoji_passes_through_supported_emoji() {
+        assert_eq!(map_reaction_emoji("\u{1F914}"), "\u{1F914}");
+    }
+
+    #[test]
+    fn test_parse_chat_id_valid() {
+        let user = ChannelUser {
+            platform_id: "123456".to_string(),
+            display_name: "Test User".to_string(),
+            librefang_user: None,
+        };
+        let result = TelegramAdapter::parse_chat_id(&user);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 123456);
+    }
+
+    #[test]
+    fn test_parse_chat_id_invalid() {
+        let user = ChannelUser {
+            platform_id: "abc".to_string(),
+            display_name: "Test User".to_string(),
+            librefang_user: None,
+        };
+        let result = TelegramAdapter::parse_chat_id(&user);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_video_message() {
+        let update = serde_json::json!({
+            "update_id": 800,
+            "message": {
+                "message_id": 1,
+                "from": { "id": 123, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1700000000,
+                "video": { "file_id": "vid_id", "file_unique_id": "v", "duration": 60, "width": 1920, "height": 1080 }
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], &test_ctx(&client), None)
+            .await
+            .unwrap();
+        match &msg.content {
+            ChannelContent::Text(t) => {
+                assert!(t.contains("Video received"), "got: {t}");
+                assert!(t.contains("60s"), "got: {t}");
+            }
+            other => panic!("Expected Text fallback for video message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_video_note_message() {
+        let update = serde_json::json!({
+            "update_id": 801,
+            "message": {
+                "message_id": 2,
+                "from": { "id": 123, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1700000000,
+                "video_note": { "file_id": "vn_id", "file_unique_id": "vn", "duration": 30, "length": 240 }
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], &test_ctx(&client), None)
+            .await
+            .unwrap();
+        match &msg.content {
+            ChannelContent::Text(t) => {
+                assert!(t.contains("Video note"), "got: {t}");
+                assert!(t.contains("30s"), "got: {t}");
+            }
+            other => panic!("Expected Text fallback for video_note message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_update_no_message_field() {
+        let update = serde_json::json!({
+            "update_id": 802
+        });
+
+        let client = test_client();
+        let result = parse_telegram_update(&update, &[], &test_ctx(&client), None).await;
+        assert!(result.is_err());
+        match result {
+            Err(DropReason::ParseError(_)) => {}
+            other => panic!("Expected DropReason::ParseError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_sender_chat_without_id() {
+        let update = serde_json::json!({
+            "update_id": 803,
+            "message": {
+                "message_id": 3,
+                "sender_chat": { "title": "My Channel", "type": "channel" },
+                "chat": { "id": -100123, "type": "supergroup" },
+                "date": 1700000000,
+                "text": "hello"
+            }
+        });
+
+        let client = test_client();
+        let result = parse_telegram_update(&update, &[], &test_ctx(&client), None).await;
+        assert!(result.is_err());
+        match result {
+            Err(DropReason::ParseError(_)) => {}
+            other => panic!("Expected DropReason::ParseError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_from_without_id() {
+        let update = serde_json::json!({
+            "update_id": 804,
+            "message": {
+                "message_id": 4,
+                "from": { "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1700000000,
+                "text": "hello"
+            }
+        });
+
+        let client = test_client();
+        let result = parse_telegram_update(&update, &[], &test_ctx(&client), None).await;
+        assert!(result.is_err());
+        match result {
+            Err(DropReason::ParseError(_)) => {}
+            other => panic!("Expected DropReason::ParseError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_with_message_thread_id() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_thread",
+            "from": { "id": 42, "first_name": "Alice" },
+            "data": "action",
+            "message": {
+                "message_id": 1,
+                "message_thread_id": 17,
+                "chat": { "id": -100123, "type": "supergroup" },
+                "text": "question",
+                "date": 1700000000
+            }
+        });
+
+        let msg = parse_telegram_callback_query(&callback, &[], &test_ctx(&client)).unwrap();
+        assert_eq!(msg.thread_id, Some("17".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_without_message_field() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_no_msg",
+            "from": { "id": 42 },
+            "data": "action"
+        });
+
+        let msg = parse_telegram_callback_query(&callback, &[], &test_ctx(&client));
+        assert!(msg.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_without_from_field() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_no_from",
+            "data": "action",
+            "message": {
+                "message_id": 1,
+                "chat": { "id": 123 },
+                "date": 1700000000
+            }
+        });
+
+        let msg = parse_telegram_callback_query(&callback, &[], &test_ctx(&client));
+        assert!(msg.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_with_last_name() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_last",
+            "from": { "id": 42, "first_name": "Alice", "last_name": "Smith" },
+            "data": "action",
+            "message": {
+                "message_id": 1,
+                "chat": { "id": 42, "type": "private" },
+                "text": "hi",
+                "date": 1700000000
+            }
+        });
+
+        let msg = parse_telegram_callback_query(&callback, &[], &test_ctx(&client)).unwrap();
+        assert_eq!(msg.sender.display_name, "Alice Smith");
+    }
+
+    #[tokio::test]
+    async fn test_apply_reply_context_text_reply_to_text_message() {
+        let client = test_client();
+        let ctx = test_ctx(&client);
+
+        let message = serde_json::json!({
+            "reply_to_message": {
+                "message_id": 99,
+                "from": { "id": 456, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1699999900,
+                "text": "The sky is blue"
+            }
+        });
+
+        let content = ChannelContent::Text("I disagree".to_string());
+        let result = apply_reply_context(content, &message, &ctx).await;
+        match result {
+            ChannelContent::Text(t) => {
+                assert!(t.starts_with("[Replying to Alice: \"The sky is blue\"]\n"));
+                assert!(t.contains("I disagree"));
+            }
+            other => panic!("expected Text with prefix, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_reply_context_text_reply_to_caption_only() {
+        let client = test_client();
+        let ctx = test_ctx(&client);
+
+        let message = serde_json::json!({
+            "reply_to_message": {
+                "message_id": 99,
+                "from": { "id": 456, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1699999900,
+                "caption": "Look at this photo"
+            }
+        });
+
+        let content = ChannelContent::Text("nice".to_string());
+        let result = apply_reply_context(content, &message, &ctx).await;
+        match result {
+            ChannelContent::Text(t) => {
+                assert!(t.starts_with("[Replying to Alice: \"Look at this photo\"]\n"));
+                assert!(t.contains("nice"));
+            }
+            other => panic!("expected Text with prefix, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_reply_context_no_reply_to_message() {
+        let client = test_client();
+        let ctx = test_ctx(&client);
+
+        let message = serde_json::json!({
+            "message_id": 100,
+            "from": { "id": 123, "first_name": "Bob" },
+            "chat": { "id": 123, "type": "private" },
+            "date": 1700000000,
+            "text": "Hello"
+        });
+
+        let content = ChannelContent::Text("Hello".to_string());
+        let result = apply_reply_context(content, &message, &ctx).await;
+        match result {
+            ChannelContent::Text(t) => assert_eq!(t, "Hello"),
+            other => panic!("expected unchanged Text, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_reply_context_text_reply_to_photo_no_url() {
+        let client = test_client();
+        let ctx = test_ctx(&client);
+
+        let message = serde_json::json!({
+            "reply_to_message": {
+                "message_id": 99,
+                "from": { "id": 456, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1699999900,
+                "photo": [
+                    { "file_id": "small_id", "file_unique_id": "a", "width": 90, "height": 90 },
+                    { "file_id": "large_id", "file_unique_id": "b", "width": 800, "height": 600 }
+                ]
+            }
+        });
+
+        let content = ChannelContent::Text("I disagree".to_string());
+        let result = apply_reply_context(content, &message, &ctx).await;
+        match result {
+            ChannelContent::Text(t) => {
+                assert_eq!(t, "I disagree");
+            }
+            other => {
+                panic!("expected unchanged Text (no photo URL with fake token), got {other:?}")
+            }
+        }
     }
 }
