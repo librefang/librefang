@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::io::AsyncBufReadExt;
 use tracing::{debug, warn};
 
@@ -269,8 +269,21 @@ impl QwenCodeDriver {
                                 }
                             }
                             ContentBlock::Image { media_type, data } => {
+                                // Decode first — if the base64 is bad, we
+                                // don't want to have created a temp dir or
+                                // burned an image index slot.
+                                let decoded = match base64::engine::general_purpose::STANDARD
+                                    .decode(data)
+                                {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        warn!(error = %e, "Failed to decode base64 image");
+                                        continue;
+                                    }
+                                };
+
                                 let dir = match image_dir.as_ref() {
-                                    Some(d) => d,
+                                    Some(d) => d.clone(),
                                     None => {
                                         let d = std::env::temp_dir().join(format!(
                                             "librefang-qwen-images-{}",
@@ -283,8 +296,8 @@ impl QwenCodeDriver {
                                             );
                                             continue;
                                         }
-                                        image_dir = Some(d);
-                                        image_dir.as_ref().expect("just set")
+                                        image_dir = Some(d.clone());
+                                        d
                                     }
                                 };
 
@@ -294,45 +307,44 @@ impl QwenCodeDriver {
                                     "image/webp" => "webp",
                                     _ => "jpg",
                                 };
-                                image_count += 1;
-                                let filename = format!("image-{image_count}.{ext}");
+                                // Use next index for the candidate filename,
+                                // but only commit the increment once the file
+                                // is successfully written. This keeps
+                                // image-N.ext contiguous even if a previous
+                                // decode/write failed earlier in the loop.
+                                let next_index = image_count + 1;
+                                let filename = format!("image-{next_index}.{ext}");
                                 let path = dir.join(&filename);
 
-                                match base64::engine::general_purpose::STANDARD.decode(data) {
-                                    Ok(decoded) => {
-                                        if let Err(e) = std::fs::write(&path, &decoded) {
-                                            warn!(
-                                                error = %e,
-                                                "Failed to write Qwen Code temp image"
-                                            );
-                                            continue;
-                                        }
-                                        msg_parts.push(format!("@{}", path.display()));
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "Failed to decode base64 image");
-                                    }
+                                if let Err(e) = std::fs::write(&path, &decoded) {
+                                    warn!(
+                                        error = %e,
+                                        "Failed to write Qwen Code temp image"
+                                    );
+                                    continue;
                                 }
+                                image_count = next_index;
+                                msg_parts.push(format!("@{}", display_cli_path(&path)));
                             }
                             ContentBlock::ImageFile { path, .. } => {
                                 // ImageFile is already on disk — reference it
                                 // directly without a temp copy, and whitelist
                                 // its parent directory via --add-dir so the
                                 // CLI sandbox can read it.
-                                let raw = std::path::Path::new(path);
-                                if !raw.exists() {
-                                    warn!(path = %path, "ImageFile path missing, skipping");
-                                    continue;
-                                }
-                                // Canonicalize so @path is absolute regardless
-                                // of the CLI subprocess cwd.
-                                let canonical = match raw.canonicalize() {
+                                //
+                                // Canonicalize so `@path` is absolute
+                                // regardless of the CLI subprocess cwd. On
+                                // Windows, strip the `\\?\` verbatim prefix
+                                // that `canonicalize` adds, since the Qwen
+                                // CLI's `@path` lexer does not understand it.
+                                let canonical = match Path::new(path).canonicalize() {
                                     Ok(p) => p,
                                     Err(e) => {
                                         warn!(
                                             error = %e,
                                             path = %path,
-                                            "Failed to canonicalize ImageFile path"
+                                            "ImageFile path missing or not canonicalizable, \
+                                             skipping"
                                         );
                                         continue;
                                     }
@@ -343,7 +355,7 @@ impl QwenCodeDriver {
                                         extra_read_dirs.push(parent);
                                     }
                                 }
-                                msg_parts.push(format!("@{}", canonical.display()));
+                                msg_parts.push(format!("@{}", display_cli_path(&canonical)));
                             }
                             _ => {}
                         }
@@ -391,6 +403,28 @@ impl QwenCodeDriver {
                 }
             }
         }
+    }
+}
+
+/// Format an absolute path for embedding in a Qwen CLI `@path` token.
+///
+/// On Windows, `Path::canonicalize` returns a verbatim path like
+/// `\\?\C:\Users\foo\pic.png`. The Qwen CLI's `@path` lexer does not
+/// understand that prefix — it treats `\\?\` as a UNC host. Strip it so
+/// the CLI sees a normal drive path. On non-Windows the canonical form is
+/// already plain, so this is a no-op.
+fn display_cli_path(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        let s = path.display().to_string();
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+        s
+    }
+    #[cfg(not(windows))]
+    {
+        path.display().to_string()
     }
 }
 
@@ -913,8 +947,10 @@ mod tests {
         assert!(image_path.exists(), "decoded image file must exist");
 
         // The prompt text must reference the file via the @path convention
-        // so Qwen Code CLI picks it up as a file attachment.
-        let expected_token = format!("@{}", image_path.display());
+        // so Qwen Code CLI picks it up as a file attachment. On Windows the
+        // prefix `\\?\` is stripped by display_cli_path, so assert against
+        // that helper rather than raw Display.
+        let expected_token = format!("@{}", display_cli_path(&image_path));
         assert!(
             prepared.text.contains(&expected_token),
             "prompt text must contain '{expected_token}' — got: {}",
@@ -967,9 +1003,10 @@ mod tests {
         let prepared = QwenCodeDriver::build_prompt(&request);
 
         // The emitted `@path` must use the canonicalized absolute path so
-        // the CLI subprocess resolves it independent of cwd.
+        // the CLI subprocess resolves it independent of cwd, with Windows
+        // `\\?\` prefix stripped via display_cli_path.
         let canonical = std::fs::canonicalize(&tmp).expect("canonicalize tmp file");
-        let expected_token = format!("@{}", canonical.display());
+        let expected_token = format!("@{}", display_cli_path(&canonical));
         assert!(
             prepared.text.contains(&expected_token),
             "prompt text must reference the canonical file path — got: {}",
