@@ -2271,7 +2271,16 @@ server.listen(PORT, '127.0.0.1', async () => {
 });
 
 // Graceful shutdown
+let shuttingDown = false;
 function gracefulShutdown(signal) {
+  // Re-entry guard: if SIGINT arrives during the SIGTERM 10s window (or
+  // vice versa) we'd otherwise invoke cleanupSocket() / server.close()
+  // twice — the second server.close() throws ERR_SERVER_NOT_RUNNING.
+  if (shuttingDown) {
+    console.log(`[gateway] Already shutting down, ignoring ${signal}`);
+    return;
+  }
+  shuttingDown = true;
   console.log(`\n[gateway] Received ${signal}, shutting down...`);
 
   // Force exit after 10 seconds no matter what
@@ -2281,8 +2290,12 @@ function gracefulShutdown(signal) {
   }, 10_000);
   forceExitTimer.unref();
 
-  // Tear down Baileys socket properly (fire-and-forget, we don't await)
-  cleanupSocket().catch(() => {});
+  // Tear down Baileys socket properly (fire-and-forget, we don't await).
+  // Log the error message if teardown fails — a silent catch would hide a
+  // broken Baileys shutdown in production.
+  cleanupSocket().catch(e =>
+    console.warn('[gateway] cleanupSocket error:', e?.message || e),
+  );
 
   // Close HTTP server — forcibly drain all existing connections (Node.js 18.2+)
   if (server.closeAllConnections) {
