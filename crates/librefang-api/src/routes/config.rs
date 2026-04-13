@@ -1961,8 +1961,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
                 .unwrap_or_else(|e| e.into_inner());
             super::agents::effective_default_model(&cfg.default_model, dm_override.as_ref())
         };
-        let mut agent_entries_visible: Vec<_> =
-            agent_entries.iter().filter(|e| !e.is_hand).collect();
+        let mut agent_entries_visible: Vec<_> = agent_entries.iter().collect();
         // Sort by last_active descending — matches AgentsPage default query order.
         agent_entries_visible.sort_by(|a, b| b.last_active.cmp(&a.last_active));
         agent_entries_visible

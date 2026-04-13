@@ -61,8 +61,7 @@ function detectBrowserTimezone(): string {
 }
 
 export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave, onClose }: ScheduleModalProps) {
-  const { t, i18n } = useTranslation();
-  const isZh = i18n.language?.startsWith("zh");
+  const { t } = useTranslation();
 
   const parsed = parseCronType(initialCron || "0 9 * * *");
   const detectedTz = initialTz || detectBrowserTimezone();
