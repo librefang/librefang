@@ -110,10 +110,12 @@ fn download_and_install() -> Option<PathBuf> {
 
     // Query GitHub Releases API for latest release
     let api_url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-    let resp = match ureq::get(&api_url)
+    let client = crate::http_client::new_client();
+    let resp = match client
+        .get(&api_url)
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "librefang-cli")
-        .call()
+        .send()
     {
         Ok(r) => r,
         Err(e) => {
@@ -122,7 +124,7 @@ fn download_and_install() -> Option<PathBuf> {
         }
     };
 
-    let body: serde_json::Value = match serde_json::from_reader(resp.into_body().into_reader()) {
+    let body: serde_json::Value = match resp.json() {
         Ok(v) => v,
         Err(e) => {
             ui::error(&format!("Failed to parse release info: {e}"));
@@ -183,16 +185,18 @@ fn download_and_install() -> Option<PathBuf> {
 
 /// Stream-download a file from `url` to `dest`.
 fn download_file(url: &str, dest: &Path) -> Result<(), String> {
-    let resp = ureq::get(url)
+    let client = crate::http_client::new_client();
+    let mut resp = client
+        .get(url)
         .header("User-Agent", "librefang-cli")
-        .call()
+        .send()
         .map_err(|e| format!("HTTP request failed: {e}"))?;
 
-    let mut reader = resp.into_body().into_reader();
     let mut file = std::fs::File::create(dest)
         .map_err(|e| format!("Cannot create {}: {e}", dest.display()))?;
 
-    std::io::copy(&mut reader, &mut file).map_err(|e| format!("Write error: {e}"))?;
+    resp.copy_to(&mut file)
+        .map_err(|e| format!("Write error: {e}"))?;
     Ok(())
 }
 
