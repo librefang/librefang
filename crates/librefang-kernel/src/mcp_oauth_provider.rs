@@ -155,6 +155,9 @@ impl KernelOAuthProvider {
             ));
         }
 
+        // We register as a public client (`token_endpoint_auth_method: "none"`),
+        // so any `client_secret` the AS echoes back is intentionally ignored —
+        // it must not be persisted or used in subsequent token exchanges.
         #[derive(serde::Deserialize)]
         struct RegistrationResponse {
             client_id: String,

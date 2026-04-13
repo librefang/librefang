@@ -71,40 +71,124 @@ pub async fn auth_status(
     )
 }
 
-/// Derive the OAuth callback URL from the incoming request headers.
-fn derive_callback_url(headers: &HeaderMap, server_name: &str) -> String {
-    // Try Origin header first
+/// Derive a safe OAuth callback URL from the incoming request.
+///
+/// The host portion is validated against `trusted_hosts` plus built-in
+/// loopback aliases (`localhost`, `127.0.0.1`, `::1`). When no candidate
+/// header matches the allowlist, falls back to the daemon's own listen
+/// address — never echoes an untrusted `Host`/`Origin`/`X-Forwarded-Host`
+/// header back as the redirect_uri. Matching is hostname-only so that a
+/// bare allowlist entry (`dash.example.com`) accepts any port.
+fn derive_callback_url(
+    headers: &HeaderMap,
+    server_name: &str,
+    trusted_hosts: &[String],
+    api_listen: &str,
+) -> String {
+    let path = format!("/api/mcp/servers/{}/auth/callback", server_name);
+
     if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
-        if !origin.is_empty() && origin != "null" {
-            return format!("{}/api/mcp/servers/{}/auth/callback", origin, server_name);
+        if let Some(url) = accept_origin(origin, &path, trusted_hosts) {
+            return url;
         }
     }
-    // Try X-Forwarded-Host + X-Forwarded-Proto
+
     if let Some(fwd_host) = headers
         .get("x-forwarded-host")
         .and_then(|v| v.to_str().ok())
     {
-        let proto = headers
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("https");
-        return format!(
-            "{}://{}/api/mcp/servers/{}/auth/callback",
-            proto, fwd_host, server_name
-        );
+        if host_is_trusted(fwd_host, trusted_hosts) {
+            let proto = headers
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .filter(|p| *p == "http" || *p == "https")
+                .unwrap_or("https");
+            return format!("{}://{}{}", proto, fwd_host, path);
+        }
     }
-    // Fall back to Host header
+
     if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
-        return format!(
-            "http://{}/api/mcp/servers/{}/auth/callback",
-            host, server_name
-        );
+        if host_is_trusted(host, trusted_hosts) {
+            return format!("http://{}{}", host, path);
+        }
     }
-    // Last resort
-    format!(
-        "http://localhost:4545/api/mcp/servers/{}/auth/callback",
-        server_name
+
+    format!("http://{}{}", listen_fallback(api_listen), path)
+}
+
+/// Return `Some(callback_url)` if `origin` is a syntactically valid
+/// `scheme://host[:port]` whose host is trusted, else `None`.
+fn accept_origin(origin: &str, path: &str, trusted_hosts: &[String]) -> Option<String> {
+    if origin.is_empty() || origin == "null" {
+        return None;
+    }
+    let (scheme, rest) = origin.split_once("://")?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    // Guard against origins that smuggle a path/query/fragment.
+    let host_authority = rest.split(['/', '?', '#']).next()?;
+    if host_authority.is_empty() || !host_is_trusted(host_authority, trusted_hosts) {
+        return None;
+    }
+    Some(format!("{}://{}{}", scheme, host_authority, path))
+}
+
+/// Check whether a `host[:port]` authority matches the allowlist.
+///
+/// Always permits loopback aliases so local development and the
+/// daemon's own API port keep working even with an empty config.
+fn host_is_trusted(authority: &str, trusted_hosts: &[String]) -> bool {
+    let hostname = strip_port(authority);
+    if hostname.is_empty() {
+        return false;
+    }
+    if is_loopback_host(hostname) {
+        return true;
+    }
+    trusted_hosts
+        .iter()
+        .any(|entry| strip_port(entry).eq_ignore_ascii_case(hostname))
+}
+
+fn is_loopback_host(hostname: &str) -> bool {
+    matches!(
+        hostname.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "[::1]" | "::1"
     )
+}
+
+/// Strip an optional trailing `:port` from a `host[:port]` authority,
+/// handling bracketed IPv6 literals (`[::1]:4545` → `[::1]`).
+fn strip_port(authority: &str) -> &str {
+    if let Some(stripped) = authority.strip_prefix('[') {
+        if let Some(end) = stripped.find(']') {
+            return &authority[..end + 2];
+        }
+    }
+    match authority.rfind(':') {
+        Some(idx) if !authority[idx + 1..].contains('.') => &authority[..idx],
+        _ => authority,
+    }
+}
+
+/// Turn the daemon's bind address into a reachable loopback authority.
+/// `0.0.0.0` / `[::]` bind to all interfaces but are not valid callback
+/// targets, so substitute `127.0.0.1` while preserving the port.
+fn listen_fallback(api_listen: &str) -> String {
+    let (host, port) = match api_listen.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() => (h, p),
+        _ => return "127.0.0.1:4545".to_string(),
+    };
+    let host_lower = host
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    let safe_host = match host_lower.as_str() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        other if other == "localhost" || other == "127.0.0.1" => other,
+        _ => host,
+    };
+    format!("{}:{}", safe_host, port)
 }
 
 /// Percent-encode a string for use as a URL query parameter value.
@@ -185,8 +269,10 @@ pub async fn auth_start(
     // Build a KernelOAuthProvider for vault access
     let provider = KernelOAuthProvider::new(state.kernel.home_dir().to_path_buf());
 
-    // Derive the redirect URI from the incoming request
-    let redirect_uri = derive_callback_url(&headers, &name);
+    // Derive the redirect URI from the incoming request — validated
+    // against `trusted_hosts` to prevent Host-header spoofing from
+    // redirecting the OAuth code to an attacker origin.
+    let redirect_uri = derive_callback_url(&headers, &name, &cfg.trusted_hosts, &cfg.api_listen);
 
     // Check vault for cached client_id, or do Dynamic Client Registration
     let mut client_id = metadata
@@ -673,4 +759,143 @@ pub async fn auth_revoke(
             "state": "not_required",
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderName, HeaderValue};
+
+    fn hdrs(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    const LISTEN: &str = "0.0.0.0:4545";
+
+    #[test]
+    fn spoofed_host_falls_back_to_loopback_when_allowlist_empty() {
+        let h = hdrs(&[("host", "attacker.example")]);
+        let url = derive_callback_url(&h, "srv", &[], LISTEN);
+        assert!(
+            !url.contains("attacker.example"),
+            "spoofed Host must not appear in redirect_uri, got {url}"
+        );
+        assert!(url.starts_with("http://127.0.0.1:4545/"), "got {url}");
+        assert!(url.ends_with("/api/mcp/servers/srv/auth/callback"));
+    }
+
+    #[test]
+    fn spoofed_origin_falls_back_to_loopback_when_allowlist_empty() {
+        let h = hdrs(&[("origin", "https://attacker.example")]);
+        let url = derive_callback_url(&h, "srv", &[], LISTEN);
+        assert!(!url.contains("attacker.example"), "got {url}");
+        assert!(url.starts_with("http://127.0.0.1:4545/"), "got {url}");
+    }
+
+    #[test]
+    fn spoofed_forwarded_host_falls_back_to_loopback_when_allowlist_empty() {
+        let h = hdrs(&[
+            ("x-forwarded-host", "attacker.example"),
+            ("x-forwarded-proto", "https"),
+        ]);
+        let url = derive_callback_url(&h, "srv", &[], LISTEN);
+        assert!(!url.contains("attacker.example"), "got {url}");
+        assert!(url.starts_with("http://127.0.0.1:4545/"), "got {url}");
+    }
+
+    #[test]
+    fn localhost_always_allowed_even_with_empty_allowlist() {
+        let h = hdrs(&[("host", "localhost:4545")]);
+        let url = derive_callback_url(&h, "srv", &[], LISTEN);
+        assert_eq!(
+            url,
+            "http://localhost:4545/api/mcp/servers/srv/auth/callback"
+        );
+    }
+
+    #[test]
+    fn loopback_ip_always_allowed_even_with_empty_allowlist() {
+        let h = hdrs(&[("host", "127.0.0.1:4545")]);
+        let url = derive_callback_url(&h, "srv", &[], LISTEN);
+        assert_eq!(
+            url,
+            "http://127.0.0.1:4545/api/mcp/servers/srv/auth/callback"
+        );
+    }
+
+    #[test]
+    fn allowlisted_origin_is_used_verbatim() {
+        let trusted = vec!["dash.example.com".to_string()];
+        let h = hdrs(&[("origin", "https://dash.example.com")]);
+        let url = derive_callback_url(&h, "srv", &trusted, LISTEN);
+        assert_eq!(
+            url,
+            "https://dash.example.com/api/mcp/servers/srv/auth/callback"
+        );
+    }
+
+    #[test]
+    fn allowlisted_forwarded_host_uses_forwarded_proto() {
+        let trusted = vec!["dash.example.com".to_string()];
+        let h = hdrs(&[
+            ("x-forwarded-host", "dash.example.com"),
+            ("x-forwarded-proto", "https"),
+        ]);
+        let url = derive_callback_url(&h, "srv", &trusted, LISTEN);
+        assert_eq!(
+            url,
+            "https://dash.example.com/api/mcp/servers/srv/auth/callback"
+        );
+    }
+
+    #[test]
+    fn allowlisted_host_with_port_matches_bare_entry() {
+        let trusted = vec!["dash.example.com".to_string()];
+        let h = hdrs(&[("host", "dash.example.com:8080")]);
+        let url = derive_callback_url(&h, "srv", &trusted, LISTEN);
+        assert_eq!(
+            url,
+            "http://dash.example.com:8080/api/mcp/servers/srv/auth/callback"
+        );
+    }
+
+    #[test]
+    fn attacker_header_ignored_even_when_other_trusted_hosts_configured() {
+        let trusted = vec!["dash.example.com".to_string()];
+        let h = hdrs(&[
+            ("origin", "https://attacker.example"),
+            ("host", "attacker.example"),
+        ]);
+        let url = derive_callback_url(&h, "srv", &trusted, LISTEN);
+        assert!(!url.contains("attacker.example"), "got {url}");
+        assert!(url.starts_with("http://127.0.0.1:4545/"), "got {url}");
+    }
+
+    #[test]
+    fn server_name_is_percent_encoded_into_path() {
+        let h = hdrs(&[("host", "localhost:4545")]);
+        let url = derive_callback_url(&h, "my-server", &[], LISTEN);
+        assert!(url.contains("/api/mcp/servers/my-server/auth/callback"));
+    }
+
+    #[test]
+    fn ipv6_listen_addr_collapses_to_ipv4_loopback_fallback() {
+        let h = hdrs(&[("host", "attacker.example")]);
+        let url = derive_callback_url(&h, "srv", &[], "[::]:4545");
+        assert!(url.starts_with("http://127.0.0.1:4545/"), "got {url}");
+    }
+
+    #[test]
+    fn origin_null_is_rejected() {
+        let h = hdrs(&[("origin", "null")]);
+        let url = derive_callback_url(&h, "srv", &[], LISTEN);
+        assert!(url.starts_with("http://127.0.0.1:4545/"), "got {url}");
+    }
 }
