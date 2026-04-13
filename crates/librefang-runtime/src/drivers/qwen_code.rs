@@ -222,9 +222,12 @@ impl QwenCodeDriver {
     /// When messages contain image blocks, the images are decoded from base64
     /// (or referenced directly for `ImageFile` blocks), written to a temporary
     /// directory, and referenced by file path in the prompt text using the
-    /// `@path` syntax recognized by Qwen Code CLI. The caller must pass the
-    /// returned `image_dir` to `--add-dir` so the CLI sandbox can read those
-    /// files, and call `PreparedPrompt::cleanup` after the CLI exits.
+    /// `@path` syntax recognized by Qwen Code CLI. The caller passes every
+    /// directory in `read_dirs()` to `--add-dir` so the CLI sandbox can read
+    /// those files. The owned temp dir is removed when the returned
+    /// `PreparedPrompt` is dropped — no explicit cleanup call is required,
+    /// which means the temp dir is also released if the future is cancelled
+    /// mid-`await`.
     ///
     /// Note: the Qwen Code CLI forwards the files to the underlying model in
     /// the same way Claude Code does, but Qwen's coding-focused models
@@ -236,6 +239,7 @@ impl QwenCodeDriver {
     fn build_prompt(request: &CompletionRequest) -> PreparedPrompt {
         let mut parts = Vec::new();
         let mut image_dir: Option<PathBuf> = None;
+        let mut extra_read_dirs: Vec<PathBuf> = Vec::new();
         let mut image_count = 0u32;
 
         if let Some(ref sys) = request.system {
@@ -265,21 +269,24 @@ impl QwenCodeDriver {
                                 }
                             }
                             ContentBlock::Image { media_type, data } => {
-                                // Create the temp dir lazily, on the first image.
-                                if image_dir.is_none() {
-                                    let dir = std::env::temp_dir().join(format!(
-                                        "librefang-qwen-images-{}",
-                                        uuid::Uuid::new_v4()
-                                    ));
-                                    if let Err(e) = std::fs::create_dir_all(&dir) {
-                                        warn!(
-                                            error = %e,
-                                            "Failed to create Qwen Code image temp dir"
-                                        );
-                                        continue;
+                                let dir = match image_dir.as_ref() {
+                                    Some(d) => d,
+                                    None => {
+                                        let d = std::env::temp_dir().join(format!(
+                                            "librefang-qwen-images-{}",
+                                            uuid::Uuid::new_v4()
+                                        ));
+                                        if let Err(e) = std::fs::create_dir_all(&d) {
+                                            warn!(
+                                                error = %e,
+                                                "Failed to create Qwen Code image temp dir"
+                                            );
+                                            continue;
+                                        }
+                                        image_dir = Some(d);
+                                        image_dir.as_ref().expect("just set")
                                     }
-                                    image_dir = Some(dir);
-                                }
+                                };
 
                                 let ext = match media_type.as_str() {
                                     "image/png" => "png",
@@ -289,7 +296,7 @@ impl QwenCodeDriver {
                                 };
                                 image_count += 1;
                                 let filename = format!("image-{image_count}.{ext}");
-                                let path = image_dir.as_ref().unwrap().join(&filename);
+                                let path = dir.join(&filename);
 
                                 match base64::engine::general_purpose::STANDARD.decode(data) {
                                     Ok(decoded) => {
@@ -309,13 +316,34 @@ impl QwenCodeDriver {
                             }
                             ContentBlock::ImageFile { path, .. } => {
                                 // ImageFile is already on disk — reference it
-                                // directly without a temp copy.
-                                let file_path = std::path::Path::new(path);
-                                if file_path.exists() {
-                                    msg_parts.push(format!("@{}", file_path.display()));
-                                } else {
+                                // directly without a temp copy, and whitelist
+                                // its parent directory via --add-dir so the
+                                // CLI sandbox can read it.
+                                let raw = std::path::Path::new(path);
+                                if !raw.exists() {
                                     warn!(path = %path, "ImageFile path missing, skipping");
+                                    continue;
                                 }
+                                // Canonicalize so @path is absolute regardless
+                                // of the CLI subprocess cwd.
+                                let canonical = match raw.canonicalize() {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        warn!(
+                                            error = %e,
+                                            path = %path,
+                                            "Failed to canonicalize ImageFile path"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                if let Some(parent) = canonical.parent() {
+                                    let parent = parent.to_path_buf();
+                                    if !extra_read_dirs.contains(&parent) {
+                                        extra_read_dirs.push(parent);
+                                    }
+                                }
+                                msg_parts.push(format!("@{}", canonical.display()));
                             }
                             _ => {}
                         }
@@ -331,6 +359,7 @@ impl QwenCodeDriver {
         PreparedPrompt {
             text: parts.join("\n\n"),
             image_dir,
+            extra_read_dirs,
         }
     }
 
@@ -369,22 +398,36 @@ impl QwenCodeDriver {
 ///
 /// Mirrors `claude_code::PreparedPrompt`: the driver decodes inline image
 /// blocks onto disk, emits `@path` tokens in the prompt text, and hands the
-/// directory back to the caller so it can be passed via `--add-dir` and
-/// removed after the CLI exits.
+/// directories back to the caller so they can be passed via `--add-dir`.
+/// The owned temp dir is removed by the `Drop` impl, which means the temp
+/// dir is released even if the driver future is cancelled mid-`await`.
 struct PreparedPrompt {
     text: String,
     /// Temporary directory holding decoded image files, if any messages
-    /// contained image blocks. `None` means the request was pure text.
+    /// contained inline `ContentBlock::Image` blocks. `None` means the
+    /// request had no inline images. Owned by this struct and removed on
+    /// drop.
     image_dir: Option<PathBuf>,
+    /// Additional directories that must be readable by the CLI because they
+    /// contain `ContentBlock::ImageFile` paths referenced in the prompt.
+    /// Not owned — never removed on drop.
+    extra_read_dirs: Vec<PathBuf>,
 }
 
 impl PreparedPrompt {
+    /// All directories that must be passed to the CLI via `--add-dir`.
+    fn read_dirs(&self) -> impl Iterator<Item = &PathBuf> {
+        self.image_dir.iter().chain(self.extra_read_dirs.iter())
+    }
+}
+
+impl Drop for PreparedPrompt {
     /// Remove the temporary image directory, if any. Errors are logged at
     /// debug level and otherwise ignored — cleanup failure must never mask
     /// a real driver error.
-    fn cleanup(&self) {
-        if let Some(ref dir) = self.image_dir {
-            if let Err(e) = std::fs::remove_dir_all(dir) {
+    fn drop(&mut self) {
+        if let Some(dir) = self.image_dir.take() {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
                 debug!(
                     error = %e,
                     dir = %dir.display(),
@@ -447,9 +490,10 @@ impl QwenCodeDriver {
             cmd.arg(arg);
         }
 
-        // Allow the CLI to read temp image files referenced via `@path`
-        // tokens in the prompt.
-        if let Some(ref dir) = prepared.image_dir {
+        // Allow the CLI to read every directory that backs an `@path` token
+        // in the prompt: our owned temp dir for inline images, plus the
+        // parents of any ImageFile blocks.
+        for dir in prepared.read_dirs() {
             cmd.arg("--add-dir").arg(dir);
         }
 
@@ -461,7 +505,7 @@ impl QwenCodeDriver {
         debug!(
             cli = %self.cli_path,
             skip_permissions = self.skip_permissions,
-            has_images = prepared.image_dir.is_some(),
+            has_images = prepared.read_dirs().next().is_some(),
             "Spawning Qwen Code CLI"
         );
 
@@ -553,9 +597,10 @@ impl QwenCodeDriver {
             cmd.arg(arg);
         }
 
-        // Allow the CLI to read temp image files referenced via `@path`
-        // tokens in the prompt.
-        if let Some(ref dir) = prepared.image_dir {
+        // Allow the CLI to read every directory that backs an `@path` token
+        // in the prompt: our owned temp dir for inline images, plus the
+        // parents of any ImageFile blocks.
+        for dir in prepared.read_dirs() {
             cmd.arg("--add-dir").arg(dir);
         }
 
@@ -567,7 +612,7 @@ impl QwenCodeDriver {
         debug!(
             cli = %self.cli_path,
             skip_permissions = self.skip_permissions,
-            has_images = prepared.image_dir.is_some(),
+            has_images = prepared.read_dirs().next().is_some(),
             "Spawning Qwen Code CLI (streaming)"
         );
 
@@ -723,10 +768,11 @@ impl QwenCodeDriver {
 #[async_trait]
 impl LlmDriver for QwenCodeDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        // `prepared` cleans up its temp dir via `Drop`, so cancellation at
+        // any await point below still releases the dir — no explicit
+        // cleanup call needed.
         let prepared = Self::build_prompt(&request);
-        let result = self.complete_inner(&prepared, &request).await;
-        prepared.cleanup();
-        result
+        self.complete_inner(&prepared, &request).await
     }
 
     async fn stream(
@@ -735,9 +781,7 @@ impl LlmDriver for QwenCodeDriver {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
         let prepared = Self::build_prompt(&request);
-        let result = self.stream_inner(&prepared, &request, &tx).await;
-        prepared.cleanup();
-        result
+        self.stream_inner(&prepared, &request, &tx).await
     }
 }
 
@@ -853,12 +897,16 @@ mod tests {
         // The text question survives.
         assert!(prepared.text.contains("What's in this image?"));
 
-        // A temp dir was allocated.
+        // A temp dir was allocated and is exposed via read_dirs().
         let dir = prepared
             .image_dir
-            .as_ref()
+            .clone()
             .expect("image_dir must be Some when the request has an image block");
         assert!(dir.exists(), "temp dir must actually exist on disk");
+        assert!(
+            prepared.read_dirs().any(|d| d == &dir),
+            "read_dirs() must include the owned temp dir so --add-dir is passed"
+        );
 
         // The image landed in the temp dir as image-1.png.
         let image_path = dir.join("image-1.png");
@@ -873,11 +921,12 @@ mod tests {
             prepared.text
         );
 
-        // Cleanup removes the temp dir without panicking.
-        prepared.cleanup();
+        // Dropping `prepared` must remove the temp dir (Drop impl), so
+        // cancelled futures don't leak disk space.
+        drop(prepared);
         assert!(
             !dir.exists(),
-            "cleanup must remove the temp dir after the CLI exits"
+            "Drop must remove the temp dir after the prompt is released"
         );
     }
 
@@ -916,10 +965,14 @@ mod tests {
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
-        let expected_token = format!("@{}", tmp.display());
+
+        // The emitted `@path` must use the canonicalized absolute path so
+        // the CLI subprocess resolves it independent of cwd.
+        let canonical = std::fs::canonicalize(&tmp).expect("canonicalize tmp file");
+        let expected_token = format!("@{}", canonical.display());
         assert!(
             prepared.text.contains(&expected_token),
-            "prompt text must reference the existing file — got: {}",
+            "prompt text must reference the canonical file path — got: {}",
             prepared.text
         );
         // ImageFile doesn't need a temp dir — the driver must not allocate one.
@@ -927,9 +980,15 @@ mod tests {
             prepared.image_dir.is_none(),
             "ImageFile block must not trigger temp dir allocation"
         );
+        // The parent dir must be whitelisted for --add-dir so the CLI
+        // sandbox can actually read the file.
+        let parent = canonical.parent().expect("canonical has parent");
+        assert!(
+            prepared.read_dirs().any(|d| d.as_path() == parent),
+            "read_dirs() must include the parent of the ImageFile so --add-dir covers it"
+        );
 
-        // Cleanup (no temp dir, but must be safe to call).
-        prepared.cleanup();
+        drop(prepared);
         let _ = std::fs::remove_file(&tmp);
     }
 
