@@ -6679,37 +6679,25 @@ system_prompt = "You are a helpful assistant."
                 continue;
             }
 
-            // Inherit kernel defaults when hand declares "default" provider/model.
+            // Inherit kernel defaults when hand declares "default" sentinel.
+            // Provider and model are resolved independently so that a hand
+            // can pin one while inheriting the other (e.g. provider="openai"
+            // with model="default" inherits the global default model name).
             //
-            // "default" is a PAIRED sentinel — provider and model must both be
-            // "default" for inheritance to fire. A half-default config (e.g.
-            // provider="openai", model="default") would otherwise resolve
-            // model from config.default_model independently of provider and
-            // silently build a mismatched pair like openai+claude-sonnet-4.
-            // Reject it up front with a clear error instead.
-            let provider_is_default = manifest.model.provider == "default";
-            let model_is_default = manifest.model.model == "default";
-            if provider_is_default != model_is_default {
-                return Err(KernelError::LibreFang(LibreFangError::Config(format!(
-                    "hand '{hand_id}' agent '{}' has a partial \"default\" model config \
-                     (provider=\"{}\", model=\"{}\"); set both fields explicitly or omit \
-                     both to inherit the kernel default_model",
-                    manifest.name, manifest.model.provider, manifest.model.model
-                ))));
-            }
-            if provider_is_default && model_is_default {
+            // When inheriting provider, also fill api_key_env / base_url
+            // from global config — but only if the hand didn't set them
+            // explicitly, to preserve legacy HAND.toml credential overrides.
+            if manifest.model.provider == "default" {
                 manifest.model.provider = cfg.default_model.provider.clone();
-                manifest.model.model = cfg.default_model.model.clone();
-                // Only fill credential fields the hand did NOT set explicitly.
-                // A legacy HAND.toml may have pinned api_key_env or base_url
-                // for its own reasons; clobbering them would silently discard
-                // the author's intent.
                 if manifest.model.api_key_env.is_none() {
                     manifest.model.api_key_env = Some(cfg.default_model.api_key_env.clone());
                 }
                 if manifest.model.base_url.is_none() {
                     manifest.model.base_url = cfg.default_model.base_url.clone();
                 }
+            }
+            if manifest.model.model == "default" {
+                manifest.model.model = cfg.default_model.model.clone();
             }
 
             // Merge extra_params from default_model (agent-level keys take precedence)

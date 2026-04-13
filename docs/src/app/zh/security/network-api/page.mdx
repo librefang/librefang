@@ -1,0 +1,421 @@
+# 网络与 API 安全
+
+本页覆盖传输层、对等连接、HTTP 中间件和 Dashboard 边界上的安全保护。
+
+## 包含的主题
+
+- SSRF 防护
+- OFP 双向认证
+- 安全响应头
+- GCRA 速率限制器
+- 健康端点信息脱敏
+- Dashboard 认证
+
+---
+
+## SSRF 防护
+
+**源码：** `librefang-runtime/src/host_functions.rs`
+
+`host_net_fetch` 函数（用于网络请求的 WASM 宿主调用）包含全面的
+服务端请求伪造防护。
+
+### 协议验证
+
+仅允许 `http://` 和 `https://` 协议。所有其他协议（`file://`、
+`gopher://`、`ftp://`）会被立即阻止：
+
+```rust
+if !url.starts_with("http://") && !url.starts_with("https://") {
+    return Err(json!({"error": "Only http:// and https:// URLs are allowed"}));
+}
+```
+
+### 主机名黑名单
+
+在 DNS 解析之前，以下主机名会被阻止：
+
+- `localhost`
+- `metadata.google.internal`
+- `metadata.aws.internal`
+- `instance-data`
+- `169.254.169.254`（AWS/GCP 元数据端点）
+
+### DNS 解析检查
+
+在主机名黑名单检查之后，函数会将主机名解析为 IP 地址，并检查**每个
+解析出的 IP** 是否属于私有地址范围。这可以防御 DNS 重绑定攻击：
+
+```rust
+let socket_addr = format!("{hostname}:{port}");
+if let Ok(addrs) = socket_addr.to_socket_addrs() {
+    for addr in addrs {
+        let ip = addr.ip();
+        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
+            return Err(json!({"error": format!(
+                "SSRF blocked: {hostname} resolves to private IP {ip}"
+            )}));
+        }
+    }
+}
+```
+
+### 私有 IP 检测
+
+`is_private_ip()` 函数覆盖以下范围：
+
+**IPv4：**
+- `10.0.0.0/8` -- RFC 1918
+- `172.16.0.0/12` -- RFC 1918
+- `192.168.0.0/16` -- RFC 1918
+- `169.254.0.0/16` -- 链路本地（AWS 元数据）
+
+**IPv6：**
+- `fc00::/7` -- 唯一本地地址
+- `fe80::/10` -- 链路本地
+
+```rust
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            matches!(
+                octets,
+                [10, ..] | [172, 16..=31, ..] | [192, 168, ..] | [169, 254, ..]
+            )
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+```
+
+### 主机提取
+
+`extract_host_from_url()` 解析 URL 以提取 `host:port`，同时用于 SSRF
+检查和能力匹配：
+
+```
+https://api.openai.com/v1/chat  ->  api.openai.com:443
+http://localhost:8080/api       ->  localhost:8080
+http://example.com              ->  example.com:80
+```
+
+---
+
+## OFP 双向认证
+
+**源码：** `librefang-wire/src/peer.rs`
+
+LibreFang 线路协议（OFP）在 TCP 连接上使用基于 HMAC-SHA256 的 nonce
+双向认证。
+
+### 预共享密钥要求
+
+OFP 在没有 `shared_secret` 的情况下拒绝启动：
+
+```rust
+if config.shared_secret.is_empty() {
+    return Err(WireError::HandshakeFailed(
+        "OFP requires shared_secret. Set [network] shared_secret in config.toml".into(),
+    ));
+}
+```
+
+### HMAC 函数
+
+```rust
+type HmacSha256 = Hmac<Sha256>;
+
+fn hmac_sign(secret: &str, data: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts any key size");
+    mac.update(data);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn hmac_verify(secret: &str, data: &[u8], signature: &str) -> bool {
+    let expected = hmac_sign(secret, data);
+    subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), signature.as_bytes()).into()
+}
+```
+
+**常数时间比较**（`subtle::ConstantTimeEq`）防止时序侧信道攻击。
+
+### 握手协议
+
+**发起方（客户端）：**
+
+1. 生成随机 UUID nonce。
+2. 计算 `auth_data = nonce + node_id`。
+3. 计算 `auth_hmac = hmac_sign(shared_secret, auth_data)`。
+4. 发送 `Handshake { node_id, node_name, protocol_version, agents, nonce, auth_hmac }`。
+
+**响应方（服务端）：**
+
+1. 接收 `Handshake` 消息。
+2. 验证传入的 HMAC：`hmac_verify(shared_secret, nonce + node_id, auth_hmac)`。
+3. 如果验证失败，返回错误码 403。
+4. 为确认消息生成新的 UUID nonce。
+5. 计算 `ack_auth_data = ack_nonce + self.node_id`。
+6. 计算 `ack_hmac = hmac_sign(shared_secret, ack_auth_data)`。
+7. 发送 `HandshakeAck { node_id, node_name, protocol_version, agents, nonce: ack_nonce, auth_hmac: ack_hmac }`。
+
+**发起方（验证）：**
+
+1. 接收 `HandshakeAck`。
+2. 验证：`hmac_verify(shared_secret, ack_nonce + node_id, ack_hmac)`。
+3. 如果验证失败，返回 `WireError::HandshakeFailed`。
+
+### 安全属性
+
+| 属性 | 实现方式 |
+|------|---------|
+| **双向认证** | 双方都证明拥有共享密钥 |
+| **重放保护** | 每次握手使用随机 UUID nonce |
+| **时序攻击抵抗** | HMAC 比较使用 `subtle::ConstantTimeEq` |
+| **强制密钥** | 空 `shared_secret` 时 OFP 拒绝启动 |
+| **消息大小限制** | `MAX_MESSAGE_SIZE = 16 MB` 防止内存 DoS |
+| **协议版本检查** | `PROTOCOL_VERSION` 不匹配时返回 `WireError::VersionMismatch` |
+
+---
+
+## 安全响应头
+
+**源码：** `librefang-api/src/middleware.rs`
+
+`security_headers` 中间件应用于**所有** API 响应：
+
+```rust
+pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Body> {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    headers.insert("x-frame-options", "DENY".parse().unwrap());
+    headers.insert("x-xss-protection", "1; mode=block".parse().unwrap());
+    headers.insert("content-security-policy", /* CSP policy */);
+    headers.insert("referrer-policy", "strict-origin-when-cross-origin".parse().unwrap());
+    headers.insert("cache-control", "no-store, no-cache, must-revalidate".parse().unwrap());
+    response
+}
+```
+
+| 响应头 | 值 | 防护目标 |
+|--------|-----|---------|
+| `X-Content-Type-Options` | `nosniff` | MIME 类型嗅探攻击 |
+| `X-Frame-Options` | `DENY` | 通过 iframe 进行的点击劫持 |
+| `X-XSS-Protection` | `1; mode=block` | 反射型 XSS（旧版浏览器） |
+| `Content-Security-Policy` | 见下文 | XSS、代码注入、数据外泄 |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Referrer 泄露 |
+| `Cache-Control` | `no-store, no-cache, must-revalidate` | 敏感数据缓存 |
+
+### CSP 详细说明
+
+| 指令 | 值 | 用途 |
+|------|-----|------|
+| `default-src` | `'self'` | 默认拒绝所有外部资源 |
+| `script-src` | `'self' 'unsafe-inline' 'unsafe-eval' cdn.jsdelivr.net` | 允许来自自身和 CDN 的脚本 |
+| `style-src` | `'self' 'unsafe-inline' cdn.jsdelivr.net fonts.googleapis.com` | 允许来自自身、CDN、Google Fonts 的样式 |
+| `img-src` | `'self' data:` | 允许来自自身和 data URI 的图片 |
+| `connect-src` | `'self' ws: wss:` | 允许 WebSocket 连接 |
+| `font-src` | `'self' cdn.jsdelivr.net fonts.gstatic.com` | 允许来自 CDN 的字体 |
+| `object-src` | `'none'` | 阻止所有插件（Flash、Java 等） |
+| `base-uri` | `'self'` | 防止 base 标签劫持 |
+| `form-action` | `'self'` | 限制表单提交目标 |
+
+---
+
+## GCRA 速率限制器
+
+**源码：** `librefang-api/src/rate_limiter.rs`
+
+LibreFang 通过 `governor` crate 使用通用信元速率算法（GCRA）实现
+成本感知的 API 速率限制。
+
+### 算法
+
+GCRA 是漏桶算法的一种变体，为每个键追踪一个"虚拟调度时间"
+（TAT -- Theoretical Arrival Time）。每个请求消耗的令牌数与其成本
+成正比。桶以恒定速率补充。
+
+**预算：** 每个 IP 地址每分钟 500 个令牌。
+
+```rust
+pub fn create_rate_limiter() -> Arc<KeyedRateLimiter> {
+    Arc::new(RateLimiter::keyed(Quota::per_minute(NonZeroU32::new(500).unwrap())))
+}
+```
+
+### 操作成本
+
+每个 API 操作都有可配置的令牌成本：
+
+```rust
+pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
+    match (method, path) {
+        (_, "/api/health")                            => 1,
+        ("GET", "/api/status")                        => 1,
+        ("GET", "/api/version")                       => 1,
+        ("GET", "/api/tools")                         => 1,
+        ("GET", "/api/agents")                        => 2,
+        ("GET", "/api/skills")                        => 2,
+        ("GET", "/api/peers")                         => 2,
+        ("GET", "/api/config")                        => 2,
+        ("GET", "/api/usage")                         => 3,
+        ("GET", p) if p.starts_with("/api/audit")     => 5,
+        ("GET", p) if p.starts_with("/api/marketplace")=> 10,
+        ("POST", "/api/agents")                       => 50,
+        ("POST", p) if p.contains("/message")         => 30,
+        ("POST", p) if p.contains("/run")             => 100,
+        ("POST", "/api/skills/install")               => 50,
+        ("POST", "/api/skills/uninstall")             => 10,
+        ("POST", "/api/migrate")                      => 100,
+        ("PUT", p) if p.contains("/update")           => 10,
+        _                                             => 5,
+    }
+}
+```
+
+成本分层是有意设计的：只读的健康检查消耗 1 个令牌，而昂贵的工作流运行
+消耗 100 个令牌，这意味着客户端每分钟可以执行 500 次健康检查，但只能
+执行 5 次工作流运行。
+
+### 中间件
+
+```rust
+pub async fn gcra_rate_limit(
+    State(limiter): State<Arc<KeyedRateLimiter>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let ip = /* extract from ConnectInfo, default 127.0.0.1 */;
+    let cost = operation_cost(&method, &path);
+
+    if limiter.check_key_n(&ip, cost).is_err() {
+        tracing::warn!(ip, cost, path, "GCRA rate limit exceeded");
+        return Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("retry-after", "60")
+            .body(/* JSON error */)
+            .unwrap_or_default();
+    }
+    next.run(request).await
+}
+```
+
+### 速率限制器类型
+
+```rust
+pub type KeyedRateLimiter = RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>;
+```
+
+`DashMapStateStore` 提供并发的每 IP 状态管理，并自动清理过期条目。
+
+---
+
+## 健康端点信息脱敏
+
+**源码：** `librefang-api/src/routes.rs`
+
+LibreFang 提供两个信息级别不同的健康端点。
+
+### 公开端点：`GET /api/health`
+
+**无需认证。** 仅返回存活信息：
+
+```json
+{
+    "status": "ok",
+    "version": "0.1.0"
+}
+```
+
+该端点不会暴露 Agent 数量、数据库详情、配置警告、运行时间或任何内部
+系统信息。适用于负载均衡器健康检查。
+
+### 详细端点：`GET /api/health/detail`
+
+**需要认证。** 返回完整诊断信息：
+
+```json
+{
+    "status": "ok",
+    "version": "0.1.0",
+    "uptime_seconds": 3600,
+    "panic_count": 0,
+    "restart_count": 2,
+    "agent_count": 15,
+    "database": "connected",
+    "config_warnings": []
+}
+```
+
+### 本地回环回退
+
+当未配置 API 密钥时，`auth` 中间件将所有非健康端点限制为仅允许回环
+地址访问：
+
+```rust
+if api_key.is_empty() {
+    let is_loopback = request.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip().is_loopback())
+        .unwrap_or(false);
+    if !is_loopback {
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(/* "No API key configured. Remote access denied." */)
+            ...;
+    }
+}
+```
+
+---
+
+## Dashboard 认证
+
+LibreFang 支持为 Web Dashboard 配置可选的用户名/密码认证。
+
+### 配置
+
+```toml
+# config.toml
+dashboard_user = "admin"
+dashboard_pass = "vault:dashboard_password"
+```
+
+当两个字段都设置后，Dashboard 会显示登录页面。如果未配置凭据，
+Dashboard 无需登录即可访问（或者在设置了 `api_key` 的情况下受其保护）。
+
+### 凭据来源（优先级顺序）
+
+| 优先级 | 来源 | 示例 |
+|--------|------|------|
+| 1 | 环境变量 | `LIBREFANG_DASHBOARD_PASS=secret` |
+| 2 | 加密 Vault | `dashboard_pass = "vault:dashboard_password"` |
+| 3 | 配置文件明文 | `dashboard_pass = "my-password"` |
+
+### Vault 存储（推荐）
+
+```bash
+# Store password in encrypted vault
+librefang vault set dashboard_password
+
+# Reference in config.toml
+dashboard_pass = "vault:dashboard_password"
+```
+
+Vault 使用 AES-256-GCM 加密，主密钥存储在操作系统密钥链中（macOS
+Keychain / Windows Credential Manager / Linux Secret Service），或
+通过 `LIBREFANG_VAULT_KEY` 环境变量指定。
+
+### 安全属性
+
+- **常数时间比较**：使用 `subtle::ConstantTimeEq` 比较凭据，防止时序攻击。
+- **HMAC 会话令牌**：登录成功后，使用 HMAC-SHA256 从凭据派生确定性令牌，作为后续 API 请求的 Bearer token。
+- **无服务端会话状态**：令牌是确定性的，服务端无需存储会话状态。
+- **公开端点**：`/api/auth/dashboard-login` 和 `/api/auth/dashboard-check` 无需认证即可访问。
+
+---

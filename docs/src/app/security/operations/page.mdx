@@ -1,0 +1,265 @@
+# Security Operations
+
+This page covers runtime guardrails, conversation repair logic, security-facing configuration, and dependency choices.
+
+## Included Topics
+
+- Loop Guard
+- Session Repair
+- Security Configuration
+- Security Dependencies
+
+---
+
+## Loop Guard
+
+**Source:** `librefang-runtime/src/loop_guard.rs`
+
+The `LoopGuard` tracks tool calls within a single agent loop execution to
+detect when the agent is stuck calling the same tool repeatedly.
+
+### Configuration
+
+```rust
+pub struct LoopGuardConfig {
+    pub warn_threshold: u32,         // Default: 3
+    pub block_threshold: u32,        // Default: 5
+    pub global_circuit_breaker: u32, // Default: 30
+}
+```
+
+### Detection Algorithm
+
+1. For each tool call, compute SHA-256 of `tool_name + "|" + serialized_params`.
+2. Increment the count for that hash in a `HashMap<String, u32>`.
+3. Increment `total_calls`.
+4. Return a graduated verdict:
+
+```rust
+pub fn check(&mut self, tool_name: &str, params: &serde_json::Value) -> LoopGuardVerdict {
+    self.total_calls += 1;
+
+    // Global circuit breaker
+    if self.total_calls > self.config.global_circuit_breaker {
+        return LoopGuardVerdict::CircuitBreak(/* ... */);
+    }
+
+    let hash = Self::compute_hash(tool_name, params);
+    let count = self.call_counts.entry(hash).or_insert(0);
+    *count += 1;
+
+    if *count >= self.config.block_threshold {
+        LoopGuardVerdict::Block(/* ... */)
+    } else if *count >= self.config.warn_threshold {
+        LoopGuardVerdict::Warn(/* ... */)
+    } else {
+        LoopGuardVerdict::Allow
+    }
+}
+```
+
+### Verdict Types
+
+| Verdict | Meaning | Action |
+|---------|---------|--------|
+| `Allow` | Normal operation | Run the tool |
+| `Warn(msg)` | Same call repeated >= 3 times | Run, append warning to result |
+| `Block(msg)` | Same call repeated >= 5 times | Skip execution, return error |
+| `CircuitBreak(msg)` | > 30 total tool calls | Terminate the entire agent loop |
+
+### Hash Computation
+
+```rust
+fn compute_hash(tool_name: &str, params: &serde_json::Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(tool_name.as_bytes());
+    hasher.update(b"|");
+    let params_str = serde_json::to_string(params).unwrap_or_default();
+    hasher.update(params_str.as_bytes());
+    hex::encode(hasher.finalize())
+}
+```
+
+Note: `serde_json::to_string` produces deterministic output (object keys are
+sorted), ensuring that semantically identical parameters produce the same hash.
+
+### Key Property
+
+Calls with **different parameters** are tracked separately.  An agent that
+calls `web_search` with 10 different queries will not trigger the guard, but
+an agent that calls `web_search({"query": "test"})` 5 times will be blocked.
+
+---
+
+## Session Repair
+
+**Source:** `librefang-runtime/src/session_repair.rs`
+
+Before sending message history to the LLM, this module validates and repairs
+common structural issues that would cause API errors.
+
+### Three-Phase Repair
+
+```rust
+pub fn validate_and_repair(messages: &[Message]) -> Vec<Message>
+```
+
+**Phase 1 -- Collect ToolUse IDs:**
+
+Scan all messages for `ContentBlock::ToolUse { id, .. }` blocks and collect
+their IDs into a `HashSet<String>`.
+
+**Phase 2 -- Filter orphans and empties:**
+
+- **Orphaned ToolResults:** `ContentBlock::ToolResult { tool_use_id, .. }`
+  blocks where `tool_use_id` is not in the ToolUse ID set are dropped.
+- **Empty messages:** Messages with empty text or no content blocks are
+  dropped.
+
+**Phase 3 -- Merge consecutive same-role messages:**
+
+The Anthropic API requires strict role alternation (user, assistant, user,
+assistant...).  If two consecutive messages have the same role, they are
+merged into a single message with combined content blocks.
+
+### Why Each Repair Is Needed
+
+| Issue | Cause | Effect Without Repair |
+|-------|-------|----------------------|
+| Orphaned ToolResult | Compaction or truncation removed the ToolUse | API error: "tool_use_id not found" |
+| Empty messages | Cancelled generation, empty user submission | API error: empty content |
+| Consecutive same-role | Manual history editing, session repair itself | API error: role alternation violation |
+
+### Content Merging
+
+When merging consecutive same-role messages, both are converted to block
+format and concatenated:
+
+```rust
+fn merge_content(dst: &mut MessageContent, src: MessageContent) {
+    let dst_blocks = content_to_blocks(std::mem::replace(dst, MessageContent::Text(String::new())));
+    let src_blocks = content_to_blocks(src);
+    let mut combined = dst_blocks;
+    combined.extend(src_blocks);
+    *dst = MessageContent::Blocks(combined);
+}
+```
+
+---
+
+## Security Configuration
+
+### config.toml Reference
+
+```toml
+# API Authentication
+api_key = "your-secret-api-key"  # Empty = localhost-only mode
+
+# OFP Wire Protocol
+[network]
+shared_secret = "your-pre-shared-key"  # Required for OFP
+
+# WASM Sandbox
+[sandbox]
+fuel_limit = 1000000       # CPU instruction budget per execution
+timeout_secs = 30          # Wall-clock timeout per execution
+max_memory_bytes = 16777216 # 16 MB max WASM memory
+
+# Rate Limiting
+# 500 tokens/minute/IP (not currently configurable via config.toml)
+
+# Web Search SSRF Protection
+[web]
+# SSRF protection is always on and cannot be disabled
+```
+
+### Environment Variables for Secrets
+
+| Variable | Used By |
+|----------|---------|
+| `OPENAI_API_KEY` | OpenAI-compat driver |
+| `ANTHROPIC_API_KEY` | Anthropic driver |
+| `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Gemini driver |
+| `DEEPSEEK_API_KEY` | DeepSeek provider |
+| `GROQ_API_KEY` | Groq provider |
+| `BRAVE_API_KEY` | Brave web search |
+| `TAVILY_API_KEY` | Tavily web search |
+| `PERPLEXITY_API_KEY` | Perplexity web search |
+
+All environment variable API keys are wrapped in `Zeroizing<String>` when
+loaded into driver structs.
+
+### Capability Declaration (Agent Manifest)
+
+Capabilities are declared in the agent's TOML manifest:
+
+```toml
+[agent]
+name = "my-agent"
+
+[[capabilities]]
+type = "FileRead"
+value = "/data/*"
+
+[[capabilities]]
+type = "NetConnect"
+value = "*.openai.com:443"
+
+[[capabilities]]
+type = "ToolInvoke"
+value = "web_search"
+
+[[capabilities]]
+type = "LlmMaxTokens"
+value = 4096
+```
+
+### Loop Guard Tuning
+
+The default `LoopGuardConfig` values are:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `warn_threshold` | 3 | Identical calls before warning |
+| `block_threshold` | 5 | Identical calls before blocking |
+| `global_circuit_breaker` | 30 | Total calls before circuit break |
+
+### Subprocess Sandbox Allowlists
+
+To pass specific environment variables to subprocesses:
+
+```rust
+sandbox_command(&mut cmd, &["MY_CUSTOM_VAR".to_string()]);
+```
+
+Only variables explicitly listed in `allowed_env_vars` (plus the safe
+defaults) will be inherited.
+
+---
+
+## Security Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| `sha2` | SHA-256 hashing (audit trail, loop guard, SSRF, checksums) |
+| `hmac` | HMAC-SHA256 for OFP authentication |
+| `hex` | Hex encoding/decoding of hashes and signatures |
+| `subtle` | Constant-time comparison (`ConstantTimeEq`) for HMAC verification |
+| `ed25519-dalek` | Ed25519 signing/verification for manifest signing |
+| `rand` | Cryptographic RNG for key generation (`OsRng`) |
+| `zeroize` | `Zeroizing<T>` wrapper for automatic secret memory wiping |
+| `governor` | GCRA rate limiting algorithm |
+| `wasmtime` | WASM sandbox with fuel + epoch metering |
+| `uuid` | Nonce generation for OFP handshakes |
+| `chrono` | ISO-8601 timestamps for audit entries |
+| `reqwest` | HTTP client (used inside SSRF-protected `host_net_fetch`) |
+
+### Why These Specific Crates
+
+- **sha2/hmac:** Part of the RustCrypto project, audited, widely used in production Rust.
+- **ed25519-dalek:** De facto standard Ed25519 library in Rust, extensively audited.
+- **subtle:** Provides constant-time operations to prevent timing side-channels.
+- **zeroize:** Official RustCrypto approach to zeroing secrets; integrates with `Drop`.
+- **governor:** Battle-tested GCRA implementation with `DashMap`-backed concurrent state.
+
+---
