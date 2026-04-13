@@ -8,6 +8,7 @@ description = "Core kernel for the LibreFang Agent OS"
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 librefang-memory = { path = "../librefang-memory" }
+librefang-kernel-router = { path = "../librefang-kernel-router" }
 librefang-runtime = { path = "../librefang-runtime" }
 librefang-skills = { path = "../librefang-skills" }
 librefang-hands = { path = "../librefang-hands" }

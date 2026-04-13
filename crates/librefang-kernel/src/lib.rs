@@ -20,7 +20,7 @@ pub mod metering;
 pub mod orchestration;
 pub mod pairing;
 pub mod registry;
-pub mod router;
+pub use librefang_kernel_router as router;
 pub mod scheduler;
 pub mod supervisor;
 pub mod triggers;

@@ -4152,6 +4152,7 @@ dependencies = [
  "librefang-channels",
  "librefang-extensions",
  "librefang-hands",
+ "librefang-kernel-router",
  "librefang-memory",
  "librefang-runtime",
  "librefang-skills",
@@ -4175,6 +4176,20 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "librefang-kernel-router"
+version = "2026.4.13-beta19"
+dependencies = [
+ "dirs 6.0.0",
+ "librefang-hands",
+ "librefang-types",
+ "regex-lite",
+ "serde",
+ "serde_json",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]
