@@ -49,7 +49,7 @@ arc-swap = "1"
 
 # Logging / Tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # OpenTelemetry
 opentelemetry = "0.31"
@@ -205,10 +205,12 @@ split-debuginfo = "unpacked" # Speeds up incremental linking on macOS
 debug = "line-tables-only"
 
 [profile.release]
-lto = true
+lto = "fat"
 codegen-units = 1
-strip = true
-opt-level = 3
+strip = "symbols"
+# Size-optimized: daemon bottleneck is network I/O (LLM calls), not CPU.
+# "s" trims ~5-15% binary vs opt-level=3 with negligible runtime impact.
+opt-level = "s"
 
 [profile.release-local]
 inherits = "release"
