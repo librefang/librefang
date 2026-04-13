@@ -5,9 +5,37 @@
 use librefang_types::media::{
     MediaAttachment, MediaConfig, MediaSource, MediaType, MediaUnderstanding,
 };
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::info;
+use tracing::{info, warn};
+
+/// Guard that removes a temp file on drop so transcoding never leaks
+/// scratch audio on error paths. Best-effort: `remove_file` failures are
+/// swallowed — the file is in `std::env::temp_dir()` and the OS will
+/// reclaim it eventually.
+struct TempPath(PathBuf);
+
+impl TempPath {
+    fn new(suffix: &str) -> Self {
+        let name = format!(
+            "librefang-transcode-{}{}",
+            uuid::Uuid::new_v4(),
+            suffix
+        );
+        Self(std::env::temp_dir().join(name))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
 
 /// Media understanding engine.
 pub struct MediaEngine {
@@ -75,20 +103,8 @@ impl MediaEngine {
 
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
 
-        // Derive a proper filename with extension from mime_type
-        // (Whisper APIs require an extension to detect format)
-        let ext = match attachment.mime_type.as_str() {
-            "audio/wav" => "wav",
-            "audio/mpeg" | "audio/mp3" => "mp3",
-            "audio/ogg" => "ogg",
-            "audio/webm" => "webm",
-            "audio/mp4" | "audio/m4a" => "m4a",
-            "audio/flac" => "flac",
-            _ => "wav",
-        };
-
         // Read audio bytes from source
-        let audio_bytes = match &attachment.source {
+        let mut audio_bytes = match &attachment.source {
             MediaSource::FilePath { path } => tokio::fs::read(path)
                 .await
                 .map_err(|e| format!("Failed to read audio file '{}': {}", path, e))?,
@@ -105,6 +121,56 @@ impl MediaEngine {
                 ));
             }
         };
+
+        // Derive a proper filename with extension for Whisper to detect format.
+        let source_ext = match &attachment.source {
+            MediaSource::FilePath { path } => Path::new(path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase()),
+            _ => None,
+        };
+        let mut mime = attachment.mime_type.clone();
+        let mut ext = mime_to_ext(&mime).unwrap_or_else(|| {
+            // Fall back to the source file extension when the MIME is missing
+            // or unknown (e.g. `application/octet-stream`).
+            source_ext.clone().unwrap_or_else(|| "wav".to_string())
+        });
+
+        // Telegram voice notes arrive as `.oga` / `audio/oga` (Ogg container
+        // wrapping Opus). Whisper's MIME / extension probe doesn't recognise
+        // either and mis-detects the codec, so transcribe silently returns
+        // garbage. Re-encode to a plain Ogg/Opus stream on the fly — keeps
+        // the Opus payload (no quality loss beyond re-packetisation) while
+        // giving Whisper the `audio/ogg` shape it expects.
+        let needs_transcode = ext == "oga" || mime.eq_ignore_ascii_case("audio/oga");
+        if needs_transcode {
+            match transcode_oga_to_ogg_opus(&audio_bytes).await {
+                Ok(transcoded) => {
+                    info!(
+                        original_size = audio_bytes.len(),
+                        transcoded_size = transcoded.len(),
+                        "Transcoded .oga -> .ogg before Whisper upload"
+                    );
+                    audio_bytes = transcoded;
+                    ext = "ogg".to_string();
+                    mime = "audio/ogg".to_string();
+                }
+                Err(e) => {
+                    // Best effort: if ffmpeg is unavailable, fall back to
+                    // sending the .oga bytes as `audio/ogg` — Whisper may
+                    // still parse the Ogg container. Surface the warning so
+                    // operators know to install ffmpeg.
+                    warn!(
+                        error = %e,
+                        "Falling back to raw .oga upload — transcode unavailable"
+                    );
+                    ext = "ogg".to_string();
+                    mime = "audio/ogg".to_string();
+                }
+            }
+        }
+
         let filename = format!("audio.{}", ext);
 
         let model = default_audio_model(provider);
@@ -126,7 +192,7 @@ impl MediaEngine {
 
         let file_part = reqwest::multipart::Part::bytes(audio_bytes)
             .file_name(filename)
-            .mime_str(&attachment.mime_type)
+            .mime_str(&mime)
             .map_err(|e| format!("Failed to set MIME type: {}", e))?;
 
         let form = reqwest::multipart::Form::new()
@@ -266,6 +332,75 @@ fn detect_vision_provider() -> Option<&'static str> {
     None
 }
 
+/// Map a known audio MIME type to the extension Whisper expects.
+/// Returns `None` for MIME types that aren't in Whisper's supported set so
+/// the caller can fall back to the source file extension.
+fn mime_to_ext(mime: &str) -> Option<String> {
+    match mime.to_ascii_lowercase().as_str() {
+        "audio/wav" | "audio/x-wav" => Some("wav".to_string()),
+        "audio/mpeg" | "audio/mp3" => Some("mp3".to_string()),
+        "audio/ogg" => Some("ogg".to_string()),
+        "audio/webm" => Some("webm".to_string()),
+        "audio/mp4" | "audio/m4a" => Some("m4a".to_string()),
+        "audio/flac" => Some("flac".to_string()),
+        _ => None,
+    }
+}
+
+/// Re-encode `.oga` (Telegram voice-note flavour of Ogg/Opus) into a plain
+/// Ogg/Opus stream that Whisper's format probe accepts. Keeps the Opus
+/// payload (no quality loss beyond re-packetisation) and the output is
+/// always a valid `audio/ogg`.
+///
+/// Requires `ffmpeg` on `PATH`. A 30 s wall-clock timeout aborts runaway
+/// transcodes. Both the scratch input and output files are deleted via
+/// `TempPath`'s `Drop` regardless of success, error, or timeout — no leaks.
+async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let input = TempPath::new(".oga");
+    let output = TempPath::new(".ogg");
+
+    tokio::fs::write(input.path(), input_bytes)
+        .await
+        .map_err(|e| format!("failed to write transcode input: {e}"))?;
+
+    let ffmpeg = tokio::process::Command::new("ffmpeg")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-i")
+        .arg(input.path())
+        .arg("-vn")
+        .arg("-c:a")
+        .arg("libopus")
+        .arg(output.path())
+        .output();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), ffmpeg)
+        .await
+        .map_err(|_| "ffmpeg transcode timed out after 30s".to_string())?
+        .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
+
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(format!(
+            "ffmpeg exited with {}: {}",
+            result.status,
+            stderr.trim()
+        ));
+    }
+
+    let bytes = tokio::fs::read(output.path())
+        .await
+        .map_err(|e| format!("failed to read transcode output: {e}"))?;
+
+    if bytes.is_empty() {
+        return Err("ffmpeg produced an empty output file".to_string());
+    }
+
+    Ok(bytes)
+}
+
 /// Detect which audio transcription provider is available.
 fn detect_audio_provider() -> Option<&'static str> {
     let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
@@ -318,6 +453,123 @@ mod tests {
         let engine = MediaEngine::new(config);
         // Semaphore was clamped to 8
         assert!(engine.semaphore.available_permits() <= 8);
+    }
+
+    #[test]
+    fn mime_to_ext_maps_known_types() {
+        assert_eq!(mime_to_ext("audio/ogg"), Some("ogg".to_string()));
+        assert_eq!(mime_to_ext("audio/mpeg"), Some("mp3".to_string()));
+        assert_eq!(mime_to_ext("audio/mp3"), Some("mp3".to_string()));
+        assert_eq!(mime_to_ext("audio/wav"), Some("wav".to_string()));
+        assert_eq!(mime_to_ext("audio/x-wav"), Some("wav".to_string()));
+        assert_eq!(mime_to_ext("audio/webm"), Some("webm".to_string()));
+        assert_eq!(mime_to_ext("audio/m4a"), Some("m4a".to_string()));
+        assert_eq!(mime_to_ext("audio/mp4"), Some("m4a".to_string()));
+        assert_eq!(mime_to_ext("audio/flac"), Some("flac".to_string()));
+    }
+
+    #[test]
+    fn mime_to_ext_is_case_insensitive() {
+        assert_eq!(mime_to_ext("AUDIO/OGG"), Some("ogg".to_string()));
+        assert_eq!(mime_to_ext("Audio/Mp3"), Some("mp3".to_string()));
+    }
+
+    #[test]
+    fn mime_to_ext_returns_none_for_unmapped() {
+        // `audio/oga` intentionally unmapped — caller handles .oga via the
+        // transcode path rather than treating it as directly usable.
+        assert_eq!(mime_to_ext("audio/oga"), None);
+        assert_eq!(mime_to_ext("application/octet-stream"), None);
+        assert_eq!(mime_to_ext(""), None);
+    }
+
+    #[test]
+    fn temp_path_drop_removes_file() {
+        let path = {
+            let tp = TempPath::new(".test");
+            let p = tp.path().to_path_buf();
+            std::fs::write(&p, b"hello").unwrap();
+            assert!(p.exists());
+            p
+            // `tp` dropped here
+        };
+        assert!(
+            !path.exists(),
+            "TempPath drop must remove the scratch file"
+        );
+    }
+
+    /// Smoke test for the ffmpeg round-trip. Skips when ffmpeg is missing
+    /// from PATH so the test suite stays green on machines without it —
+    /// CI images and the production container both have ffmpeg.
+    #[tokio::test]
+    async fn transcode_oga_smoke() {
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            eprintln!("ffmpeg not on PATH — skipping transcode smoke test");
+            return;
+        }
+
+        // Ask ffmpeg to synthesise half a second of silence into an .oga
+        // so we have a realistic Telegram-voice-shaped input without
+        // bundling a binary fixture.
+        let silence = TempPath::new(".oga");
+        let gen = tokio::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=16000:cl=mono",
+                "-t",
+                "0.5",
+                "-c:a",
+                "libopus",
+            ])
+            .arg(silence.path())
+            .output()
+            .await
+            .expect("ffmpeg must run for the smoke test");
+        assert!(
+            gen.status.success(),
+            "failed to synthesise fixture: {}",
+            String::from_utf8_lossy(&gen.stderr)
+        );
+        let input_bytes = tokio::fs::read(silence.path()).await.unwrap();
+        assert!(!input_bytes.is_empty());
+
+        let out = transcode_oga_to_ogg_opus(&input_bytes)
+            .await
+            .expect("transcode must succeed on a valid .oga");
+        assert!(
+            !out.is_empty(),
+            "transcode must return a non-empty Ogg buffer"
+        );
+        // Ogg files start with the "OggS" magic marker.
+        assert_eq!(&out[..4], b"OggS", "output must be an Ogg container");
+    }
+
+    #[tokio::test]
+    async fn transcode_empty_input_errors() {
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            eprintln!("ffmpeg not on PATH — skipping transcode smoke test");
+            return;
+        }
+        let err = transcode_oga_to_ogg_opus(&[]).await.unwrap_err();
+        assert!(
+            err.contains("ffmpeg exited") || err.contains("empty output"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
