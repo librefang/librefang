@@ -263,8 +263,14 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               tools: msg.tools,
             }];
           });
-          setMessages(historical);
+          // Refresh the cache unconditionally — the data is still correct
+          // for loadId. Only touch live React state when the user is still
+          // viewing loadId; otherwise a slow A load resolving after the
+          // user has swapped to B would overwrite B's displayed messages.
           sessionCache.set(loadId, historical);
+          if (loadId === currentAgentRef.current) {
+            setMessages(historical);
+          }
         }
       })
       .catch(() => {})
