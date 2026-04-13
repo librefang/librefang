@@ -4140,6 +4140,7 @@ dependencies = [
  "librefang-channels",
  "librefang-extensions",
  "librefang-hands",
+ "librefang-kernel-metering",
  "librefang-memory",
  "librefang-runtime",
  "librefang-skills",
@@ -4163,6 +4164,16 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "librefang-kernel-metering"
+version = "2026.4.11-beta18"
+dependencies = [
+ "librefang-memory",
+ "librefang-runtime",
+ "librefang-types",
+ "serde",
 ]
 
 [[package]]
