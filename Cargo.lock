@@ -4238,6 +4238,7 @@ dependencies = [
  "librefang-channels",
  "librefang-http",
  "librefang-memory",
+ "librefang-runtime-mcp",
  "librefang-skills",
  "librefang-types",
  "once_cell",
@@ -4268,6 +4269,21 @@ dependencies = [
  "wasmtime",
  "webpki-roots",
  "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-mcp"
+version = "2026.4.13-beta19"
+dependencies = [
+ "http",
+ "librefang-http",
+ "librefang-types",
+ "reqwest 0.13.2",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

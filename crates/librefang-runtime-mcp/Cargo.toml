@@ -1,0 +1,17 @@
+[package]
+name = "librefang-runtime-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP (Model Context Protocol) client for LibreFang runtime"
+
+[dependencies]
+librefang-types = { path = "../librefang-types" }
+librefang-http = { path = "../librefang-http" }
+rmcp = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+http = "1"
