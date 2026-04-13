@@ -5,8 +5,8 @@
 
 use crate::formatter;
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
-    InteractiveButton, InteractiveMessage, LifecycleReaction,
+    split_message, truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType,
+    ChannelUser, InteractiveButton, InteractiveMessage, LifecycleReaction,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -870,11 +870,7 @@ impl TelegramAdapter {
                         } else {
                             // Callback button — sends callback_query to the bot
                             // Telegram limits callback_data to 64 bytes
-                            let action = if btn.action.len() > 64 {
-                                btn.action[..64].to_string()
-                            } else {
-                                btn.action.clone()
-                            };
+                            let action = truncate_utf8(&btn.action, 64).to_string();
                             serde_json::json!({
                                 "text": btn.label,
                                 "callback_data": action,
@@ -932,11 +928,7 @@ impl TelegramAdapter {
                         if let Some(ref u) = btn.url {
                             serde_json::json!({ "text": btn.label, "url": u })
                         } else {
-                            let action = if btn.action.len() > 64 {
-                                btn.action[..64].to_string()
-                            } else {
-                                btn.action.clone()
-                            };
+                            let action = truncate_utf8(&btn.action, 64).to_string();
                             serde_json::json!({ "text": btn.label, "callback_data": action })
                         }
                     })

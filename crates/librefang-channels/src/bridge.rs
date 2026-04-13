@@ -8,8 +8,8 @@ use crate::rate_limiter::ChannelRateLimiter;
 use crate::router::AgentRouter;
 use crate::sanitizer::{InputSanitizer, SanitizeResult};
 use crate::types::{
-    default_phase_emoji, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser,
-    InteractiveButton, LifecycleReaction, SenderContext,
+    default_phase_emoji, truncate_utf8, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage,
+    ChannelUser, InteractiveButton, LifecycleReaction, SenderContext,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -1853,12 +1853,7 @@ async fn dispatch_message(
                             // "/agent " is 7 bytes; truncate name to 57 bytes if needed.
                             let action = {
                                 let prefix = "/agent ";
-                                let max_name_bytes = 64 - prefix.len();
-                                let safe_name = if agent_name.len() > max_name_bytes {
-                                    &agent_name[..max_name_bytes]
-                                } else {
-                                    &agent_name
-                                };
+                                let safe_name = truncate_utf8(&agent_name, 64 - prefix.len());
                                 format!("{prefix}{safe_name}")
                             };
                             vec![InteractiveButton {
@@ -1894,12 +1889,7 @@ async fn dispatch_message(
                         .map(|(pid, pname, _auth_ok)| {
                             let action = {
                                 let prefix = "prov:";
-                                let max_id_bytes = 64 - prefix.len();
-                                let safe_id = if pid.len() > max_id_bytes {
-                                    &pid[..max_id_bytes]
-                                } else {
-                                    &pid
-                                };
+                                let safe_id = truncate_utf8(&pid, 64 - prefix.len());
                                 format!("{prefix}{safe_id}")
                             };
                             vec![InteractiveButton {
@@ -1998,12 +1988,7 @@ async fn dispatch_message(
                     .map(|(mid_str, mlabel)| {
                         let action_str = {
                             let prefix = "model:";
-                            let max_bytes = 64 - prefix.len();
-                            let safe_id = if mid_str.len() > max_bytes {
-                                &mid_str[..max_bytes]
-                            } else {
-                                mid_str.as_str()
-                            };
+                            let safe_id = truncate_utf8(mid_str, 64 - prefix.len());
                             format!("{prefix}{safe_id}")
                         };
                         vec![InteractiveButton {
@@ -2040,12 +2025,7 @@ async fn dispatch_message(
                     .map(|(pid, pname, _auth_ok)| {
                         let action_str = {
                             let prefix = "prov:";
-                            let max_id_bytes = 64 - prefix.len();
-                            let safe_id = if pid.len() > max_id_bytes {
-                                &pid[..max_id_bytes]
-                            } else {
-                                &pid
-                            };
+                            let safe_id = truncate_utf8(&pid, 64 - prefix.len());
                             format!("{prefix}{safe_id}")
                         };
                         vec![InteractiveButton {
@@ -2283,12 +2263,7 @@ async fn dispatch_message(
                                 // "/agent " is 7 bytes; truncate name to 57 bytes if needed.
                                 let action = {
                                     let prefix = "/agent ";
-                                    let max_name_bytes = 64 - prefix.len();
-                                    let safe_name = if name.len() > max_name_bytes {
-                                        &name[..max_name_bytes]
-                                    } else {
-                                        &name
-                                    };
+                                    let safe_name = truncate_utf8(&name, 64 - prefix.len());
                                     format!("{prefix}{safe_name}")
                                 };
                                 vec![InteractiveButton {
@@ -2324,12 +2299,7 @@ async fn dispatch_message(
                             .map(|(pid, pname, _auth_ok)| {
                                 let action = {
                                     let prefix = "prov:";
-                                    let max_id_bytes = 64 - prefix.len();
-                                    let safe_id = if pid.len() > max_id_bytes {
-                                        &pid[..max_id_bytes]
-                                    } else {
-                                        &pid
-                                    };
+                                    let safe_id = truncate_utf8(&pid, 64 - prefix.len());
                                     format!("{prefix}{safe_id}")
                                 };
                                 vec![InteractiveButton {
