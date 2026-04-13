@@ -356,18 +356,141 @@ fn update_consecutive_hard_failures(
     hard_error_count
 }
 
-struct ToolUseSetup {
+/// Accumulates an in-flight tool-use turn without touching `session.messages`
+/// or the LLM working-copy `messages` vec until the turn is ready to commit.
+///
+/// This is the structural fix for upstream #2381: the previous
+/// `begin_tool_use_turn` helper eagerly pushed the assistant `tool_use`
+/// message to `session.messages` BEFORE any tool executed, and relied on
+/// a later `finalize_tool_use_results` call to add the paired user
+/// `tool_result` message. Any control-flow exit between the two (a hard
+/// error `break`, a mid-turn signal `break`, or a `?` propagation from
+/// `execute_single_tool_call`) left `session.messages` in a
+/// half-committed state: the provider then rejected the next request
+/// with "tool_call_ids did not have response messages" (HTTP 400).
+///
+/// With `StagedToolUseTurn` the assistant message AND all tool-result
+/// blocks are buffered locally. Only `commit` touches the persisted
+/// vectors, and it does so atomically (assistant message + user
+/// {tool_results} pushed in a single operation). If the staged turn is
+/// dropped without commit — which is exactly what `?` propagation does —
+/// `session.messages` is untouched. By construction, no orphan `ToolUse`
+/// can ever reach the persistence layer.
+struct StagedToolUseTurn {
+    /// The assistant message carrying `ContentBlock::ToolUse` blocks.
+    /// Cloned into both `session.messages` and the LLM `messages`
+    /// working copy at commit time.
+    assistant_msg: Message,
+    /// `(tool_use_id, tool_name)` for every tool_use block the LLM
+    /// emitted. Used by `pad_missing_results` to fabricate synthetic
+    /// "not executed" results for any tool_use_id that never received
+    /// an `append_result` (e.g. because a mid-turn signal interrupted
+    /// the per-tool loop).
+    tool_call_ids: Vec<(String, String)>,
+    /// Accumulated `ContentBlock::ToolResult` blocks. Committed as the
+    /// body of a single user message once the turn is ready.
+    tool_result_blocks: Vec<ContentBlock>,
+    /// Cached assistant rationale text (if any) — preserved here so
+    /// the tool-execution loop can pass it to `execute_single_tool_call`
+    /// for decision trace recording.
     rationale_text: Option<String>,
+    /// Names of tools the agent is allowed to invoke on this turn.
     allowed_tool_names: Vec<String>,
+    /// Caller id (agent id as string) used for hook context and policy.
     caller_id_str: String,
+    /// Once `commit` runs this flips to true so a second commit call
+    /// (or a drop-after-commit) is a no-op.
+    committed: bool,
 }
 
-fn begin_tool_use_turn(
+impl StagedToolUseTurn {
+    /// Append a tool result block to the staged turn. Called once per
+    /// `execute_single_tool_call` completion — including for hard
+    /// errors, which are honest information the LLM must see on the
+    /// next iteration.
+    fn append_result(&mut self, block: ContentBlock) {
+        self.tool_result_blocks.push(block);
+    }
+
+    /// Pad any `tool_use_id` that never had `append_result` called for
+    /// it with a synthetic "tool not executed" result block. No-op on
+    /// the happy path where every tool executed (and therefore appended
+    /// a result — including a real error result).
+    ///
+    /// This is ONLY for ids that have no result at all. If a tool
+    /// returned `is_error=true` via `append_result`, that real error
+    /// content is preserved — padding must NOT paper over honest error
+    /// information.
+    fn pad_missing_results(&mut self) {
+        for (id, name) in &self.tool_call_ids {
+            let already_present = self.tool_result_blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id
+                )
+            });
+            if already_present {
+                continue;
+            }
+            self.tool_result_blocks.push(ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                tool_name: name.clone(),
+                content: "[tool interrupted: turn aborted before this call could execute]"
+                    .to_string(),
+                is_error: true,
+                status: librefang_types::tool::ToolExecutionStatus::Error,
+                approval_request_id: None,
+            });
+        }
+    }
+
+    /// Atomically commit the staged assistant message and user
+    /// tool-result message to both `session.messages` and the LLM
+    /// working copy `messages`. Returns the outcome summary computed
+    /// from the accumulated tool-result blocks (for consecutive-failure
+    /// tracking).
+    ///
+    /// Callers should always run `pad_missing_results` before `commit`
+    /// if any control-flow exit (mid-turn signal, etc.) interrupted the
+    /// per-tool loop — otherwise the wire format will carry orphan
+    /// `tool_use_id`s the provider will reject.
+    fn commit(
+        &mut self,
+        session: &mut Session,
+        messages: &mut Vec<Message>,
+    ) -> ToolResultOutcomeSummary {
+        if self.committed {
+            return ToolResultOutcomeSummary::default();
+        }
+        self.committed = true;
+
+        // Step 1: push the assistant message carrying the tool_use blocks.
+        session.messages.push(self.assistant_msg.clone());
+        messages.push(self.assistant_msg.clone());
+
+        // Step 2: degenerate-case short-circuit — if no result blocks
+        // were accumulated (LLM emitted no tool_calls, or every id was
+        // padded away) we skip the paired user message so we don't emit
+        // an empty `Blocks(vec![])` message.
+        if self.tool_result_blocks.is_empty() {
+            return ToolResultOutcomeSummary::default();
+        }
+
+        // Step 3: delegate the user{tool_result} push to the existing
+        // `finalize_tool_use_results` helper so guidance-block append
+        // behaviour stays centralized.
+        finalize_tool_use_results(session, messages, &mut self.tool_result_blocks)
+    }
+}
+
+/// Build a `StagedToolUseTurn` for an assistant response whose stop
+/// reason is `ToolUse`. Does NOT mutate `session.messages` or the LLM
+/// working copy — see `StagedToolUseTurn` docs for why.
+fn stage_tool_use_turn(
     response: &crate::llm_driver::CompletionResponse,
-    session: &mut Session,
-    messages: &mut Vec<Message>,
+    session: &Session,
     available_tools: &[ToolDefinition],
-) -> ToolUseSetup {
+) -> StagedToolUseTurn {
     let rationale_text = {
         let text = response.text();
         if text.trim().is_empty() {
@@ -377,23 +500,26 @@ fn begin_tool_use_turn(
         }
     };
 
-    let assistant_blocks = response.content.clone();
-
-    session.messages.push(Message {
+    let assistant_msg = Message {
         role: Role::Assistant,
-        content: MessageContent::Blocks(assistant_blocks.clone()),
+        content: MessageContent::Blocks(response.content.clone()),
         pinned: false,
-    });
-    messages.push(Message {
-        role: Role::Assistant,
-        content: MessageContent::Blocks(assistant_blocks),
-        pinned: false,
-    });
+    };
 
-    ToolUseSetup {
+    let tool_call_ids: Vec<(String, String)> = response
+        .tool_calls
+        .iter()
+        .map(|tc| (tc.id.clone(), tc.name.clone()))
+        .collect();
+
+    StagedToolUseTurn {
+        assistant_msg,
+        tool_call_ids,
+        tool_result_blocks: Vec::new(),
         rationale_text,
         allowed_tool_names: available_tools.iter().map(|t| t.name.clone()).collect(),
         caller_id_str: session.agent_id.to_string(),
+        committed: false,
     }
 }
 
@@ -629,28 +755,12 @@ async fn execute_single_tool_call(
     })
 }
 
-fn append_tool_result_block(
-    tool_result_blocks: &mut Vec<ContentBlock>,
-    tool_call: &ToolCall,
-    result: &librefang_types::tool::ToolResult,
-    final_content: String,
-) {
-    tool_result_blocks.push(ContentBlock::ToolResult {
-        tool_use_id: result.tool_use_id.clone(),
-        tool_name: tool_call.name.clone(),
-        content: final_content,
-        is_error: result.is_error,
-        status: result.status,
-        approval_request_id: result.approval_request_id.clone(),
-    });
-}
-
 fn handle_mid_turn_signal(
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
     manifest_name: &str,
     session: &mut Session,
     messages: &mut Vec<Message>,
-    tool_result_blocks: &mut Vec<ContentBlock>,
+    staged: &mut StagedToolUseTurn,
 ) -> Option<ToolResultOutcomeSummary> {
     let pending_rx = pending_messages?;
     let Ok(mut rx) = pending_rx.try_lock() else {
@@ -660,7 +770,13 @@ fn handle_mid_turn_signal(
         return None;
     };
 
-    let flushed_outcomes = finalize_tool_use_results(session, messages, tool_result_blocks);
+    // Pad any tool_use_id that never produced a result, then commit the
+    // staged assistant message + user{tool_results} atomically. After
+    // this call, session.messages is guaranteed to have paired
+    // ToolUse+ToolResult blocks — no orphan tool_use_id can leak onto
+    // the wire (#2381).
+    staged.pad_missing_results();
+    let flushed_outcomes = staged.commit(session, messages);
 
     info!(
         agent = %manifest_name,
@@ -694,7 +810,6 @@ fn handle_mid_turn_signal(
     let inject_msg = Message::user(&injected_text);
     session.messages.push(inject_msg.clone());
     messages.push(inject_msg);
-    tool_result_blocks.clear();
     Some(flushed_outcomes)
 }
 
@@ -2363,12 +2478,18 @@ pub async fn run_agent_loop(
                 // Reset MaxTokens continuation counter on tool use
                 consecutive_max_tokens = 0;
                 any_tools_executed = true;
-                let tool_use_setup =
-                    begin_tool_use_turn(&response, session, &mut messages, available_tools);
+                // Stage the turn locally — session.messages is NOT
+                // mutated until `staged.commit(...)` runs below (or the
+                // mid-turn signal handler commits on our behalf). If
+                // execute_single_tool_call propagates `?` before commit,
+                // the staged turn drops silently and session.messages is
+                // unchanged — by construction, no orphan ToolUse can
+                // reach the persistence layer. See #2381.
+                let mut staged = stage_tool_use_turn(&response, session, available_tools);
 
-                // Execute each tool call with loop guard, timeout, and truncation
-                let mut tool_result_blocks = Vec::new();
+                // Execute each tool call with loop guard, timeout, and truncation.
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
+                let mut committed_by_signal = false;
                 for tool_call in &response.tool_calls {
                     let mut tool_exec_ctx = ToolExecutionContext {
                         manifest,
@@ -2376,8 +2497,8 @@ pub async fn run_agent_loop(
                         memory,
                         session,
                         kernel: kernel.as_ref(),
-                        available_tool_names: &tool_use_setup.allowed_tool_names,
-                        caller_id_str: &tool_use_setup.caller_id_str,
+                        available_tool_names: &staged.allowed_tool_names,
+                        caller_id_str: &staged.caller_id_str,
                         skill_registry,
                         mcp_connections,
                         web_ctx,
@@ -2397,7 +2518,7 @@ pub async fn run_agent_loop(
                         context_window_tokens: ctx_window,
                         on_phase,
                         decision_traces: &mut decision_traces,
-                        rationale_text: &tool_use_setup.rationale_text,
+                        rationale_text: &staged.rationale_text,
                         tools_recovered_from_text,
                         iteration,
                         streaming: false,
@@ -2405,47 +2526,48 @@ pub async fn run_agent_loop(
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
-                    append_tool_result_block(
-                        &mut tool_result_blocks,
-                        tool_call,
-                        &executed.result,
-                        executed.final_content,
-                    );
+                    staged.append_result(ContentBlock::ToolResult {
+                        tool_use_id: executed.result.tool_use_id.clone(),
+                        tool_name: tool_call.name.clone(),
+                        content: executed.final_content,
+                        is_error: executed.result.is_error,
+                        status: executed.result.status,
+                        approval_request_id: executed.result.approval_request_id.clone(),
+                    });
 
-                    // Stop executing remaining tool calls on failure (#948)
-                    // but not for approval denials or sandbox security rejections —
-                    // those should let the LLM recover and retry with a valid path (#1861)
-                    let is_soft_error = executed.result.status.is_soft_error()
-                        || is_soft_error_content(&executed.result.content);
-                    if executed.result.is_error && !is_soft_error {
-                        warn!(
-                            tool = %tool_call.name,
-                            "Tool execution failed — skipping remaining tool calls"
-                        );
-                        break;
-                    }
+                    // NOTE (#2381): previously this loop used to `break`
+                    // on hard tool errors to stop executing remaining
+                    // calls. That produced orphan tool_use_ids on the
+                    // wire, because the skipped calls never received
+                    // paired tool_result blocks. Running every tool in
+                    // the batch — even after a hard error — is honest
+                    // information for the LLM's next iteration and is
+                    // capped by MAX_CONSECUTIVE_ALL_FAILED via
+                    // `update_consecutive_hard_failures` below, so the
+                    // loop cannot wheel-spin.
 
-                    // Mid-turn message injection (#956): check for pending user
-                    // messages between tool calls. If one is available, flush
-                    // completed tool results so far and inject the user message
-                    // so the LLM can process the interrupt on the next iteration.
+                    // Mid-turn message injection (#956): check for
+                    // pending user messages between tool calls. The
+                    // handler pads missing results and commits the
+                    // staged turn BEFORE injecting the user message, so
+                    // the session never has orphan tool_use_ids.
                     if let Some(flushed_outcomes) = handle_mid_turn_signal(
                         pending_messages,
                         &manifest.name,
                         session,
                         &mut messages,
-                        &mut tool_result_blocks,
+                        &mut staged,
                     ) {
                         iteration_outcomes.accumulate(flushed_outcomes);
+                        committed_by_signal = true;
                         break;
                     }
                 }
 
-                iteration_outcomes.accumulate(finalize_tool_use_results(
-                    session,
-                    &mut messages,
-                    &mut tool_result_blocks,
-                ));
+                if !committed_by_signal {
+                    staged.pad_missing_results();
+                    iteration_outcomes.accumulate(staged.commit(session, &mut messages));
+                }
 
                 // Interim save after tool execution to prevent data loss on crash
                 if let Err(e) = memory.save_session_async(session).await {
@@ -3327,12 +3449,14 @@ pub async fn run_agent_loop_streaming(
                 // Reset MaxTokens continuation counter on tool use
                 consecutive_max_tokens = 0;
                 any_tools_executed = true;
-                let tool_use_setup =
-                    begin_tool_use_turn(&response, session, &mut messages, available_tools);
+                // See non-streaming branch above for the full rationale
+                // — this is the streaming twin of the #2381 staged-commit
+                // fix.
+                let mut staged = stage_tool_use_turn(&response, session, available_tools);
 
-                // Execute each tool call with loop guard, timeout, and truncation
-                let mut tool_result_blocks = Vec::new();
+                // Execute each tool call with loop guard, timeout, and truncation.
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
+                let mut committed_by_signal = false;
                 for tool_call in &response.tool_calls {
                     let mut tool_exec_ctx = ToolExecutionContext {
                         manifest,
@@ -3340,8 +3464,8 @@ pub async fn run_agent_loop_streaming(
                         memory,
                         session,
                         kernel: kernel.as_ref(),
-                        available_tool_names: &tool_use_setup.allowed_tool_names,
-                        caller_id_str: &tool_use_setup.caller_id_str,
+                        available_tool_names: &staged.allowed_tool_names,
+                        caller_id_str: &staged.caller_id_str,
                         skill_registry,
                         mcp_connections,
                         web_ctx,
@@ -3361,7 +3485,7 @@ pub async fn run_agent_loop_streaming(
                         context_window_tokens: ctx_window,
                         on_phase,
                         decision_traces: &mut decision_traces,
-                        rationale_text: &tool_use_setup.rationale_text,
+                        rationale_text: &staged.rationale_text,
                         tools_recovered_from_text,
                         iteration,
                         streaming: true,
@@ -3383,45 +3507,39 @@ pub async fn run_agent_loop_streaming(
                         warn!(agent = %manifest.name, "Stream consumer disconnected — continuing tool loop but will not stream further");
                     }
 
-                    append_tool_result_block(
-                        &mut tool_result_blocks,
-                        tool_call,
-                        &executed.result,
-                        executed.final_content,
-                    );
+                    staged.append_result(ContentBlock::ToolResult {
+                        tool_use_id: executed.result.tool_use_id.clone(),
+                        tool_name: tool_call.name.clone(),
+                        content: executed.final_content,
+                        is_error: executed.result.is_error,
+                        status: executed.result.status,
+                        approval_request_id: executed.result.approval_request_id.clone(),
+                    });
 
-                    // Stop executing remaining tool calls on failure (#948)
-                    // but not for approval denials or sandbox security rejections —
-                    // those should let the LLM recover and retry with a valid path (#1861)
-                    let is_soft_error = executed.result.status.is_soft_error()
-                        || is_soft_error_content(&executed.result.content);
-                    if executed.result.is_error && !is_soft_error {
-                        warn!(
-                            tool = %tool_call.name,
-                            "Tool execution failed — skipping remaining tool calls (streaming)"
-                        );
-                        break;
-                    }
+                    // NOTE (#2381): previously this loop used to `break`
+                    // on hard tool errors. Removed — see the non-streaming
+                    // branch for the full reasoning.
 
-                    // Mid-turn message injection (#956): check for pending user
-                    // messages between tool calls (streaming variant).
+                    // Mid-turn message injection (#956): check for
+                    // pending user messages between tool calls (streaming
+                    // variant).
                     if let Some(flushed_outcomes) = handle_mid_turn_signal(
                         pending_messages,
                         &manifest.name,
                         session,
                         &mut messages,
-                        &mut tool_result_blocks,
+                        &mut staged,
                     ) {
                         iteration_outcomes.accumulate(flushed_outcomes);
+                        committed_by_signal = true;
                         break;
                     }
                 }
 
-                iteration_outcomes.accumulate(finalize_tool_use_results(
-                    session,
-                    &mut messages,
-                    &mut tool_result_blocks,
-                ));
+                if !committed_by_signal {
+                    staged.pad_missing_results();
+                    iteration_outcomes.accumulate(staged.commit(session, &mut messages));
+                }
 
                 if let Err(e) = memory.save_session_async(session).await {
                     warn!("Failed to interim-save session: {e}");
@@ -4545,6 +4663,10 @@ mod tests {
 
     #[test]
     fn test_handle_mid_turn_signal_injects_without_tool_results() {
+        // Even when the staged turn has no tool results yet (empty
+        // tool_result_blocks) and no pending tool_use_ids, the signal
+        // handler must still commit the staged assistant message (empty
+        // Blocks), then inject the user signal.
         let agent_id = librefang_types::agent::AgentId::new();
         let mut session = librefang_memory::session::Session {
             id: librefang_types::agent::SessionId::new(),
@@ -4554,7 +4676,19 @@ mod tests {
             label: None,
         };
         let mut messages = Vec::new();
-        let mut tool_result_blocks = Vec::new();
+        let mut staged = StagedToolUseTurn {
+            assistant_msg: Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(Vec::new()),
+                pinned: false,
+            },
+            tool_call_ids: Vec::new(),
+            tool_result_blocks: Vec::new(),
+            rationale_text: None,
+            allowed_tool_names: Vec::new(),
+            caller_id_str: session.agent_id.to_string(),
+            committed: false,
+        };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::Message {
             content: "interrupt".to_string(),
@@ -4567,18 +4701,27 @@ mod tests {
             "test-agent",
             &mut session,
             &mut messages,
-            &mut tool_result_blocks,
+            &mut staged,
         )
         .expect("expected mid-turn signal");
 
         assert_eq!(flushed_outcomes, ToolResultOutcomeSummary::default());
-        assert_eq!(session.messages.len(), 1);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(session.messages[0].content.text_content(), "interrupt");
+        // Empty staged assistant msg + injected user msg = 2 messages.
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(session.messages[1].content.text_content(), "interrupt");
     }
 
     #[test]
     fn test_handle_mid_turn_signal_mixed_flush_resets_consecutive_all_failed() {
+        // A staged turn with two already-appended tool results (one
+        // hard error, one success) receives a mid-turn signal. The
+        // signal handler must: pad (no-op — both ids have results),
+        // commit both results + assistant msg, then inject the user
+        // signal. Final shape:
+        //   [assistant{ToolUse x2},
+        //    user{ToolResult x2 + guidance text},
+        //    user{"interrupt"}]
         let agent_id = librefang_types::agent::AgentId::new();
         let mut session = librefang_memory::session::Session {
             id: librefang_types::agent::SessionId::new(),
@@ -4588,24 +4731,52 @@ mod tests {
             label: None,
         };
         let mut messages = Vec::new();
-        let mut tool_result_blocks = vec![
-            ContentBlock::ToolResult {
-                tool_use_id: "tool-hard-fail".to_string(),
-                tool_name: "nonexistent_tool".to_string(),
-                content: "Permission denied: unknown tool".to_string(),
-                is_error: true,
-                status: librefang_types::tool::ToolExecutionStatus::Error,
-                approval_request_id: None,
+        let mut staged = StagedToolUseTurn {
+            assistant_msg: Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "tool-hard-fail".to_string(),
+                        name: "nonexistent_tool".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool-ok".to_string(),
+                        name: "noop".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                ]),
+                pinned: false,
             },
-            ContentBlock::ToolResult {
-                tool_use_id: "tool-ok".to_string(),
-                tool_name: "noop".to_string(),
-                content: "ok".to_string(),
-                is_error: false,
-                status: librefang_types::tool::ToolExecutionStatus::Completed,
-                approval_request_id: None,
-            },
-        ];
+            tool_call_ids: vec![
+                ("tool-hard-fail".to_string(), "nonexistent_tool".to_string()),
+                ("tool-ok".to_string(), "noop".to_string()),
+            ],
+            tool_result_blocks: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "tool-hard-fail".to_string(),
+                    tool_name: "nonexistent_tool".to_string(),
+                    content: "Permission denied: unknown tool".to_string(),
+                    is_error: true,
+                    status: librefang_types::tool::ToolExecutionStatus::Error,
+                    approval_request_id: None,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "tool-ok".to_string(),
+                    tool_name: "noop".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::Completed,
+                    approval_request_id: None,
+                },
+            ],
+            rationale_text: None,
+            allowed_tool_names: Vec::new(),
+            caller_id_str: session.agent_id.to_string(),
+            committed: false,
+        };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::Message {
             content: "interrupt".to_string(),
@@ -4618,7 +4789,7 @@ mod tests {
             "test-agent",
             &mut session,
             &mut messages,
-            &mut tool_result_blocks,
+            &mut staged,
         )
         .expect("expected mid-turn signal");
 
@@ -4629,11 +4800,21 @@ mod tests {
                 success_count: 1,
             }
         );
-        assert!(tool_result_blocks.is_empty());
-        assert_eq!(session.messages.len(), 2);
-        assert_eq!(messages.len(), 2);
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(messages.len(), 3);
         assert!(matches!(
             &session.messages[0].content,
+            MessageContent::Blocks(blocks)
+                if matches!(
+                    blocks.as_slice(),
+                    [
+                        ContentBlock::ToolUse { id: id_a, .. },
+                        ContentBlock::ToolUse { id: id_b, .. },
+                    ] if id_a == "tool-hard-fail" && id_b == "tool-ok"
+                )
+        ));
+        assert!(matches!(
+            &session.messages[1].content,
             MessageContent::Blocks(blocks)
                 if matches!(
                     blocks.as_slice(),
@@ -4654,7 +4835,7 @@ mod tests {
                     ] if tool_use_id == "tool-hard-fail" && tool_use_id_ok == "tool-ok"
                 )
         ));
-        assert_eq!(session.messages[1].content.text_content(), "interrupt");
+        assert_eq!(session.messages[2].content.text_content(), "interrupt");
 
         let mut consecutive_all_failed = 2;
         let hard_error_count =
@@ -4686,24 +4867,52 @@ mod tests {
             label: None,
         };
         let mut messages = session.messages.clone();
-        let mut tool_result_blocks = vec![
-            ContentBlock::ToolResult {
-                tool_use_id: "tool-hard-fail".to_string(),
-                tool_name: "failing_tool".to_string(),
-                content: "hard failure before approval resolution".to_string(),
-                is_error: true,
-                status: librefang_types::tool::ToolExecutionStatus::Error,
-                approval_request_id: None,
+        let mut staged = StagedToolUseTurn {
+            assistant_msg: Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "tool-hard-fail".to_string(),
+                        name: "failing_tool".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool-ok".to_string(),
+                        name: "noop".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                ]),
+                pinned: false,
             },
-            ContentBlock::ToolResult {
-                tool_use_id: "tool-ok".to_string(),
-                tool_name: "noop".to_string(),
-                content: "completed before approval resolution".to_string(),
-                is_error: false,
-                status: librefang_types::tool::ToolExecutionStatus::Completed,
-                approval_request_id: None,
-            },
-        ];
+            tool_call_ids: vec![
+                ("tool-hard-fail".to_string(), "failing_tool".to_string()),
+                ("tool-ok".to_string(), "noop".to_string()),
+            ],
+            tool_result_blocks: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "tool-hard-fail".to_string(),
+                    tool_name: "failing_tool".to_string(),
+                    content: "hard failure before approval resolution".to_string(),
+                    is_error: true,
+                    status: librefang_types::tool::ToolExecutionStatus::Error,
+                    approval_request_id: None,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "tool-ok".to_string(),
+                    tool_name: "noop".to_string(),
+                    content: "completed before approval resolution".to_string(),
+                    is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::Completed,
+                    approval_request_id: None,
+                },
+            ],
+            rationale_text: None,
+            allowed_tool_names: Vec::new(),
+            caller_id_str: session.agent_id.to_string(),
+            committed: false,
+        };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::ApprovalResolved {
             tool_use_id: "tool_waiting".to_string(),
@@ -4721,7 +4930,7 @@ mod tests {
             "test-agent",
             &mut session,
             &mut messages,
-            &mut tool_result_blocks,
+            &mut staged,
         )
         .expect("expected approval resolution signal");
 
@@ -4732,10 +4941,15 @@ mod tests {
                 success_count: 1,
             }
         );
-        assert!(tool_result_blocks.is_empty());
-        assert_eq!(session.messages.len(), 3);
-        assert_eq!(messages.len(), 3);
+        // After commit + approval_resolution + inject:
+        //   [0] original waiting result (updated to "approved and executed")
+        //   [1] staged assistant_msg (2 ToolUse blocks)
+        //   [2] staged user{ToolResult x2 + guidance text}
+        //   [3] injected user "approval resolved" message
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(messages.len(), 4);
 
+        // [0] — original waiting result, updated in place by approval_resolution.
         match &session.messages[0].content {
             MessageContent::Blocks(blocks) => match &blocks[0] {
                 ContentBlock::ToolResult {
@@ -4758,7 +4972,21 @@ mod tests {
             other => panic!("expected blocks message, got {other:?}"),
         }
 
-        match &session.messages[1].content {
+        // [1] — staged assistant_msg with 2 ToolUse blocks.
+        assert!(matches!(
+            &session.messages[1].content,
+            MessageContent::Blocks(blocks)
+                if matches!(
+                    blocks.as_slice(),
+                    [
+                        ContentBlock::ToolUse { id: id_a, .. },
+                        ContentBlock::ToolUse { id: id_b, .. },
+                    ] if id_a == "tool-hard-fail" && id_b == "tool-ok"
+                )
+        ));
+
+        // [2] — flushed user{ToolResult x2 + guidance text}.
+        match &session.messages[2].content {
             MessageContent::Blocks(blocks) => {
                 assert!(matches!(
                     blocks.as_slice(),
@@ -4788,7 +5016,8 @@ mod tests {
             other => panic!("expected flushed blocks message, got {other:?}"),
         }
 
-        let injected_text = session.messages[2].content.text_content();
+        // [3] — injected user signal.
+        let injected_text = session.messages[3].content.text_content();
         assert!(injected_text.contains("Tool 'dangerous_tool' approval resolved (approved)"));
         assert!(injected_text.contains("approved and executed"));
 
@@ -5093,6 +5322,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_mid_turn_signal_preserves_partial_hard_failure_results_for_classification() {
+        // A staged turn with a single already-appended hard-error result
+        // receives a mid-turn signal. The signal handler must commit the
+        // staged assistant ToolUse + the hard-error user ToolResult
+        // atomically, then inject the user signal. Final session shape:
+        //   [assistant{ToolUse "tool-hard-fail"},
+        //    user{ToolResult hard-error + guidance text},
+        //    user{"interrupt"}]
+        // The real hard-error content must survive verbatim so that
+        // update_consecutive_hard_failures can classify it correctly.
         let agent_id = librefang_types::agent::AgentId::new();
         let mut session = librefang_memory::session::Session {
             id: librefang_types::agent::SessionId::new(),
@@ -5102,14 +5340,31 @@ mod tests {
             label: None,
         };
         let mut messages = Vec::new();
-        let mut tool_result_blocks = vec![ContentBlock::ToolResult {
-            tool_use_id: "tool-hard-fail".to_string(),
-            tool_name: "nonexistent_tool".to_string(),
-            content: "Permission denied: unknown tool".to_string(),
-            is_error: true,
-            status: librefang_types::tool::ToolExecutionStatus::Error,
-            approval_request_id: None,
-        }];
+        let mut staged = StagedToolUseTurn {
+            assistant_msg: Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "tool-hard-fail".to_string(),
+                    name: "nonexistent_tool".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+            },
+            tool_call_ids: vec![("tool-hard-fail".to_string(), "nonexistent_tool".to_string())],
+            tool_result_blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool-hard-fail".to_string(),
+                tool_name: "nonexistent_tool".to_string(),
+                content: "Permission denied: unknown tool".to_string(),
+                is_error: true,
+                status: librefang_types::tool::ToolExecutionStatus::Error,
+                approval_request_id: None,
+            }],
+            rationale_text: None,
+            allowed_tool_names: Vec::new(),
+            caller_id_str: session.agent_id.to_string(),
+            committed: false,
+        };
         let (tx, rx) = mpsc::channel(1);
         tx.send(AgentLoopSignal::Message {
             content: "interrupt".to_string(),
@@ -5123,14 +5378,30 @@ mod tests {
             "test-agent",
             &mut session,
             &mut messages,
-            &mut tool_result_blocks,
+            &mut staged,
         );
 
         let interrupted = interrupted.expect("signal should flush accumulated results");
-        assert!(tool_result_blocks.is_empty());
-        assert_eq!(session.messages.len(), 2);
-        assert_eq!(messages.len(), 2);
+        assert!(staged.committed);
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(messages.len(), 3);
+
+        // [0] assistant{ToolUse "tool-hard-fail"}
         match &session.messages[0].content {
+            MessageContent::Blocks(blocks) => match blocks.as_slice() {
+                [ContentBlock::ToolUse { id, name, .. }] => {
+                    assert_eq!(id, "tool-hard-fail");
+                    assert_eq!(name, "nonexistent_tool");
+                }
+                other => panic!("expected single ToolUse block, got {other:?}"),
+            },
+            other => panic!("expected blocks message, got {other:?}"),
+        }
+
+        // [1] user{ToolResult hard-error + guidance text} — the real error
+        // content must be preserved verbatim, NOT overwritten with any
+        // synthetic "[interrupted]" placeholder.
+        match &session.messages[1].content {
             MessageContent::Blocks(blocks) => {
                 assert!(!blocks.is_empty());
                 match &blocks[0] {
@@ -5155,11 +5426,13 @@ mod tests {
             other => panic!("expected blocks message, got {other:?}"),
         }
         assert!(matches!(
-            &messages[0].content,
+            &messages[1].content,
             MessageContent::Blocks(blocks)
                 if matches!(blocks.first(), Some(ContentBlock::ToolResult { .. }))
         ));
-        assert_eq!(session.messages[1].content.text_content(), "interrupt");
+
+        // [2] user{"interrupt"}
+        assert_eq!(session.messages[2].content.text_content(), "interrupt");
         assert_eq!(interrupted.hard_error_count, 1);
         assert_eq!(interrupted.success_count, 0);
 
@@ -7476,6 +7749,389 @@ mod tests {
                 );
             }
             other => panic!("Expected RepeatedToolFailures, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // StagedToolUseTurn invariants (closes #2381 by construction)
+    //
+    // These tests lock in the structural guarantees that make orphaned
+    // `tool_use_id`s impossible:
+    //   (a) pad_missing_results only fills ids that have no result at
+    //       all — real error content is never overwritten.
+    //   (b) commit is idempotent (safe to call twice).
+    //   (c) a StagedToolUseTurn dropped without commit leaves
+    //       session.messages untouched (drop-safety via ? propagation).
+    //   (d) commit atomically pushes exactly one assistant message plus
+    //       one user{tool_results} message in that order.
+    //   (e) the happy path batch case commits once and grows the
+    //       session by exactly 2 messages.
+    // -------------------------------------------------------------------
+
+    fn fresh_session() -> librefang_memory::session::Session {
+        librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id: librefang_types::agent::AgentId::new(),
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        }
+    }
+
+    fn staged_two_tool_use(agent_id_str: String) -> StagedToolUseTurn {
+        StagedToolUseTurn {
+            assistant_msg: Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "tool-a".to_string(),
+                        name: "tool_a".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool-b".to_string(),
+                        name: "tool_b".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                ]),
+                pinned: false,
+            },
+            tool_call_ids: vec![
+                ("tool-a".to_string(), "tool_a".to_string()),
+                ("tool-b".to_string(), "tool_b".to_string()),
+            ],
+            tool_result_blocks: Vec::new(),
+            rationale_text: None,
+            allowed_tool_names: Vec::new(),
+            caller_id_str: agent_id_str,
+            committed: false,
+        }
+    }
+
+    #[test]
+    fn staged_pad_missing_results_fills_uncalled_ids_only() {
+        // Real hard-error content on tool-a must survive pad untouched;
+        // tool-b has no result so pad fabricates an "interrupted" one.
+        let session = fresh_session();
+        let mut staged = staged_two_tool_use(session.agent_id.to_string());
+        staged.append_result(ContentBlock::ToolResult {
+            tool_use_id: "tool-a".to_string(),
+            tool_name: "tool_a".to_string(),
+            content: "Permission denied: unknown tool".to_string(),
+            is_error: true,
+            status: librefang_types::tool::ToolExecutionStatus::Error,
+            approval_request_id: None,
+        });
+
+        staged.pad_missing_results();
+
+        assert_eq!(staged.tool_result_blocks.len(), 2);
+        match &staged.tool_result_blocks[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "tool-a");
+                assert_eq!(content, "Permission denied: unknown tool");
+                assert!(*is_error);
+            }
+            other => panic!("expected tool-a real error result, got {other:?}"),
+        }
+        match &staged.tool_result_blocks[1] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                status,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "tool-b");
+                assert!(content.contains("[tool interrupted"));
+                assert!(*is_error);
+                assert_eq!(*status, librefang_types::tool::ToolExecutionStatus::Error);
+            }
+            other => panic!("expected tool-b synthetic result, got {other:?}"),
+        }
+        // Session was never touched — pad is a staging-buffer operation.
+        assert!(session.messages.is_empty());
+    }
+
+    #[test]
+    fn staged_pad_missing_results_noop_when_all_ids_have_results() {
+        let mut staged = staged_two_tool_use("agent".to_string());
+        staged.append_result(ContentBlock::ToolResult {
+            tool_use_id: "tool-a".to_string(),
+            tool_name: "tool_a".to_string(),
+            content: "ok-a".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        });
+        staged.append_result(ContentBlock::ToolResult {
+            tool_use_id: "tool-b".to_string(),
+            tool_name: "tool_b".to_string(),
+            content: "ok-b".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        });
+
+        staged.pad_missing_results();
+
+        assert_eq!(staged.tool_result_blocks.len(), 2);
+        for block in &staged.tool_result_blocks {
+            match block {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    assert!(!content.contains("[tool interrupted"));
+                    assert!(!*is_error);
+                }
+                other => panic!("expected tool result, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn staged_commit_is_idempotent() {
+        let mut session = fresh_session();
+        let mut messages = Vec::new();
+        let mut staged = staged_two_tool_use(session.agent_id.to_string());
+        staged.append_result(ContentBlock::ToolResult {
+            tool_use_id: "tool-a".to_string(),
+            tool_name: "tool_a".to_string(),
+            content: "ok-a".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        });
+        staged.append_result(ContentBlock::ToolResult {
+            tool_use_id: "tool-b".to_string(),
+            tool_name: "tool_b".to_string(),
+            content: "ok-b".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        });
+
+        let first = staged.commit(&mut session, &mut messages);
+        let len_after_first = session.messages.len();
+        let msgs_after_first = messages.len();
+        assert_eq!(first.success_count, 2);
+        assert_eq!(first.hard_error_count, 0);
+        assert_eq!(len_after_first, 2);
+        assert_eq!(msgs_after_first, 2);
+        assert!(staged.committed);
+
+        // Second commit is a no-op: summary is default, no new messages.
+        let second = staged.commit(&mut session, &mut messages);
+        assert_eq!(second, ToolResultOutcomeSummary::default());
+        assert_eq!(session.messages.len(), len_after_first);
+        assert_eq!(messages.len(), msgs_after_first);
+    }
+
+    #[test]
+    fn staged_drop_without_commit_does_not_touch_session() {
+        // This test simulates the `?`-propagation path: a caller builds
+        // a StagedToolUseTurn, appends some results, then an error
+        // propagates through the caller (in production via `?`) — the
+        // staged turn is dropped without commit. Session state must be
+        // byte-for-byte identical to the pre-stage snapshot; no orphan
+        // ToolUse can have reached disk.
+        let session = fresh_session();
+        let snapshot = session.messages.clone();
+
+        {
+            let mut staged = staged_two_tool_use(session.agent_id.to_string());
+            staged.append_result(ContentBlock::ToolResult {
+                tool_use_id: "tool-a".to_string(),
+                tool_name: "tool_a".to_string(),
+                content: "ok-a".to_string(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::Completed,
+                approval_request_id: None,
+            });
+            // Intentionally drop `staged` here without commit.
+            assert!(!staged.committed);
+        }
+
+        assert_eq!(session.messages.len(), snapshot.len());
+        assert!(session.messages.is_empty());
+    }
+
+    #[test]
+    fn staged_batch_with_no_issues_commits_once() {
+        // Happy path: 2 tool calls, both succeed, commit grows the
+        // session by exactly 2 messages: [assistant{ToolUse×2},
+        // user{ToolResult×2 + guidance text}].
+        let mut session = fresh_session();
+        let mut messages = Vec::new();
+        let mut staged = staged_two_tool_use(session.agent_id.to_string());
+        staged.append_result(ContentBlock::ToolResult {
+            tool_use_id: "tool-a".to_string(),
+            tool_name: "tool_a".to_string(),
+            content: "ok-a".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        });
+        staged.append_result(ContentBlock::ToolResult {
+            tool_use_id: "tool-b".to_string(),
+            tool_name: "tool_b".to_string(),
+            content: "ok-b".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        });
+        // pad_missing_results is a no-op on the happy path — guarantee
+        // that explicitly, so a future refactor adding padding side
+        // effects breaks this test.
+        let before = staged.tool_result_blocks.len();
+        staged.pad_missing_results();
+        assert_eq!(staged.tool_result_blocks.len(), before);
+
+        let summary = staged.commit(&mut session, &mut messages);
+
+        assert_eq!(summary.success_count, 2);
+        assert_eq!(summary.hard_error_count, 0);
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(
+            &session.messages[0].content,
+            MessageContent::Blocks(blocks)
+                if matches!(
+                    blocks.as_slice(),
+                    [
+                        ContentBlock::ToolUse { id: id_a, .. },
+                        ContentBlock::ToolUse { id: id_b, .. },
+                    ] if id_a == "tool-a" && id_b == "tool-b"
+                )
+        ));
+        assert!(matches!(
+            &session.messages[1].content,
+            MessageContent::Blocks(blocks)
+                if blocks.iter().filter(|b| matches!(b, ContentBlock::ToolResult { .. })).count() == 2
+        ));
+    }
+
+    #[test]
+    fn staged_hard_error_mid_batch_preserves_all_real_results() {
+        // Three tool calls — tool 0 hard-errors, tools 1+2 succeed.
+        // Under the pre-#2381 behaviour the `break;` after tool 0 would
+        // have left tool 1 and tool 2 as orphan ids. Under the new
+        // staged-commit contract, the caller is required to drive every
+        // append_result before committing, so the final session carries
+        // all three real results (real hard-error content preserved for
+        // tool 0, real successes for tools 1+2) and zero synthetics.
+        let mut session = fresh_session();
+        let mut messages = Vec::new();
+        let mut staged = StagedToolUseTurn {
+            assistant_msg: Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "t0".to_string(),
+                        name: "web_fetch".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".to_string(),
+                        name: "web_fetch".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".to_string(),
+                        name: "web_fetch".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                ]),
+                pinned: false,
+            },
+            tool_call_ids: vec![
+                ("t0".to_string(), "web_fetch".to_string()),
+                ("t1".to_string(), "web_fetch".to_string()),
+                ("t2".to_string(), "web_fetch".to_string()),
+            ],
+            tool_result_blocks: Vec::new(),
+            rationale_text: None,
+            allowed_tool_names: Vec::new(),
+            caller_id_str: session.agent_id.to_string(),
+            committed: false,
+        };
+
+        // Simulate the batch executing end-to-end (no early break).
+        staged.append_result(ContentBlock::ToolResult {
+            tool_use_id: "t0".to_string(),
+            tool_name: "web_fetch".to_string(),
+            content: "network error: Wikipedia unreachable".to_string(),
+            is_error: true,
+            status: librefang_types::tool::ToolExecutionStatus::Error,
+            approval_request_id: None,
+        });
+        staged.append_result(ContentBlock::ToolResult {
+            tool_use_id: "t1".to_string(),
+            tool_name: "web_fetch".to_string(),
+            content: "fetched page 1".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        });
+        staged.append_result(ContentBlock::ToolResult {
+            tool_use_id: "t2".to_string(),
+            tool_name: "web_fetch".to_string(),
+            content: "fetched page 2".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        });
+
+        // pad is a no-op — every id already has a real result.
+        staged.pad_missing_results();
+        assert_eq!(staged.tool_result_blocks.len(), 3);
+
+        let summary = staged.commit(&mut session, &mut messages);
+        assert_eq!(summary.success_count, 2);
+        assert_eq!(summary.hard_error_count, 1);
+        assert_eq!(session.messages.len(), 2);
+
+        // Verify every real result content survived — no synthetic
+        // "[tool interrupted" placeholders, because no id was skipped.
+        match &session.messages[1].content {
+            MessageContent::Blocks(blocks) => {
+                let results: Vec<_> = blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                            ..
+                        } => Some((tool_use_id.clone(), content.clone(), *is_error)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(results.len(), 3);
+                assert_eq!(results[0].0, "t0");
+                assert_eq!(results[0].1, "network error: Wikipedia unreachable");
+                assert!(results[0].2);
+                assert_eq!(results[1].0, "t1");
+                assert_eq!(results[1].1, "fetched page 1");
+                assert!(!results[1].2);
+                assert_eq!(results[2].0, "t2");
+                assert_eq!(results[2].1, "fetched page 2");
+                assert!(!results[2].2);
+                for (_, content, _) in &results {
+                    assert!(!content.contains("[tool interrupted"));
+                }
+            }
+            other => panic!("expected blocks message, got {other:?}"),
         }
     }
 }
