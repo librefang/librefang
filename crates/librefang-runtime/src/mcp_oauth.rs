@@ -30,6 +30,10 @@ pub struct OAuthMetadata {
     pub registration_endpoint: Option<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Slack-style user scopes. Appended to the authorization URL as
+    /// `&user_scope=...` when non-empty.
+    #[serde(default)]
+    pub user_scopes: Vec<String>,
     pub server_url: String,
 }
 
@@ -217,6 +221,11 @@ pub fn merge_metadata_with_config(
         } else {
             config.scopes.clone()
         },
+        user_scopes: if config.user_scopes.is_empty() {
+            discovered.user_scopes
+        } else {
+            config.user_scopes.clone()
+        },
         server_url: discovered.server_url,
     }
 }
@@ -275,6 +284,7 @@ pub fn parse_authorization_server_metadata(
         client_id: None,
         registration_endpoint: raw.registration_endpoint,
         scopes: Vec::new(),
+        user_scopes: Vec::new(),
         server_url: server_url.to_string(),
     })
 }
@@ -370,6 +380,7 @@ pub async fn discover_oauth_metadata(
                 client_id: cfg.client_id.clone(),
                 registration_endpoint: None,
                 scopes: cfg.scopes.clone(),
+                user_scopes: cfg.user_scopes.clone(),
                 server_url: server_url.to_string(),
             });
         }
@@ -568,6 +579,7 @@ mod tests {
             client_id: Some("discovered-client".to_string()),
             registration_endpoint: None,
             scopes: vec!["read".to_string()],
+            user_scopes: Vec::new(),
             server_url: "https://server.com/mcp".to_string(),
         };
         let config = McpOAuthConfig {
@@ -575,6 +587,7 @@ mod tests {
             token_url: Some("https://override.com/token".to_string()),
             client_id: Some("override-client".to_string()),
             scopes: vec!["admin".to_string()],
+            user_scopes: Vec::new(),
         };
         let merged = merge_metadata_with_config(discovered, &config);
         assert_eq!(merged.authorization_endpoint, "https://override.com/auth");
@@ -592,6 +605,7 @@ mod tests {
             client_id: Some("discovered-client".to_string()),
             registration_endpoint: None,
             scopes: vec!["read".to_string(), "write".to_string()],
+            user_scopes: Vec::new(),
             server_url: "https://server.com/mcp".to_string(),
         };
         let config = McpOAuthConfig::default();

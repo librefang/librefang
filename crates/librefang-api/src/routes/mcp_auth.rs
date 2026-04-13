@@ -277,6 +277,13 @@ pub async fn auth_start(
         let scope_str = metadata.scopes.join(" ");
         auth_url.push_str(&format!("&scope={}", percent_encode_param(&scope_str)));
     }
+    if !metadata.user_scopes.is_empty() {
+        let user_scope_str = metadata.user_scopes.join(" ");
+        auth_url.push_str(&format!(
+            "&user_scope={}",
+            percent_encode_param(&user_scope_str)
+        ));
+    }
 
     // Update auth state
     {
@@ -528,10 +535,31 @@ pub async fn auth_callback(
         ));
     }
 
-    let tokens: OAuthTokens = match token_resp.json().await {
+    let body = match token_resp.text().await {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = format!("Failed to read token response body: {e}");
+            let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
+            auth_states.insert(
+                name.clone(),
+                McpAuthState::Error {
+                    message: msg.clone(),
+                },
+            );
+            return axum::response::Html(format!(
+                "<html><body>\
+                 <h2>Authorization Failed</h2>\
+                 <p>{msg}</p>\
+                 <p>You can close this tab.</p>\
+                 </body></html>"
+            ));
+        }
+    };
+
+    let tokens: OAuthTokens = match serde_json::from_str(&body) {
         Ok(t) => t,
         Err(e) => {
-            let msg = format!("Failed to parse token response: {e}");
+            let msg = format!("Failed to parse token response: {e}. Body: {body}");
             let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
             auth_states.insert(
                 name.clone(),

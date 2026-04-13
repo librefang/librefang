@@ -3272,6 +3272,10 @@ pub struct McpOAuthConfig {
     pub client_id: Option<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Slack-style user scopes, appended to the authorization URL as
+    /// `&user_scope=...`. Most OAuth servers don't use this.
+    #[serde(default)]
+    pub user_scopes: Vec<String>,
 }
 
 /// A2A (Agent-to-Agent) protocol configuration.
