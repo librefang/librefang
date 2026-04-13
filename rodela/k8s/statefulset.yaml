@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: librefang
+  namespace: librefang
+  labels:
+    app: librefang
+spec:
+  replicas: 1
+  serviceName: librefang
+  selector:
+    matchLabels:
+      app: librefang
+  template:
+    metadata:
+      labels:
+        app: librefang
+    spec:
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: librefang
+          image: ghcr.io/rodela-ai/librefang:k8s-latest
+          ports:
+            - containerPort: 4545
+              name: http
+          envFrom:
+            - secretRef:
+                name: librefang-secrets
+            - configMapRef:
+                name: librefang-env
+          env:
+            - name: LIBREFANG_HOME
+              value: /data
+            - name: HOME
+              value: /data
+            - name: RUST_LOG
+              value: info
+            - name: TZ
+              value: Europe/Madrid
+          volumeMounts:
+            - name: librefang-data
+              mountPath: /data
+            - name: librefang-config
+              mountPath: /etc/librefang/config
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 4545
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 4545
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: librefang-config
+          configMap:
+            name: librefang-config
+  volumeClaimTemplates:
+    - metadata:
+        name: librefang-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 10Gi

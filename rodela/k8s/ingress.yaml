@@ -1,0 +1,32 @@
+# Uncomment and fill in host/tls when the cluster has an ingress controller.
+# Apply with: kubectl apply -f ingress.yaml  (or let kustomize include it)
+# and uncomment the ingress.yaml line in kustomization.yaml.
+#
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: librefang
+#   namespace: librefang
+#   labels:
+#     app: librefang
+#   annotations:
+#     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+#     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+#     # cert-manager.io/cluster-issuer: letsencrypt-prod
+# spec:
+#   ingressClassName: nginx
+#   rules:
+#     - host: librefang.example.com   # <-- replace with your hostname
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: librefang
+#                 port:
+#                   number: 4545
+#   tls:
+#     - hosts:
+#         - librefang.example.com     # <-- replace with your hostname
+#       secretName: librefang-tls     # cert-manager will populate this

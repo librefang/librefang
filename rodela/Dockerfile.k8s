@@ -1,0 +1,85 @@
+# syntax=docker/dockerfile:1
+
+# Stage 1: Build React dashboard
+FROM --platform=linux/amd64 node:20-alpine AS dashboard-builder
+ARG REPO_REF=main
+ARG REPO_URL=https://github.com/rodela-ai/librefang.git
+RUN apk add --no-cache git
+RUN git clone --depth 1 --branch ${REPO_REF} ${REPO_URL} /src
+RUN cd /src/crates/librefang-api/dashboard && npm ci && npm run build
+
+# Stage 2: Build Rust binary
+FROM --platform=linux/amd64 rust:1-slim-bookworm AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=dashboard-builder /src /src
+WORKDIR /src
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p librefang-cli
+RUN mkdir /out && cp /src/target/release/librefang /out/librefang && strip /out/librefang
+
+# Stage 3: Runtime
+FROM --platform=linux/amd64 ubuntu:24.04 AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tzdata \
+    locales \
+    bash \
+    procps \
+    less \
+    gosu \
+    curl \
+    wget \
+    openssh-client \
+    dnsutils \
+    vim-tiny \
+    nano \
+    jq \
+    tar \
+    gzip \
+    unzip \
+    sqlite3 \
+    python3 \
+    python3-venv \
+    python3-pip \
+    libssl3 \
+    libicu74 \
+    taskwarrior \
+    git \
+    htop \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --uid 1000 --gid 0 --shell /bin/bash --home /data --no-create-home librefang
+
+COPY --from=builder /out/librefang /usr/local/bin/librefang
+COPY rodela/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENV LIBREFANG_HOME=/data
+ENV HOME=/data
+
+VOLUME /data
+EXPOSE 4545
+
+USER root
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:4545/api/health || exit 1
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["librefang", "start", "--foreground"]
