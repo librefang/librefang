@@ -244,6 +244,20 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_env_line_spaces() {
+        let (k, v) = parse_env_line("  KEY  =  value  ").unwrap();
+        assert_eq!(k, "KEY");
+        assert_eq!(v, "value");
+    }
+
+    #[test]
+    fn test_parse_env_line_no_value() {
+        let (k, v) = parse_env_line("KEY=").unwrap();
+        assert_eq!(k, "KEY");
+        assert_eq!(v, "");
+    }
+
+    #[test]
     fn test_parse_env_line_no_equals() {
         assert!(parse_env_line("NOEQUALS").is_none());
     }
