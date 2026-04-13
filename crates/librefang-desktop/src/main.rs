@@ -16,6 +16,12 @@ struct Cli {
 }
 
 fn main() {
+    // Load ~/.librefang/.env / secrets.env / vault into process env before
+    // spawning the runtime. `std::env::set_var` is UB once other threads
+    // exist, so this must happen at the synchronous main() boundary — not
+    // from inside `LibreFangKernel::boot_with_config`.
+    librefang_extensions::dotenv::load_dotenv();
+
     let cli = Cli::parse();
     librefang_desktop::run(cli.server_url, cli.local);
 }

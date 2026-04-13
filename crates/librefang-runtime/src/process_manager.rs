@@ -267,17 +267,33 @@ impl Default for ProcessManager {
 mod tests {
     use super::*;
 
+    /// Long-running, IO-quiet placeholder process for tests that need
+    /// "something alive in the registry until we kill it". Using `cat`
+    /// here used to flake the Ubuntu CI job — a stdin-blocked child
+    /// somehow caused the runner to receive SIGTERM mid-test (exit 143).
+    /// `sleep` doesn't touch stdin/stdout, has a bounded lifetime, and
+    /// behaves identically across platforms via Windows' `timeout`.
+    fn long_running_proc() -> (&'static str, Vec<String>) {
+        if cfg!(windows) {
+            (
+                "cmd",
+                vec![
+                    "/C".to_string(),
+                    "timeout".to_string(),
+                    "/t".to_string(),
+                    "30".to_string(),
+                ],
+            )
+        } else {
+            ("sleep", vec!["30".to_string()])
+        }
+    }
+
     #[tokio::test]
     async fn test_start_and_list() {
         let pm = ProcessManager::new(5);
 
-        let cmd = if cfg!(windows) { "cmd" } else { "cat" };
-        let args: Vec<String> = if cfg!(windows) {
-            vec!["/C".to_string(), "echo".to_string(), "hello".to_string()]
-        } else {
-            vec![]
-        };
-
+        let (cmd, args) = long_running_proc();
         let id = pm.start("agent1", cmd, &args).await.unwrap();
         assert!(id.starts_with("proc_"));
 
@@ -293,18 +309,7 @@ mod tests {
     async fn test_per_agent_limit() {
         let pm = ProcessManager::new(1);
 
-        let cmd = if cfg!(windows) { "cmd" } else { "cat" };
-        let args: Vec<String> = if cfg!(windows) {
-            vec![
-                "/C".to_string(),
-                "timeout".to_string(),
-                "/t".to_string(),
-                "10".to_string(),
-            ]
-        } else {
-            vec![]
-        };
-
+        let (cmd, args) = long_running_proc();
         let id1 = pm.start("agent1", cmd, &args).await.unwrap();
         let result = pm.start("agent1", cmd, &args).await;
         assert!(result.is_err());
