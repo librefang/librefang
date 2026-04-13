@@ -133,6 +133,17 @@ Work on a GitHub fork branch **and** in sync with the NAS runtime — every loca
 3. **Keep the fork branch and the NAS in lockstep.** After any local edit: (a) commit, (b) push, (c) mirror to NAS, (d) restart. Skipping step (b) or (c) makes "works on my machine" / "fixed in prod, lost at next deploy" failure modes. The NAS `/data/` volumes are persistent across container restarts but **get overwritten on image rebuild** — persistence requires the fork branch, not the NAS copy.
 4. **No PRs upstream without explicit user confirmation.** Fork branch = always. Upstream PR = only when the Signore says so. A push to `fork` is not a request to merge — it's just the backup + live-test vehicle.
 
+## Regression Check (MANDATORY)
+
+Before pushing **any** change, verify you are not removing or breaking code that is still in use. The PR #2099 / #2217 incident — where a rebase silently dropped the WhatsApp `sendAudio()` helper that another merged PR had introduced four days earlier — is the cautionary tale. Production lost voice-note delivery for days because no one looked at what the rebase was tearing out.
+
+1. **Inspect every deletion in the diff** — `git diff <base>..HEAD --stat` and then `git diff <base>..HEAD -- <file>` filtered for `^-` lines. If you see a function, route, helper, or branch you didn't intend to touch, stop and investigate. Especially after a rebase or a stash-pop: those operations *can* and *do* drop hunks silently.
+2. **Verify each deleted symbol is actually unused.** Before removing `function foo()` / a route / an exported constant, grep the entire repo (and the runtime container, if it's gateway/runtime code) for references — not just within the file you are editing. Helpers from other PRs often live in the same hunk you are rewriting.
+3. **After a rebase, re-diff against the rebase base** (`git diff <base>..HEAD`), not against the previous tip. This is the only view that shows what your branch actually contributes — the version that other people will see when they merge.
+4. **If you find an unrelated deletion you can't explain, you broke a regression.** Restore the symbol, re-stage, and commit. Don't push first and "fix later" — by then it is in CI / production.
+
+This rule is not optional. Skipping it is how silent regressions ship.
+
 ## Common Gotchas
 - `librefang.exe` may be locked if daemon is running — use `--lib` flag or kill daemon first
 - `PeerRegistry` is `Option<PeerRegistry>` on kernel but `Option<Arc<PeerRegistry>>` on `AppState` — wrap with `.as_ref().map(|r| Arc::new(r.clone()))`
