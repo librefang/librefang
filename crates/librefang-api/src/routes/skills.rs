@@ -4309,7 +4309,11 @@ mod tests {
         }
         let raw = std::fs::read_to_string(&config_path).unwrap();
         let parsed: Wrapper = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed.mcp_servers.len(), 1, "upsert must replace, not append");
+        assert_eq!(
+            parsed.mcp_servers.len(),
+            1,
+            "upsert must replace, not append"
+        );
         assert_eq!(parsed.mcp_servers[0].timeout_secs, 60);
         match &parsed.mcp_servers[0].transport {
             Some(McpTransportEntry::Http { url }) => assert_eq!(url, "http://new:9090/mcp"),
