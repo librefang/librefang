@@ -1,0 +1,263 @@
+# 运行防护与配置
+
+本页覆盖运行时护栏、会话修复逻辑、安全相关配置以及依赖选择。
+
+## 包含的主题
+
+- 循环守卫
+- 会话修复
+- 安全配置
+- 安全相关依赖
+
+---
+
+## 循环守卫
+
+**源码：** `librefang-runtime/src/loop_guard.rs`
+
+`LoopGuard` 追踪单次 Agent 循环执行中的工具调用，以检测 Agent 是否
+陷入重复调用同一工具的状态。
+
+### 配置
+
+```rust
+pub struct LoopGuardConfig {
+    pub warn_threshold: u32,         // Default: 3
+    pub block_threshold: u32,        // Default: 5
+    pub global_circuit_breaker: u32, // Default: 30
+}
+```
+
+### 检测算法
+
+1. 对每次工具调用，计算 `tool_name + "|" + serialized_params` 的 SHA-256 哈希。
+2. 在 `HashMap<String, u32>` 中递增该哈希的计数。
+3. 递增 `total_calls`。
+4. 返回分级裁决：
+
+```rust
+pub fn check(&mut self, tool_name: &str, params: &serde_json::Value) -> LoopGuardVerdict {
+    self.total_calls += 1;
+
+    // Global circuit breaker
+    if self.total_calls > self.config.global_circuit_breaker {
+        return LoopGuardVerdict::CircuitBreak(/* ... */);
+    }
+
+    let hash = Self::compute_hash(tool_name, params);
+    let count = self.call_counts.entry(hash).or_insert(0);
+    *count += 1;
+
+    if *count >= self.config.block_threshold {
+        LoopGuardVerdict::Block(/* ... */)
+    } else if *count >= self.config.warn_threshold {
+        LoopGuardVerdict::Warn(/* ... */)
+    } else {
+        LoopGuardVerdict::Allow
+    }
+}
+```
+
+### 裁决类型
+
+| 裁决 | 含义 | 动作 |
+|------|------|------|
+| `Allow` | 正常操作 | 运行工具 |
+| `Warn(msg)` | 同一调用重复 >= 3 次 | 运行，并在结果中附加警告 |
+| `Block(msg)` | 同一调用重复 >= 5 次 | 跳过执行，返回错误 |
+| `CircuitBreak(msg)` | 总调用次数 > 30 | 终止整个 Agent 循环 |
+
+### 哈希计算
+
+```rust
+fn compute_hash(tool_name: &str, params: &serde_json::Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(tool_name.as_bytes());
+    hasher.update(b"|");
+    let params_str = serde_json::to_string(params).unwrap_or_default();
+    hasher.update(params_str.as_bytes());
+    hex::encode(hasher.finalize())
+}
+```
+
+注意：`serde_json::to_string` 生成确定性输出（对象键已排序），确保
+语义相同的参数产生相同的哈希值。
+
+### 关键特性
+
+使用**不同参数**的调用会被分别追踪。一个 Agent 使用 10 个不同查询调用
+`web_search` 不会触发守卫，但使用 `web_search({"query": "test"})` 调用
+5 次将被阻止。
+
+---
+
+## 会话修复
+
+**源码：** `librefang-runtime/src/session_repair.rs`
+
+在将消息历史发送给 LLM 之前，本模块会验证并修复常见的结构性问题，
+避免 API 错误。
+
+### 三阶段修复
+
+```rust
+pub fn validate_and_repair(messages: &[Message]) -> Vec<Message>
+```
+
+**阶段 1 -- 收集 ToolUse ID：**
+
+扫描所有消息中的 `ContentBlock::ToolUse { id, .. }` 块，将其 ID 收集
+到 `HashSet<String>` 中。
+
+**阶段 2 -- 过滤孤立条目和空消息：**
+
+- **孤立的 ToolResult：** `ContentBlock::ToolResult { tool_use_id, .. }`
+  块中 `tool_use_id` 不在 ToolUse ID 集合中的会被丢弃。
+- **空消息：** 文本为空或没有内容块的消息会被丢弃。
+
+**阶段 3 -- 合并连续的同角色消息：**
+
+Anthropic API 要求严格的角色交替（user、assistant、user、
+assistant...）。如果两条连续消息具有相同的角色，它们会被合并为一条
+包含组合内容块的消息。
+
+### 每种修复的必要性
+
+| 问题 | 原因 | 不修复的后果 |
+|------|------|-------------|
+| 孤立的 ToolResult | 压缩或截断删除了 ToolUse | API 错误："tool_use_id not found" |
+| 空消息 | 取消的生成、空的用户提交 | API 错误：内容为空 |
+| 连续的同角色消息 | 手动编辑历史、会话修复本身 | API 错误：角色交替违规 |
+
+### 内容合并
+
+合并连续的同角色消息时，两条消息都被转换为块格式并拼接：
+
+```rust
+fn merge_content(dst: &mut MessageContent, src: MessageContent) {
+    let dst_blocks = content_to_blocks(std::mem::replace(dst, MessageContent::Text(String::new())));
+    let src_blocks = content_to_blocks(src);
+    let mut combined = dst_blocks;
+    combined.extend(src_blocks);
+    *dst = MessageContent::Blocks(combined);
+}
+```
+
+---
+
+## 安全配置
+
+### config.toml 参考
+
+```toml
+# API Authentication
+api_key = "your-secret-api-key"  # Empty = localhost-only mode
+
+# OFP Wire Protocol
+[network]
+shared_secret = "your-pre-shared-key"  # Required for OFP
+
+# WASM Sandbox
+[sandbox]
+fuel_limit = 1000000       # CPU instruction budget per execution
+timeout_secs = 30          # Wall-clock timeout per execution
+max_memory_bytes = 16777216 # 16 MB max WASM memory
+
+# Rate Limiting
+# 500 tokens/minute/IP (not currently configurable via config.toml)
+
+# Web Search SSRF Protection
+[web]
+# SSRF protection is always on and cannot be disabled
+```
+
+### 密钥相关环境变量
+
+| 变量 | 用途 |
+|------|------|
+| `OPENAI_API_KEY` | OpenAI 兼容驱动 |
+| `ANTHROPIC_API_KEY` | Anthropic 驱动 |
+| `GEMINI_API_KEY` 或 `GOOGLE_API_KEY` | Gemini 驱动 |
+| `DEEPSEEK_API_KEY` | DeepSeek 提供商 |
+| `GROQ_API_KEY` | Groq 提供商 |
+| `BRAVE_API_KEY` | Brave 网络搜索 |
+| `TAVILY_API_KEY` | Tavily 网络搜索 |
+| `PERPLEXITY_API_KEY` | Perplexity 网络搜索 |
+
+所有环境变量中的 API 密钥在加载到驱动结构体时都会被包装为
+`Zeroizing<String>`。
+
+### 能力声明（Agent 清单）
+
+能力在 Agent 的 TOML 清单中声明：
+
+```toml
+[agent]
+name = "my-agent"
+
+[[capabilities]]
+type = "FileRead"
+value = "/data/*"
+
+[[capabilities]]
+type = "NetConnect"
+value = "*.openai.com:443"
+
+[[capabilities]]
+type = "ToolInvoke"
+value = "web_search"
+
+[[capabilities]]
+type = "LlmMaxTokens"
+value = 4096
+```
+
+### 循环守卫调优
+
+`LoopGuardConfig` 的默认值：
+
+| 参数 | 默认值 | 描述 |
+|------|--------|------|
+| `warn_threshold` | 3 | 相同调用多少次后发出警告 |
+| `block_threshold` | 5 | 相同调用多少次后阻止 |
+| `global_circuit_breaker` | 30 | 总调用多少次后熔断 |
+
+### 子进程沙箱白名单
+
+要将特定环境变量传递给子进程：
+
+```rust
+sandbox_command(&mut cmd, &["MY_CUSTOM_VAR".to_string()]);
+```
+
+只有明确列在 `allowed_env_vars` 中的变量（加上安全默认值）才会被
+子进程继承。
+
+---
+
+## 安全相关依赖
+
+| Crate | 用途 |
+|-------|------|
+| `sha2` | SHA-256 哈希（审计追踪、循环守卫、SSRF、校验和） |
+| `hmac` | HMAC-SHA256 用于 OFP 认证 |
+| `hex` | 哈希和签名的十六进制编解码 |
+| `subtle` | 常数时间比较（`ConstantTimeEq`）用于 HMAC 验证 |
+| `ed25519-dalek` | Ed25519 签名/验证用于清单签名 |
+| `rand` | 密码学安全随机数生成器用于密钥生成（`OsRng`） |
+| `zeroize` | `Zeroizing<T>` 包装器用于自动密钥内存擦除 |
+| `governor` | GCRA 速率限制算法 |
+| `wasmtime` | WASM 沙箱，带燃料 + 纪元计量 |
+| `uuid` | OFP 握手的 nonce 生成 |
+| `chrono` | 审计条目的 ISO-8601 时间戳 |
+| `reqwest` | HTTP 客户端（在受 SSRF 保护的 `host_net_fetch` 中使用） |
+
+### 为什么选择这些 Crate
+
+- **sha2/hmac：** 属于 RustCrypto 项目，经过审计，在生产环境的 Rust 项目中广泛使用。
+- **ed25519-dalek：** Rust 生态中事实上的 Ed25519 标准库，经过广泛审计。
+- **subtle：** 提供常数时间操作以防止时序侧信道攻击。
+- **zeroize：** RustCrypto 官方的密钥零化方案，与 `Drop` trait 集成。
+- **governor：** 久经考验的 GCRA 实现，使用 `DashMap` 支持的并发状态。
+
+---

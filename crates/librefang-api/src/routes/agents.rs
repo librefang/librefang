@@ -1691,6 +1691,7 @@ pub async fn get_agent(
         Json(serde_json::json!({
             "id": entry.id.to_string(),
             "name": entry.name,
+            "is_hand": entry.is_hand,
             "state": format!("{:?}", entry.state),
             "mode": entry.mode,
             "profile": entry.manifest.profile,

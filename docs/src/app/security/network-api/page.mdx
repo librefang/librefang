@@ -1,0 +1,422 @@
+# Network & API Security
+
+This page covers protections at the transport, peer, HTTP middleware, and dashboard boundary layers.
+
+## Included Topics
+
+- SSRF Protection
+- OFP Mutual Authentication
+- Security Headers
+- GCRA Rate Limiter
+- Health Endpoint Redaction
+- Dashboard Authentication
+
+---
+
+## SSRF Protection
+
+**Source:** `librefang-runtime/src/host_functions.rs`
+
+The `host_net_fetch` function (WASM host call for network requests) includes
+comprehensive Server-Side Request Forgery protection.
+
+### Scheme Validation
+
+Only `http://` and `https://` schemes are allowed.  All others (`file://`,
+`gopher://`, `ftp://`) are blocked immediately:
+
+```rust
+if !url.starts_with("http://") && !url.starts_with("https://") {
+    return Err(json!({"error": "Only http:// and https:// URLs are allowed"}));
+}
+```
+
+### Hostname Blocklist
+
+Before DNS resolution, these hostnames are blocked:
+
+- `localhost`
+- `metadata.google.internal`
+- `metadata.aws.internal`
+- `instance-data`
+- `169.254.169.254` (AWS/GCP metadata endpoint)
+
+### DNS Resolution Check
+
+After the hostname blocklist, the function resolves the hostname to IP
+addresses and checks **every resolved IP** against private ranges.  This
+defeats DNS rebinding attacks:
+
+```rust
+let socket_addr = format!("{hostname}:{port}");
+if let Ok(addrs) = socket_addr.to_socket_addrs() {
+    for addr in addrs {
+        let ip = addr.ip();
+        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
+            return Err(json!({"error": format!(
+                "SSRF blocked: {hostname} resolves to private IP {ip}"
+            )}));
+        }
+    }
+}
+```
+
+### Private IP Detection
+
+The `is_private_ip()` function covers:
+
+**IPv4:**
+- `10.0.0.0/8` -- RFC 1918
+- `172.16.0.0/12` -- RFC 1918
+- `192.168.0.0/16` -- RFC 1918
+- `169.254.0.0/16` -- Link-local (AWS metadata)
+
+**IPv6:**
+- `fc00::/7` -- Unique Local Address
+- `fe80::/10` -- Link-local
+
+```rust
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            matches!(
+                octets,
+                [10, ..] | [172, 16..=31, ..] | [192, 168, ..] | [169, 254, ..]
+            )
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+```
+
+### Host Extraction
+
+`extract_host_from_url()` parses the URL to extract `host:port` for both
+SSRF checking and capability matching:
+
+```
+https://api.openai.com/v1/chat  ->  api.openai.com:443
+http://localhost:8080/api       ->  localhost:8080
+http://example.com              ->  example.com:80
+```
+
+---
+
+## OFP Mutual Authentication
+
+**Source:** `librefang-wire/src/peer.rs`
+
+The LibreFang Wire Protocol (OFP) uses HMAC-SHA256 with nonce-based mutual
+authentication over TCP connections.
+
+### Pre-Shared Key Requirement
+
+OFP refuses to start without a `shared_secret`:
+
+```rust
+if config.shared_secret.is_empty() {
+    return Err(WireError::HandshakeFailed(
+        "OFP requires shared_secret. Set [network] shared_secret in config.toml".into(),
+    ));
+}
+```
+
+### HMAC Functions
+
+```rust
+type HmacSha256 = Hmac<Sha256>;
+
+fn hmac_sign(secret: &str, data: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts any key size");
+    mac.update(data);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn hmac_verify(secret: &str, data: &[u8], signature: &str) -> bool {
+    let expected = hmac_sign(secret, data);
+    subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), signature.as_bytes()).into()
+}
+```
+
+**Constant-time comparison** (`subtle::ConstantTimeEq`) prevents
+timing side-channel attacks.
+
+### Handshake Protocol
+
+**Initiator (client):**
+
+1. Generate a random UUID nonce.
+2. Compute `auth_data = nonce + node_id`.
+3. Compute `auth_hmac = hmac_sign(shared_secret, auth_data)`.
+4. Send `Handshake { node_id, node_name, protocol_version, agents, nonce, auth_hmac }`.
+
+**Responder (server):**
+
+1. Receive the `Handshake` message.
+2. Verify the incoming HMAC: `hmac_verify(shared_secret, nonce + node_id, auth_hmac)`.
+3. If verification fails, return error code 403.
+4. Generate a new UUID nonce for the ack.
+5. Compute `ack_auth_data = ack_nonce + self.node_id`.
+6. Compute `ack_hmac = hmac_sign(shared_secret, ack_auth_data)`.
+7. Send `HandshakeAck { node_id, node_name, protocol_version, agents, nonce: ack_nonce, auth_hmac: ack_hmac }`.
+
+**Initiator (verification):**
+
+1. Receive `HandshakeAck`.
+2. Verify: `hmac_verify(shared_secret, ack_nonce + node_id, ack_hmac)`.
+3. If verification fails, return `WireError::HandshakeFailed`.
+
+### Security Properties
+
+| Property | How It Is Achieved |
+|----------|-------------------|
+| **Mutual authentication** | Both sides prove knowledge of the shared secret |
+| **Replay protection** | Random UUID nonces per handshake |
+| **Timing-attack resistance** | `subtle::ConstantTimeEq` for HMAC comparison |
+| **Mandatory secret** | OFP refuses to start with an empty `shared_secret` |
+| **Message size limit** | `MAX_MESSAGE_SIZE = 16 MB` prevents memory DoS |
+| **Protocol version check** | `PROTOCOL_VERSION` mismatch returns `WireError::VersionMismatch` |
+
+---
+
+## Security Headers
+
+**Source:** `librefang-api/src/middleware.rs`
+
+The `security_headers` middleware is applied to **all** API responses:
+
+```rust
+pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Body> {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    headers.insert("x-frame-options", "DENY".parse().unwrap());
+    headers.insert("x-xss-protection", "1; mode=block".parse().unwrap());
+    headers.insert("content-security-policy", /* CSP policy */);
+    headers.insert("referrer-policy", "strict-origin-when-cross-origin".parse().unwrap());
+    headers.insert("cache-control", "no-store, no-cache, must-revalidate".parse().unwrap());
+    response
+}
+```
+
+| Header | Value | Protects Against |
+|--------|-------|------------------|
+| `X-Content-Type-Options` | `nosniff` | MIME type sniffing attacks |
+| `X-Frame-Options` | `DENY` | Clickjacking via iframes |
+| `X-XSS-Protection` | `1; mode=block` | Reflected XSS (legacy browsers) |
+| `Content-Security-Policy` | See below | XSS, code injection, data exfiltration |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Referrer leakage |
+| `Cache-Control` | `no-store, no-cache, must-revalidate` | Sensitive data caching |
+
+### CSP Breakdown
+
+| Directive | Value | Purpose |
+|-----------|-------|---------|
+| `default-src` | `'self'` | Deny all external resources by default |
+| `script-src` | `'self' 'unsafe-inline' 'unsafe-eval' cdn.jsdelivr.net` | Allow scripts from self and CDN |
+| `style-src` | `'self' 'unsafe-inline' cdn.jsdelivr.net fonts.googleapis.com` | Allow styles from self, CDN, Google Fonts |
+| `img-src` | `'self' data:` | Allow images from self and data URIs |
+| `connect-src` | `'self' ws: wss:` | Allow WebSocket connections |
+| `font-src` | `'self' cdn.jsdelivr.net fonts.gstatic.com` | Allow fonts from CDN |
+| `object-src` | `'none'` | Block all plugins (Flash, Java, etc.) |
+| `base-uri` | `'self'` | Prevent base tag hijacking |
+| `form-action` | `'self'` | Restrict form submission targets |
+
+---
+
+## GCRA Rate Limiter
+
+**Source:** `librefang-api/src/rate_limiter.rs`
+
+LibreFang uses the Generic Cell Rate Algorithm (GCRA) for cost-aware API
+rate limiting via the `governor` crate.
+
+### Algorithm
+
+GCRA is a leaky-bucket variant that tracks a single "virtual scheduling time"
+(TAT -- Theoretical Arrival Time) per key.  Each request consumes a number of
+tokens proportional to its cost.  The bucket refills at a constant rate.
+
+**Budget:** 500 tokens per minute per IP address.
+
+```rust
+pub fn create_rate_limiter() -> Arc<KeyedRateLimiter> {
+    Arc::new(RateLimiter::keyed(Quota::per_minute(NonZeroU32::new(500).unwrap())))
+}
+```
+
+### Operation Costs
+
+Each API operation has a configurable token cost:
+
+```rust
+pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
+    match (method, path) {
+        (_, "/api/health")                            => 1,
+        ("GET", "/api/status")                        => 1,
+        ("GET", "/api/version")                       => 1,
+        ("GET", "/api/tools")                         => 1,
+        ("GET", "/api/agents")                        => 2,
+        ("GET", "/api/skills")                        => 2,
+        ("GET", "/api/peers")                         => 2,
+        ("GET", "/api/config")                        => 2,
+        ("GET", "/api/usage")                         => 3,
+        ("GET", p) if p.starts_with("/api/audit")     => 5,
+        ("GET", p) if p.starts_with("/api/marketplace")=> 10,
+        ("POST", "/api/agents")                       => 50,
+        ("POST", p) if p.contains("/message")         => 30,
+        ("POST", p) if p.contains("/run")             => 100,
+        ("POST", "/api/skills/install")               => 50,
+        ("POST", "/api/skills/uninstall")             => 10,
+        ("POST", "/api/migrate")                      => 100,
+        ("PUT", p) if p.contains("/update")           => 10,
+        _                                             => 5,
+    }
+}
+```
+
+The cost hierarchy is intentional: read-only health checks cost 1 token while
+expensive operations like workflow runs cost 100, meaning a client can perform
+500 health checks per minute but only 5 workflow runs.
+
+### Middleware
+
+```rust
+pub async fn gcra_rate_limit(
+    State(limiter): State<Arc<KeyedRateLimiter>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let ip = /* extract from ConnectInfo, default 127.0.0.1 */;
+    let cost = operation_cost(&method, &path);
+
+    if limiter.check_key_n(&ip, cost).is_err() {
+        tracing::warn!(ip, cost, path, "GCRA rate limit exceeded");
+        return Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("retry-after", "60")
+            .body(/* JSON error */)
+            .unwrap_or_default();
+    }
+    next.run(request).await
+}
+```
+
+### Rate Limiter Type
+
+```rust
+pub type KeyedRateLimiter = RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>;
+```
+
+The `DashMapStateStore` provides concurrent per-IP state with automatic stale
+entry cleanup.
+
+---
+
+## Health Endpoint Redaction
+
+**Source:** `librefang-api/src/routes.rs`
+
+LibreFang provides two health endpoints with different information levels.
+
+### Public Endpoint: `GET /api/health`
+
+**No authentication required.**  Returns only liveness information:
+
+```json
+{
+    "status": "ok",
+    "version": "0.1.0"
+}
+```
+
+This endpoint does not expose agent count, database details, configuration
+warnings, uptime, or any internal system information.  It is suitable for
+load balancer health checks.
+
+### Detail Endpoint: `GET /api/health/detail`
+
+**Requires authentication.**  Returns full diagnostics:
+
+```json
+{
+    "status": "ok",
+    "version": "0.1.0",
+    "uptime_seconds": 3600,
+    "panic_count": 0,
+    "restart_count": 2,
+    "agent_count": 15,
+    "database": "connected",
+    "config_warnings": []
+}
+```
+
+### Localhost Fallback
+
+When no API key is configured, the `auth` middleware restricts all
+non-health endpoints to loopback addresses only:
+
+```rust
+if api_key.is_empty() {
+    let is_loopback = request.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip().is_loopback())
+        .unwrap_or(false);
+    if !is_loopback {
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(/* "No API key configured. Remote access denied." */)
+            ...;
+    }
+}
+```
+
+---
+
+## Dashboard Authentication
+
+LibreFang supports optional username/password authentication for the web dashboard.
+
+### Configuration
+
+```toml
+# config.toml
+dashboard_user = "admin"
+dashboard_pass = "vault:dashboard_password"
+```
+
+When both fields are set, the dashboard displays a login page. Without credentials configured, the dashboard is accessible without login (or protected by `api_key` if set).
+
+### Credential Sources (Priority Order)
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | Environment variable | `LIBREFANG_DASHBOARD_PASS=secret` |
+| 2 | Encrypted vault | `dashboard_pass = "vault:dashboard_password"` |
+| 3 | Literal in config | `dashboard_pass = "my-password"` |
+
+### Vault Storage (Recommended)
+
+```bash
+# Store password in encrypted vault
+librefang vault set dashboard_password
+
+# Reference in config.toml
+dashboard_pass = "vault:dashboard_password"
+```
+
+The vault uses AES-256-GCM encryption with a master key stored in the OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service) or via the `LIBREFANG_VAULT_KEY` environment variable.
+
+### Security Properties
+
+- **Constant-time comparison**: Credentials are compared using `subtle::ConstantTimeEq` to prevent timing attacks.
+- **HMAC session token**: On successful login, a deterministic HMAC-SHA256 token is derived from the credentials and returned as a Bearer token for subsequent API requests.
+- **No server-side sessions**: The token is deterministic, so the server does not need to store session state.
+- **Public endpoints**: `/api/auth/dashboard-login` and `/api/auth/dashboard-check` are accessible without authentication.
+
+---
