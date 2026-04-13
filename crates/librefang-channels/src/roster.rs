@@ -92,30 +92,30 @@ mod tests {
         store.upsert(
             "telegram",
             "-100123",
-            mk_member("2", "Pakman", Some("pakman")),
+            mk_member("2", "Alice", Some("alice")),
         );
         store.upsert("telegram", "-100123", mk_member("3", "Ana", Some("ana")));
 
         let members = store.members("telegram", "-100123");
         assert_eq!(members.len(), 3);
-        assert_eq!(members[0].display_name, "Ana");
-        assert_eq!(members[1].display_name, "Jorge");
-        assert_eq!(members[2].display_name, "Pakman");
+        assert_eq!(members[0].display_name, "Alice");
+        assert_eq!(members[1].display_name, "Ana");
+        assert_eq!(members[2].display_name, "Jorge");
     }
 
     #[test]
     fn upsert_idempotent_and_updates() {
         let store = GroupRosterStore::new();
-        store.upsert("telegram", "-100123", mk_member("1", "Jorge", None));
+        store.upsert("telegram", "-100123", mk_member("1", "Bob", None));
         store.upsert(
             "telegram",
             "-100123",
-            mk_member("1", "Jorge Pablo", Some("jorgepablo")),
+            mk_member("1", "Bob Smith", Some("bobsmith")),
         );
         let members = store.members("telegram", "-100123");
         assert_eq!(members.len(), 1);
-        assert_eq!(members[0].display_name, "Jorge Pablo");
-        assert_eq!(members[0].username.as_deref(), Some("jorgepablo"));
+        assert_eq!(members[0].display_name, "Bob Smith");
+        assert_eq!(members[0].username.as_deref(), Some("bobsmith"));
     }
 
     #[test]

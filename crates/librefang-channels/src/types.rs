@@ -313,7 +313,7 @@ pub struct SenderContext {
     /// Divergence count threshold for `sticky_heuristic` strategy.
     #[serde(default)]
     pub auto_route_divergence_count: u32,
-    /// The bot's own platform `@handle` on this channel (e.g. `fandangorodelo_bot`
+    /// The bot's own platform `@handle` on this channel (e.g. `mybot`
     /// on Telegram). Used so the agent knows its own alias in the prompt.
     #[serde(default)]
     pub bot_username: Option<String>,
