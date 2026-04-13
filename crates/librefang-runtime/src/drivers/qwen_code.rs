@@ -558,19 +558,19 @@ impl LlmDriver for QwenCodeDriver {
             // Qwen CLI 0.14+ sometimes emits a full JSON array on a single
             // line instead of one event per line. Unwrap it into individual
             // events before the normal line-by-line handler runs.
-            let events: Vec<QwenStreamEvent> =
-                if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                    serde_json::from_str(trimmed).unwrap_or_default()
-                } else if let Ok(single) = serde_json::from_str::<QwenStreamEvent>(trimmed) {
-                    vec![single]
-                } else {
-                    // Not valid JSON. This used to be forwarded to the UI as
-                    // a TextDelta, which surfaced raw stderr/preamble/garbage
-                    // in the chat. Log and drop — assistant text only comes
-                    // from structured events.
-                    warn!(line = %trimmed, "Dropping non-JSON line from Qwen CLI stdout");
-                    continue;
-                };
+            let events: Vec<QwenStreamEvent> = if trimmed.starts_with('[') && trimmed.ends_with(']')
+            {
+                serde_json::from_str(trimmed).unwrap_or_default()
+            } else if let Ok(single) = serde_json::from_str::<QwenStreamEvent>(trimmed) {
+                vec![single]
+            } else {
+                // Not valid JSON. This used to be forwarded to the UI as
+                // a TextDelta, which surfaced raw stderr/preamble/garbage
+                // in the chat. Log and drop — assistant text only comes
+                // from structured events.
+                warn!(line = %trimmed, "Dropping non-JSON line from Qwen CLI stdout");
+                continue;
+            };
 
             for event in events {
                 match event.r#type.as_str() {
@@ -752,7 +752,10 @@ mod tests {
         // object shape — must not leak raw text into the chat.
         let out = r#"{"totally":"unexpected","shape":123}"#;
         let (t, _) = extract_text_from_qwen_output(out);
-        assert_eq!(t, "", "unrecognised JSON shape must produce empty text, not leak raw JSON into chat");
+        assert_eq!(
+            t, "",
+            "unrecognised JSON shape must produce empty text, not leak raw JSON into chat"
+        );
     }
 
     #[test]
