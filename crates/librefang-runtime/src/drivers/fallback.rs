@@ -330,9 +330,10 @@ mod tests {
 
     #[tokio::test]
     async fn unhealthy_driver_recovers_after_cooldown() {
-        // Two drivers: primary fails, secondary succeeds. After a few primary
-        // failures we simulate the recovery window elapsing and verify that
-        // `maybe_recover` clears both the error counter and the EWMA penalty.
+        // Seed the primary's health state directly to simulate three
+        // accumulated failures. We can't get there via dispatch: after the
+        // first failure health_order() reroutes to the healthy secondary,
+        // so the primary would never accrue a second error through complete().
         let fb = FallbackDriver::with_models(vec![
             (
                 Arc::new(FailDriver) as Arc<dyn LlmDriver>,
@@ -341,11 +342,15 @@ mod tests {
             (Arc::new(OkDriver) as Arc<dyn LlmDriver>, "ok".to_string()),
         ]);
 
-        // Three dispatches → primary accumulates 3 errors and 3×ERROR_PENALTY_MS.
-        for _ in 0..3 {
-            let _ = fb.complete(test_request()).await;
-        }
         let primary = &fb.drivers[0];
+        primary.consecutive_errors.store(3, Ordering::Relaxed);
+        primary
+            .last_failure_at_ms
+            .store(FallbackDriver::now_ms(), Ordering::Relaxed);
+        primary
+            .ewma_latency_ms
+            .store(ERROR_PENALTY_MS * 3, Ordering::Relaxed);
+
         assert_eq!(primary.consecutive_errors.load(Ordering::Relaxed), 3);
         let penalised = primary.ewma_latency_ms.load(Ordering::Relaxed);
         assert!(penalised >= ERROR_PENALTY_MS * 3);
