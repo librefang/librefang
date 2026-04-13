@@ -503,6 +503,21 @@ pub async fn bulk_delete_agents(
                 continue;
             }
         };
+        // Same guard as the single-agent kill path: hand-spawned agents
+        // must be removed by deactivating their owning hand, not directly.
+        if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+            if entry.is_hand {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some(
+                        "Cannot delete a hand-spawned agent directly; deactivate or uninstall the owning hand instead.".to_string(),
+                    ),
+                });
+                continue;
+            }
+        }
         match state.kernel.kill_agent(agent_id) {
             Ok(()) => {
                 results.push(BulkActionResult {
@@ -1507,6 +1522,22 @@ pub async fn kill_agent(
             );
         }
     };
+
+    // Hand-spawned runtime agents are owned by their hand instance. Killing
+    // one directly leaves the hand registry pointing at a dangling id that
+    // can respawn or produce stale instance state — require callers to
+    // deactivate or uninstall the owning hand instead. The dashboard hides
+    // Delete for hand agents already; this closes the direct-API loophole.
+    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+        if entry.is_hand {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Cannot delete a hand-spawned agent directly; deactivate or uninstall the owning hand instead."
+                })),
+            );
+        }
+    }
 
     match state.kernel.kill_agent(agent_id) {
         Ok(()) => (
