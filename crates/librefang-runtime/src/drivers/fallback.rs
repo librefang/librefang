@@ -352,9 +352,7 @@ mod tests {
 
         // Simulate the cooldown elapsing by calling maybe_recover with a
         // fabricated future timestamp.
-        let future = primary.last_failure_at_ms.load(Ordering::Relaxed)
-            + HEALTH_RECOVERY_MS
-            + 1;
+        let future = primary.last_failure_at_ms.load(Ordering::Relaxed) + HEALTH_RECOVERY_MS + 1;
         FallbackDriver::maybe_recover(primary, future);
 
         assert_eq!(
