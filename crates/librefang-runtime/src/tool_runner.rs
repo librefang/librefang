@@ -2886,8 +2886,8 @@ async fn tool_channel_send(
             })
             .unwrap_or_default();
 
-        if poll_options.len() < 2 {
-            return Err("poll_options must have at least 2 options".to_string());
+        if poll_options.len() < 2 || poll_options.len() > 10 {
+            return Err("poll_options must have between 2 and 10 options".to_string());
         }
 
         let is_quiz = input
@@ -2899,6 +2899,20 @@ async fn tool_channel_send(
             .and_then(|v| v.as_u64())
             .map(|n| n as u8);
         let explanation = input.get("poll_explanation").and_then(|v| v.as_str());
+
+        // Validate quiz mode requirements
+        if is_quiz {
+            let id = correct_option_id.ok_or_else(|| {
+                "poll_correct_option is required when poll_is_quiz is true".to_string()
+            })?;
+            if id as usize >= poll_options.len() {
+                return Err(format!(
+                    "poll_correct_option {} is out of bounds (must be between 0 and {})",
+                    id,
+                    poll_options.len() - 1
+                ));
+            }
+        }
 
         kh.send_channel_poll(
             &channel,

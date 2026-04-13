@@ -229,6 +229,7 @@ pub struct TelegramAdapter {
 struct PollContext {
     question: String,
     options: Vec<String>,
+    last_accessed: Instant,
 }
 
 /// Parameters for `api_send_poll` — grouped to satisfy clippy's argument limit.
@@ -677,20 +678,16 @@ impl TelegramAdapter {
 
         let media: Vec<serde_json::Value> = items
             .iter()
-            .enumerate()
-            .map(|(i, item)| match item {
+            .map(|item| match item {
                 crate::types::MediaGroupItem::Photo { url, caption } => {
                     let mut v = serde_json::json!({
                         "type": "photo",
                         "media": url,
                     });
-                    // Only first item gets the caption (Telegram limitation)
-                    if i == 0 {
-                        if let Some(cap) = caption {
-                            v["caption"] = serde_json::Value::String(cap.clone());
-                            v["parse_mode"] =
-                                serde_json::Value::String(PARSE_MODE_HTML.to_string());
-                        }
+                    // Apply caption if present
+                    if let Some(cap) = caption {
+                        v["caption"] = serde_json::Value::String(cap.clone());
+                        v["parse_mode"] = serde_json::Value::String(PARSE_MODE_HTML.to_string());
                     }
                     v
                 }
@@ -704,12 +701,10 @@ impl TelegramAdapter {
                         "media": url,
                         "duration": duration_seconds,
                     });
-                    if i == 0 {
-                        if let Some(cap) = caption {
-                            v["caption"] = serde_json::Value::String(cap.clone());
-                            v["parse_mode"] =
-                                serde_json::Value::String(PARSE_MODE_HTML.to_string());
-                        }
+                    // Apply caption if present
+                    if let Some(cap) = caption {
+                        v["caption"] = serde_json::Value::String(cap.clone());
+                        v["parse_mode"] = serde_json::Value::String(PARSE_MODE_HTML.to_string());
                     }
                     v
                 }
@@ -1379,6 +1374,7 @@ impl TelegramAdapter {
                             PollContext {
                                 question: question.clone(),
                                 options: options.clone(),
+                                last_accessed: Instant::now(),
                             },
                         );
                     }
@@ -1474,6 +1470,36 @@ impl ChannelAdapter for TelegramAdapter {
         let poll_handle = self.poll_handle.clone();
         let bot_commands = effective_commands;
         let poll_contexts = self.poll_contexts.clone();
+
+        // Spawn background cleanup task for poll_contexts
+        let poll_contexts_cleanup = poll_contexts.clone();
+        let shutdown_cleanup = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300)); // Every 5 minutes
+            loop {
+                if *shutdown_cleanup.borrow() {
+                    break;
+                }
+                interval.tick().await;
+                let now = Instant::now();
+                let mut removed = 0;
+                poll_contexts_cleanup.retain(|_k, v| {
+                    if now.duration_since(v.last_accessed) > Duration::from_secs(1800) {
+                        // 30 minutes
+                        removed += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if removed > 0 {
+                    debug!(
+                        "Telegram: cleaned up {} stale poll_context entries",
+                        removed
+                    );
+                }
+            }
+        });
 
         let handle = tokio::spawn(async move {
             let ctx = TelegramApiCtx {
