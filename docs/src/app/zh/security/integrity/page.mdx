@@ -1,0 +1,432 @@
+# 完整性与内容安全
+
+本页覆盖防篡改、签名内容、污点传播、密钥处理和技能内容扫描。
+
+## 包含的主题
+
+- Merkle 哈希链审计追踪
+- 信息流污点追踪
+- Ed25519 清单签名
+- 密钥零化
+- 提示注入扫描器
+
+---
+
+## Merkle 哈希链审计追踪
+
+**源码：** `librefang-runtime/src/audit.rs`
+
+每个安全关键操作都会追加到一条防篡改的 Merkle 哈希链中，类似于区块链。
+每个条目包含其自身内容与前一个条目哈希值拼接后的 SHA-256 哈希。
+
+### 可审计的操作
+
+```rust
+pub enum AuditAction {
+    ToolInvoke,
+    CapabilityCheck,
+    AgentSpawn,
+    AgentKill,
+    AgentMessage,
+    MemoryAccess,
+    FileAccess,
+    NetworkAccess,
+    ShellExec,
+    AuthAttempt,
+    WireConnect,
+    ConfigChange,
+}
+```
+
+### 条目结构
+
+```rust
+pub struct AuditEntry {
+    pub seq: u64,          // Monotonically increasing sequence number
+    pub timestamp: String, // ISO-8601
+    pub agent_id: String,
+    pub action: AuditAction,
+    pub detail: String,    // e.g. tool name, file path
+    pub outcome: String,   // "ok", "denied", error message
+    pub prev_hash: String, // SHA-256 of previous entry (or 64 zeros)
+    pub hash: String,      // SHA-256 of this entry + prev_hash
+}
+```
+
+### 哈希计算
+
+每个条目的哈希值由其所有字段与前一条目的哈希值拼接后计算得出：
+
+```rust
+fn compute_entry_hash(
+    seq: u64, timestamp: &str, agent_id: &str,
+    action: &AuditAction, detail: &str,
+    outcome: &str, prev_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(seq.to_string().as_bytes());
+    hasher.update(timestamp.as_bytes());
+    hasher.update(agent_id.as_bytes());
+    hasher.update(action.to_string().as_bytes());
+    hasher.update(detail.as_bytes());
+    hasher.update(outcome.as_bytes());
+    hasher.update(prev_hash.as_bytes());
+    hex::encode(hasher.finalize())
+}
+```
+
+### 链完整性验证
+
+`AuditLog::verify_integrity()` 遍历整条链并重新计算每个哈希值。如果
+任何条目被篡改，重新计算的哈希值将与存储的哈希值不匹配，或者
+`prev_hash` 链接将断裂：
+
+```rust
+pub fn verify_integrity(&self) -> Result<(), String> {
+    let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+    let mut expected_prev = "0".repeat(64);  // Genesis sentinel
+
+    for entry in entries.iter() {
+        if entry.prev_hash != expected_prev {
+            return Err(format!(
+                "chain break at seq {}: expected prev_hash {} but found {}",
+                entry.seq, expected_prev, entry.prev_hash
+            ));
+        }
+        let recomputed = compute_entry_hash(/* ... */);
+        if recomputed != entry.hash {
+            return Err(format!(
+                "hash mismatch at seq {}: expected {} but found {}",
+                entry.seq, recomputed, entry.hash
+            ));
+        }
+        expected_prev = entry.hash.clone();
+    }
+    Ok(())
+}
+```
+
+### 线程安全
+
+`AuditLog` 使用 `Mutex<Vec<AuditEntry>>` 和 `Mutex<String>` 来保护
+链尾哈希。两个锁都使用 `unwrap_or_else(|e| e.into_inner())` 从中毒的
+互斥锁中恢复，确保审计日志在 panic 之后仍然可用。
+
+### API
+
+| 方法 | 描述 |
+|------|------|
+| `AuditLog::new()` | 创建空日志，初始哨兵为 `"0" * 64` |
+| `record(agent_id, action, detail, outcome)` | 追加条目，返回其哈希值 |
+| `verify_integrity()` | 验证整条链的完整性 |
+| `tip_hash()` | 返回最新条目的哈希值 |
+| `len()` / `is_empty()` | 条目计数 |
+| `recent(n)` | 返回最近 `n` 个条目（克隆） |
+
+---
+
+## 信息流污点追踪
+
+**源码：** `librefang-types/src/taint.rs`
+
+LibreFang 实现了基于格的污点传播模型，防止被污染的值在未经显式解密的
+情况下流入敏感汇聚点。此机制可防范提示注入、数据外泄和混淆代理攻击。
+
+### 污点标签
+
+```rust
+pub enum TaintLabel {
+    ExternalNetwork,  // Data from external network requests
+    UserInput,        // Direct user input
+    Pii,              // Personally identifiable information
+    Secret,           // API keys, tokens, passwords
+    UntrustedAgent,   // Data from sandboxed/untrusted agents
+}
+```
+
+### 被污染的值
+
+```rust
+pub struct TaintedValue {
+    pub value: String,              // The payload
+    pub labels: HashSet<TaintLabel>, // Attached taint labels
+    pub source: String,             // Human-readable origin
+}
+```
+
+关键方法：
+
+| 方法 | 描述 |
+|------|------|
+| `TaintedValue::new(value, labels, source)` | 创建带标签的值 |
+| `TaintedValue::clean(value, source)` | 创建无标签的值（未污染） |
+| `merge_taint(&mut self, other)` | 标签取并集（用于拼接场景） |
+| `check_sink(&self, sink)` | 检查值是否可以流入指定汇聚点 |
+| `declassify(&mut self, label)` | 移除特定标签（显式安全决策） |
+| `is_tainted(&self) -> bool` | 如果存在任何标签则返回 true |
+
+### 污点汇聚点
+
+`TaintSink` 定义了哪些标签被**阻止**到达该汇聚点：
+
+| 汇聚点 | 被阻止的标签 | 原因 |
+|--------|-------------|------|
+| `TaintSink::shell_exec()` | `ExternalNetwork`、`UntrustedAgent`、`UserInput` | 防止命令注入 |
+| `TaintSink::net_fetch()` | `Secret`、`Pii` | 防止数据外泄 |
+| `TaintSink::agent_message()` | `Secret` | 防止密钥泄露给其他 Agent |
+
+### 违规处理
+
+当 `check_sink()` 发现被阻止的标签时，会返回 `TaintViolation`：
+
+```rust
+pub struct TaintViolation {
+    pub label: TaintLabel,    // The offending label
+    pub sink_name: String,    // "shell_exec", "net_fetch", etc.
+    pub source: String,       // Where the tainted value came from
+}
+```
+
+输出示例：`taint violation: label 'Secret' from source 'env_var' is not allowed to reach sink 'net_fetch'`
+
+### 解密
+
+解密是一个**显式的安全决策**。调用方声明该值已经过净化处理：
+
+```rust
+tainted.declassify(&TaintLabel::ExternalNetwork);
+tainted.declassify(&TaintLabel::UserInput);
+// After declassification, value can flow to shell_exec
+assert!(tainted.check_sink(&TaintSink::shell_exec()).is_ok());
+```
+
+### 污点传播
+
+当两个值被组合（拼接、插值）时，结果必须携带两者标签集的并集：
+
+```rust
+let mut combined = TaintedValue::new(/* ... */);
+combined.merge_taint(&other_value);
+// combined.labels is now the union of both
+```
+
+---
+
+## Ed25519 清单签名
+
+**源码：** `librefang-types/src/manifest_signing.rs`
+
+Agent 清单定义了 Agent 的能力、工具和配置。被篡改的清单可以授予
+提升的权限。本模块提供基于 Ed25519 的加密签名。
+
+### 签名方案
+
+1. 计算清单内容（原始 TOML 文本）的 SHA-256 哈希。
+2. 使用 Ed25519（通过 `ed25519-dalek`）对哈希进行签名。
+3. 将签名、公钥和内容哈希打包到 `SignedManifest` 信封中。
+
+### SignedManifest 结构
+
+```rust
+pub struct SignedManifest {
+    pub manifest: String,           // Raw TOML content
+    pub content_hash: String,       // Hex SHA-256 of manifest
+    pub signature: Vec<u8>,         // Ed25519 signature (64 bytes)
+    pub signer_public_key: Vec<u8>, // Ed25519 public key (32 bytes)
+    pub signer_id: String,          // Human-readable signer ID
+}
+```
+
+### 签名过程
+
+```rust
+let signing_key = SigningKey::generate(&mut OsRng);
+let signed = SignedManifest::sign(manifest_toml, &signing_key, "admin@org.com");
+```
+
+内部实现：
+
+```rust
+pub fn sign(manifest: impl Into<String>, signing_key: &SigningKey, signer_id: impl Into<String>) -> Self {
+    let manifest = manifest.into();
+    let content_hash = hash_manifest(&manifest);  // SHA-256
+    let signature = signing_key.sign(content_hash.as_bytes());
+    let verifying_key = signing_key.verifying_key();
+    Self {
+        manifest,
+        content_hash,
+        signature: signature.to_bytes().to_vec(),
+        signer_public_key: verifying_key.to_bytes().to_vec(),
+        signer_id: signer_id.into(),
+    }
+}
+```
+
+### 验证过程
+
+两阶段验证：
+
+1. **哈希校验：** 重新计算 `manifest` 的 SHA-256 并与 `content_hash` 比较。
+2. **签名校验：** 使用 `signer_public_key` 验证 `content_hash` 上的 Ed25519 签名。
+
+```rust
+pub fn verify(&self) -> Result<(), String> {
+    let recomputed = hash_manifest(&self.manifest);
+    if recomputed != self.content_hash {
+        return Err("content hash mismatch: ...");
+    }
+    let verifying_key = VerifyingKey::from_bytes(&pk_bytes)?;
+    let signature = Signature::from_bytes(&sig_bytes);
+    verifying_key.verify(self.content_hash.as_bytes(), &signature)
+        .map_err(|e| format!("signature verification failed: {}", e))
+}
+```
+
+### 篡改检测
+
+- 签名后修改清单内容会导致**内容哈希不匹配**。
+- 替换公钥为不同的密钥会导致**签名验证失败**。
+- 两种攻击都会被 `verify()` 捕获。
+
+---
+
+## 密钥零化
+
+**源码：** 所有 LLM 驱动模块、通道适配器和网络搜索模块。
+
+LibreFang 在所有持有密钥材料的字段上使用 `zeroize` crate 提供的
+`Zeroizing<String>`。当值被销毁时，其内存会被零覆盖，防止密钥在
+内存中残留。
+
+### 工作原理
+
+`Zeroizing<T>` 是 `zeroize` crate 提供的智能指针包装器。它实现了
+`Deref<Target=T>` 以实现透明使用，以及 `Drop` 以实现自动零化：
+
+```rust
+// On Drop, the inner String's buffer is overwritten with zeros
+let key = Zeroizing::new("sk-secret-key".to_string());
+// Use key transparently via Deref
+client.post(url).header("authorization", format!("Bearer {}", &*key));
+// When key goes out of scope, memory is zeroed
+```
+
+### 使用零化的字段
+
+**LLM 驱动** (`librefang-runtime/src/drivers/`)：
+
+| 驱动 | 字段 |
+|------|------|
+| `AnthropicDriver` | `api_key: Zeroizing<String>` |
+| `GeminiDriver` | `api_key: Zeroizing<String>` |
+| `OpenAiCompatDriver` | `api_key: Zeroizing<String>` |
+
+**通道适配器** (`librefang-channels/src/`)：
+
+| 适配器 | 字段 |
+|--------|------|
+| `DiscordAdapter` | `token: Zeroizing<String>` |
+| `EmailAdapter` | `password: Zeroizing<String>` |
+| `BlueskyAdapter` | `app_password: Zeroizing<String>` |
+| `DingTalkAdapter` | `access_token: Zeroizing<String>`、`secret: Zeroizing<String>`、`client_id: Zeroizing<String>`、`client_secret: Zeroizing<String>` |
+| `FeishuAdapter` | `app_secret: Zeroizing<String>` |
+| `FlockAdapter` | `bot_token: Zeroizing<String>` |
+| `GitterAdapter` | `token: Zeroizing<String>` |
+| `GotifyAdapter` | `app_token: Zeroizing<String>`、`client_token: Zeroizing<String>` |
+
+**网络搜索** (`librefang-runtime/src/web_search.rs`)：
+
+```rust
+fn resolve_api_key(env_var: &str) -> Option<Zeroizing<String>> {
+    std::env::var(env_var).ok().filter(|k| !k.is_empty()).map(Zeroizing::new)
+}
+```
+
+**嵌入** (`librefang-runtime/src/embedding.rs`)：
+
+| 结构体 | 字段 |
+|--------|------|
+| `EmbeddingClient` | `api_key: Zeroizing<String>` |
+
+### 为什么重要
+
+如果不进行零化，密钥在使用后会一直留在内存中，直到操作系统回收该页面。
+具有核心转储、交换文件或内存取证工具访问权限的攻击者可以恢复 API 密钥。
+`Zeroizing<String>` 确保密钥在不再需要时立即被覆盖。
+
+---
+
+## 提示注入扫描器
+
+**源码：** `librefang-skills/src/verify.rs`
+
+`SkillVerifier` 提供两个扫描函数：`security_scan()` 用于技能清单，
+`scan_prompt_content()` 用于技能提示文本（SKILL.md 正文）。
+
+### 清单安全扫描
+
+`SkillVerifier::security_scan(manifest)` 检查技能声明的需求：
+
+| 检查项 | 严重级别 | 触发条件 |
+|--------|---------|---------|
+| Node.js 运行时 | Warning | `runtime_type == SkillRuntime::Node` |
+| Shell 执行能力 | Critical | 能力包含 `shellexec` 或 `shell_exec` |
+| 不受限的网络访问 | Warning | 能力包含 `netconnect(*)` |
+| Shell 工具 | Critical | 工具为 `shell_exec` 或 `bash` |
+| 文件系统写入工具 | Warning | 工具为 `file_write` 或 `file_delete` |
+| 工具过多 | Info | 需要超过 10 个工具 |
+
+### 提示注入扫描
+
+`SkillVerifier::scan_prompt_content(content)` 检测技能提示文本中的
+常见攻击模式：
+
+**Critical -- 提示覆盖尝试：**
+
+```
+"ignore previous instructions", "ignore all previous",
+"disregard previous", "forget your instructions",
+"you are now", "new instructions:", "system prompt override",
+"ignore the above", "do not follow", "override system"
+```
+
+**Warning -- 数据外泄模式：**
+
+```
+"send to http", "send to https", "post to http", "post to https",
+"exfiltrate", "forward all", "send all data",
+"base64 encode and send", "upload to"
+```
+
+**Warning -- Shell 命令引用：**
+
+```
+"rm -rf", "chmod ", "sudo "
+```
+
+**Info -- 内容过长：**
+
+超过 50,000 字节的内容会触发信息级别的警告，提示可能影响 LLM 性能。
+
+### SHA256 校验和验证
+
+```rust
+pub fn verify_checksum(data: &[u8], expected_sha256: &str) -> bool {
+    let actual = Self::sha256_hex(data);
+    actual == expected_sha256.to_lowercase()
+}
+```
+
+从 ClawHub 安装的技能会根据已知的 SHA256 哈希验证其内容，以检测
+下载过程中的篡改。
+
+### 警告结构
+
+```rust
+pub struct SkillWarning {
+    pub severity: WarningSeverity,  // Info, Warning, Critical
+    pub message: String,
+}
+```
+
+---

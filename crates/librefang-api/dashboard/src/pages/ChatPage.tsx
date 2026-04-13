@@ -144,9 +144,58 @@ const sessionCache = new Map<string, ChatMessage[]>();
 // sessionVersion: bump to force reload after session switch
 function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  // Per-agent loading state. A single shared `isLoading` would freeze the
+  // ChatInput on every agent while one of them is streaming (#2322). Keyed
+  // by agentId so switching away from a busy agent unblocks the new one,
+  // and coming back still reflects the in-flight status of the original.
+  const [loadingAgents, setLoadingAgents] = useState<Record<string, boolean>>({});
+  const isLoading = agentId ? loadingAgents[agentId] === true : false;
+  const setAgentLoading = useCallback((id: string, on: boolean) => {
+    setLoadingAgents(prev => {
+      if ((prev[id] ?? false) === on) return prev;
+      const next = { ...prev };
+      if (on) next[id] = true; else delete next[id];
+      return next;
+    });
+  }, []);
+  // Garbage-collect loading flags for agents that no longer exist so the
+  // map doesn't accumulate dead entries over a long session.
+  useEffect(() => {
+    const alive = new Set(agents.map(a => a.id));
+    setLoadingAgents(prev => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+      for (const [id, on] of Object.entries(prev)) {
+        if (alive.has(id)) next[id] = on; else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [agents]);
   const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
+
+  // Track the currently-viewed agent in a ref so async handlers registered
+  // during a previous render can tell whether their target is still on screen.
+  const currentAgentRef = useRef<string | null>(agentId);
+  useEffect(() => { currentAgentRef.current = agentId; }, [agentId]);
+
+  // Route a message update to either live React state (when the target agent
+  // is on screen) or straight to the session cache (when the user has
+  // switched away). Without this, updates against a swapped-out agent fall
+  // into `setMessages(prev => prev.map(...))` whose `prev` is the OTHER
+  // agent's array — the update becomes a silent no-op and the in-flight
+  // response is lost once the user switches back.
+  const updateAgentMessages = useCallback((
+    id: string,
+    updater: (msgs: ChatMessage[]) => ChatMessage[],
+  ) => {
+    if (id === currentAgentRef.current) {
+      setMessages(updater);
+    } else {
+      const current = sessionCache.get(id) ?? [];
+      sessionCache.set(id, updater(current));
+    }
+  }, []);
 
   // Save current messages to cache when switching away. The cleanup must
   // read the LATEST messages at unmount/agent-swap time, so we keep a
@@ -180,8 +229,9 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     }
 
     setMessages([]);
-    setIsLoading(true);
-    loadAgentSession(agentId)
+    const loadId = agentId;
+    setAgentLoading(loadId, true);
+    loadAgentSession(loadId)
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
@@ -213,12 +263,18 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               tools: msg.tools,
             }];
           });
-          setMessages(historical);
-          sessionCache.set(agentId, historical);
+          // Refresh the cache unconditionally — the data is still correct
+          // for loadId. Only touch live React state when the user is still
+          // viewing loadId; otherwise a slow A load resolving after the
+          // user has swapped to B would overwrite B's displayed messages.
+          sessionCache.set(loadId, historical);
+          if (loadId === currentAgentRef.current) {
+            setMessages(historical);
+          }
         }
       })
       .catch(() => {})
-      .finally(() => setIsLoading(false));
+      .finally(() => setAgentLoading(loadId, false));
   }, [agentId, sessionVersion]);
 
   // Send message - WS first, HTTP fallback
@@ -288,6 +344,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     }
 
     if (!agentId) return;
+    // Snapshot the agent at send time. The user may switch agents before
+    // the response finishes; all completion/cleanup paths must still target
+    // the original sender so we don't flip loading state / HTTP routes on
+    // the agent the user is now looking at.
+    const sendAgentId = agentId;
 
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
@@ -305,14 +366,14 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     };
 
     setMessages(prev => [...prev, userMsg, botMsg]);
-    setIsLoading(true);
+    setAgentLoading(sendAgentId, true);
 
     // Helper: send via HTTP (used as primary fallback and WS drop recovery)
     const sendViaHttp = async () => {
       try {
-        const response = await sendAgentMessage(agentId, trimmed);
+        const response = await sendAgentMessage(sendAgentId, trimmed);
         const fullContent = response.response || "";
-        setMessages(prev => prev.map(m =>
+        updateAgentMessages(sendAgentId, prev => prev.map(m =>
           m.id === botMsg.id
             ? {
                 ...m, content: fullContent, isStreaming: false,
@@ -324,18 +385,18 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
             : m
         ));
         if (response.memories_saved?.length) {
-          const agentName = agents.find(a => a.id === agentId)?.name;
+          const agentName = agents.find(a => a.id === sendAgentId)?.name;
           response.memories_saved.forEach((mem: string) => {
-            addSkillOutput({ skillName: "memory", agentId: agentId || undefined, agentName, content: mem });
+            addSkillOutput({ skillName: "memory", agentId: sendAgentId, agentName, content: mem });
           });
         }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : "Unknown error";
-        setMessages(prev => prev.map(m =>
+        updateAgentMessages(sendAgentId, prev => prev.map(m =>
           m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg } : m
         ));
       } finally {
-        setIsLoading(false);
+        setAgentLoading(sendAgentId, false);
       }
     };
 
@@ -370,12 +431,12 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
             const data = JSON.parse(event.data as string);
             if (data.type === "text_delta") {
               const chunk = data.content || "";
-              setMessages(prev => prev.map(m =>
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, content: m.content + chunk, error: undefined } : m
               ));
             } else if (data.type === "typing") {
               if (data.state === "stop") {
-                setMessages(prev => prev.map(m =>
+                updateAgentMessages(sendAgentId, prev => prev.map(m =>
                   m.id === botMsg.id ? { ...m, isStreaming: false } : m
                 ));
               }
@@ -383,7 +444,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               // Agent started a tool call — add a running tool entry
               const toolName = typeof data.tool === "string" ? data.tool : "unknown";
               const toolId = data.id || `tool-${Date.now()}`;
-              setMessages(prev => prev.map(m =>
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id
                   ? { ...m, tools: [...(m.tools || []), { name: toolName, running: true, expanded: false, is_error: false, input: undefined, result: undefined, _call_id: toolId }] }
                   : m
@@ -395,7 +456,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               const toolId = data.id;
               let parsedInput: unknown;
               try { parsedInput = typeof data.input === "string" ? JSON.parse(data.input) : data.input; } catch { parsedInput = data.input; }
-              setMessages(prev => prev.map(m => {
+              updateAgentMessages(sendAgentId, prev => prev.map(m => {
                 if (m.id !== botMsg.id) return m;
                 const tools = (m.tools || []).map(t =>
                   t._call_id === toolId ? { ...t, input: parsedInput } : t
@@ -407,7 +468,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               const toolName = typeof data.tool === "string" ? data.tool : "";
               const isError = Boolean(data.is_error);
               const result = typeof data.result === "string" ? data.result : data.result != null ? JSON.stringify(data.result) : "";
-              setMessages(prev => prev.map(m => {
+              updateAgentMessages(sendAgentId, prev => prev.map(m => {
                 if (m.id !== botMsg.id) return m;
                 const tools = [...(m.tools || [])];
                 // Find last tool with this name that has no result yet
@@ -422,15 +483,15 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               // Also keep the skill output panel behavior
               const entry = normalizeToolOutput(data);
               if (entry) {
-                addSkillOutput({ skillName: entry.tool, agentId: agentId || undefined, content: entry.content });
+                addSkillOutput({ skillName: entry.tool, agentId: sendAgentId, content: entry.content });
               }
             } else if (data.type === "silent_complete") {
-              setMessages(prev => prev.filter(m => m.id !== botMsg.id));
-              setIsLoading(false);
+              updateAgentMessages(sendAgentId, prev => prev.filter(m => m.id !== botMsg.id));
+              setAgentLoading(sendAgentId, false);
               cleanup();
             } else if (data.type === "error") {
               const error = data.content || "WebSocket error";
-              setMessages(prev => prev.map(m =>
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
               ));
               // Don't cleanup immediately — the agent may recover and send a final
@@ -441,7 +502,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                 if (!responded) { cleanup(); sendViaHttp(); }
               }, 30_000);
             } else if (data.type === "response") {
-              setMessages(prev => prev.map(m =>
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id
                   ? {
                       ...m, content: data.content || m.content, isStreaming: false,
@@ -452,12 +513,12 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                     }
                   : m
               ));
-              setIsLoading(false);
+              setAgentLoading(sendAgentId, false);
               cleanup();
             }
           } catch {
             // Non-JSON text chunk
-            setMessages(prev => prev.map(m =>
+            updateAgentMessages(sendAgentId, prev => prev.map(m =>
               m.id === botMsg.id ? { ...m, content: m.content + event.data } : m
             ));
           }
