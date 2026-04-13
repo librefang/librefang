@@ -27,25 +27,26 @@ fn librefang_home() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".librefang"))
 }
 
-/// Return the path to `$LIBREFANG_HOME/.env`.
-pub fn env_file_path() -> Option<PathBuf> {
+fn env_file_path() -> Option<PathBuf> {
     librefang_home().map(|h| h.join(".env"))
 }
 
-/// Return the path to `$LIBREFANG_HOME/secrets.env`.
-pub fn secrets_file_path() -> Option<PathBuf> {
+fn secrets_file_path() -> Option<PathBuf> {
     librefang_home().map(|h| h.join("secrets.env"))
 }
 
 /// Load vault + `.env` + `secrets.env` into `std::env`. Call from the
 /// synchronous `main()` of a binary *before* spawning any tokio runtime —
 /// `std::env::set_var` is UB in Rust 1.80+ once other threads exist.
-/// Idempotent: only the first call does work.
 pub fn load_dotenv() {
     DOTENV_LOADED.call_once(|| {
         load_vault();
-        load_env_file(env_file_path());
-        load_env_file(secrets_file_path());
+        if let Some(p) = env_file_path() {
+            load_env_file(&p);
+        }
+        if let Some(p) = secrets_file_path() {
+            load_env_file(&p);
+        }
     });
 }
 
@@ -84,13 +85,8 @@ fn load_vault() {
     }
 }
 
-fn load_env_file(path: Option<PathBuf>) {
-    let path = match path {
-        Some(p) => p,
-        None => return,
-    };
-
-    let content = match std::fs::read_to_string(&path) {
+fn load_env_file(path: &Path) {
+    let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -280,7 +276,7 @@ mod tests {
     #[test]
     fn test_load_env_file_nonexistent() {
         // Should not panic
-        load_env_file(Some(PathBuf::from("/nonexistent/.env")));
+        load_env_file(&PathBuf::from("/nonexistent/.env"));
     }
 
     /// `load_env_file` must not override existing process env vars —
@@ -292,18 +288,19 @@ mod tests {
     #[serial_test::serial]
     fn test_load_env_file_does_not_override_existing_var() {
         let key = "LIBREFANG_DOTENV_TEST_PRIORITY_OVERRIDE";
-        // SAFETY: `#[serial]` above serialises every env-mutating test in
-        // this binary; no other thread reads or writes `key`.
+        // SAFETY: #[serial] serialises every env-mutating test in this
+        // binary, so no other thread reads or writes `key` here.
         unsafe { std::env::set_var(key, "system-value") };
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(".env");
         std::fs::write(&path, format!("{key}=file-value\n")).unwrap();
 
-        load_env_file(Some(path));
+        load_env_file(&path);
 
         assert_eq!(std::env::var(key).unwrap(), "system-value");
 
+        // SAFETY: same as above.
         unsafe { std::env::remove_var(key) };
     }
 }
