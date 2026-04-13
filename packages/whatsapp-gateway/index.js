@@ -2271,16 +2271,45 @@ server.listen(PORT, '127.0.0.1', async () => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\n[gateway] Shutting down...');
-  if (sock) sock.end();
-  server.close(() => process.exit(0));
-});
+let shuttingDown = false;
+function gracefulShutdown(signal) {
+  // Re-entry guard: if SIGINT arrives during the SIGTERM 10s window (or
+  // vice versa) we'd otherwise invoke cleanupSocket() / server.close()
+  // twice — the second server.close() throws ERR_SERVER_NOT_RUNNING.
+  if (shuttingDown) {
+    console.log(`[gateway] Already shutting down, ignoring ${signal}`);
+    return;
+  }
+  shuttingDown = true;
+  console.log(`\n[gateway] Received ${signal}, shutting down...`);
 
-process.on('SIGTERM', () => {
-  if (sock) sock.end();
-  server.close(() => process.exit(0));
-});
+  // Force exit after 10 seconds no matter what
+  const forceExitTimer = setTimeout(() => {
+    console.error('[gateway] Graceful shutdown timed out, force exiting');
+    process.exit(1);
+  }, 10_000);
+  forceExitTimer.unref();
+
+  // Tear down Baileys socket properly (fire-and-forget, we don't await).
+  // Log the error message if teardown fails — a silent catch would hide a
+  // broken Baileys shutdown in production.
+  cleanupSocket().catch(e =>
+    console.warn('[gateway] cleanupSocket error:', e?.message || e),
+  );
+
+  // Close HTTP server — forcibly drain all existing connections (Node.js 18.2+)
+  if (server.closeAllConnections) {
+    server.closeAllConnections();
+  }
+  server.close(() => {
+    clearTimeout(forceExitTimer);
+    console.log('[gateway] Shutdown complete');
+    process.exit(0);
+  });
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 } // end if (require.main === module)
 
 // Export for testing
