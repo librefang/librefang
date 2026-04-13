@@ -2,6 +2,8 @@
 //!
 //! Abstracts over multiple LLM providers (Anthropic, OpenAI, Ollama, etc.).
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use librefang_types::config::{AzureOpenAiConfig, ResponseFormat, VertexAiConfig};
 use librefang_types::message::{ContentBlock, Message, StopReason, TokenUsage};
@@ -24,10 +26,12 @@ pub enum LlmError {
         message: String,
     },
     /// Rate limited — should retry after delay.
-    #[error("Rate limited, retry after {retry_after_ms}ms")]
+    #[error("Rate limited, retry after {retry_after_ms}ms{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
     RateLimited {
         /// How long to wait before retrying.
         retry_after_ms: u64,
+        /// Optional original message from the provider (e.g. "You've hit your limit · resets 10am (UTC)").
+        message: Option<String>,
     },
     /// Response parsing failed.
     #[error("Parse error: {0}")]
@@ -91,6 +95,12 @@ pub struct CompletionRequest {
     /// this instead of the global `message_timeout_secs`.  Allows the agent
     /// loop to grant longer timeouts for requests that involve browser tools.
     pub timeout_secs: Option<u64>,
+    /// Provider-specific extension parameters merged directly into the
+    /// top-level API request body.
+    ///
+    /// When keys conflict with standard parameters (temperature, max_tokens, etc.),
+    /// values from `extra_body` take precedence (last-wins in JSON serialization).
+    pub extra_body: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// A response from an LLM completion.
@@ -359,6 +369,7 @@ mod tests {
             prompt_caching: false,
             response_format: None,
             timeout_secs: None,
+            extra_body: None,
         };
 
         let response = driver.stream(request, tx).await.unwrap();

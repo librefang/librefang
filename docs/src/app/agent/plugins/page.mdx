@@ -1,0 +1,680 @@
+# Context Engine Plugins
+
+Context engine plugins give you full control over an agent's context management: memory recall, context window assembly, context compaction, and sub-agent lifecycle. Plugins speak a tiny JSON-over-stdin/stdout protocol, so they can be written in almost any language that can read stdin and print stdout.
+
+This page covers the protocol, the manifest format, every supported runtime, and a full worked example.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Hook Lifecycle](#hook-lifecycle)
+- [Protocol Specification](#protocol-specification)
+- [`plugin.toml` Manifest](#plugin-toml-manifest)
+- [Plugin Environment Variables (`[env]`)](#plugin-environment-variables-env)
+- [Hook Timeout Override (`hook_timeout_secs`)](#hook-timeout-override-hook_timeout_secs)
+- [Supported Runtimes](#supported-runtimes)
+- [Writing Your First Plugin](#writing-your-first-plugin)
+- [Plugin Stacking (`plugin_stack`)](#plugin-stacking-plugin_stack)
+- [Scaffolding via Dashboard or API](#scaffolding-via-dashboard-or-api)
+- [Hot-Reload Endpoint](#hot-reload-endpoint)
+- [Hook Invocation Metrics](#hook-invocation-metrics)
+- [Testing Locally](#testing-locally)
+- [Debugging with the Doctor Endpoint](#debugging-with-the-doctor-endpoint)
+- [Error Handling, Timeouts, and Logs](#error-handling-timeouts-and-logs)
+- [Plugins vs. Skills](#plugins-vs-skills)
+
+---
+
+## Overview
+
+A plugin is a directory under `~/.librefang/plugins/<name>/` containing:
+
+```
+my-recall-plugin/
+├── plugin.toml               # manifest
+└── hooks/
+    ├── ingest.py             # (or .js / .go / .rb / ...)  active by default
+    ├── after_turn.py         # active by default
+    ├── assemble.py           # scaffolded — uncomment in plugin.toml to activate
+    ├── compact.py            # scaffolded — uncomment in plugin.toml to activate
+    ├── bootstrap.py          # scaffolded — runs once at startup (2× timeout)
+    ├── prepare_subagent.py   # scaffolded — called before sub-agent spawns
+    └── merge_subagent.py     # scaffolded — called after sub-agent completes
+```
+
+LibreFang loads the manifest, wires the declared hook scripts into the context engine, and runs them as subprocesses at well-defined lifecycle points. Each hook invocation is a fresh subprocess: one JSON object in on stdin, one JSON object out on stdout.
+
+Plugins are sandboxed by default — env vars are scrubbed to a safe baseline, the working directory is controlled, and a configurable timeout (default 30 seconds) kills runaway hooks. The `bootstrap` hook gets double the configured timeout since it runs only once and may need time to connect to external services.
+
+---
+
+## Hook Lifecycle
+
+All 7 hooks are supported, covering the full context engine lifecycle:
+
+| Hook | When it fires | Purpose | Blocks turn? | On failure |
+|------|---------------|---------|--------------|------------|
+| `bootstrap` | Engine initialisation, once only | Connect to vector store, warm cache | Yes (at startup) | Warn, continue |
+| `ingest` | A new user message enters the session, before the LLM is called | Recall memories / inject custom context | Yes | Fallback to default recall |
+| `assemble` | **Before every LLM call** | **Full control over context window contents** | Yes | Fallback to default trimming |
+| `compact` | When context pressure is high | Custom compaction strategy | Yes | Fallback to LLM compaction |
+| `after_turn` | After an LLM turn completes (response sent) | Index, persist, trigger background work | No (fire-and-forget) | Warn, ignore |
+| `prepare_subagent` | Before a sub-agent starts | Isolate memory scope | Yes | Warn, continue |
+| `merge_subagent` | After a sub-agent completes | Merge context | Yes | Warn, continue |
+
+**Key properties:**
+
+- `assemble` is the most powerful hook — it completely replaces the default context window assembly. Your script decides every message the LLM sees.
+- `ingest` runs *in addition to* the built-in memory recall — its returned memories are merged with the default ones, not a replacement.
+- `after_turn` is best-effort: a failure here is logged, never surfaced to the user.
+- If `stable_prefix_mode` is on in context engine config, the `ingest` hook is skipped.
+- Each hook runs in a fresh subprocess — there is no persistent state between invocations. Use an external store (SQLite, vector DB, HTTP service) if you need continuity.
+
+---
+
+## Protocol Specification
+
+### `ingest` hook
+
+**Request** (one line of JSON written to the hook's stdin, then stdin is closed):
+
+```json
+{
+  "type": "ingest",
+  "agent_id": "0f3b…-uuid",
+  "message": "What was the last thing I asked about Kafka?",
+  "peer_id": "user_12345"
+}
+```
+
+| Field | Type | Always present | Notes |
+|-------|------|----------------|-------|
+| `type` | `"ingest"` | yes | Constant, lets a single script dispatch on hook kind. |
+| `agent_id` | string (UUID) | yes | Use to scope lookups per agent. |
+| `message` | string | yes | Raw user message text. |
+| `peer_id` | string or `null` | yes | Platform user ID when the message came from a channel (Telegram, Discord, WhatsApp…). **Always scope your recall to `peer_id` when present** to avoid cross-user context leaks. |
+
+**Response** (one line of JSON on stdout, last JSON-parseable line wins):
+
+```json
+{
+  "type": "ingest_result",
+  "memories": [
+    { "content": "User asked about Kafka consumer groups on 2026-04-01." },
+    { "content": "Previously decided to standardize on Kafka over RabbitMQ." }
+  ]
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `type` | `"ingest_result"` | Constant. |
+| `memories` | array of objects | May be empty. Each object requires `content` (string). Extra keys are ignored. |
+
+### `after_turn` hook
+
+**Request:**
+
+```json
+{
+  "type": "after_turn",
+  "agent_id": "0f3b…-uuid",
+  "messages": [
+    { "role": "user", "content": "What was the last thing I asked about Kafka?", "pinned": false },
+    { "role": "assistant", "content": "You asked about consumer groups on…", "pinned": false }
+  ]
+}
+```
+
+Each message `content` is truncated to the first 500 characters to keep the hook fast. If you need the full message, store it from a tool call or a separate webhook.
+
+**Response:**
+
+```json
+{ "type": "ok" }
+```
+
+The return value is ignored — it just signals completion. Return anything valid and exit with code 0.
+
+---
+
+### `bootstrap` hook
+
+Called once when the engine initialises. Use it for connection checks, cache warm-up, or any one-time setup work.
+
+**Request:**
+
+```json
+{
+  "type": "bootstrap",
+  "context_window_tokens": 200000,
+  "stable_prefix_mode": false,
+  "max_recall_results": 5
+}
+```
+
+**Response:**
+
+```json
+{ "type": "ok" }
+```
+
+A failure is logged at `warn` level and does not prevent the engine from starting.
+
+---
+
+### `assemble` hook ⭐ most powerful hook
+
+Fires before every LLM call and gives you **complete control over the message list the LLM receives**.
+
+**Request:**
+
+```json
+{
+  "type": "assemble",
+  "system_prompt": "You are a helpful assistant.",
+  "messages": [
+    { "role": "user", "content": "Check my Kafka config for me", "pinned": false },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "tool_use", "id": "tu_01", "name": "file_read", "input": { "path": "/etc/kafka.conf" } }
+      ],
+      "pinned": false
+    },
+    {
+      "role": "user",
+      "content": [
+        { "type": "tool_result", "tool_use_id": "tu_01", "content": "broker=localhost:9092\n...", "is_error": false }
+      ],
+      "pinned": false
+    }
+  ],
+  "context_window_tokens": 200000
+}
+```
+
+Messages carry their **full structure**, including `tool_use` / `tool_result` / `image` / `thinking` blocks. Messages with `pinned: true` must not be dropped.
+
+**Response:**
+
+```json
+{
+  "type": "assemble_result",
+  "messages": [...]
+}
+```
+
+Return the trimmed / reordered message list. If you return an empty list or the hook fails, LibreFang automatically falls back to the default trimming strategy.
+
+---
+
+### `compact` hook
+
+Fires when context pressure is too high, allowing you to compress the conversation history with a custom strategy.
+
+**Request:**
+
+```json
+{
+  "type": "compact",
+  "agent_id": "0f3b…-uuid",
+  "messages": [...],
+  "model": "llama-3.3-70b-versatile",
+  "context_window_tokens": 200000
+}
+```
+
+The message format is the same as `assemble`.
+
+**Response:**
+
+```json
+{
+  "type": "compact_result",
+  "messages": [...]
+}
+```
+
+Return the compacted message list. An empty list or a failure falls back to the built-in LLM compaction.
+
+---
+
+### `prepare_subagent` / `merge_subagent` hooks
+
+Sub-agent lifecycle hooks, useful when you need to isolate or merge memory scope across agent boundaries.
+
+**Requests:**
+
+```json
+{ "type": "prepare_subagent", "parent_id": "...", "child_id": "..." }
+{ "type": "merge_subagent",   "parent_id": "...", "child_id": "..." }
+```
+
+**Response:**
+
+```json
+{ "type": "ok" }
+```
+
+---
+
+### Errors
+
+Exit with a non-zero code and write an error to stderr. LibreFang logs the stderr at `warn` level and falls back to the default context engine result. The turn still proceeds.
+
+---
+
+## `plugin.toml` Manifest
+
+Every plugin needs a `plugin.toml` at its root:
+
+```toml
+name = "qdrant-recall"
+version = "0.1.0"
+description = "Recall from a Qdrant vector store"
+author = "Evan"
+
+# hook_timeout_secs = 30  # per-invocation timeout; bootstrap gets 2× this value
+
+[hooks]
+# --- Active hooks ---
+ingest    = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+runtime = "python"
+
+# --- Optional hooks (template files are already scaffolded — just uncomment) ---
+# bootstrap        = "hooks/bootstrap.py"   # runs once at startup (2× timeout)
+# assemble         = "hooks/assemble.py"    # control what the LLM sees (powerful)
+# compact          = "hooks/compact.py"     # custom context compression
+# prepare_subagent = "hooks/prepare_subagent.py"   # before sub-agent spawns
+# merge_subagent   = "hooks/merge_subagent.py"     # after sub-agent completes
+
+requirements = "requirements.txt"
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `name` | string | yes | Must match the directory name under `plugins/`. |
+| `version` | string | yes | Semver. |
+| `description` | string | no | Shown in the dashboard plugin list. |
+| `author` | string | no | Free-form. |
+| `hook_timeout_secs` | integer | no | Per-invocation timeout in seconds (default `30`). The `bootstrap` hook gets **2×** this value since it runs once and may need extra time for external connections. |
+| `hooks.ingest` | string | no | Recall memories when a new message arrives. |
+| `hooks.after_turn` | string | no | Persist / update indexes after a turn completes. |
+| `hooks.bootstrap` | string | no | Runs once at engine initialisation (2× timeout). |
+| `hooks.assemble` | string | no | **Full control over the messages the LLM sees** — the most powerful hook. |
+| `hooks.compact` | string | no | Custom compaction strategy when context pressure is high. |
+| `hooks.prepare_subagent` | string | no | Isolate memory scope before a sub-agent starts. |
+| `hooks.merge_subagent` | string | no | Merge context after a sub-agent completes. |
+| `hooks.runtime` | string | no | One of `python`, `native`, `v`, `node`, `deno`, `go`, `ruby`, `bash`, `bun`, `php`, `lua`. Defaults to `python`. Unknown values fall back to `python` with a warning. |
+| `requirements` | string | no | Only read for `python` runtime; path to `requirements.txt` installable via `pip3 install --user -r …`. Other runtimes manage deps out-of-band (`go.mod`, `package.json`, `Gemfile`, etc.). |
+
+---
+
+## Plugin Environment Variables (`[env]`)
+
+The `[env]` section in `plugin.toml` lets a plugin declare the environment variables that every one of its hook subprocesses will receive. This keeps plugin-specific config out of the global agent config and makes plugins self-contained.
+
+```toml
+name = "qdrant-recall"
+version = "0.1.0"
+
+[env]
+QDRANT_URL     = "http://localhost:6333"
+COLLECTION     = "agent-memories"
+QDRANT_API_KEY = "${QDRANT_API_KEY}"
+
+[hooks]
+ingest    = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+runtime   = "python"
+```
+
+**Env-var expansion:** any value that begins with `${VAR_NAME}` is expanded from the daemon's own environment at invocation time. If `VAR_NAME` is not set in the daemon environment the variable is passed as an empty string and a `warn` log entry is emitted. Expansion applies only to values that start with `${` — static values like `"http://localhost:6333"` are forwarded verbatim.
+
+Your hook script can then read these from the environment in the usual way:
+
+```python
+import os
+qdrant_url = os.environ["QDRANT_URL"]
+api_key    = os.environ.get("QDRANT_API_KEY", "")
+```
+
+**Order of precedence** (highest wins): `[env]` values override LibreFang's baseline set (`LIBREFANG_AGENT_ID`, `PATH`, `HOME`, runtime passthrough vars) for any key that appears in both. Variables in the agent's `allowed_env_vars` list are applied after `[env]` and therefore take final precedence.
+
+---
+
+## Hook Timeout Override (`hook_timeout_secs`)
+
+By default every hook invocation is allowed 30 seconds before the subprocess is killed. You can raise or lower that limit per-plugin with the `hook_timeout_secs` field at the top level of `plugin.toml` (alongside `name`, `version`, etc. — not inside `[hooks]`):
+
+```toml
+name = "qdrant-recall"
+version = "0.2.0"
+
+hook_timeout_secs = 60   # all hooks get 60 s; bootstrap gets 120 s
+
+[context_engine_hooks]
+runtime = "python"
+ingest  = "hooks/ingest.py"
+```
+
+| Value | Hook timeout | `bootstrap` timeout |
+|-------|-------------|---------------------|
+| *(unset)* | 30 s (default) | 60 s |
+| `60` | 60 s | 120 s |
+| `10` | 10 s | 20 s |
+
+The `bootstrap` hook always receives **2× the configured timeout** because it runs only once at startup and may need extra time to connect to external services, warm a cache, or download embeddings.
+
+Use a higher value when your hooks call remote services with variable latency (vector stores, embedding APIs). Use a lower value when you want tighter failure-detection for lightweight hooks.
+
+---
+
+## Supported Runtimes
+
+| Runtime | Command | Works out of the box in Docker? |
+|---------|---------|-------|
+| `python` | `python3 script.py` (falls back to `python`, `py`) | Yes |
+| `native` | Exec the file directly (requires exec bit + valid binary or shebang) | Yes |
+| `node` | `node script.js` | Yes |
+| `bash` | `bash script.sh` | Yes |
+| `deno` | `deno run --allow-read --allow-env script.ts` | No |
+| `bun` | `bun run script.ts` | No |
+| `go` | `go run script.go` | No |
+| `v` | `v -no-retry-compilation run script.v` | No |
+| `ruby` | `ruby script.rb` | No |
+| `php` | `php script.php` | No |
+| `lua` | `lua script.lua` | No |
+
+Runtimes marked "No" aren't bundled in the official Docker image — extend the image with the snippets in [Configuration → Plugins](./configuration#context_engine) or `apt install` them on bare-metal deploys.
+
+**Env passthrough:** a minimal PATH/HOME baseline plus runtime-specific vars (e.g. `PYTHONPATH`/`VIRTUAL_ENV` for Python, `GEM_HOME`/`GEM_PATH` for Ruby, `LUA_PATH` for Lua) are forwarded. Any custom env var the script needs must be declared in the agent's `allowed_env_vars` config.
+
+---
+
+## Writing Your First Plugin
+
+Let's build a plugin that remembers user preferences from a SQLite file. Python, for brevity.
+
+### 1. Scaffold the plugin
+
+From the dashboard Plugins page, click **Create Plugin**, pick `python`, name it `prefs`. Or via API:
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/plugins/scaffold \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"prefs","description":"User preference recall","runtime":"python"}'
+```
+
+This creates `~/.librefang/plugins/prefs/` with `plugin.toml`, `hooks/ingest.py`, `hooks/after_turn.py`, and a blank `requirements.txt`.
+
+### 2. Edit `hooks/ingest.py`
+
+```python
+#!/usr/bin/env python3
+"""Recall user preferences keyed by peer_id from a local SQLite DB."""
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+DB_PATH = Path.home() / ".librefang" / "plugins" / "prefs" / "prefs.db"
+
+def main():
+    request = json.loads(sys.stdin.read())
+    peer_id = request.get("peer_id")          # may be None for direct API calls
+    if not peer_id:
+        print(json.dumps({"type": "ingest_result", "memories": []}))
+        return
+
+    # Open the per-plugin DB and read anything keyed to this peer.
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("CREATE TABLE IF NOT EXISTS prefs (peer_id TEXT, fact TEXT)")
+    rows = conn.execute(
+        "SELECT fact FROM prefs WHERE peer_id = ?", (peer_id,)
+    ).fetchall()
+    conn.close()
+
+    memories = [{"content": f"User preference: {row[0]}"} for row in rows]
+    print(json.dumps({"type": "ingest_result", "memories": memories}))
+
+if __name__ == "__main__":
+    main()
+```
+
+### 3. Edit `hooks/after_turn.py`
+
+For this plugin we don't need post-turn work — just acknowledge:
+
+```python
+#!/usr/bin/env python3
+import json
+import sys
+
+_ = json.loads(sys.stdin.read())
+print(json.dumps({"type": "ok"}))
+```
+
+Or delete the `after_turn` field from `plugin.toml` entirely to skip the hook.
+
+### 4. Wire it to an agent
+
+Edit `~/.librefang/config.toml`:
+
+```toml
+[context_engine]
+plugin = "prefs"
+```
+
+Or configure hooks manually (same effect, without installing a plugin dir):
+
+```toml
+[context_engine.hooks]
+ingest = "~/.librefang/plugins/prefs/hooks/ingest.py"
+after_turn = "~/.librefang/plugins/prefs/hooks/after_turn.py"
+runtime = "python"
+```
+
+### 5. Restart LibreFang
+
+```bash
+librefang start
+```
+
+The next time a message arrives with a `peer_id`, your `ingest` hook runs and the returned memories get merged into the agent's context window.
+
+---
+
+## Plugin Stacking (`plugin_stack`)
+
+A single `plugin` entry in the agent config wires one plugin to the context engine. `plugin_stack` lets you chain **two or more plugins together** so that each hook phase draws from multiple plugins simultaneously.
+
+```toml
+[context_engine]
+plugin_stack = ["qdrant-recall", "my-indexer"]
+```
+
+The array must contain at least two plugin names. Each name must match a directory under `~/.librefang/plugins/`. Plugins are applied in array order.
+
+### Chain semantics
+
+| Hook | How the stack is applied |
+|------|--------------------------|
+| `ingest` | All plugins run; their `memories` arrays are **merged** (concatenated in order). |
+| `assemble` | Plugins run in order; the **first non-empty message list** wins and the rest are skipped. |
+| `compact` | Plugins run in order; the **first non-fallback result** wins (i.e. the first plugin that returns a non-empty message list). |
+| `after_turn` | All plugins run **sequentially**. Failures are logged individually and do not abort the chain. |
+| `bootstrap`, `prepare_subagent`, `merge_subagent` | All plugins run sequentially; failures are logged but do not abort the chain. |
+
+### When to use plugin stacking
+
+- **Recall + indexing separation**: use one plugin for vector-DB recall (`ingest`) and a second for post-turn indexing (`after_turn`) without mixing concerns inside a single plugin.
+- **Fallback assembly**: put your preferred `assemble` plugin first and a simpler fallback plugin second — the chain automatically uses the first plugin whose response is non-empty.
+- **Layered memory**: combine a fast local-cache recall plugin with a slower remote recall plugin so you always get low-latency results while still pulling from the full history.
+
+`plugin_stack` and `plugin` are mutually exclusive in the same `[context_engine]` block. If both are present, `plugin_stack` takes precedence.
+
+---
+
+## Scaffolding via Dashboard or API
+
+The dashboard's Plugins page has a **Create Plugin** form with a runtime dropdown — pick your language and it emits a matching template (`ingest.rb` for Ruby, `ingest.go` for Go, etc.) that already speaks the protocol.
+
+The HTTP equivalent:
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/plugins/scaffold \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "my-plugin",
+    "description": "What it does",
+    "runtime": "go"
+  }'
+```
+
+---
+
+## Hot-Reload Endpoint
+
+After editing a plugin's scripts or `plugin.toml`, you can apply the changes without restarting the daemon:
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/plugins/qdrant-recall/reload
+```
+
+The endpoint re-reads `plugin.toml` from disk and replaces the in-memory plugin configuration. What changes take effect immediately vs. what requires a restart:
+
+| Change type | After `/reload` | Requires agent restart |
+|-------------|----------------|------------------------|
+| Script edits (logic changes inside `.py`, `.js`, etc.) | Yes — next hook invocation uses the updated file | No |
+| `hook_timeout_secs` change | Yes | No |
+| `[env]` additions or edits | Yes | No |
+| Adding or removing a hook entry in `plugin.toml` | No | Yes |
+| `runtime` change | No | Yes |
+| Renaming the plugin directory | No | Yes |
+
+A successful reload returns:
+
+```json
+{ "status": "ok", "plugin": "qdrant-recall" }
+```
+
+If the updated `plugin.toml` fails to parse, the daemon keeps the previous configuration and returns a 400 with an error message — the plugin continues to operate uninterrupted.
+
+---
+
+## Hook Invocation Metrics
+
+The context engine runtime accumulates per-hook statistics for every installed plugin. Retrieve them with:
+
+```bash
+curl http://127.0.0.1:4545/api/context-engine/metrics
+```
+
+Example response:
+
+```json
+{
+  "plugins": {
+    "qdrant-recall": {
+      "ingest": {
+        "calls":       142,
+        "successes":   140,
+        "failures":      2,
+        "latency_ms_total": 8421
+      },
+      "after_turn": {
+        "calls":       138,
+        "successes":   138,
+        "failures":      0,
+        "latency_ms_total": 2760
+      }
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `calls` | Total number of times this hook has been invoked since daemon start. |
+| `successes` | Invocations that exited with code 0 and returned valid JSON. |
+| `failures` | Invocations that timed out, exited non-zero, or produced unparseable output. |
+| `latency_ms_total` | Cumulative wall-clock time (ms) spent inside the hook subprocess. Divide by `calls` for mean latency. |
+
+Counters reset when the daemon restarts. Use this endpoint to identify slow hooks (`latency_ms_total / calls` is high), frequently failing hooks (`failures / calls` is high), or hooks that are never invoked (possibly missing a `plugin_stack` entry or an incorrect hook path).
+
+---
+
+## Testing Locally
+
+Every hook is just a script that reads JSON from stdin and writes JSON to stdout — you can test it without LibreFang running:
+
+```bash
+echo '{"type":"ingest","agent_id":"test","message":"hello","peer_id":"u1"}' \
+  | python3 ~/.librefang/plugins/prefs/hooks/ingest.py
+```
+
+Expected output:
+
+```json
+{"type": "ingest_result", "memories": [...]}
+```
+
+If the script hangs, you forgot to close stdin or the script is blocking on input other than stdin. If it prints non-JSON lines, only the *last* JSON-parseable line is used as the response — log lines printed earlier are fine.
+
+---
+
+## Debugging with the Doctor Endpoint
+
+`GET /api/plugins/doctor` probes every supported runtime on the host and cross-references it with every installed plugin:
+
+```bash
+curl http://127.0.0.1:4545/api/plugins/doctor
+```
+
+```json
+{
+  "runtimes": [
+    { "runtime": "python", "launcher": "python3", "available": true,
+      "version": "Python 3.12.3", "install_hint": "..." },
+    { "runtime": "go", "launcher": null, "available": false,
+      "version": null, "install_hint": "Install Go from https://go.dev/dl/ ..." }
+  ],
+  "plugins": [
+    { "name": "prefs", "runtime": "python",
+      "runtime_available": true, "hooks_valid": true,
+      "install_hint": "..." }
+  ]
+}
+```
+
+Call this whenever a plugin mysteriously does nothing — `runtime_available: false` means the launcher isn't on PATH, and `hooks_valid: false` means a declared hook script is missing on disk.
+
+---
+
+## Error Handling, Timeouts, and Logs
+
+- **Timeout**: 30 seconds per hook invocation. If your hook exceeds that, the subprocess is killed and a `Timeout` error is logged.
+- **Exit codes**: non-zero exits are logged with the script's stderr at `warn` level, and the default context engine result is used instead.
+- **Empty output**: if the script exits 0 but prints nothing, `EmptyOutput` is returned and the default result is used.
+- **Malformed JSON**: the runtime walks stdout lines from the bottom up, taking the first JSON-parseable one. If none are parseable, it wraps the last line of stdout as `{ "text": "..." }`.
+- **Path traversal**: script paths may not contain `..` components — rejected at every invocation, not just load time.
+- **Env scrubbing**: every inherited env var is wiped (`env_clear`) before the subprocess spawns. LibreFang then sets `LIBREFANG_AGENT_ID`, `LIBREFANG_MESSAGE`, `LIBREFANG_RUNTIME`, forwards `PATH` and `HOME` from the parent process, adds the runtime's passthrough set (e.g. `PYTHONPATH`/`VIRTUAL_ENV` for Python, `GEM_HOME`/`GEM_PATH` for Ruby — see `runtime_passthrough_vars`), and finally forwards anything listed in the agent's `allowed_env_vars`. Your hook can read `LIBREFANG_AGENT_ID` / `LIBREFANG_MESSAGE` from the environment as an alternative to parsing stdin JSON.
+
+Hook stderr is captured and printed to LibreFang's own logs — use it liberally for debug logging from inside your hook.
+
+---
+
+## Plugins vs. Skills
+
+| | Plugins | Skills |
+|---|---------|--------|
+| What they customize | Memory recall / context assembly | Tool catalog (things the agent can *do*) |
+| Lifecycle hook | `ingest`, `after_turn` | Tool invocations from the LLM |
+| Scope | Per-agent, via `context_engine` config | Global or per-agent |
+| Language support | 11 runtimes via JSON stdin/stdout | Python, WASM, Node, prompt-only, built-in |
+| Sandboxing | env scrub + timeout + path validation | WASM runtime is fully sandboxed; Python/Node are subprocess |
+
+Use a **plugin** when you want to change *what the agent remembers* or run post-turn bookkeeping. Use a **skill** when you want to give the agent a new *tool* it can call during a conversation.

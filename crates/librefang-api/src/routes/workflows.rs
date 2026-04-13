@@ -954,10 +954,21 @@ pub async fn create_trigger(
     let max_fires = req["max_fires"].as_u64().unwrap_or(0);
 
     // Optional cross-session target: route triggered message to a different agent.
-    let target_agent: Option<AgentId> = req
-        .get("target_agent_id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse().ok());
+    // If the caller supplied a value but it is malformed, reject explicitly —
+    // otherwise the trigger would silently register without any target and the
+    // caller would assume the routing was accepted.
+    let target_agent: Option<AgentId> = match req.get("target_agent_id").and_then(|v| v.as_str()) {
+        None => None,
+        Some(s) => match s.parse() {
+            Ok(id) => Some(id),
+            Err(_) => {
+                return ApiErrorResponse::bad_request(format!(
+                    "Invalid 'target_agent_id': '{s}' is not a valid UUID"
+                ))
+                .into_json_tuple();
+            }
+        },
+    };
 
     match state.kernel.register_trigger_with_target(
         agent_id,
@@ -1105,12 +1116,14 @@ fn parse_cron_job_id(
 
 /// Helper: serialize a CronJob to the JSON shape the dashboard expects.
 fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde_json::Value {
-    let cron_expr = match &job.schedule {
-        librefang_types::scheduler::CronSchedule::Cron { expr, .. } => expr.clone(),
+    let (cron_expr, tz) = match &job.schedule {
+        librefang_types::scheduler::CronSchedule::Cron { expr, tz } => (expr.clone(), tz.clone()),
         librefang_types::scheduler::CronSchedule::Every { every_secs } => {
-            format!("every {every_secs}s")
+            (format!("every {every_secs}s"), None)
         }
-        librefang_types::scheduler::CronSchedule::At { at } => format!("at {}", at.to_rfc3339()),
+        librefang_types::scheduler::CronSchedule::At { at } => {
+            (format!("at {}", at.to_rfc3339()), None)
+        }
     };
     let message = match &job.action {
         librefang_types::scheduler::CronAction::AgentTurn { message, .. } => message.clone(),
@@ -1129,6 +1142,7 @@ fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde
         "id": job.id.to_string(),
         "name": job.name,
         "cron": cron_expr,
+        "tz": tz,
         "agent_id": job.agent_id.to_string(),
         "workflow_id": workflow_id,
         "message": message,
@@ -1268,6 +1282,20 @@ pub async fn create_schedule(
     }
 
     let message = req["message"].as_str().unwrap_or("").to_string();
+    let tz = req["tz"]
+        .as_str()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+
+    // Validate timezone string if provided
+    if let Some(ref tz_str) = tz {
+        if tz_str != "UTC" && tz_str.parse::<chrono_tz::Tz>().is_err() {
+            return ApiErrorResponse::bad_request(format!(
+                "Invalid timezone '{tz_str}'. Use IANA format (e.g. 'America/New_York', 'Europe/Rome')"
+            ))
+            .into_json_tuple();
+        }
+    }
 
     // Build the CronJob action
     let action = if !workflow_id_str.is_empty() {
@@ -1298,10 +1326,7 @@ pub async fn create_schedule(
         agent_id: resolved_agent_id,
         name,
         enabled: req.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-        schedule: librefang_types::scheduler::CronSchedule::Cron {
-            expr: cron,
-            tz: None,
-        },
+        schedule: librefang_types::scheduler::CronSchedule::Cron { expr: cron, tz },
         action,
         delivery: librefang_types::scheduler::CronDelivery::None,
         created_at: chrono::Utc::now(),
@@ -1344,15 +1369,57 @@ pub async fn update_schedule(
     if let Some(name) = req.get("name") {
         updates.insert("name".to_string(), name.clone());
     }
+    // Read tz from the request (if provided).  When the caller sends
+    // a new `cron` expression we must carry over the timezone — otherwise
+    // replacing the entire schedule object would reset tz to null.
+    let req_tz = req
+        .get("tz")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    // Validate timezone string if provided
+    if let Some(ref tz_str) = req_tz {
+        if tz_str != "UTC" && tz_str.parse::<chrono_tz::Tz>().is_err() {
+            return ApiErrorResponse::bad_request(format!(
+                "Invalid timezone '{tz_str}'. Use IANA format (e.g. 'America/New_York', 'Europe/Rome')"
+            ))
+            .into_json_tuple();
+        }
+    }
+
     if let Some(cron) = req.get("cron").and_then(|v| v.as_str()) {
         let cron_parts: Vec<&str> = cron.split_whitespace().collect();
         if cron_parts.len() != 5 {
             return ApiErrorResponse::bad_request("Invalid cron expression").into_json_tuple();
         }
+        // If tz not in this request, preserve the existing tz from the job.
+        let tz = req_tz.clone().or_else(|| {
+            state.kernel.cron().get_meta(job_id).and_then(|meta| {
+                if let librefang_types::scheduler::CronSchedule::Cron { tz, .. } =
+                    &meta.job.schedule
+                {
+                    tz.clone()
+                } else {
+                    None
+                }
+            })
+        });
         updates.insert(
             "schedule".to_string(),
-            serde_json::json!({"kind": "cron", "expr": cron}),
+            serde_json::json!({"kind": "cron", "expr": cron, "tz": tz}),
         );
+    } else if req_tz.is_some() {
+        // Caller wants to change only the timezone — read current cron expr.
+        if let Some(meta) = state.kernel.cron().get_meta(job_id) {
+            if let librefang_types::scheduler::CronSchedule::Cron { expr, .. } = &meta.job.schedule
+            {
+                updates.insert(
+                    "schedule".to_string(),
+                    serde_json::json!({"kind": "cron", "expr": expr, "tz": req_tz}),
+                );
+            }
+        }
     }
     if let Some(agent_id) = req.get("agent_id") {
         updates.insert("agent_id".to_string(), agent_id.clone());

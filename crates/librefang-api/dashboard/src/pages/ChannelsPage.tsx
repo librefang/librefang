@@ -191,7 +191,7 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
                 <p className="text-xs font-black uppercase tracking-widest text-text-dim/60">{channel.category || channel.name}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors">
+            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close")}>
               <X className="w-5 h-5 text-text-dim" />
             </button>
           </div>
@@ -317,6 +317,7 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
 // Config Dialog — standard form with controlled inputs
 function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () => void; t: (key: string) => string }) {
   const queryClient = useQueryClient();
+  const addToast = useUIStore((s) => s.addToast);
   const fields = useMemo(() => (channel.fields ?? []).filter(f => !f.advanced), [channel.fields]);
 
   // Build initial form values: non-secret fields use saved value, secrets start empty
@@ -362,8 +363,10 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
     mutationFn: (payload: Record<string, string>) => configureChannel(channel.name, payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["channels", "list"] });
+      addToast(t("channels.config_success") || `${channel.display_name || channel.name} configured`, "success");
       onClose();
-    }
+    },
+    onError: (err: any) => addToast(err.message || t("channels.config_failed") || "Failed to configure channel", "error"),
   });
 
   return (
@@ -380,7 +383,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
                 <p className="text-[10px] text-text-dim mt-0.5">{t("channels.configure")}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close")}><X className="w-4 h-4" /></button>
           </div>
         </div>
         <div className="p-6">
@@ -543,7 +546,7 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
                 <p className="text-[10px] text-text-dim mt-0.5">{t("channels.qr_login") || "QR Code Login"}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close")}><X className="w-4 h-4" /></button>
           </div>
         </div>
 
@@ -622,6 +625,16 @@ export function ChannelsPage() {
   const channels = channelsQuery.data ?? [];
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
   const unconfiguredCount = useMemo(() => channels.filter(c => !c.configured).length, [channels]);
+
+  // Auto-switch to "unconfigured" tab when no channels are configured,
+  // so new users see the setup buttons instead of an empty page.
+  const hasInitTab = useRef(false);
+  useEffect(() => {
+    if (!hasInitTab.current && channels.length > 0) {
+      hasInitTab.current = true;
+      if (configuredCount === 0) setActiveTab("unconfigured");
+    }
+  }, [channels.length, configuredCount]);
 
   // Filter, search, and sort
   const filteredChannels = useMemo(
@@ -706,7 +719,7 @@ export function ChannelsPage() {
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
-              <button onClick={() => setSearch("")} className="hover:text-text-main">
+              <button onClick={() => setSearch("")} className="hover:text-text-main" aria-label={t("common.clear_search", { defaultValue: "Clear search" })}>
                 <X className="w-3 h-3" />
               </button>
             )}

@@ -275,7 +275,7 @@ async fn resolve_manifest(
     }
 
     // Parse TOML
-    let manifest: AgentManifest = match toml::from_str(&manifest_toml) {
+    let mut manifest: AgentManifest = match toml::from_str(&manifest_toml) {
         Ok(m) => m,
         Err(e) => {
             let _ = e;
@@ -285,6 +285,14 @@ async fn resolve_manifest(
             });
         }
     };
+
+    // Allow callers to override the manifest name, enabling multiple agents
+    // from the same template with distinct names.
+    if let Some(ref custom_name) = req.name {
+        if !custom_name.trim().is_empty() {
+            manifest.name = custom_name.trim().to_string();
+        }
+    }
 
     let name = manifest.name.clone();
     Ok(ResolvedManifest { manifest, name })
@@ -681,7 +689,7 @@ pub async fn bulk_stop_agents(
 }
 
 /// Enrich an `AgentEntry` into a JSON value with catalog data.
-fn enrich_agent_json(
+pub(crate) fn enrich_agent_json(
     e: &librefang_types::agent::AgentEntry,
     dm: &librefang_types::config::DefaultModelConfig,
     catalog: &Option<
@@ -1256,6 +1264,7 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
         was_mentioned: req.was_mentioned,
         thread_id: None,
         account_id: None,
+        ..Default::default()
     })
 }
 
@@ -1653,6 +1662,30 @@ pub async fn get_agent(
         }
     };
 
+    let dm = {
+        let dm_override = state
+            .kernel
+            .default_model_override_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        effective_default_model(
+            &state.kernel.config_ref().default_model,
+            dm_override.as_ref(),
+        )
+    };
+    let resolved_provider =
+        if entry.manifest.model.provider.is_empty() || entry.manifest.model.provider == "default" {
+            dm.provider.as_str()
+        } else {
+            entry.manifest.model.provider.as_str()
+        };
+    let resolved_model =
+        if entry.manifest.model.model.is_empty() || entry.manifest.model.model == "default" {
+            dm.model.as_str()
+        } else {
+            entry.manifest.model.model.as_str()
+        };
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -1665,8 +1698,8 @@ pub async fn get_agent(
             "last_active": entry.last_active.to_rfc3339(),
             "session_id": entry.session_id.0.to_string(),
             "model": {
-                "provider": entry.manifest.model.provider,
-                "model": entry.manifest.model.model,
+                "provider": resolved_provider,
+                "model": resolved_model,
                 "max_tokens": entry.manifest.model.max_tokens,
                 "temperature": entry.manifest.model.temperature,
             },
@@ -2309,6 +2342,15 @@ pub async fn set_model(
         }
     };
     let explicit_provider = body["provider"].as_str();
+    // Check agent exists — kernel returns a generic error for missing
+    // agents that the match arm below would wrap as 500. Validate up
+    // front so the caller gets a 404 for the common case.
+    if state.kernel.agent_registry().get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     match state
         .kernel
         .set_agent_model(agent_id, model, explicit_provider)
@@ -2486,6 +2528,16 @@ pub async fn set_agent_tools(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": t.t("api-error-agent-missing-tools")})),
+        );
+    }
+
+    // Check agent exists — kernel returns a generic error for missing
+    // agents that the match arm below would wrap as 500. Validate up
+    // front so the caller gets a 404 for the common case.
+    if state.kernel.agent_registry().get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 
@@ -2881,6 +2933,24 @@ pub async fn patch_agent(
             );
         }
     }
+    if let Some(mcp_servers) = match patch_agent_mcp_servers(&body) {
+        Ok(servers) => servers,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error})),
+            );
+        }
+    } {
+        if let Err(e) = state.kernel.set_agent_mcp_servers(agent_id, mcp_servers) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
+            );
+        }
+    }
 
     // Persist updated entry to SQLite
     if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
@@ -2899,6 +2969,31 @@ pub async fn patch_agent(
             Json(serde_json::json!({"error": t.t("api-error-agent-vanished")})),
         )
     }
+}
+
+fn patch_agent_mcp_servers(body: &serde_json::Value) -> Result<Option<Vec<String>>, &'static str> {
+    let raw = body.get("mcp_servers").or_else(|| {
+        body.get("capabilities")
+            .and_then(|caps| caps.get("mcp_servers"))
+    });
+
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+
+    let items = raw
+        .as_array()
+        .ok_or("mcp_servers must be an array of strings")?;
+
+    let mut servers = Vec::with_capacity(items.len());
+    for item in items {
+        let name = item
+            .as_str()
+            .ok_or("mcp_servers must be an array of strings")?;
+        servers.push(name.to_string());
+    }
+
+    Ok(Some(servers))
 }
 
 // ---------------------------------------------------------------------------
@@ -4568,6 +4663,8 @@ mod tests {
             api_key_env: "OPENAI_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         };
         let override_dm = librefang_types::config::DefaultModelConfig {
             provider: "deepseek".to_string(),
@@ -4575,6 +4672,8 @@ mod tests {
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         };
 
         let effective = effective_default_model(&base, Some(&override_dm));
@@ -4592,6 +4691,8 @@ mod tests {
             api_key_env: "OPENAI_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         };
 
         let effective = effective_default_model(&base, None);
@@ -4967,5 +5068,118 @@ mod monitoring_tests {
         let logs = body["logs"].as_array().unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0]["outcome"], "custom_error");
+    }
+
+    #[test]
+    fn test_patch_agent_mcp_servers_parses_top_level_and_nested_shapes() {
+        let top_level = serde_json::json!({"mcp_servers": ["alpha", "beta"]});
+        assert_eq!(
+            patch_agent_mcp_servers(&top_level).unwrap(),
+            Some(vec!["alpha".to_string(), "beta".to_string()])
+        );
+
+        let nested = serde_json::json!({"capabilities": {"mcp_servers": ["gamma"]}});
+        assert_eq!(
+            patch_agent_mcp_servers(&nested).unwrap(),
+            Some(vec!["gamma".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_patch_agent_mcp_servers_rejects_invalid_shape() {
+        let invalid = serde_json::json!({"mcp_servers": [{}]});
+        assert!(patch_agent_mcp_servers(&invalid).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_patch_agent_updates_top_level_mcp_servers_and_persists() {
+        let (state, _tmp) = monitoring_test_app_state();
+        let manifest = AgentManifest {
+            name: "patch-top-level-mcp".to_string(),
+            mcp_servers: vec!["server-a".to_string()],
+            ..AgentManifest::default()
+        };
+        let agent_id = state.kernel.spawn_agent(manifest).unwrap();
+
+        let (status, body) = json_response(
+            patch_agent(
+                State(state.clone()),
+                Path(agent_id.to_string()),
+                None,
+                Json(serde_json::json!({"mcp_servers": []})),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "ok");
+        assert_eq!(
+            state
+                .kernel
+                .agent_registry()
+                .get(agent_id)
+                .unwrap()
+                .manifest
+                .mcp_servers,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            state
+                .kernel
+                .memory_substrate()
+                .load_agent(agent_id)
+                .unwrap()
+                .unwrap()
+                .manifest
+                .mcp_servers,
+            Vec::<String>::new()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_patch_agent_updates_nested_capabilities_mcp_servers_and_persists() {
+        let (state, _tmp) = monitoring_test_app_state();
+        let manifest = AgentManifest {
+            name: "patch-nested-mcp".to_string(),
+            mcp_servers: vec!["server-b".to_string()],
+            ..AgentManifest::default()
+        };
+        let agent_id = state.kernel.spawn_agent(manifest).unwrap();
+
+        let (status, body) = json_response(
+            patch_agent(
+                State(state.clone()),
+                Path(agent_id.to_string()),
+                None,
+                Json(serde_json::json!({"capabilities": {"mcp_servers": []}})),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "ok");
+        assert_eq!(
+            state
+                .kernel
+                .agent_registry()
+                .get(agent_id)
+                .unwrap()
+                .manifest
+                .mcp_servers,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            state
+                .kernel
+                .memory_substrate()
+                .load_agent(agent_id)
+                .unwrap()
+                .unwrap()
+                .manifest
+                .mcp_servers,
+            Vec::<String>::new()
+        );
     }
 }

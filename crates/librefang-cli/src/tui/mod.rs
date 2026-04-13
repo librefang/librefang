@@ -1222,6 +1222,8 @@ impl App {
 
     fn handle_kernel_ready(&mut self, kernel: Arc<LibreFangKernel>) {
         self.kernel_booting = false;
+        // Spawn approval expiry sweep task
+        kernel.clone().spawn_approval_sweep_task();
         self.backend = Backend::InProcess { kernel };
         self.agents.reset();
         self.enter_main_phase();

@@ -20,6 +20,8 @@ fn test_config() -> KernelConfig {
             api_key_env: "GROQ_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
     }

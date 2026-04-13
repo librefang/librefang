@@ -16,6 +16,53 @@ use std::sync::Arc;
 /// Compile-time ETag based on the crate version.
 const ETAG: &str = concat!("\"librefang-", env!("CARGO_PKG_VERSION"), "\"");
 
+/// Loading page shown while dashboard assets are being downloaded.
+const LOADING_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta http-equiv="refresh" content="3">
+<title>LibreFang</title>
+<style>
+  body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8f9fa;color:#333}
+  .c{text-align:center}
+  .spinner{width:32px;height:32px;border:3px solid #e0e0e0;border-top-color:#666;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="c">
+  <div class="spinner"></div>
+  <p>Downloading dashboard assets…</p>
+</div>
+</body>
+</html>"#;
+
+/// Error page shown when dashboard sync failed and no embedded fallback exists.
+const DASHBOARD_UNAVAILABLE_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>LibreFang</title>
+<style>
+  body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8f9fa;color:#333}
+  .c{max-width:520px;padding:24px;text-align:center}
+  h1{font-size:20px;margin:0 0 12px}
+  p{line-height:1.5;margin:0 0 12px}
+  code{background:#eee;padding:2px 6px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="c">
+  <h1>Dashboard assets unavailable</h1>
+  <p>LibreFang could not load the dashboard assets from disk, and the runtime download did not complete.</p>
+  <p>Restart the app after network access is available, or build the desktop app with embedded dashboard assets.</p>
+</div>
+</body>
+</html>"#;
+
 /// Compile-time embedded dashboard (fallback).
 static REACT_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/static/react");
 
@@ -27,6 +74,16 @@ const FAVICON_ICO: &[u8] = include_bytes!("../static/favicon.ico");
 const LOCALE_EN: &str = include_str!("../static/locales/en.json");
 const LOCALE_ZH_CN: &str = include_str!("../static/locales/zh-CN.json");
 const LOCALE_JA: &str = include_str!("../static/locales/ja.json");
+
+const DASHBOARD_SYNC_ERROR_FILE: &str = ".sync-error";
+
+fn embedded_dashboard_available() -> bool {
+    REACT_DIST.get_file("index.html").is_some()
+}
+
+fn dashboard_sync_error_path(home_dir: &std::path::Path) -> std::path::PathBuf {
+    home_dir.join("dashboard").join(DASHBOARD_SYNC_ERROR_FILE)
+}
 
 /// Resolve a dashboard file: try runtime dir first, then embedded fallback.
 fn resolve_dashboard_file(
@@ -115,11 +172,27 @@ pub async fn webchat_page(State(state): State<Arc<crate::routes::AppState>>) -> 
             data,
         )
             .into_response(),
-        None => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "React dashboard build missing (expected static/react/index.html)",
-        )
-            .into_response(),
+        None => {
+            let body = if embedded_dashboard_available() {
+                LOADING_HTML
+            } else if let Some(home) = home_dir.as_deref() {
+                if dashboard_sync_error_path(home).exists() {
+                    DASHBOARD_UNAVAILABLE_HTML
+                } else {
+                    LOADING_HTML
+                }
+            } else {
+                LOADING_HTML
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                body,
+            )
+                .into_response()
+        }
     }
 }
 
@@ -176,12 +249,14 @@ fn content_type_for(path: &str) -> &'static str {
 pub async fn sync_dashboard(home_dir: &std::path::Path) {
     let dashboard_dir = home_dir.join("dashboard");
     let version_file = dashboard_dir.join(".version");
+    let sync_error_file = dashboard_sync_error_path(home_dir);
 
     // Skip if already synced for this version
     let current_version = env!("CARGO_PKG_VERSION");
     if let Ok(cached) = std::fs::read_to_string(&version_file) {
         if cached.trim() == current_version {
             tracing::debug!("Dashboard already synced for v{current_version}");
+            let _ = std::fs::remove_file(&sync_error_file);
             return;
         }
     }
@@ -202,10 +277,15 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
                 "Dashboard sync skipped (HTTP {}), using embedded fallback",
                 r.status()
             );
+            let _ = std::fs::write(
+                &sync_error_file,
+                format!("dashboard sync skipped: HTTP {}", r.status()),
+            );
             return;
         }
         Err(e) => {
             tracing::debug!("Dashboard sync skipped ({e}), using embedded fallback");
+            let _ = std::fs::write(&sync_error_file, format!("dashboard sync skipped: {e}"));
             return;
         }
     };
@@ -214,6 +294,7 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("Failed to download dashboard: {e}");
+            let _ = std::fs::write(&sync_error_file, format!("dashboard download failed: {e}"));
             return;
         }
     };
@@ -226,11 +307,13 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
     let _ = std::fs::remove_dir_all(&tmp_dir);
     if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
         tracing::warn!("Failed to create tmp dir: {e}");
+        let _ = std::fs::write(&sync_error_file, format!("dashboard tmp dir failed: {e}"));
         return;
     }
 
     if let Err(e) = archive.unpack(&tmp_dir) {
         tracing::warn!("Failed to extract dashboard archive: {e}");
+        let _ = std::fs::write(&sync_error_file, format!("dashboard extract failed: {e}"));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return;
     }
@@ -260,6 +343,7 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
     if had_existing {
         if let Err(e) = std::fs::rename(&dashboard_dir, &backup_dir) {
             tracing::warn!("Failed to back up old dashboard: {e}");
+            let _ = std::fs::write(&sync_error_file, format!("dashboard backup failed: {e}"));
             let _ = std::fs::remove_dir_all(&tmp_dir);
             return;
         }
@@ -269,6 +353,7 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
         tracing::debug!("rename failed ({e}), falling back to copy");
         if let Err(e) = copy_dir_recursive(source, &dashboard_dir) {
             tracing::warn!("Failed to install dashboard: {e}");
+            let _ = std::fs::write(&sync_error_file, format!("dashboard install failed: {e}"));
             // Restore backup
             if had_existing {
                 let _ = std::fs::rename(&backup_dir, &dashboard_dir);
@@ -283,6 +368,7 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
 
     // Write version marker
     let _ = std::fs::write(&version_file, current_version);
+    let _ = std::fs::remove_file(&sync_error_file);
     tracing::info!("Dashboard synced to v{current_version}");
 }
 

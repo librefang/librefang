@@ -6,10 +6,12 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
-import { Clock, Plus, Play, Trash2, Calendar, Zap, X, Loader2, AlertCircle, ChevronRight } from "lucide-react";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
+import { Clock, Plus, Play, Trash2, Calendar, Zap, Loader2, AlertCircle, ChevronRight } from "lucide-react";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Modal } from "../components/ui/Modal";
 import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 30000;
@@ -19,9 +21,11 @@ export function SchedulerPage() {
   const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [showCreate, setShowCreate] = useState(false);
+  useCreateShortcut(() => setShowCreate(true));
   const [showCronPicker, setShowCronPicker] = useState(false);
   const [name, setName] = useState("");
   const [cron, setCron] = useState("0 9 * * *");
+  const [cronTz, setCronTz] = useState<string | undefined>(undefined);
   const [targetType, setTargetType] = useState<"agent" | "workflow">("agent");
   const [agentId, setAgentId] = useState("");
   const [workflowId, setWorkflowId] = useState("");
@@ -57,10 +61,10 @@ export function SchedulerPage() {
     if (!name.trim()) return;
     try {
       await createMut.mutateAsync({
-        name, cron, message, enabled: true,
+        name, cron, tz: cronTz, message, enabled: true,
         ...(targetType === "agent" ? { agent_id: agentId } : { workflow_id: workflowId }),
       });
-      setShowCreate(false); setName(""); setMessage(""); setCron("0 9 * * *"); setAgentId(""); setWorkflowId(""); setTargetType("agent");
+      setShowCreate(false); setName(""); setMessage(""); setCron("0 9 * * *"); setCronTz(undefined); setAgentId(""); setWorkflowId(""); setTargetType("agent");
       await queryClient.invalidateQueries({ queryKey: ["schedules"] });
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
@@ -179,6 +183,7 @@ export function SchedulerPage() {
                   <div className="flex items-center gap-2 sm:gap-3 pl-9 sm:pl-11 text-[9px] sm:text-[10px] text-text-dim/60 flex-wrap">
                     <span className="font-mono bg-main px-1 sm:px-1.5 py-0.5 rounded">{s.cron}</span>
                     <span className="text-text-dim hidden sm:inline">{cronHint(s.cron || "")}</span>
+                    <span className="text-text-dim/40">{s.tz || "UTC"}</span>
                     {agent && <span className="font-bold text-brand truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</span>}
                     {s.next_run && <span className="text-text-dim/40">{t("scheduler.next_run", { defaultValue: "Next" })}: {new Date(s.next_run).toLocaleString()}</span>}
                   </div>
@@ -248,14 +253,8 @@ export function SchedulerPage() {
       </div>
 
       {/* Create Modal */}
-      {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreate(false)}>
-          <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[440px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <h3 className="text-sm font-bold">{t("scheduler.create_job")}</h3>
-              <button onClick={() => setShowCreate(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
-            </div>
-            <form onSubmit={handleCreate} className="p-5 space-y-4">
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("scheduler.create_job")} size="md">
+        <form onSubmit={handleCreate} className="p-5 space-y-4">
               <div>
                 <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.job_name")}</label>
                 <input value={name} onChange={e => setName(e.target.value)} placeholder={t("scheduler.job_name_placeholder")} className={inputClass} />
@@ -268,8 +267,8 @@ export function SchedulerPage() {
                   className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-border-subtle bg-main hover:border-brand transition-colors text-left"
                 >
                   <div>
-                    <p className="text-sm">{cronHint(cron)}</p>
-                    <p className="text-[10px] font-mono text-text-dim/50">{cron}</p>
+                    <p className="text-sm">{cronHint(cron)}{cronTz && cronTz !== "UTC" ? ` (${cronTz.split("/").pop()?.replace(/_/g, " ")})` : ""}</p>
+                    <p className="text-[10px] font-mono text-text-dim/50">{cron}{cronTz ? ` · ${cronTz}` : ""}</p>
                   </div>
                   <ChevronRight className="w-4 h-4 text-text-dim/40 flex-shrink-0" />
                 </button>
@@ -278,7 +277,8 @@ export function SchedulerPage() {
                 <ScheduleModal
                   title={t("scheduler.cron_exp")}
                   initialCron={cron}
-                  onSave={(c) => { setCron(c); setShowCronPicker(false); }}
+                  initialTz={cronTz}
+                  onSave={(c, tz) => { setCron(c); setCronTz(tz); setShowCronPicker(false); }}
                   onClose={() => setShowCronPicker(false)}
                 />
               )}
@@ -321,10 +321,8 @@ export function SchedulerPage() {
                 </Button>
                 <Button type="button" variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
               </div>
-            </form>
-          </div>
-        </div>
-      )}
+        </form>
+      </Modal>
     </div>
   );
 }

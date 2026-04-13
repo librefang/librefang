@@ -283,6 +283,7 @@ export interface ScheduleItem {
   id: string;
   name?: string;
   cron?: string;
+  tz?: string | null;
   description?: string;
   message?: string;
   enabled?: boolean;
@@ -521,6 +522,10 @@ export interface HandDefinitionItem {
   dashboard_metrics?: number;
   has_settings?: boolean;
   settings_count?: number;
+  /** True when the hand was installed by the user (lives under
+   *  `home/workspaces/{id}`). Built-in hands shipped by librefang-registry
+   *  report false and cannot be uninstalled. */
+  is_custom?: boolean;
 }
 
 export interface HandInstanceItem {
@@ -716,24 +721,24 @@ export async function postQuickInit(): Promise<{ status: string; provider?: stri
 }
 
 export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
-  const [health, status, providersRaw, channelsRaw, skillsRaw, agents, workflows] = await Promise.all([
-    get<HealthResponse>("/api/health"),
-    get<StatusResponse>("/api/status"),
-    get<ProvidersResponse>("/api/providers"),
-    get<ChannelsResponse>("/api/channels"),
-    get<SkillsResponse>("/api/skills"),
-    listAgents(),
-    get<{ workflows?: any[] }>("/api/workflows")
-  ]);
+  const snap = await get<{
+    health: HealthResponse;
+    status: StatusResponse;
+    agents: AgentItem[];
+    providers: ProviderItem[];
+    channels: ChannelItem[];
+    skillCount: number;
+    workflowCount: number;
+  }>("/api/dashboard/snapshot");
 
   return {
-    health,
-    status,
-    providers: providersRaw.providers ?? [],
-    channels: channelsRaw.channels ?? [],
-    agents: agents ?? [],
-    skillCount: skillsRaw.skills?.length ?? 0,
-    workflowCount: workflows.workflows?.length ?? 0
+    health: snap.health,
+    status: snap.status,
+    agents: snap.agents ?? [],
+    providers: snap.providers ?? [],
+    channels: snap.channels ?? [],
+    skillCount: snap.skillCount ?? 0,
+    workflowCount: snap.workflowCount ?? 0,
   };
 }
 
@@ -780,6 +785,15 @@ export interface AgentTemplate {
 export async function listAgentTemplates(): Promise<AgentTemplate[]> {
   const data = await get<{ templates: AgentTemplate[] }>("/api/templates");
   return data.templates ?? [];
+}
+
+export async function getAgentTemplateToml(name: string): Promise<string> {
+  const response = await fetch(`/api/templates/${encodeURIComponent(name)}/toml`);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Failed to fetch template: ${response.status}`);
+  }
+  return response.text();
 }
 
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
@@ -1253,6 +1267,7 @@ export async function listSchedules(): Promise<ScheduleItem[]> {
 export async function createSchedule(payload: {
   name: string;
   cron: string;
+  tz?: string;
   agent_id?: string;
   workflow_id?: string;
   message?: string;
@@ -1267,6 +1282,7 @@ export async function updateSchedule(
     enabled?: boolean;
     name?: string;
     cron?: string;
+    tz?: string;
     agent_id?: string;
     message?: string;
   }
@@ -1478,8 +1494,49 @@ export async function listApprovals(): Promise<ApprovalItem[]> {
   return data.approvals ?? [];
 }
 
-export async function approveApproval(id: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/approve`, {});
+export async function approveApproval(id: string, totpCode?: string): Promise<ApiActionResponse> {
+  const body = totpCode ? { totp_code: totpCode } : {};
+  return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/approve`, body);
+}
+
+// ── TOTP second-factor management ──
+
+export interface TotpSetupResponse {
+  otpauth_uri: string;
+  secret: string;
+  qr_code: string | null;
+  recovery_codes: string[];
+  message: string;
+}
+
+export interface TotpStatusResponse {
+  enrolled: boolean;
+  confirmed: boolean;
+  enforced: boolean;
+  remaining_recovery_codes: number;
+}
+
+export async function totpSetup(currentCode?: string): Promise<TotpSetupResponse> {
+  const body = currentCode ? { current_code: currentCode } : {};
+  return post<TotpSetupResponse>("/api/approvals/totp/setup", body);
+}
+
+export async function totpConfirm(code: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/approvals/totp/confirm", { code });
+}
+
+export async function totpStatus(): Promise<TotpStatusResponse> {
+  return get<TotpStatusResponse>("/api/approvals/totp/status");
+}
+
+export async function totpRevoke(code: string): Promise<ApiActionResponse> {
+  const response = await fetch("/api/approvals/totp/revoke", {
+    method: "POST",
+    headers: buildHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ code }),
+  });
+  if (!response.ok) throw await parseError(response);
+  return response.json();
 }
 
 export async function rejectApproval(id: string): Promise<ApiActionResponse> {
@@ -1780,6 +1837,13 @@ export async function deactivateHand(instanceId: string): Promise<ApiActionRespo
   return del<ApiActionResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}`);
 }
 
+/** Uninstall a user-installed hand. Fails with 404 for built-ins and
+ *  409 if there is still a live instance. Callers should deactivate
+ *  first, then call this. */
+export async function uninstallHand(handId: string): Promise<{ status: string; hand_id: string }> {
+  return del(`/api/hands/${encodeURIComponent(handId)}`);
+}
+
 export async function getHandStats(instanceId: string): Promise<HandStatsResponse> {
   return get<HandStatsResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/stats`);
 }
@@ -1817,6 +1881,15 @@ export async function getHandSettings(handId: string): Promise<HandSettingsRespo
 
 export async function setHandSecret(handId: string, key: string, value: string): Promise<{ ok: boolean }> {
   return post<{ ok: boolean }>(`/api/hands/${encodeURIComponent(handId)}/secret`, { key, value });
+}
+
+/** Update mutable settings on an active hand instance. The backend returns
+ *  404 if no instance exists for the hand — callers should guard accordingly. */
+export async function updateHandSettings(
+  handId: string,
+  config: Record<string, unknown>,
+): Promise<{ status: string; hand_id: string; instance_id: string; config: Record<string, unknown> }> {
+  return put(`/api/hands/${encodeURIComponent(handId)}/settings`, config);
 }
 
 export interface HandMessageResponse {
@@ -2014,7 +2087,7 @@ export function hasApiKey(): boolean {
   return !!key && key.length > 0;
 }
 
-export type AuthMode = "credentials" | "api_key" | "none";
+export type AuthMode = "credentials" | "api_key" | "hybrid" | "none";
 
 export async function checkDashboardAuthMode(): Promise<AuthMode> {
   try {
@@ -2118,8 +2191,12 @@ export async function uninstallPlugin(name: string): Promise<ApiActionResponse> 
   return post<ApiActionResponse>("/api/plugins/uninstall", { name });
 }
 
-export async function scaffoldPlugin(name: string, description: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/plugins/scaffold", { name, description });
+export async function scaffoldPlugin(
+  name: string,
+  description: string,
+  runtime?: string,
+): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/plugins/scaffold", { name, description, runtime });
 }
 
 export async function installPluginDeps(name: string): Promise<ApiActionResponse> {
@@ -2280,6 +2357,55 @@ export async function createRegistryContent(
 
 // ---------------------------------------------------------------------------
 // Auth — change password
+// ---------------------------------------------------------------------------
+
+// ── MCP Servers API ─────────────────────────────────────────────────────
+
+export interface McpServerTransport {
+  type: "stdio" | "sse" | "http";
+  command?: string;
+  args?: string[];
+  url?: string;
+}
+
+export interface McpServerConfigured {
+  name: string;
+  transport: McpServerTransport;
+  timeout_secs?: number;
+  env?: string[];
+  headers?: string[];
+}
+
+export interface McpServerConnected {
+  name: string;
+  tools_count: number;
+  tools: { name: string; description?: string }[];
+  connected: boolean;
+}
+
+export interface McpServersResponse {
+  configured: McpServerConfigured[];
+  connected: McpServerConnected[];
+  total_configured: number;
+  total_connected: number;
+}
+
+export async function listMcpServers(): Promise<McpServersResponse> {
+  return get<McpServersResponse>("/api/mcp/servers");
+}
+
+export async function addMcpServer(server: Omit<McpServerConfigured, "name"> & { name: string }): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/mcp/servers", server);
+}
+
+export async function updateMcpServer(name: string, server: Partial<McpServerConfigured>): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`, server);
+}
+
+export async function deleteMcpServer(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`);
+}
+
 // ---------------------------------------------------------------------------
 
 export async function changePassword(

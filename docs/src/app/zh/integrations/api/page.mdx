@@ -1,0 +1,456 @@
+# API 参考
+
+LibreFang 在守护进程运行时提供 REST API、WebSocket 端点和 SSE 流式传输。默认监听地址为 `http://127.0.0.1:4545`。
+
+所有响应均包含安全头（CSP、X-Frame-Options、X-Content-Type-Options、HSTS），并受 GCRA 成本感知速率限制器保护，支持按 IP 的令牌桶追踪和过期条目自动清理。LibreFang 实现了 16 个安全系统，包括 Merkle 审计链、污点追踪、WASM 双重计量、Ed25519 清单签名、SSRF 防护、子进程沙箱和密钥归零。
+
+
+## 目录
+
+### [代理与工作流 API](/zh/integrations/api/agents)
+Agent 端点、工作流端点、触发器端点、调度端点、目标端点、定时任务端点
+
+### [系统与配置 API](/zh/integrations/api/system)
+模板端点、系统端点、配置管理、会话管理、任务队列、备份和恢复、迁移、绑定和命令
+
+### [智能与技能 API](/zh/integrations/api/intelligence)
+记忆端点、技能和市场、ClawHub、Hands、扩展、插件、媒体生成
+
+### [供应商与模型 API](/zh/integrations/api/providers)
+模型目录、提供商配置
+
+### [通信与网络 API](/zh/integrations/api/communication)
+通道端点、MCP 和 A2A 协议、审计和安全、用量和分析、预算、Webhooks、集成、配对、OAuth/OIDC、通信、审批、网络和对等节点
+
+### [实时 API](/zh/integrations/api/realtime)
+WebSocket 协议、SSE 流式传输、OpenAI 兼容 API
+
+- [认证](#认证)
+- [错误响应](#错误响应)
+- [端点汇总](#端点汇总)
+
+---
+
+## 认证
+
+在 `config.toml` 中配置 API 密钥后，所有端点（除 `/api/health` 和 `/` 外）均需要 Bearer 令牌：
+
+```
+Authorization: Bearer <your-api-key>
+```
+
+### 设置 API 密钥
+
+在 `~/.librefang/config.toml` 中添加：
+
+```toml
+api_key = "your-secret-api-key"
+```
+
+### 无认证模式
+
+如果 `api_key` 为空或未设置，则 API 无需认证即可访问。此模式下 CORS 仅限 localhost 来源。
+
+### 公共端点（无需认证）
+
+- `GET /api/health`
+- `GET /` (WebChat UI)
+
+---
+
+
+## 错误响应
+
+所有错误响应使用统一的 JSON 格式：
+
+```json
+{
+  "error": "Description of what went wrong"
+}
+```
+
+### HTTP 状态码
+
+| 状态码 | 含义 |
+|--------|------|
+| `200` | 成功 |
+| `201` | 已创建（创建 Agent、创建工作流、创建触发器、安装技能） |
+| `400` | 请求错误（无效 UUID、缺少必填字段、格式错误的 TOML/JSON） |
+| `401` | 未授权（缺少或无效的 `Authorization: Bearer` 头） |
+| `404` | 未找到（Agent、工作流、触发器、模板、模型、技能或 KV 键不存在） |
+| `429` | 请求过多（GCRA 速率限制已超） |
+| `500` | 内部服务器错误（Agent 循环失败、数据库错误、驱动程序错误） |
+
+### 请求 ID
+
+每个响应都包含 `x-request-id` 头，其值为用于追踪的 UUID：
+
+```
+x-request-id: 550e8400-e29b-41d4-a716-446655440000
+```
+
+在报告问题或在日志中关联请求时使用此值。
+
+### 安全头
+
+每个响应都包含安全头：
+
+| 头 | 值 |
+|----|----|
+| `Content-Security-Policy` | `default-src 'self'`（附带适当的指令） |
+| `X-Frame-Options` | `DENY` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains` |
+| `X-Request-Id` | 每个请求唯一的 UUID |
+
+### 速率限制
+
+GCRA（通用信元速率算法）速率限制器提供成本感知的令牌桶速率限制，支持按 IP 追踪和过期条目自动清理。不同端点消耗不同的令牌成本（例如 `/api/agents/&lbrace;id&rbrace;/message` 的成本高于 `/api/health`）。当超出限制时，服务器返回 `429 Too Many Requests`：
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+
+{"error": "Rate limit exceeded"}
+```
+
+`Retry-After` 头以秒为单位指示窗口持续时间。
+
+---
+
+
+## 端点汇总
+
+**230+ 个端点**，分布在 35 个分组中。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| **系统** | | |
+| GET | `/` | WebChat UI |
+| GET | `/api/health` | 健康检查（无需认证，已脱敏） |
+| GET | `/api/health/detail` | 完整健康检查（需要认证） |
+| GET | `/api/status` | 内核状态 |
+| GET | `/api/version` | 版本信息 |
+| POST | `/api/shutdown` | 优雅关闭 |
+| GET | `/api/profiles` | 列出 Agent 配置文件 |
+| GET | `/api/profiles/{name}` | 获取指定配置文件 |
+| GET | `/api/tools` | 列出可用工具 |
+| GET | `/api/tools/{name}` | 获取工具详情 |
+| GET | `/api/metrics` | Prometheus 指标 |
+| GET | `/api/versions` | API 版本发现 |
+| GET | `/api/openapi.json` | OpenAPI 规范 |
+| **配置** | | |
+| GET | `/api/config` | 配置（敏感信息已脱敏） |
+| GET | `/api/config/schema` | 配置 JSON Schema |
+| POST | `/api/config/set` | 运行时设置配置值 |
+| POST | `/api/config/reload` | 从磁盘重新加载配置 |
+| **Agent** | | |
+| GET | `/api/agents` | 列出 Agent |
+| POST | `/api/agents` | 创建 Agent |
+| POST | `/api/agents/bulk` | 批量创建 Agent |
+| DELETE | `/api/agents/bulk` | 批量删除 Agent |
+| POST | `/api/agents/bulk/start` | 批量启动 Agent |
+| POST | `/api/agents/bulk/stop` | 批量停止 Agent |
+| GET | `/api/agents/{id}` | 获取 Agent 详情 |
+| DELETE | `/api/agents/{id}` | 终止 Agent |
+| PATCH | `/api/agents/{id}` | 部分更新 Agent |
+| PUT | `/api/agents/{id}/update` | 完整更新 Agent 配置 |
+| PUT | `/api/agents/{id}/mode` | 设置 Agent 模式（Stable/Normal） |
+| PATCH | `/api/agents/{id}/identity` | 更新 Agent 身份 |
+| PATCH | `/api/agents/{id}/config` | 部分更新 Agent 配置 |
+| POST | `/api/agents/{id}/clone` | 克隆 Agent |
+| POST | `/api/agents/{id}/message` | 发送消息（阻塞） |
+| POST | `/api/agents/{id}/message/stream` | 发送消息（SSE 流） |
+| GET | `/api/agents/{id}/session` | 获取当前对话历史 |
+| GET | `/api/agents/{id}/sessions` | 列出所有 Agent 会话 |
+| POST | `/api/agents/{id}/sessions` | 创建新会话 |
+| POST | `/api/agents/{id}/sessions/{session_id}/switch` | 切换活跃会话 |
+| GET | `/api/agents/{id}/sessions/by-label/{label}` | 按标签查找会话 |
+| DELETE | `/api/agents/{id}/history` | 清除对话历史 |
+| POST | `/api/agents/{id}/session/reset` | 重置会话 |
+| POST | `/api/agents/{id}/session/compact` | 基于 LLM 的压缩 |
+| POST | `/api/agents/{id}/stop` | 取消当前运行 |
+| PUT | `/api/agents/{id}/model` | 切换模型 |
+| GET | `/api/agents/{id}/tools` | 获取 Agent 工具 |
+| PUT | `/api/agents/{id}/tools` | 设置 Agent 工具 |
+| GET | `/api/agents/{id}/skills` | 获取 Agent 技能 |
+| PUT | `/api/agents/{id}/skills` | 设置 Agent 技能 |
+| GET | `/api/agents/{id}/mcp_servers` | 获取 Agent 的 MCP 服务器 |
+| PUT | `/api/agents/{id}/mcp_servers` | 设置 Agent 的 MCP 服务器 |
+| GET | `/api/agents/{id}/traces` | 执行追踪 |
+| GET | `/api/agents/{id}/metrics` | Agent 指标 |
+| GET | `/api/agents/{id}/logs` | Agent 日志行 |
+| GET | `/api/agents/{id}/deliveries` | 入站投递 |
+| GET | `/api/agents/{id}/files` | 列出工作区文件 |
+| GET | `/api/agents/{id}/files/{filename}` | 获取工作区文件 |
+| PUT | `/api/agents/{id}/files/{filename}` | 设置工作区文件 |
+| DELETE | `/api/agents/{id}/files/{filename}` | 删除工作区文件 |
+| POST | `/api/agents/{id}/upload` | 上传文件（multipart） |
+| GET | `/api/uploads/{file_id}` | 获取已上传文件 |
+| GET | `/api/agents/{id}/ws` | WebSocket 聊天 |
+| GET | `/api/agents/{id}/memory/export` | 导出 KV 记忆 |
+| POST | `/api/agents/{id}/memory/import` | 导入 KV 记忆 |
+| **工作流** | | |
+| GET | `/api/workflows` | 列出工作流 |
+| POST | `/api/workflows` | 创建工作流 |
+| GET | `/api/workflows/{id}` | 获取工作流 |
+| PUT | `/api/workflows/{id}` | 更新工作流 |
+| DELETE | `/api/workflows/{id}` | 删除工作流 |
+| POST | `/api/workflows/{id}/run` | 运行工作流 |
+| GET | `/api/workflows/{id}/runs` | 列出工作流执行记录 |
+| **触发器** | | |
+| GET | `/api/triggers` | 列出触发器 |
+| POST | `/api/triggers` | 创建触发器 |
+| PUT | `/api/triggers/{id}` | 更新触发器 |
+| DELETE | `/api/triggers/{id}` | 删除触发器 |
+| **调度** | | |
+| GET | `/api/schedules` | 列出调度 |
+| POST | `/api/schedules` | 创建调度 |
+| GET | `/api/schedules/{id}` | 获取调度 |
+| PUT | `/api/schedules/{id}` | 更新调度 |
+| DELETE | `/api/schedules/{id}` | 删除调度 |
+| POST | `/api/schedules/{id}/run` | 立即运行调度 |
+| **记忆（KV）** | | |
+| GET | `/api/memory/agents/{id}/kv` | 列出 KV 键值对 |
+| GET | `/api/memory/agents/{id}/kv/{key}` | 获取 KV 值 |
+| PUT | `/api/memory/agents/{id}/kv/{key}` | 设置 KV 值 |
+| DELETE | `/api/memory/agents/{id}/kv/{key}` | 删除 KV 值 |
+| **记忆（主动式）** | | |
+| GET | `/api/memory` | 列出所有主动式记忆 |
+| POST | `/api/memory` | 添加主动式记忆 |
+| GET | `/api/memory/search` | 搜索记忆（全局） |
+| GET | `/api/memory/stats` | 记忆聚合统计 |
+| POST | `/api/memory/cleanup` | 移除陈旧记忆 |
+| POST | `/api/memory/decay` | 施加时间衰减 |
+| POST | `/api/memory/bulk-delete` | 批量删除记忆 |
+| PUT | `/api/memory/items/{memory_id}` | 更新记忆条目 |
+| DELETE | `/api/memory/items/{memory_id}` | 删除记忆条目 |
+| GET | `/api/memory/items/{memory_id}/history` | 记忆编辑历史 |
+| GET | `/api/memory/user/{user_id}` | 按用户查询记忆 |
+| GET | `/api/memory/agents/{id}` | Agent 主动式记忆 |
+| DELETE | `/api/memory/agents/{id}` | 清除 Agent 记忆 |
+| GET | `/api/memory/agents/{id}/search` | 搜索 Agent 记忆 |
+| GET | `/api/memory/agents/{id}/stats` | Agent 记忆统计 |
+| DELETE | `/api/memory/agents/{id}/level/{level}` | 按级别清除记忆 |
+| GET | `/api/memory/agents/{id}/duplicates` | 查找重复记忆 |
+| POST | `/api/memory/agents/{id}/consolidate` | 合并记忆 |
+| GET | `/api/memory/agents/{id}/count` | 统计 Agent 记忆数 |
+| GET | `/api/memory/agents/{id}/relations` | 查询关系图谱 |
+| POST | `/api/memory/agents/{id}/relations` | 存储关系 |
+| GET | `/api/memory/agents/{id}/export` | 导出 Agent 记忆 |
+| POST | `/api/memory/agents/{id}/import` | 导入 Agent 记忆 |
+| **通道** | | |
+| GET | `/api/channels` | 列出通道（44 种适配器） |
+| GET | `/api/channels/{name}` | 获取通道配置 |
+| POST | `/api/channels/{name}/configure` | 配置通道 |
+| DELETE | `/api/channels/{name}/configure` | 移除通道配置 |
+| POST | `/api/channels/{name}/test` | 测试通道 |
+| POST | `/api/channels/reload` | 重新加载所有通道 |
+| POST | `/api/channels/whatsapp/qr/start` | 启动 WhatsApp 二维码会话 |
+| GET | `/api/channels/whatsapp/qr/status` | WhatsApp 二维码状态 |
+| **模板** | | |
+| GET | `/api/templates` | 列出模板 |
+| GET | `/api/templates/{name}` | 获取模板 |
+| **会话** | | |
+| GET | `/api/sessions` | 列出所有会话 |
+| POST | `/api/sessions/cleanup` | 清理孤立会话 |
+| GET | `/api/sessions/{id}` | 获取会话详情 |
+| DELETE | `/api/sessions/{id}` | 删除会话 |
+| PUT | `/api/sessions/{id}/label` | 为会话添加标签 |
+| **模型目录** | | |
+| GET | `/api/models` | 完整模型目录（130+ 模型） |
+| GET | `/api/models/aliases` | 列出模型别名 |
+| POST | `/api/models/aliases` | 创建模型别名 |
+| DELETE | `/api/models/aliases/{alias}` | 删除模型别名 |
+| POST | `/api/models/custom` | 注册自定义模型 |
+| DELETE | `/api/models/custom/{id}` | 移除自定义模型 |
+| GET | `/api/models/{id}` | 模型详情 |
+| GET | `/api/catalog/status` | 目录版本和更新信息 |
+| POST | `/api/catalog/update` | 触发目录更新 |
+| **提供商** | | |
+| GET | `/api/providers` | 提供商列表及认证状态 |
+| GET | `/api/providers/ollama/detect` | 自动检测 Ollama |
+| POST | `/api/providers/github-copilot/oauth/start` | 启动 Copilot OAuth |
+| GET | `/api/providers/github-copilot/oauth/poll/{poll_id}` | 轮询 Copilot OAuth |
+| GET | `/api/providers/{name}` | 获取提供商详情 |
+| POST | `/api/providers/{name}/key` | 设置提供商 API 密钥 |
+| DELETE | `/api/providers/{name}/key` | 移除提供商 API 密钥 |
+| POST | `/api/providers/{name}/test` | 测试提供商连通性 |
+| PUT | `/api/providers/{name}/url` | 覆盖提供商基础 URL |
+| **技能和市场** | | |
+| GET | `/api/skills` | 列出已安装技能（60 个内置） |
+| POST | `/api/skills/install` | 安装技能 |
+| POST | `/api/skills/uninstall` | 卸载技能 |
+| POST | `/api/skills/create` | 创建新技能 |
+| GET | `/api/marketplace/search` | 搜索 FangHub |
+| **ClawHub** | | |
+| GET | `/api/clawhub/search` | 搜索 ClawHub |
+| GET | `/api/clawhub/browse` | 浏览 ClawHub |
+| GET | `/api/clawhub/skill/{slug}` | 技能详情 |
+| GET | `/api/clawhub/skill/{slug}/code` | 技能源代码 |
+| POST | `/api/clawhub/install` | 从 ClawHub 安装 |
+| **Hands** | | |
+| GET | `/api/hands` | 列出 Hand 定义 |
+| POST | `/api/hands/install` | 安装 Hand |
+| GET | `/api/hands/active` | 列出活跃的 Hand 实例 |
+| GET | `/api/hands/{hand_id}` | 获取 Hand 详情 |
+| POST | `/api/hands/{hand_id}/activate` | 激活 Hand |
+| POST | `/api/hands/{hand_id}/check-deps` | 检查 Hand 依赖项 |
+| POST | `/api/hands/{hand_id}/install-deps` | 安装 Hand 依赖项 |
+| GET | `/api/hands/{hand_id}/settings` | 获取 Hand 设置 |
+| PUT | `/api/hands/{hand_id}/settings` | 更新 Hand 设置 |
+| POST | `/api/hands/instances/{id}/pause` | 暂停 Hand 实例 |
+| POST | `/api/hands/instances/{id}/resume` | 恢复 Hand 实例 |
+| DELETE | `/api/hands/instances/{id}` | 停用 Hand 实例 |
+| GET | `/api/hands/instances/{id}/stats` | Hand 实例统计 |
+| GET | `/api/hands/instances/{id}/browser` | Hand 浏览器状态 |
+| **扩展** | | |
+| GET | `/api/extensions` | 列出扩展 |
+| GET | `/api/extensions/{name}` | 获取扩展 |
+| POST | `/api/extensions/install` | 安装扩展 |
+| POST | `/api/extensions/uninstall` | 卸载扩展 |
+| **插件** | | |
+| GET | `/api/plugins/registries` | 列出插件注册表 |
+| GET | `/api/plugins` | 列出插件 |
+| GET | `/api/plugins/{name}` | 获取插件 |
+| POST | `/api/plugins/install` | 安装插件 |
+| POST | `/api/plugins/uninstall` | 卸载插件 |
+| POST | `/api/plugins/scaffold` | 脚手架创建插件 |
+| POST | `/api/plugins/{name}/install-deps` | 安装插件依赖项 |
+| **MCP（托管）** | | |
+| GET | `/api/mcp/servers` | MCP 服务器连接 |
+| POST | `/api/mcp/servers` | 添加 MCP 服务器 |
+| GET | `/api/mcp/servers/{name}` | 获取 MCP 服务器 |
+| PUT | `/api/mcp/servers/{name}` | 更新 MCP 服务器 |
+| DELETE | `/api/mcp/servers/{name}` | 删除 MCP 服务器 |
+| **A2A（外部）** | | |
+| GET | `/api/a2a/agents` | 列出外部 A2A Agent |
+| GET | `/api/a2a/agents/{id}` | 获取外部 A2A Agent |
+| POST | `/api/a2a/discover` | 发现外部 A2A Agent |
+| POST | `/api/a2a/send` | 向外部 A2A Agent 发送任务 |
+| GET | `/api/a2a/tasks/{id}/status` | 外部 A2A 任务状态 |
+| **MCP 和 A2A 协议** | | |
+| POST | `/mcp` | MCP HTTP 传输（JSON-RPC 2.0） |
+| GET | `/.well-known/agent.json` | A2A Agent Card |
+| GET | `/a2a/agents` | A2A 本地 Agent 列表 |
+| POST | `/a2a/tasks/send` | 发送 A2A 任务 |
+| GET | `/a2a/tasks/{id}` | 获取 A2A 任务状态 |
+| POST | `/a2a/tasks/{id}/cancel` | 取消 A2A 任务 |
+| **审计和安全** | | |
+| GET | `/api/audit/recent` | 最近审计日志 |
+| GET | `/api/audit/verify` | 验证 Merkle 链完整性 |
+| GET | `/api/security` | 安全状态（16 个系统） |
+| GET | `/api/logs/stream` | SSE 实时日志流 |
+| **用量和分析** | | |
+| GET | `/api/usage` | 用量统计 |
+| GET | `/api/usage/summary` | 用量摘要及配额 |
+| GET | `/api/usage/by-model` | 按模型分类的用量 |
+| GET | `/api/usage/daily` | 每日用量明细 |
+| **预算** | | |
+| GET | `/api/budget` | 全局预算状态 |
+| PUT | `/api/budget` | 更新全局预算 |
+| GET | `/api/budget/agents` | Agent 预算排名 |
+| GET | `/api/budget/agents/{id}` | Agent 预算详情 |
+| PUT | `/api/budget/agents/{id}` | 设置 Agent 预算 |
+| **目标** | | |
+| GET | `/api/goals` | 列出目标 |
+| POST | `/api/goals` | 创建目标 |
+| GET | `/api/goals/{id}` | 获取目标 |
+| PUT | `/api/goals/{id}` | 更新目标 |
+| DELETE | `/api/goals/{id}` | 删除目标 |
+| GET | `/api/goals/{id}/children` | 列出子目标 |
+| **定时任务** | | |
+| GET | `/api/cron/jobs` | 列出定时任务 |
+| POST | `/api/cron/jobs` | 创建定时任务 |
+| GET | `/api/cron/jobs/{id}` | 获取定时任务 |
+| PUT | `/api/cron/jobs/{id}` | 更新定时任务 |
+| DELETE | `/api/cron/jobs/{id}` | 删除定时任务 |
+| PUT | `/api/cron/jobs/{id}/enable` | 切换定时任务状态 |
+| GET | `/api/cron/jobs/{id}/status` | 定时任务状态 |
+| **Webhooks** | | |
+| GET | `/api/webhooks/events` | 列出事件 Webhook 订阅 |
+| POST | `/api/webhooks/events` | 创建事件 Webhook |
+| PUT | `/api/webhooks/events/{id}` | 更新事件 Webhook |
+| DELETE | `/api/webhooks/events/{id}` | 删除事件 Webhook |
+| GET | `/api/webhooks` | 列出出站 Webhook |
+| POST | `/api/webhooks` | 创建出站 Webhook |
+| GET | `/api/webhooks/{id}` | 获取出站 Webhook |
+| PUT | `/api/webhooks/{id}` | 更新出站 Webhook |
+| DELETE | `/api/webhooks/{id}` | 删除出站 Webhook |
+| POST | `/api/webhooks/{id}/test` | 测试出站 Webhook |
+| POST | `/api/hooks/wake` | 唤醒触发（无版本前缀） |
+| POST | `/api/hooks/agent` | Agent 触发（无版本前缀） |
+| **备份和恢复** | | |
+| POST | `/api/backup` | 创建备份 |
+| GET | `/api/backups` | 列出备份 |
+| DELETE | `/api/backups/{filename}` | 删除备份 |
+| POST | `/api/restore` | 从备份恢复 |
+| **集成** | | |
+| GET | `/api/integrations` | 列出集成 |
+| GET | `/api/integrations/available` | 可用集成 |
+| GET | `/api/integrations/health` | 集成健康状态 |
+| POST | `/api/integrations/add` | 添加集成 |
+| POST | `/api/integrations/reload` | 重新加载集成 |
+| GET | `/api/integrations/{id}` | 获取集成 |
+| DELETE | `/api/integrations/{id}` | 移除集成 |
+| POST | `/api/integrations/{id}/reconnect` | 重新连接集成 |
+| **配对** | | |
+| POST | `/api/pairing/request` | 发起配对 |
+| POST | `/api/pairing/complete` | 完成配对 |
+| POST | `/api/pairing/notify` | 通知已配对设备 |
+| GET | `/api/pairing/devices` | 列出已配对设备 |
+| DELETE | `/api/pairing/devices/{id}` | 移除已配对设备 |
+| **OAuth / OIDC** | | |
+| GET | `/api/auth/providers` | 列出 OAuth 提供商 |
+| GET | `/api/auth/login` | 重定向到默认 OAuth 登录 |
+| GET | `/api/auth/login/{provider}` | 重定向到指定 OAuth 登录 |
+| GET | `/api/auth/callback` | OAuth 回调（GET） |
+| POST | `/api/auth/callback` | OAuth 回调（POST） |
+| GET | `/api/auth/userinfo` | OIDC 用户信息 |
+| POST | `/api/auth/introspect` | Token 内省 |
+| **任务队列** | | |
+| GET | `/api/tasks/status` | 任务队列汇总 |
+| GET | `/api/tasks/list` | 列出排队任务 |
+| DELETE | `/api/tasks/{id}` | 取消排队任务 |
+| POST | `/api/tasks/{id}/retry` | 重试失败任务 |
+| GET | `/api/queue/status` | 队列深度和吞吐量 |
+| **通信** | | |
+| GET | `/api/comms/topology` | 通信拓扑 |
+| GET | `/api/comms/events` | 最近通信事件 |
+| GET | `/api/comms/events/stream` | SSE 通信事件流 |
+| POST | `/api/comms/send` | 通过通信层发送 |
+| POST | `/api/comms/task` | 分派通信任务 |
+| **审批** | | |
+| GET | `/api/approvals` | 列出审批请求 |
+| POST | `/api/approvals` | 创建审批请求 |
+| GET | `/api/approvals/{id}` | 获取审批请求 |
+| POST | `/api/approvals/{id}/approve` | 批准请求（body: `{totp_code?}`） |
+| POST | `/api/approvals/{id}/reject` | 拒绝请求 |
+| POST | `/api/approvals/totp/setup` | 生成 TOTP 注册密钥 |
+| POST | `/api/approvals/totp/confirm` | 确认 TOTP 注册 |
+| GET | `/api/approvals/totp/status` | 查询 TOTP 注册状态 |
+| DELETE | `/api/approvals/totp` | 撤销 TOTP 注册 |
+| **绑定和命令** | | |
+| GET | `/api/bindings` | 列出 UI 绑定 |
+| POST | `/api/bindings` | 添加绑定 |
+| DELETE | `/api/bindings/{index}` | 移除绑定 |
+| GET | `/api/commands` | 列出斜杠命令 |
+| GET | `/api/commands/{name}` | 获取斜杠命令 |
+| **媒体生成** | | |
+| POST | `/api/media/image` | 从文本生成图像 |
+| POST | `/api/media/speech` | 文本转语音 |
+| POST | `/api/media/video` | 提交视频生成任务 |
+| GET | `/api/media/video/{task_id}` | 轮询视频任务状态 |
+| POST | `/api/media/music` | 从提示/歌词生成音乐 |
+| GET | `/api/media/providers` | 列出媒体提供商和能力 |
+| **网络和对等节点** | | |
+| GET | `/api/peers` | 列出 OFP 对等节点 |
+| GET | `/api/peers/{id}` | 获取 OFP 对等节点 |
+| GET | `/api/network/status` | OFP 网络状态 |
+| **迁移** | | |
+| GET | `/api/migrate/detect` | 检测迁移来源 |
+| POST | `/api/migrate/scan` | 扫描可导入数据 |
+| POST | `/api/migrate` | 执行迁移 |
+| **OpenAI 兼容** | | |
+| POST | `/v1/chat/completions` | OpenAI 兼容聊天 |
+| GET | `/v1/models` | OpenAI 兼容模型列表 |

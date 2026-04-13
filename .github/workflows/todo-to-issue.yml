@@ -17,3 +17,6 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LABEL: "good first issue,help wanted"
           AUTO_ASSIGN: false
+          # Skip files that contain TODO markers inside string-literal code templates
+          # (e.g. plugin scaffolding) — those are placeholders for end users, not tasks.
+          IGNORE: crates/librefang-runtime/src/plugin_manager.rs

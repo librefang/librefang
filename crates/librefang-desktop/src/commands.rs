@@ -8,8 +8,11 @@ use tracing::info;
 
 /// Get the port the embedded server is listening on.
 #[tauri::command]
-pub fn get_port(port: tauri::State<'_, PortState>) -> u16 {
+pub fn get_port(port: tauri::State<'_, PortState>) -> Result<u16, String> {
     port.0
+        .read()
+        .unwrap()
+        .ok_or_else(|| "No local server running".to_string())
 }
 
 /// Get a status summary of the running kernel.
@@ -17,28 +20,41 @@ pub fn get_port(port: tauri::State<'_, PortState>) -> u16 {
 pub fn get_status(
     port: tauri::State<'_, PortState>,
     kernel_state: tauri::State<'_, KernelState>,
-) -> serde_json::Value {
-    let agents = kernel_state.kernel.agent_registry().list().len();
-    let uptime_secs = kernel_state.started_at.elapsed().as_secs();
+) -> Result<serde_json::Value, String> {
+    let p = port
+        .0
+        .read()
+        .unwrap()
+        .ok_or_else(|| "No local server running".to_string())?;
+    let guard = kernel_state.0.read().unwrap();
+    let inner = guard
+        .as_ref()
+        .ok_or_else(|| "No local server running".to_string())?;
+    let agents = inner.kernel.agent_registry().list().len();
+    let uptime_secs = inner.started_at.elapsed().as_secs();
 
-    serde_json::json!({
+    Ok(serde_json::json!({
         "status": "running",
-        "port": port.0,
+        "port": p,
         "agents": agents,
         "uptime_secs": uptime_secs,
-    })
+    }))
 }
 
 /// Get the number of registered agents.
 #[tauri::command]
-pub fn get_agent_count(kernel_state: tauri::State<'_, KernelState>) -> usize {
-    kernel_state.kernel.agent_registry().list().len()
+pub fn get_agent_count(kernel_state: tauri::State<'_, KernelState>) -> Result<usize, String> {
+    let guard = kernel_state.0.read().unwrap();
+    let inner = guard
+        .as_ref()
+        .ok_or_else(|| "No local server running".to_string())?;
+    Ok(inner.kernel.agent_registry().list().len())
 }
 
 /// Open a native file picker to import an agent TOML manifest.
 ///
 /// Validates the TOML as a valid `AgentManifest`, copies it to
-/// `~/.librefang/agents/{name}/agent.toml`, then spawns the agent.
+/// `~/.librefang/workspaces/agents/{name}/agent.toml`, then spawns the agent.
 #[tauri::command]
 pub fn import_agent_toml(
     app: tauri::AppHandle,
@@ -73,7 +89,11 @@ pub fn import_agent_toml(
     let dest = agent_dir.join("agent.toml");
     std::fs::write(&dest, &content).map_err(|e| format!("Failed to write manifest: {e}"))?;
 
-    kernel_state
+    let guard = kernel_state.0.read().unwrap();
+    let inner = guard
+        .as_ref()
+        .ok_or_else(|| "No local server running".to_string())?;
+    inner
         .kernel
         .spawn_agent(manifest)
         .map_err(|e| format!("Failed to spawn agent: {e}"))?;
@@ -117,7 +137,11 @@ pub fn import_skill_file(
     let dest = skills_dir.join(&file_name);
     std::fs::copy(src, &dest).map_err(|e| format!("Failed to copy skill file: {e}"))?;
 
-    kernel_state.kernel.reload_skills();
+    let guard = kernel_state.0.read().unwrap();
+    let inner = guard
+        .as_ref()
+        .ok_or_else(|| "No local server running".to_string())?;
+    inner.kernel.reload_skills();
 
     info!("Imported skill file \"{file_name}\" and reloaded registry");
     Ok(file_name)

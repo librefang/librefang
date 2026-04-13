@@ -178,6 +178,46 @@ pub trait KernelHandle: Send + Sync {
         Ok(librefang_types::approval::ApprovalDecision::Approved)
     }
 
+    /// Submit a tool for approval without blocking. Returns request UUID immediately.
+    async fn submit_tool_approval(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        action_summary: &str,
+        deferred: librefang_types::tool::DeferredToolExecution,
+    ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
+        let _ = (agent_id, tool_name, action_summary, deferred);
+        Err("Approval system not available".to_string())
+    }
+
+    /// Resolve an approval request and get the deferred payload.
+    async fn resolve_tool_approval(
+        &self,
+        request_id: uuid::Uuid,
+        decision: librefang_types::approval::ApprovalDecision,
+        decided_by: Option<String>,
+        totp_verified: bool,
+        user_id: Option<&str>,
+    ) -> Result<
+        (
+            librefang_types::approval::ApprovalResponse,
+            Option<librefang_types::tool::DeferredToolExecution>,
+        ),
+        String,
+    > {
+        let _ = (request_id, decision, decided_by, totp_verified, user_id);
+        Err("Approval system not available".to_string())
+    }
+
+    /// Check current status of an approval request.
+    fn get_approval_status(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<Option<librefang_types::approval::ApprovalDecision>, String> {
+        let _ = request_id;
+        Ok(None)
+    }
+
     /// List available Hands and their activation status.
     async fn hand_list(&self) -> Result<Vec<serde_json::Value>, String> {
         Err("Hands system not available".to_string())
@@ -415,6 +455,18 @@ pub trait KernelHandle: Send + Sync {
     /// Returns a JSON array of goal objects.
     fn goal_list_active(&self, _agent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
         Ok(Vec::new())
+    }
+
+    /// Run a workflow by ID or name. The `workflow_id` can be a UUID string or a
+    /// workflow name. The `input` is an arbitrary string (typically JSON-encoded
+    /// parameters) passed to the first step. Returns `(run_id, output)` on success.
+    async fn run_workflow(
+        &self,
+        workflow_id: &str,
+        input: &str,
+    ) -> Result<(String, String), String> {
+        let _ = (workflow_id, input);
+        Err("Workflow engine not available".to_string())
     }
 
     /// Update a goal's status and/or progress. Returns the updated goal JSON.

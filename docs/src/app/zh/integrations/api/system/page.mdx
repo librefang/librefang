@@ -1,0 +1,497 @@
+# 系统与配置 API
+
+系统健康、配置管理、模板、会话、任务队列、备份恢复、迁移和 UI 绑定的端点。
+
+## 模板端点
+
+### GET /api/templates
+
+列出 agents 目录中的可用 Agent 模板。
+
+**响应** `200 OK`：
+
+```json
+{
+  "templates": [
+    {
+      "name": "hello-world",
+      "description": "A friendly greeting agent",
+      "path": "/home/user/.librefang/workspaces/agents/hello-world/agent.toml"
+    },
+    {
+      "name": "coder",
+      "description": "Expert coding assistant",
+      "path": "/home/user/.librefang/workspaces/agents/coder/agent.toml"
+    }
+  ],
+  "total": 30
+}
+```
+
+### GET /api/templates/&lbrace;name&rbrace;
+
+获取指定模板的清单和原始 TOML 内容。
+
+**响应** `200 OK`：
+
+```json
+{
+  "name": "hello-world",
+  "manifest": {
+    "name": "hello-world",
+    "description": "A friendly greeting agent",
+    "module": "builtin:chat",
+    "tags": [],
+    "model": {
+      "provider": "groq",
+      "model": "llama-3.3-70b-versatile"
+    },
+    "capabilities": {
+      "tools": ["file_read", "file_list", "web_fetch"],
+      "network": []
+    }
+  },
+  "manifest_toml": "name = \"hello-world\"\nversion = \"0.1.0\"\n..."
+}
+```
+
+---
+
+## 系统端点
+
+### GET /api/health
+
+公开健康检查。无需认证。返回系统状态的精简子集（不包含数据库或 agent_count 详情）。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "ok",
+  "uptime_seconds": 3600,
+  "panic_count": 0,
+  "restart_count": 0
+}
+```
+
+当所有系统正常时 `status` 字段为 `"ok"`，当数据库不可达时为 `"degraded"`。
+
+### GET /api/health/detail
+
+完整的健康检查，包含所有依赖项状态。需要认证。与公开的 `/api/health` 不同，此端点包含数据库连通性和 Agent 数量信息。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "ok",
+  "uptime_seconds": 3600,
+  "panic_count": 0,
+  "restart_count": 0,
+  "agent_count": 3,
+  "database": "connected",
+  "config_warnings": []
+}
+```
+
+### GET /api/status
+
+详细的内核状态，包含所有 Agent。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "running",
+  "agent_count": 2,
+  "data_dir": "/home/user/.librefang/data",
+  "default_provider": "groq",
+  "default_model": "llama-3.3-70b-versatile",
+  "uptime_seconds": 3600,
+  "agents": [
+    {
+      "id": "a1b2c3d4-...",
+      "name": "hello-world",
+      "state": "Running",
+      "created_at": "2025-01-15T10:30:00Z",
+      "model_provider": "groq",
+      "model_name": "llama-3.3-70b-versatile"
+    }
+  ]
+}
+```
+
+### GET /api/version
+
+构建和版本信息。
+
+**响应** `200 OK`：
+
+```json
+{
+  "name": "librefang",
+  "version": "0.1.0",
+  "build_date": "2025-01-15",
+  "git_sha": "abc1234",
+  "rust_version": "1.82.0",
+  "platform": "linux",
+  "arch": "x86_64"
+}
+```
+
+### POST /api/shutdown
+
+发起优雅关闭。Agent 状态会被保存到 SQLite，以便下次启动时恢复。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "shutting_down"
+}
+```
+
+### GET /api/profiles
+
+列出可用的 Agent 配置文件（针对常见用例的预定义配置）。
+
+**响应** `200 OK`：
+
+```json
+{
+  "profiles": [
+    {
+      "name": "coder",
+      "tier": "smart",
+      "description": "Expert coding assistant"
+    },
+    {
+      "name": "researcher",
+      "tier": "frontier",
+      "description": "Deep research and analysis"
+    }
+  ]
+}
+```
+
+### GET /api/profiles/&lbrace;name&rbrace;
+
+获取指定名称的配置文件。
+
+### GET /api/tools
+
+列出 Agent 可使用的所有工具。
+
+**响应** `200 OK`：
+
+```json
+{
+  "tools": [
+    "file_read",
+    "file_write",
+    "file_list",
+    "web_fetch",
+    "web_search",
+    "shell_exec",
+    "kv_get",
+    "kv_set",
+    "agent_call"
+  ],
+  "total": 60
+}
+```
+
+### GET /api/tools/&lbrace;name&rbrace;
+
+获取指定工具的详细信息，包括其输入模式（input schema）。
+
+### GET /api/metrics
+
+Prometheus 格式的指标端点，用于集成 Grafana、Prometheus 或兼容的监控栈。
+
+### GET /api/versions
+
+API 版本发现。返回所有可用的 API 版本及其稳定性状态。
+
+### GET /api/openapi.json
+
+所有 API 端点的自动生成 OpenAPI 3.0 规范。
+
+---
+
+## 配置管理端点
+
+### GET /api/config
+
+获取当前内核配置（敏感信息已脱敏）。
+
+**响应** `200 OK`：
+
+```json
+{
+  "data_dir": "/home/user/.librefang/data",
+  "default_provider": "groq",
+  "default_model": "llama-3.3-70b-versatile",
+  "listen_addr": "127.0.0.1:4545",
+  "api_key_set": true,
+  "channels_configured": 2,
+  "mcp_servers": 1
+}
+```
+
+### GET /api/config/schema
+
+获取完整配置文件（`~/.librefang/config.toml`）的 JSON Schema。适用于编辑器集成和配置验证。
+
+### POST /api/config/set
+
+在运行时设置一个或多个配置值，无需重启。
+
+**请求体**：
+
+```json
+{
+  "key": "default_model",
+  "value": "gemini-2.5-flash"
+}
+```
+
+### POST /api/config/reload
+
+从磁盘重新加载配置（`~/.librefang/config.toml`）。
+
+---
+
+## 会话管理端点
+
+### GET /api/sessions
+
+列出所有 Agent 的活跃会话。
+
+**响应** `200 OK`：
+
+```json
+{
+  "sessions": [
+    {
+      "id": "s1b2c3d4-...",
+      "agent_id": "a1b2c3d4-...",
+      "agent_name": "coder",
+      "message_count": 12,
+      "created_at": "2025-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+### POST /api/sessions/cleanup
+
+从数据库中移除过期或孤立的会话。
+
+### GET /api/sessions/&lbrace;id&rbrace;
+
+获取指定会话的完整详情，包括消息数量和元数据。
+
+### DELETE /api/sessions/&lbrace;id&rbrace;
+
+删除指定会话及其对话历史。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "deleted",
+  "session_id": "s1b2c3d4-..."
+}
+```
+
+### PUT /api/sessions/&lbrace;id&rbrace;/label
+
+为会话指定一个人类可读的标签，便于后续检索。
+
+**请求体**：
+
+```json
+{
+  "label": "code-review-session-2025-01"
+}
+```
+
+---
+
+## 任务队列端点
+
+查看和管理守护进程的内部异步任务队列。
+
+### GET /api/tasks/status
+
+获取任务队列的汇总状态（待处理、运行中、失败的数量）。
+
+### GET /api/tasks/list
+
+列出排队中和最近完成的任务。
+
+### DELETE /api/tasks/&lbrace;id&rbrace;
+
+取消并移除排队中的任务。
+
+### POST /api/tasks/&lbrace;id&rbrace;/retry
+
+重试失败的任务。
+
+### GET /api/queue/status
+
+获取当前队列深度和吞吐量指标。
+
+---
+
+## 备份和恢复端点
+
+### POST /api/backup
+
+创建守护进程状态的完整备份（Agent、会话、记忆、配置）。
+
+**响应** `200 OK`：
+
+```json
+{
+  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz",
+  "size_bytes": 2048576
+}
+```
+
+### GET /api/backups
+
+列出所有可用的备份文件。
+
+### DELETE /api/backups/&lbrace;filename&rbrace;
+
+删除备份文件。
+
+### POST /api/restore
+
+从备份文件恢复守护进程状态。
+
+**请求体**：
+
+```json
+{
+  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz"
+}
+```
+
+---
+
+## 迁移端点
+
+从 OpenClaw 或其他 Agent 框架导入数据。迁移引擎处理 YAML 到 TOML 的清单转换、SKILL.md 解析和会话历史导入。
+
+### GET /api/migrate/detect
+
+自动检测系统上的迁移来源。扫描常见位置以查找 OpenClaw 安装、配置文件和 Agent 数据。
+
+**响应** `200 OK`：
+
+```json
+{
+  "sources": [
+    {
+      "type": "openclaw",
+      "path": "/home/user/.openclaw",
+      "version": "2.1.0",
+      "agents_found": 12,
+      "skills_found": 8
+    }
+  ]
+}
+```
+
+### POST /api/migrate/scan
+
+扫描指定路径以查找可导入的数据。
+
+**请求体**：
+
+```json
+{
+  "path": "/home/user/.openclaw"
+}
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "agents": [
+    {
+      "name": "my-agent",
+      "format": "yaml",
+      "convertible": true
+    }
+  ],
+  "skills": [
+    {
+      "name": "custom-skill",
+      "format": "SKILL.md",
+      "convertible": true
+    }
+  ],
+  "sessions": 45
+}
+```
+
+### POST /api/migrate
+
+执行迁移。转换清单、导入技能，并可选择性导入会话历史。
+
+**请求体**：
+
+```json
+{
+  "source": "/home/user/.openclaw",
+  "import_agents": true,
+  "import_skills": true,
+  "import_sessions": false
+}
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "completed",
+  "agents_imported": 12,
+  "skills_imported": 8,
+  "sessions_imported": 0,
+  "warnings": [
+    "Skill 'legacy-plugin' uses unsupported runtime 'ruby', skipped"
+  ]
+}
+```
+
+---
+
+## 绑定和命令端点
+
+### GET /api/bindings
+
+列出 WebChat UI 当前的键盘/事件绑定。
+
+### POST /api/bindings
+
+添加新的绑定。
+
+### DELETE /api/bindings/&lbrace;index&rbrace;
+
+按索引移除绑定。
+
+### GET /api/commands
+
+列出 WebChat 输入框中所有可用的斜杠命令。
+
+### GET /api/commands/&lbrace;name&rbrace;
+
+获取指定斜杠命令的详情。
+
+---
+

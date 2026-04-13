@@ -13,7 +13,7 @@ import { isProviderAvailable } from "../lib/status";
 import { getStatusVariant } from "../lib/status";
 import { formatRelativeTime } from "../lib/datetime";
 
-const REFRESH_MS = 30000;
+const REFRESH_MS = 5000;
 
 export function OverviewPage() {
   const { t } = useTranslation();
@@ -80,8 +80,8 @@ export function OverviewPage() {
   const statsCards = [
     {
       title: t("overview.active_agents"),
-      value: agentsTotal,
-      subValue: `${agentsActive} ${t("overview.active")}`,
+      value: agentsActive,
+      subValue: `${agentsTotal} ${t("overview.total")}`,
       icon: Users,
       color: "brand",
       link: "/agents",

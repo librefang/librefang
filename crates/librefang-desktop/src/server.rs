@@ -92,6 +92,8 @@ pub fn start_server() -> Result<ServerHandle, Box<dyn std::error::Error>> {
                 // start_background_agents() uses tokio::spawn/bootstrap async work, so it must
                 // run inside a tokio runtime context.
                 kernel_clone.start_background_agents().await;
+                // Spawn approval expiry sweep task
+                kernel_clone.clone().spawn_approval_sweep_task();
                 run_embedded_server(kernel_clone, std_listener, listen_addr, shutdown_rx).await;
             });
         })?;
@@ -113,7 +115,15 @@ async fn run_embedded_server(
     listen_addr: SocketAddr,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    let (app, state) = build_router(kernel, listen_addr).await;
+    let (app, state) = build_router(kernel.clone(), listen_addr).await;
+
+    // Sync dashboard assets in background (downloads from release if outdated)
+    {
+        let home = kernel.home_dir().to_path_buf();
+        tokio::spawn(async move {
+            librefang_api::webchat::sync_dashboard(&home).await;
+        });
+    }
 
     // Convert std TcpListener → tokio TcpListener
     std_listener

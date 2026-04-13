@@ -9,6 +9,7 @@ import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Modal } from "../components/ui/Modal";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { useUIStore } from "../lib/store";
 import {
@@ -341,14 +342,8 @@ export function ModelsPage() {
       )}
 
       {/* Add Model Modal */}
-      {showAdd && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => resetForm()}>
-          <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[480px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <h3 className="text-sm font-bold">{t("models.add_custom_model")}</h3>
-              <button onClick={() => resetForm()} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
-            </div>
-            <form onSubmit={handleAdd} className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
+      <Modal isOpen={showAdd} onClose={resetForm} title={t("models.add_custom_model")} size="lg">
+        <form onSubmit={handleAdd} className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
               <div className="grid grid-cols-2 gap-3">
                 <div className="col-span-2">
                   <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.model_id")} *</label>
@@ -404,10 +399,8 @@ export function ModelsPage() {
                 </Button>
                 <Button type="button" variant="secondary" onClick={() => resetForm()}>{t("common.cancel")}</Button>
               </div>
-            </form>
-          </div>
-        </div>
-      )}
+        </form>
+      </Modal>
     </div>
   );
 }

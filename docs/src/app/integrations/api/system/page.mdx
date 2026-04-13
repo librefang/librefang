@@ -1,0 +1,497 @@
+# System & Configuration API
+
+Endpoints for system health, configuration, templates, sessions, task queue, backup/restore, migration, and UI bindings.
+
+## Template Endpoints
+
+### GET /api/templates
+
+List available agent templates from the agents directory.
+
+**Response** `200 OK`:
+
+```json
+{
+  "templates": [
+    {
+      "name": "hello-world",
+      "description": "A friendly greeting agent",
+      "path": "/home/user/.librefang/workspaces/agents/hello-world/agent.toml"
+    },
+    {
+      "name": "coder",
+      "description": "Expert coding assistant",
+      "path": "/home/user/.librefang/workspaces/agents/coder/agent.toml"
+    }
+  ],
+  "total": 30
+}
+```
+
+### GET /api/templates/&lbrace;name&rbrace;
+
+Get a specific template's manifest and raw TOML.
+
+**Response** `200 OK`:
+
+```json
+{
+  "name": "hello-world",
+  "manifest": {
+    "name": "hello-world",
+    "description": "A friendly greeting agent",
+    "module": "builtin:chat",
+    "tags": [],
+    "model": {
+      "provider": "groq",
+      "model": "llama-3.3-70b-versatile"
+    },
+    "capabilities": {
+      "tools": ["file_read", "file_list", "web_fetch"],
+      "network": []
+    }
+  },
+  "manifest_toml": "name = \"hello-world\"\nversion = \"0.1.0\"\n..."
+}
+```
+
+---
+
+## System Endpoints
+
+### GET /api/health
+
+Public health check. Does not require authentication. Returns a redacted subset of system status (no database or agent_count details).
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "ok",
+  "uptime_seconds": 3600,
+  "panic_count": 0,
+  "restart_count": 0
+}
+```
+
+The `status` field is `"ok"` when all systems are healthy, or `"degraded"` when the database is unreachable.
+
+### GET /api/health/detail
+
+Full health check with all dependency status. Requires authentication. Unlike the public `/api/health`, this endpoint includes database connectivity and agent counts.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "ok",
+  "uptime_seconds": 3600,
+  "panic_count": 0,
+  "restart_count": 0,
+  "agent_count": 3,
+  "database": "connected",
+  "config_warnings": []
+}
+```
+
+### GET /api/status
+
+Detailed kernel status including all agents.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "running",
+  "agent_count": 2,
+  "data_dir": "/home/user/.librefang/data",
+  "default_provider": "groq",
+  "default_model": "llama-3.3-70b-versatile",
+  "uptime_seconds": 3600,
+  "agents": [
+    {
+      "id": "a1b2c3d4-...",
+      "name": "hello-world",
+      "state": "Running",
+      "created_at": "2025-01-15T10:30:00Z",
+      "model_provider": "groq",
+      "model_name": "llama-3.3-70b-versatile"
+    }
+  ]
+}
+```
+
+### GET /api/version
+
+Build and version information.
+
+**Response** `200 OK`:
+
+```json
+{
+  "name": "librefang",
+  "version": "0.1.0",
+  "build_date": "2025-01-15",
+  "git_sha": "abc1234",
+  "rust_version": "1.82.0",
+  "platform": "linux",
+  "arch": "x86_64"
+}
+```
+
+### POST /api/shutdown
+
+Initiate graceful shutdown. Agent states are preserved to SQLite for restore on next boot.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "shutting_down"
+}
+```
+
+### GET /api/profiles
+
+List available agent profiles (predefined configurations for common use cases).
+
+**Response** `200 OK`:
+
+```json
+{
+  "profiles": [
+    {
+      "name": "coder",
+      "tier": "smart",
+      "description": "Expert coding assistant"
+    },
+    {
+      "name": "researcher",
+      "tier": "frontier",
+      "description": "Deep research and analysis"
+    }
+  ]
+}
+```
+
+### GET /api/profiles/&lbrace;name&rbrace;
+
+Get a specific profile by name.
+
+### GET /api/tools
+
+List all available tools that agents can use.
+
+**Response** `200 OK`:
+
+```json
+{
+  "tools": [
+    "file_read",
+    "file_write",
+    "file_list",
+    "web_fetch",
+    "web_search",
+    "shell_exec",
+    "kv_get",
+    "kv_set",
+    "agent_call"
+  ],
+  "total": 60
+}
+```
+
+### GET /api/tools/&lbrace;name&rbrace;
+
+Get detailed information about a specific tool including its input schema.
+
+### GET /api/metrics
+
+Prometheus-format metrics endpoint for integration with Grafana, Prometheus, or compatible monitoring stacks.
+
+### GET /api/versions
+
+API version discovery. Returns all available API versions and their stability status.
+
+### GET /api/openapi.json
+
+Auto-generated OpenAPI 3.0 specification for all API endpoints.
+
+---
+
+## Config Management Endpoints
+
+### GET /api/config
+
+Retrieve current kernel configuration (secrets are redacted).
+
+**Response** `200 OK`:
+
+```json
+{
+  "data_dir": "/home/user/.librefang/data",
+  "default_provider": "groq",
+  "default_model": "llama-3.3-70b-versatile",
+  "listen_addr": "127.0.0.1:4545",
+  "api_key_set": true,
+  "channels_configured": 2,
+  "mcp_servers": 1
+}
+```
+
+### GET /api/config/schema
+
+Get the JSON Schema for the full config file (`~/.librefang/config.toml`). Useful for editor integrations and config validation.
+
+### POST /api/config/set
+
+Set one or more config values at runtime without restarting.
+
+**Request Body**:
+
+```json
+{
+  "key": "default_model",
+  "value": "gemini-2.5-flash"
+}
+```
+
+### POST /api/config/reload
+
+Reload configuration from disk (`~/.librefang/config.toml`).
+
+---
+
+## Session Management Endpoints
+
+### GET /api/sessions
+
+List all active sessions across agents.
+
+**Response** `200 OK`:
+
+```json
+{
+  "sessions": [
+    {
+      "id": "s1b2c3d4-...",
+      "agent_id": "a1b2c3d4-...",
+      "agent_name": "coder",
+      "message_count": 12,
+      "created_at": "2025-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+### POST /api/sessions/cleanup
+
+Remove old or orphaned sessions from the database.
+
+### GET /api/sessions/&lbrace;id&rbrace;
+
+Get full details for a specific session including message count and metadata.
+
+### DELETE /api/sessions/&lbrace;id&rbrace;
+
+Delete a specific session and its conversation history.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "deleted",
+  "session_id": "s1b2c3d4-..."
+}
+```
+
+### PUT /api/sessions/&lbrace;id&rbrace;/label
+
+Assign a human-readable label to a session for later retrieval.
+
+**Request Body**:
+
+```json
+{
+  "label": "code-review-session-2025-01"
+}
+```
+
+---
+
+## Task Queue Endpoints
+
+Inspect and manage the daemon's internal async task queue.
+
+### GET /api/tasks/status
+
+Get summary status of the task queue (pending, running, failed counts).
+
+### GET /api/tasks/list
+
+List queued and recently completed tasks.
+
+### DELETE /api/tasks/&lbrace;id&rbrace;
+
+Cancel and remove a queued task.
+
+### POST /api/tasks/&lbrace;id&rbrace;/retry
+
+Retry a failed task.
+
+### GET /api/queue/status
+
+Get the current queue depth and throughput metrics.
+
+---
+
+## Backup & Restore Endpoints
+
+### POST /api/backup
+
+Create a full backup of the daemon state (agents, sessions, memory, config).
+
+**Response** `200 OK`:
+
+```json
+{
+  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz",
+  "size_bytes": 2048576
+}
+```
+
+### GET /api/backups
+
+List all available backup files.
+
+### DELETE /api/backups/&lbrace;filename&rbrace;
+
+Delete a backup file.
+
+### POST /api/restore
+
+Restore daemon state from a backup file.
+
+**Request Body**:
+
+```json
+{
+  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz"
+}
+```
+
+---
+
+## Migration Endpoints
+
+Import data from OpenClaw or other agent frameworks. The migration engine handles YAML-to-TOML manifest conversion, SKILL.md parsing, and session history import.
+
+### GET /api/migrate/detect
+
+Auto-detect migration sources on the system. Scans common locations for OpenClaw installations, config files, and agent data.
+
+**Response** `200 OK`:
+
+```json
+{
+  "sources": [
+    {
+      "type": "openclaw",
+      "path": "/home/user/.openclaw",
+      "version": "2.1.0",
+      "agents_found": 12,
+      "skills_found": 8
+    }
+  ]
+}
+```
+
+### POST /api/migrate/scan
+
+Scan a specific path for importable data.
+
+**Request Body**:
+
+```json
+{
+  "path": "/home/user/.openclaw"
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "agents": [
+    {
+      "name": "my-agent",
+      "format": "yaml",
+      "convertible": true
+    }
+  ],
+  "skills": [
+    {
+      "name": "custom-skill",
+      "format": "SKILL.md",
+      "convertible": true
+    }
+  ],
+  "sessions": 45
+}
+```
+
+### POST /api/migrate
+
+Run the migration. Converts manifests, imports skills, and optionally imports session history.
+
+**Request Body**:
+
+```json
+{
+  "source": "/home/user/.openclaw",
+  "import_agents": true,
+  "import_skills": true,
+  "import_sessions": false
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "completed",
+  "agents_imported": 12,
+  "skills_imported": 8,
+  "sessions_imported": 0,
+  "warnings": [
+    "Skill 'legacy-plugin' uses unsupported runtime 'ruby', skipped"
+  ]
+}
+```
+
+---
+
+## Bindings & Commands Endpoints
+
+### GET /api/bindings
+
+List current keyboard/event bindings for the WebChat UI.
+
+### POST /api/bindings
+
+Add a new binding.
+
+### DELETE /api/bindings/&lbrace;index&rbrace;
+
+Remove a binding by its index in the bindings list.
+
+### GET /api/commands
+
+List all available slash commands for the WebChat input.
+
+### GET /api/commands/&lbrace;name&rbrace;
+
+Get details for a specific slash command.
+
+---
+

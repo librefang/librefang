@@ -301,6 +301,21 @@ pub(crate) fn convert_messages(
                                 },
                             });
                         }
+                        ContentBlock::ImageFile { media_type, path } => match std::fs::read(path) {
+                            Ok(bytes) => {
+                                use base64::Engine;
+                                let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                                parts.push(GeminiPart::InlineData {
+                                    inline_data: GeminiInlineData {
+                                        mime_type: media_type.clone(),
+                                        data,
+                                    },
+                                });
+                            }
+                            Err(e) => {
+                                warn!(path = %path, error = %e, "ImageFile missing, skipping");
+                            }
+                        },
                         ContentBlock::ToolResult {
                             content, tool_name, ..
                         } => {
@@ -789,6 +804,7 @@ impl LlmDriver for GeminiDriver {
                 return Err(if status == 429 {
                     LlmError::RateLimited {
                         retry_after_ms: 5000,
+                        message: None,
                     }
                 } else {
                     LlmError::Overloaded {
@@ -878,6 +894,7 @@ impl LlmDriver for GeminiDriver {
                 return Err(if status == 429 {
                     LlmError::RateLimited {
                         retry_after_ms: 5000,
+                        message: None,
                     }
                 } else {
                     LlmError::Overloaded {
@@ -1268,6 +1285,7 @@ mod tests {
             prompt_caching: false,
             response_format: None,
             timeout_secs: None,
+            extra_body: None,
         };
 
         let tools = convert_tools(&request);
@@ -1289,6 +1307,7 @@ mod tests {
             prompt_caching: false,
             response_format: None,
             timeout_secs: None,
+            extra_body: None,
         };
 
         let tools = convert_tools(&request);
@@ -1529,6 +1548,8 @@ mod tests {
                     tool_name: "web_search".to_string(),
                     content: "Results about Rust programming".to_string(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },

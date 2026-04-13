@@ -157,6 +157,7 @@ chrono = { workspace = true }
 dashmap = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
+bytes = { workspace = true }
 reqwest = { workspace = true }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
@@ -171,6 +172,7 @@ sha1 = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
 html-escape = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 regex = { workspace = true }
 regex-lite = { workspace = true }
 smallvec = { workspace = true }

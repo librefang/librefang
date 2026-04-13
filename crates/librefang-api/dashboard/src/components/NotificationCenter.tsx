@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Check, X, ExternalLink } from "lucide-react";
-import { fetchApprovalCount, listApprovals, approveApproval, rejectApproval } from "../api";
+import { fetchApprovalCount, listApprovals, approveApproval, rejectApproval, totpStatus } from "../api";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
 import { useNavigate } from "@tanstack/react-router";
@@ -26,12 +26,26 @@ export function NotificationCenter() {
     refetchInterval: open ? 5000 : false,
   });
 
+  const totpQuery = useQuery({
+    queryKey: ["totp", "status"],
+    queryFn: totpStatus,
+    staleTime: 60_000,
+  });
+  const totpEnforced = totpQuery.data?.enforced ?? false;
+
   const pendingCount = countQuery.data ?? 0;
   const pendingItems = (listQuery.data ?? []).filter(
     (a) => !a.status || a.status === "pending"
   );
 
   const handleAction = async (id: string, action: "approve" | "reject") => {
+    // When TOTP is enforced, redirect to Approvals page for approve
+    if (action === "approve" && totpEnforced) {
+      setOpen(false);
+      navigate({ to: "/approvals" });
+      addToast(t("approvals.totpRequired", "TOTP code required. Use the Approvals page."), "info");
+      return;
+    }
     try {
       if (action === "approve") await approveApproval(id);
       else await rejectApproval(id);
@@ -55,7 +69,9 @@ export function NotificationCenter() {
       <button
         onClick={() => setOpen(!open)}
         className="relative flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
-        aria-label={t("approvals.pending_review", "Notifications")}
+        aria-label={pendingCount > 0 ? `${t("approvals.pending_review", "Notifications")} (${pendingCount})` : t("approvals.pending_review", "Notifications")}
+        aria-expanded={open}
+        aria-haspopup="menu"
       >
         <Bell className="h-4 w-4" />
         {countQuery.isError ? (
@@ -138,6 +154,7 @@ export function NotificationCenter() {
                           onClick={() => handleAction(item.id, "approve")}
                           className="p-1 rounded hover:bg-success/10 text-success transition-colors"
                           title={t("approvals.approve")}
+                          aria-label={t("approvals.approve")}
                         >
                           <Check className="w-4 h-4" />
                         </button>
@@ -145,6 +162,7 @@ export function NotificationCenter() {
                           onClick={() => handleAction(item.id, "reject")}
                           className="p-1 rounded hover:bg-error/10 text-error transition-colors"
                           title={t("approvals.reject")}
+                          aria-label={t("approvals.reject")}
                         >
                           <X className="w-4 h-4" />
                         </button>

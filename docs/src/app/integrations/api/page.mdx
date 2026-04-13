@@ -1,0 +1,458 @@
+# API Reference
+
+LibreFang exposes a REST API, WebSocket endpoints, and SSE streaming when the daemon is running. The default listen address is `http://127.0.0.1:4545`.
+
+All responses include security headers (CSP, X-Frame-Options, X-Content-Type-Options, HSTS) and are protected by a GCRA cost-aware rate limiter with per-IP token bucket tracking and automatic stale entry cleanup. LibreFang implements 16 security systems including Merkle audit trails, taint tracking, WASM dual metering, Ed25519 manifest signing, SSRF protection, subprocess sandboxing, and secret zeroization.
+
+
+## Table of Contents
+
+### [Agent & Workflow API](/integrations/api/agents)
+Agent Endpoints, Workflow Endpoints, Trigger Endpoints, Schedule Endpoints, Goals Endpoints, Cron Endpoints
+
+### [System & Configuration API](/integrations/api/system)
+Template Endpoints, System Endpoints, Config Management, Session Management, Task Queue, Backup & Restore, Migration, Bindings & Commands
+
+### [Intelligence & Skills API](/integrations/api/intelligence)
+Memory Endpoints, Skills & Marketplace, ClawHub, Hands, Extensions, Plugins, Media Generation
+
+### [Provider & Model API](/integrations/api/providers)
+Model Catalog, Provider Configuration
+
+### [Communication & Network API](/integrations/api/communication)
+Channel Endpoints, MCP & A2A Protocol, Audit & Security, Usage & Analytics, Budget, Webhooks, Integrations, Pairing, OAuth/OIDC, Comms, Approvals, Network & Peers
+
+### [Real-time API](/integrations/api/realtime)
+WebSocket Protocol, SSE Streaming, OpenAI-Compatible API
+
+- [Authentication](#authentication)
+- [Error Responses](#error-responses)
+- [Endpoint Summary](#endpoint-summary)
+
+---
+
+## Authentication
+
+When an API key is configured in `config.toml`, all endpoints (except `/api/health` and `/`) require a Bearer token:
+
+```
+Authorization: Bearer <your-api-key>
+```
+
+### Setting the API Key
+
+Add to `~/.librefang/config.toml`:
+
+```toml
+api_key = "your-secret-api-key"
+```
+
+### No Authentication
+
+If `api_key` is empty or not set, the API is accessible without authentication. CORS is restricted to localhost origins in this mode.
+
+### Public Endpoints (No Auth Required)
+
+- `GET /api/health`
+- `GET /` (WebChat UI)
+
+---
+
+
+## Error Responses
+
+All error responses use a consistent JSON format:
+
+```json
+{
+  "error": "Description of what went wrong"
+}
+```
+
+### HTTP Status Codes
+
+| Code | Meaning |
+|------|---------|
+| `200` | Success |
+| `201` | Created (spawn agent, create workflow, create trigger, install skill) |
+| `400` | Bad request (invalid UUID, missing required fields, malformed TOML/JSON) |
+| `401` | Unauthorized (missing or invalid `Authorization: Bearer` header) |
+| `404` | Not found (agent, workflow, trigger, template, model, skill, or KV key does not exist) |
+| `429` | Too many requests (GCRA rate limit exceeded) |
+| `500` | Internal server error (agent loop failure, database error, driver error) |
+
+### Request IDs
+
+Every response includes an `x-request-id` header with a UUID for tracing:
+
+```
+x-request-id: 550e8400-e29b-41d4-a716-446655440000
+```
+
+Use this value when reporting issues or correlating requests in logs.
+
+### Security Headers
+
+Every response includes security headers:
+
+| Header | Value |
+|--------|-------|
+| `Content-Security-Policy` | `default-src 'self'` (with appropriate directives) |
+| `X-Frame-Options` | `DENY` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains` |
+| `X-Request-Id` | Unique UUID per request |
+
+### Rate Limiting
+
+The GCRA (Generic Cell Rate Algorithm) rate limiter provides cost-aware token bucket rate limiting with per-IP tracking and automatic stale entry cleanup. Different endpoints consume different token costs (e.g., `/api/agents/&lbrace;id&rbrace;/message` costs more than `/api/health`). When the limit is exceeded, the server returns `429 Too Many Requests`:
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+
+{"error": "Rate limit exceeded"}
+```
+
+The `Retry-After` header indicates the window duration in seconds.
+
+---
+
+
+## Endpoint Summary
+
+**230+ endpoints total** across 35 groups.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| **System** | | |
+| GET | `/` | WebChat UI |
+| GET | `/api/health` | Health check (no auth, redacted) |
+| GET | `/api/health/detail` | Full health check (auth required) |
+| GET | `/api/status` | Kernel status |
+| GET | `/api/version` | Version info |
+| POST | `/api/shutdown` | Graceful shutdown |
+| GET | `/api/profiles` | List agent profiles |
+| GET | `/api/profiles/{name}` | Get a specific profile |
+| GET | `/api/tools` | List available tools |
+| GET | `/api/tools/{name}` | Get tool details |
+| GET | `/api/metrics` | Prometheus metrics |
+| GET | `/api/versions` | API version discovery |
+| GET | `/api/openapi.json` | OpenAPI specification |
+| **Config** | | |
+| GET | `/api/config` | Configuration (secrets redacted) |
+| GET | `/api/config/schema` | Config JSON Schema |
+| POST | `/api/config/set` | Set a config value at runtime |
+| POST | `/api/config/reload` | Reload config from disk |
+| **Agents** | | |
+| GET | `/api/agents` | List agents |
+| POST | `/api/agents` | Spawn agent |
+| POST | `/api/agents/bulk` | Bulk create agents |
+| DELETE | `/api/agents/bulk` | Bulk delete agents |
+| POST | `/api/agents/bulk/start` | Bulk start agents |
+| POST | `/api/agents/bulk/stop` | Bulk stop agents |
+| GET | `/api/agents/{id}` | Get agent details |
+| DELETE | `/api/agents/{id}` | Kill agent |
+| PATCH | `/api/agents/{id}` | Partial update agent |
+| PUT | `/api/agents/{id}/update` | Full update agent config |
+| PUT | `/api/agents/{id}/mode` | Set agent mode (Stable/Normal) |
+| PATCH | `/api/agents/{id}/identity` | Update agent identity |
+| PATCH | `/api/agents/{id}/config` | Patch agent config |
+| POST | `/api/agents/{id}/clone` | Clone agent |
+| POST | `/api/agents/{id}/message` | Send message (blocking) |
+| POST | `/api/agents/{id}/message/stream` | Send message (SSE stream) |
+| GET | `/api/agents/{id}/session` | Get current conversation history |
+| GET | `/api/agents/{id}/sessions` | List all agent sessions |
+| POST | `/api/agents/{id}/sessions` | Create new session |
+| POST | `/api/agents/{id}/sessions/{session_id}/switch` | Switch active session |
+| GET | `/api/agents/{id}/sessions/by-label/{label}` | Find session by label |
+| DELETE | `/api/agents/{id}/history` | Clear conversation history |
+| POST | `/api/agents/{id}/session/reset` | Reset session |
+| POST | `/api/agents/{id}/session/compact` | LLM-based compaction |
+| POST | `/api/agents/{id}/stop` | Cancel current run |
+| PUT | `/api/agents/{id}/model` | Switch model |
+| GET | `/api/agents/{id}/tools` | Get agent tools |
+| PUT | `/api/agents/{id}/tools` | Set agent tools |
+| GET | `/api/agents/{id}/skills` | Get agent skills |
+| PUT | `/api/agents/{id}/skills` | Set agent skills |
+| GET | `/api/agents/{id}/mcp_servers` | Get agent MCP servers |
+| PUT | `/api/agents/{id}/mcp_servers` | Set agent MCP servers |
+| GET | `/api/agents/{id}/traces` | Execution traces |
+| GET | `/api/agents/{id}/metrics` | Agent metrics |
+| GET | `/api/agents/{id}/logs` | Agent log lines |
+| GET | `/api/agents/{id}/deliveries` | Inbound deliveries |
+| GET | `/api/agents/{id}/files` | List workspace files |
+| GET | `/api/agents/{id}/files/{filename}` | Get workspace file |
+| PUT | `/api/agents/{id}/files/{filename}` | Set workspace file |
+| DELETE | `/api/agents/{id}/files/{filename}` | Delete workspace file |
+| POST | `/api/agents/{id}/upload` | Upload file (multipart) |
+| GET | `/api/uploads/{file_id}` | Retrieve uploaded file |
+| GET | `/api/agents/{id}/ws` | WebSocket chat |
+| GET | `/api/agents/{id}/memory/export` | Export KV memory |
+| POST | `/api/agents/{id}/memory/import` | Import KV memory |
+| **Workflows** | | |
+| GET | `/api/workflows` | List workflows |
+| POST | `/api/workflows` | Create workflow |
+| GET | `/api/workflows/{id}` | Get workflow |
+| PUT | `/api/workflows/{id}` | Update workflow |
+| DELETE | `/api/workflows/{id}` | Delete workflow |
+| POST | `/api/workflows/{id}/run` | Run workflow |
+| GET | `/api/workflows/{id}/runs` | List workflow runs |
+| **Triggers** | | |
+| GET | `/api/triggers` | List triggers |
+| POST | `/api/triggers` | Create trigger |
+| PUT | `/api/triggers/{id}` | Update trigger |
+| DELETE | `/api/triggers/{id}` | Delete trigger |
+| **Schedules** | | |
+| GET | `/api/schedules` | List schedules |
+| POST | `/api/schedules` | Create schedule |
+| GET | `/api/schedules/{id}` | Get schedule |
+| PUT | `/api/schedules/{id}` | Update schedule |
+| DELETE | `/api/schedules/{id}` | Delete schedule |
+| POST | `/api/schedules/{id}/run` | Run schedule now |
+| **Memory (KV)** | | |
+| GET | `/api/memory/agents/{id}/kv` | List KV pairs |
+| GET | `/api/memory/agents/{id}/kv/{key}` | Get KV value |
+| PUT | `/api/memory/agents/{id}/kv/{key}` | Set KV value |
+| DELETE | `/api/memory/agents/{id}/kv/{key}` | Delete KV value |
+| **Memory (Proactive)** | | |
+| GET | `/api/memory` | List all proactive memories |
+| POST | `/api/memory` | Add proactive memory |
+| GET | `/api/memory/search` | Search memories (global) |
+| GET | `/api/memory/stats` | Memory aggregate stats |
+| POST | `/api/memory/cleanup` | Remove stale memories |
+| POST | `/api/memory/decay` | Apply time decay |
+| POST | `/api/memory/bulk-delete` | Bulk delete memories |
+| PUT | `/api/memory/items/{memory_id}` | Update memory entry |
+| DELETE | `/api/memory/items/{memory_id}` | Delete memory entry |
+| GET | `/api/memory/items/{memory_id}/history` | Memory edit history |
+| GET | `/api/memory/user/{user_id}` | Memories by user |
+| GET | `/api/memory/agents/{id}` | Agent proactive memories |
+| DELETE | `/api/memory/agents/{id}` | Clear agent memories |
+| GET | `/api/memory/agents/{id}/search` | Search agent memories |
+| GET | `/api/memory/agents/{id}/stats` | Agent memory stats |
+| DELETE | `/api/memory/agents/{id}/level/{level}` | Clear memory by level |
+| GET | `/api/memory/agents/{id}/duplicates` | Find duplicate memories |
+| POST | `/api/memory/agents/{id}/consolidate` | Consolidate memories |
+| GET | `/api/memory/agents/{id}/count` | Count agent memories |
+| GET | `/api/memory/agents/{id}/relations` | Query relations graph |
+| POST | `/api/memory/agents/{id}/relations` | Store relations |
+| GET | `/api/memory/agents/{id}/export` | Export agent memories |
+| POST | `/api/memory/agents/{id}/import` | Import agent memories |
+| **Channels** | | |
+| GET | `/api/channels` | List channels (44 adapters) |
+| GET | `/api/channels/{name}` | Get channel config |
+| POST | `/api/channels/{name}/configure` | Configure channel |
+| DELETE | `/api/channels/{name}/configure` | Remove channel config |
+| POST | `/api/channels/{name}/test` | Test channel |
+| POST | `/api/channels/reload` | Reload all channels |
+| POST | `/api/channels/whatsapp/qr/start` | Start WhatsApp QR session |
+| GET | `/api/channels/whatsapp/qr/status` | WhatsApp QR status |
+| **Templates** | | |
+| GET | `/api/templates` | List templates |
+| GET | `/api/templates/{name}` | Get template |
+| **Sessions** | | |
+| GET | `/api/sessions` | List all sessions |
+| POST | `/api/sessions/cleanup` | Cleanup orphaned sessions |
+| GET | `/api/sessions/{id}` | Get session details |
+| DELETE | `/api/sessions/{id}` | Delete session |
+| PUT | `/api/sessions/{id}/label` | Label a session |
+| **Model Catalog** | | |
+| GET | `/api/models` | Full model catalog (130+ models) |
+| GET | `/api/models/aliases` | List model aliases |
+| POST | `/api/models/aliases` | Create model alias |
+| DELETE | `/api/models/aliases/{alias}` | Delete model alias |
+| POST | `/api/models/custom` | Register custom model |
+| DELETE | `/api/models/custom/{id}` | Remove custom model |
+| GET | `/api/models/{id}` | Model details |
+| GET | `/api/catalog/status` | Catalog version and update info |
+| POST | `/api/catalog/update` | Trigger catalog update |
+| **Providers** | | |
+| GET | `/api/providers` | Provider list with auth status |
+| GET | `/api/providers/ollama/detect` | Auto-detect Ollama |
+| POST | `/api/providers/github-copilot/oauth/start` | Start Copilot OAuth |
+| GET | `/api/providers/github-copilot/oauth/poll/{poll_id}` | Poll Copilot OAuth |
+| GET | `/api/providers/{name}` | Get provider details |
+| POST | `/api/providers/{name}/key` | Set provider API key |
+| DELETE | `/api/providers/{name}/key` | Remove provider API key |
+| POST | `/api/providers/{name}/test` | Test provider connectivity |
+| PUT | `/api/providers/{name}/url` | Override provider base URL |
+| **Skills & Marketplace** | | |
+| GET | `/api/skills` | List installed skills (60 bundled) |
+| POST | `/api/skills/install` | Install skill |
+| POST | `/api/skills/uninstall` | Uninstall skill |
+| POST | `/api/skills/create` | Create new skill |
+| GET | `/api/marketplace/search` | Search FangHub |
+| **ClawHub** | | |
+| GET | `/api/clawhub/search` | Search ClawHub |
+| GET | `/api/clawhub/browse` | Browse ClawHub |
+| GET | `/api/clawhub/skill/{slug}` | Skill details |
+| GET | `/api/clawhub/skill/{slug}/code` | Skill source code |
+| POST | `/api/clawhub/install` | Install from ClawHub |
+| **Hands** | | |
+| GET | `/api/hands` | List hand definitions |
+| POST | `/api/hands/install` | Install a hand |
+| GET | `/api/hands/active` | List active hand instances |
+| GET | `/api/hands/{hand_id}` | Get hand details |
+| POST | `/api/hands/{hand_id}/activate` | Activate hand |
+| POST | `/api/hands/{hand_id}/check-deps` | Check hand dependencies |
+| POST | `/api/hands/{hand_id}/install-deps` | Install hand dependencies |
+| GET | `/api/hands/{hand_id}/settings` | Get hand settings |
+| PUT | `/api/hands/{hand_id}/settings` | Update hand settings |
+| POST | `/api/hands/instances/{id}/pause` | Pause hand instance |
+| POST | `/api/hands/instances/{id}/resume` | Resume hand instance |
+| DELETE | `/api/hands/instances/{id}` | Deactivate hand instance |
+| GET | `/api/hands/instances/{id}/stats` | Hand instance stats |
+| GET | `/api/hands/instances/{id}/browser` | Hand browser state |
+| **Extensions** | | |
+| GET | `/api/extensions` | List extensions |
+| GET | `/api/extensions/{name}` | Get extension |
+| POST | `/api/extensions/install` | Install extension |
+| POST | `/api/extensions/uninstall` | Uninstall extension |
+| **Plugins** | | |
+| GET | `/api/plugins/registries` | List plugin registries |
+| GET | `/api/plugins` | List plugins |
+| GET | `/api/plugins/{name}` | Get plugin |
+| POST | `/api/plugins/install` | Install plugin |
+| POST | `/api/plugins/uninstall` | Uninstall plugin |
+| POST | `/api/plugins/scaffold` | Scaffold plugin |
+| POST | `/api/plugins/{name}/install-deps` | Install plugin deps |
+| **MCP (managed)** | | |
+| GET | `/api/mcp/servers` | MCP server connections |
+| POST | `/api/mcp/servers` | Add MCP server |
+| GET | `/api/mcp/servers/{name}` | Get MCP server |
+| PUT | `/api/mcp/servers/{name}` | Update MCP server |
+| DELETE | `/api/mcp/servers/{name}` | Delete MCP server |
+| **A2A (external)** | | |
+| GET | `/api/a2a/agents` | List external A2A agents |
+| GET | `/api/a2a/agents/{id}` | Get external A2A agent |
+| POST | `/api/a2a/discover` | Discover external A2A agent |
+| POST | `/api/a2a/send` | Send task to external A2A agent |
+| GET | `/api/a2a/tasks/{id}/status` | External A2A task status |
+| **MCP & A2A Protocol** | | |
+| POST | `/mcp` | MCP HTTP transport (JSON-RPC 2.0) |
+| GET | `/.well-known/agent.json` | A2A agent card |
+| GET | `/a2a/agents` | A2A local agent list |
+| POST | `/a2a/tasks/send` | Send A2A task |
+| GET | `/a2a/tasks/{id}` | Get A2A task status |
+| POST | `/a2a/tasks/{id}/cancel` | Cancel A2A task |
+| **Audit & Security** | | |
+| GET | `/api/audit/recent` | Recent audit logs |
+| GET | `/api/audit/verify` | Verify Merkle chain integrity |
+| GET | `/api/security` | Security status (16 systems) |
+| GET | `/api/logs/stream` | SSE live log stream |
+| **Usage & Analytics** | | |
+| GET | `/api/usage` | Usage statistics |
+| GET | `/api/usage/summary` | Usage summary with quota |
+| GET | `/api/usage/by-model` | Usage by model breakdown |
+| GET | `/api/usage/daily` | Daily usage breakdown |
+| **Budget** | | |
+| GET | `/api/budget` | Global budget status |
+| PUT | `/api/budget` | Update global budget |
+| GET | `/api/budget/agents` | Agent budget ranking |
+| GET | `/api/budget/agents/{id}` | Agent budget details |
+| PUT | `/api/budget/agents/{id}` | Set agent budget |
+| **Goals** | | |
+| GET | `/api/goals` | List goals |
+| POST | `/api/goals` | Create goal |
+| GET | `/api/goals/{id}` | Get goal |
+| PUT | `/api/goals/{id}` | Update goal |
+| DELETE | `/api/goals/{id}` | Delete goal |
+| GET | `/api/goals/{id}/children` | List sub-goals |
+| **Cron** | | |
+| GET | `/api/cron/jobs` | List cron jobs |
+| POST | `/api/cron/jobs` | Create cron job |
+| GET | `/api/cron/jobs/{id}` | Get cron job |
+| PUT | `/api/cron/jobs/{id}` | Update cron job |
+| DELETE | `/api/cron/jobs/{id}` | Delete cron job |
+| PUT | `/api/cron/jobs/{id}/enable` | Toggle cron job |
+| GET | `/api/cron/jobs/{id}/status` | Cron job status |
+| **Webhooks** | | |
+| GET | `/api/webhooks/events` | List event webhook subscriptions |
+| POST | `/api/webhooks/events` | Create event webhook |
+| PUT | `/api/webhooks/events/{id}` | Update event webhook |
+| DELETE | `/api/webhooks/events/{id}` | Delete event webhook |
+| GET | `/api/webhooks` | List outbound webhooks |
+| POST | `/api/webhooks` | Create outbound webhook |
+| GET | `/api/webhooks/{id}` | Get outbound webhook |
+| PUT | `/api/webhooks/{id}` | Update outbound webhook |
+| DELETE | `/api/webhooks/{id}` | Delete outbound webhook |
+| POST | `/api/webhooks/{id}/test` | Test outbound webhook |
+| POST | `/api/hooks/wake` | Wake trigger (unversioned) |
+| POST | `/api/hooks/agent` | Agent trigger (unversioned) |
+| **Backup & Restore** | | |
+| POST | `/api/backup` | Create backup |
+| GET | `/api/backups` | List backups |
+| DELETE | `/api/backups/{filename}` | Delete backup |
+| POST | `/api/restore` | Restore from backup |
+| **Integrations** | | |
+| GET | `/api/integrations` | List integrations |
+| GET | `/api/integrations/available` | Available integrations |
+| GET | `/api/integrations/health` | Integrations health |
+| POST | `/api/integrations/add` | Add integration |
+| POST | `/api/integrations/reload` | Reload integrations |
+| GET | `/api/integrations/{id}` | Get integration |
+| DELETE | `/api/integrations/{id}` | Remove integration |
+| POST | `/api/integrations/{id}/reconnect` | Reconnect integration |
+| **Pairing** | | |
+| POST | `/api/pairing/request` | Initiate pairing |
+| POST | `/api/pairing/complete` | Complete pairing |
+| POST | `/api/pairing/notify` | Notify paired devices |
+| GET | `/api/pairing/devices` | List paired devices |
+| DELETE | `/api/pairing/devices/{id}` | Remove paired device |
+| **OAuth / OIDC** | | |
+| GET | `/api/auth/providers` | List OAuth providers |
+| GET | `/api/auth/login` | Redirect to default OAuth login |
+| GET | `/api/auth/login/{provider}` | Redirect to specific OAuth login |
+| GET | `/api/auth/callback` | OAuth callback (GET) |
+| POST | `/api/auth/callback` | OAuth callback (POST) |
+| GET | `/api/auth/userinfo` | OIDC user info |
+| POST | `/api/auth/introspect` | Token introspection |
+| **Task Queue** | | |
+| GET | `/api/tasks/status` | Task queue summary |
+| GET | `/api/tasks/list` | List queued tasks |
+| DELETE | `/api/tasks/{id}` | Cancel queued task |
+| POST | `/api/tasks/{id}/retry` | Retry failed task |
+| GET | `/api/queue/status` | Queue depth and throughput |
+| **Comms** | | |
+| GET | `/api/comms/topology` | Communication topology |
+| GET | `/api/comms/events` | Recent comms events |
+| GET | `/api/comms/events/stream` | SSE comms event stream |
+| POST | `/api/comms/send` | Send via comms layer |
+| POST | `/api/comms/task` | Dispatch comms task |
+| **Approvals** | | |
+| GET | `/api/approvals` | List approval requests |
+| POST | `/api/approvals` | Create approval request |
+| GET | `/api/approvals/{id}` | Get approval request |
+| POST | `/api/approvals/{id}/approve` | Approve request (body: `{totp_code?}`) |
+| POST | `/api/approvals/{id}/reject` | Reject request |
+| POST | `/api/approvals/totp/setup` | Generate TOTP secret for enrollment |
+| POST | `/api/approvals/totp/confirm` | Confirm TOTP enrollment with code |
+| GET | `/api/approvals/totp/status` | Check TOTP enrollment status |
+| DELETE | `/api/approvals/totp` | Revoke TOTP enrollment |
+| **Bindings & Commands** | | |
+| GET | `/api/bindings` | List UI bindings |
+| POST | `/api/bindings` | Add binding |
+| DELETE | `/api/bindings/{index}` | Remove binding |
+| GET | `/api/commands` | List slash commands |
+| GET | `/api/commands/{name}` | Get slash command |
+| **Media Generation** | | |
+| POST | `/api/media/image` | Generate images from text |
+| POST | `/api/media/speech` | Text-to-speech synthesis |
+| POST | `/api/media/video` | Submit video generation task |
+| GET | `/api/media/video/{task_id}` | Poll video task status |
+| POST | `/api/media/music` | Generate music from prompt/lyrics |
+| GET | `/api/media/providers` | List media providers & capabilities |
+| **Network & Peers** | | |
+| GET | `/api/peers` | List OFP peers |
+| GET | `/api/peers/{id}` | Get OFP peer |
+| GET | `/api/network/status` | OFP network status |
+| **Migration** | | |
+| GET | `/api/migrate/detect` | Detect migration sources |
+| POST | `/api/migrate/scan` | Scan for importable data |
+| POST | `/api/migrate` | Run migration |
+| **OpenAI Compatible** | | |
+| POST | `/v1/chat/completions` | OpenAI-compatible chat |
+| GET | `/v1/models` | OpenAI-compatible model list |
+
+

@@ -5,6 +5,185 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.11] - 2026-04-11
+
+### Added
+
+- Add WebSocket terminal with PTY backend and xterm frontend  (Phase 1) (#2229) (@leszek3737)
+- Claude Code CLI profile rotation for rate-limit resilience (#2249) (@f-liva)
+- Add MCP Servers management page (#2278) (@houko)
+- Raise MSRV to 1.94.1 and keep stable toolchain (#2302) (@houko)
+- Uninstall hand (#2312) (@houko)
+
+### Fixed
+
+- Change Docker setup to fix permissions for LIBREFANG_HOME (#2240) (@Cruel)
+- Also ignore secrets.env (dashboard-managed env file) (#2248) (@DaBlitzStein)
+- Localize agent template copy for zh users (#2257) (@houko)
+- Restore approval context and dashboard auth flows (#2272) (@houko)
+- Exclude Hand sub-agents from channel routing fallback (#2276) (@houko)
+- Accept claude-code (hyphen) in CLI profile rotation guard (#2284) (@f-liva)
+- Replace --verbose with --include-partial-messages for qwen driver (#2290) (@f-liva)
+- Add missing cli_profile_dirs to DefaultModelConfig literals (#2296) (@houko)
+- Delegate first-boot config to librefang init (#2297) (@houko)
+- Scan workspaces/ dir to persist locally-installed hands across boot (#2298) (@houko)
+- Hide delete button for built-in providers, flag custom (#2300) (@houko)
+- Mark manifest mut in parse_manifest (#2306) (@houko)
+- Stop middleware path normalization from swallowing GET / (#2307) (@houko)
+- Preserve pending Telegram updates across daemon restart (#2309) (@houko)
+- Stop agent loop on pure-text max_tokens overflow (#2310) (@houko)
+- Make Hands Settings tab actually editable (#2311) (@houko)
+- Wire ConPTY resize on Windows (#2313) (@houko)
+
+### Changed
+
+- Harden and optimize Telegram adapter (#2223) (@leszek3737)
+
+### Maintenance
+
+- Cover full-path context hook launchers (#2255) (@houko)
+- Cover wechat and wecom multi-account config parsing (#2258) (@houko)
+
+### Other
+
+- Feat(ws) harden terminal websocket follow-ups after #2229 (#2304) (@houko)
+
+
+## [2026.4.10] - 2026-04-10
+
+### Added
+
+- Per-channel session isolation via deterministic UUID v5 (#2097) (@f-liva)
+- Save channel images as files instead of inline base64 (#2098) (@f-liva)
+- TOTP second-factor for critical tool approvals (#2131) (@houko)
+- Proper resource composition for hand agents (#2133) (@houko)
+- Add extra_params support for openai compatible model (#2181) (@houko)
+- Add config export/backup endpoint and UI button (#2186) (@houko)
+- Prefill TOML editor from template selection (#2187) (@houko)
+- Add per-channel auto-routing with configurable strategies (#2189) (@houko)
+- Allow hooks to access vault secrets via allowed_secrets (#2216) (@houko)
+- Add [config] section support to plugin.toml (#2218) (@houko)
+- Add [[requires]] system binary checks to plugin.toml (#2219) (@houko)
+
+### Fixed
+
+- Detect "[no reply needed]" as silent response (#2093) (@f-liva)
+- Harden agent loop tool flow and trim handling (#2135) (@leszek3737)
+- Timezone-aware schedule creation (#2138) (@f-liva)
+- Replace librefang.dev with librefang.ai (#2147) (@houko)
+- Glob-match declared tools and auto-promote shell_exec exec_policy (#2148) (@houko)
+- Persist mcp server updates in patch agent (#2151) (@TechWizard9999)
+- Use codex exec for codex cli driver (#2153) (@TechWizard9999)
+- Improve Claude Code detection for keychain auth and non-login shells (#2166) (@x86txt)
+- Show active agent count instead of total in overview card (#2170) (@DaBlitzStein)
+- Handle SkillHub search response format with proper headers (#2171) (@DaBlitzStein)
+- Suppress CMD window flash on Windows (#2159) (#2176) (@houko)
+- Resolve hand.toml agent scan conflict (#2136) (#2177) (@houko)
+- Parameter errors trigger self-correction not user report (#2144) (#2178) (@houko)
+- Resolve pre-existing clippy and test compile failures (#2180) (@houko)
+- Multi-bot Telegram routing uses account_id, not first-match on allowed_users (#2183) (@houko)
+- Resolve build errors and clippy warnings (#2184) (@houko)
+- Skip auto-init when piped via curl, prompt user to run manually (#2190) (@houko)
+- Clean up post-install messaging for piped installs (#2192) (@houko)
+- Replace as_deref() with as_ref() for ChannelOverrides in bridge.rs (#2193) (@houko)
+- Add missing extra_body field to make_completion_request (#2197) (@houko)
+- Remove dead completion_timeout_override and build_completion_request (#2198) (@houko)
+- Derive Default for PluginManifest (#2205) (@houko)
+- Add INFO logs for all ingest hook success paths (#2213) (@houko)
+- Reduce agent count display lag on state changes (#2215) (@houko)
+- Decryption retry, streaming tag leak, session isolation (#2217) (@f-liva)
+- Filter tool_use/tool_result blocks from chat rendering (#2220) (@f-liva)
+- Resolve default provider in agent detail endpoint (#2221) (@DaBlitzStein)
+- Resolve default provider before creating driver (#2222) (@DaBlitzStein)
+- Add error handling to channel config dialog (#2224) (@DaBlitzStein)
+- Default to unconfigured tab when no channels are set up (#2225) (@DaBlitzStein)
+- Propagate ClawHub/Skillhub errors instead of returning 200 OK with empty items (#2231) (@DaBlitzStein)
+- Fix compile errors and rustfmt from Custom variant merge (#2234) (@houko)
+- Show embedding status ok when fts_only mode is active (#2236) (@houko)
+- Rustfmt formatting in snapshot handler (#2237) (@houko)
+- Rustfmt formatting in config routes (#2238) (@houko)
+- Merge extra_body into JSON Value to avoid duplicate keys (#2239) (@shilkazx)
+- Scope RwLockReadGuard before await in dashboard_snapshot (#2241) (@houko)
+- Increase dark theme surface opacity for readable dropdowns (#2242) (@houko)
+- Always load marketplace skills even without search keyword (#2243) (@houko)
+
+### Changed
+
+- Typed enums, O(1) indexes, and typed persistence v4 (#2161) (@leszek3737)
+
+### Maintenance
+
+- Apply rustfmt formatting across bridge, router, kernel, system (#2195) (@houko)
+- Remove extra blank line in agent_loop.rs (#2203) (@houko)
+- Remove mempalace-indexer from contrib — moved to registry (#2247) (@houko)
+
+
+## [2026.4.7] - 2026-04-07
+
+### Fixed
+
+- Resume agent loops after approval without blocking (#2101) (@leszek3737)
+- Skip Discord notification when release workflows are cancelled (#2129) (@houko)
+- Embed dashboard in release binaries (#2132) (@houko)
+
+### Maintenance
+
+- Add desktop build/dev recipes to justfile (#2134) (@houko)
+
+
+## [2026.4.6] - 2026-04-06
+
+### Added
+
+- Hot-reload skills dir and per-agent manifest (#2069) (@houko)
+- Unify full-section empty/error states (#2088) (@houko)
+- Focus trap + aria-modal + more n-shortcut coverage (#2092) (@houko)
+- Add send-audio endpoint for voice notes and audio files (#2099) (@f-liva)
+- Language-agnostic hook runtime (V / Go / Deno / Node / native) (#2100) (@houko)
+
+### Fixed
+
+- Allow tool retry on failure instead of early loop termination (#2065) (@neo-wanderer)
+- Sync openclaw/openfang with current KernelConfig schema (#2066) (@houko)
+- Stop stale messages_before index from breaking auto_memorize & append_canonical (#2068) (@houko)
+- Agent_send/kill fall through to name lookup for stale UUIDs (#2070) (@houko)
+- Reject missing required tool params instead of silent empty (#2071) (@houko)
+- Surface silent session-cleanup failures and panic on empty chunks (#2072) (@houko)
+- Return 404 for missing agents and reject malformed target_agent_id (#2073) (@houko)
+- Log when webhook/dingtalk bridge drops incoming messages (#2074) (@houko)
+- Surface agent tick panics instead of silent join drop (#2075) (@houko)
+- Emit skills/workspace/tool_blocklist during OpenClaw import (#2076) (@houko)
+- Providers.rs persistence failures + expect() panic (#2077) (@houko)
+- Surface silent DB errors and wrap merge updates in tx (#2078) (@houko)
+- Surface episodic memory persist failures in agent_loop (#2079) (@houko)
+- Sanitize user-controlled identity fields in prompt builder (#2080) (@houko)
+- Reload path must clamp bounds and clamp max_cron_jobs=0 (#2081) (@houko)
+- Close SSRF via redirect + URL-encoding bypass in taint (#2082) (@houko)
+- Route media tools through workspace sandbox (#2083) (@houko)
+- Guard sandbox ptr arithmetic with checked_add (#2084) (@houko)
+- ChatPage session-cache save effect + tool call keys (#2085) (@houko)
+- Cascade agent-scoped tables on remove_agent (#2086) (@houko)
+- Authorize cron_cancel + cap knowledge_query depth (#2087) (@houko)
+- Use PAT for release creation so dashboard-build fires (#2094) (@houko)
+- Suppress error messages in groups, show rate-limit in DMs only (#2095) (@f-liva)
+- Auto-close unclosed HTML tags, plain-text fallback, and reply-to photo support (#2096) (@f-liva)
+- Drop Ubuntu RUST_TEST_THREADS to 1 (#2117) (@houko)
+- Unify agent manifest path on workspaces/agents/ (#2118) (@houko)
+
+### Changed
+
+- Align URL hierarchy with sidebar nav groups (#2119) (@houko)
+
+### Maintenance
+
+- Fix test_image_analyze_missing_file after sandbox wiring (#2103) (@houko)
+- Ignore plugin scaffold templates (#2120) (@houko)
+
+### Reverted
+
+- V2026.4.6 stable release (was meant to be beta15) (#2126) (@houko)
+
+
 ## [2026.4.5] - 2026-04-05
 
 ### Added

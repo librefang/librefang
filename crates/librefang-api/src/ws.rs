@@ -15,6 +15,7 @@
 use crate::routes::AppState;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, Uri};
 use axum::response::IntoResponse;
 use dashmap::DashMap;
 use futures::stream::SplitSink;
@@ -80,13 +81,13 @@ impl VerboseLevel {
 // ---------------------------------------------------------------------------
 
 /// Global connection tracker (DashMap<IpAddr, AtomicUsize>).
-fn ws_tracker() -> &'static DashMap<IpAddr, AtomicUsize> {
+pub fn ws_tracker() -> &'static DashMap<IpAddr, AtomicUsize> {
     static TRACKER: std::sync::OnceLock<DashMap<IpAddr, AtomicUsize>> = std::sync::OnceLock::new();
     TRACKER.get_or_init(DashMap::new)
 }
 
 /// RAII guard that decrements the connection count on drop.
-struct WsConnectionGuard {
+pub struct WsConnectionGuard {
     ip: IpAddr,
 }
 
@@ -104,7 +105,7 @@ impl Drop for WsConnectionGuard {
 
 /// Try to acquire a WS connection slot for the given IP.
 /// Returns None if the IP has reached `max_ws_per_ip`.
-fn try_acquire_ws_slot(ip: IpAddr, max_ws_per_ip: usize) -> Option<WsConnectionGuard> {
+pub fn try_acquire_ws_slot(ip: IpAddr, max_ws_per_ip: usize) -> Option<WsConnectionGuard> {
     let entry = ws_tracker()
         .entry(ip)
         .or_insert_with(|| AtomicUsize::new(0));
@@ -114,6 +115,26 @@ fn try_acquire_ws_slot(ip: IpAddr, max_ws_per_ip: usize) -> Option<WsConnectionG
         return None;
     }
     Some(WsConnectionGuard { ip })
+}
+
+pub fn ws_query_param(uri: &Uri, key: &str) -> Option<String> {
+    let query = uri.query()?;
+    url::form_urlencoded::parse(query.as_bytes()).find_map(|(param, value)| {
+        if param == key {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    })
+}
+
+pub fn ws_auth_token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(ToOwned::to_owned)
+        .or_else(|| ws_query_param(uri, "token"))
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +156,10 @@ pub async fn agent_ws(
 ) -> impl IntoResponse {
     // SECURITY: Authenticate WebSocket upgrades (bypasses middleware).
     let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
-    if !valid_tokens.is_empty() {
+    let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
+    let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
+    let auth_required = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
+    if auth_required {
         // SECURITY: Use constant-time comparison to prevent timing attacks on auth tokens.
         let matches_any = |token: &str| -> bool {
             use subtle::ConstantTimeEq;
@@ -144,21 +168,12 @@ pub async fn agent_ws(
             })
         };
 
-        let header_token = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
-
-        let query_token = uri
-            .query()
-            .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")));
-
-        let header_auth = header_token.map(&matches_any).unwrap_or(false);
-        let query_auth = query_token.map(&matches_any).unwrap_or(false);
-
+        let provided_token = ws_auth_token(&headers, &uri);
         let mut session_auth = false;
-        let provided_token = header_token.or(query_token);
-        if let Some(token_str) = provided_token {
+        let mut user_key_auth = false;
+        let mut api_auth = false;
+        if let Some(token_str) = provided_token.as_deref() {
+            api_auth = matches_any(token_str);
             let mut sessions = state.active_sessions.write().await;
             sessions.retain(|_, st| {
                 !crate::password_hash::is_token_expired(
@@ -168,9 +183,16 @@ pub async fn agent_ws(
             });
             session_auth = sessions.contains_key(token_str);
             drop(sessions);
+
+            // Check per-user API keys (hashed with Argon2).
+            if !session_auth {
+                user_key_auth = user_api_keys.iter().any(|user| {
+                    crate::password_hash::verify_password(token_str, &user.api_key_hash)
+                });
+            }
         }
 
-        if !header_auth && !query_auth && !session_auth {
+        if !api_auth && !session_auth && !user_key_auth {
             warn!("WebSocket upgrade rejected: invalid auth");
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }
@@ -560,6 +582,7 @@ async fn handle_text_message(
                 was_mentioned: false,
                 thread_id: None,
                 account_id: None,
+                ..Default::default()
             };
             match state
                 .kernel
@@ -1166,7 +1189,7 @@ async fn flush_text_buffer(
 }
 
 /// Helper to send a JSON value over WebSocket.
-async fn send_json(
+pub async fn send_json(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     value: &serde_json::Value,
 ) -> Result<(), axum::Error> {
@@ -1403,6 +1426,29 @@ mod tests {
         assert_eq!(
             extract_status_code("API error (401): invalid api key"),
             Some(401)
+        );
+    }
+
+    #[test]
+    fn test_ws_query_param_decodes_percent_encoded_values() {
+        let uri: Uri = "/api/terminal/ws?token=abc%2Bdef%2Fghi%3D&cols=120"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            ws_query_param(&uri, "token").as_deref(),
+            Some("abc+def/ghi=")
+        );
+        assert_eq!(ws_query_param(&uri, "cols").as_deref(), Some("120"));
+    }
+
+    #[test]
+    fn test_ws_auth_token_prefers_bearer_header() {
+        let uri: Uri = "/api/terminal/ws?token=query-token".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer header-token".parse().unwrap());
+        assert_eq!(
+            ws_auth_token(&headers, &uri).as_deref(),
+            Some("header-token")
         );
     }
 

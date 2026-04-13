@@ -20,12 +20,12 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.4.5-beta14"
+version = "2026.4.11-beta18"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
 homepage = "https://librefang.ai"
-rust-version = "1.75"
+rust-version = "1.94.1"
 
 [workspace.dependencies]
 # Async runtime
@@ -136,11 +136,17 @@ rsa = "0.9"
 rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 
+# TOTP
+totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
+
 # JWT validation
 jsonwebtoken = "10"
 
 # Rate limiting
 governor = "0.10.4"
+
+# PTY
+portable-pty = "0.9"
 
 # Interactive CLI
 ratatui = "0.30"

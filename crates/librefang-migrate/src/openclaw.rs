@@ -1858,6 +1858,28 @@ fn convert_agent_from_json(
 
     // Resolve tools
     let mut unmapped_tools = Vec::new();
+    // Also capture deny list — previously #[allow(dead_code)] and silently
+    // dropped, which widened the agent's tool access after migration.
+    let tool_blocklist: Vec<String> = entry
+        .tools
+        .as_ref()
+        .and_then(|t| t.deny.as_ref())
+        .map(extract_string_list)
+        .map(|names| {
+            names
+                .into_iter()
+                .map(|t| {
+                    if is_known_librefang_tool(&t) {
+                        t
+                    } else if let Some(of_name) = map_tool_name(&t) {
+                        of_name.to_string()
+                    } else {
+                        t
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let tools: Vec<String> = if let Some(ref agent_tools) = entry.tools {
         if let Some(ref allow_val) = agent_tools.allow {
             let allow = extract_string_list(allow_val);
@@ -1950,6 +1972,36 @@ fn convert_agent_from_json(
     toml_str.push_str("module = \"builtin:chat\"\n");
     if let Some(p) = profile_name {
         toml_str.push_str(&format!("profile = \"{p}\"\n"));
+    }
+
+    // Per-agent skill allowlist (previously silently dropped during migration).
+    if let Some(ref skills_val) = entry.skills {
+        let skill_names = extract_string_list(skills_val);
+        if !skill_names.is_empty() {
+            let skills_toml: Vec<String> = skill_names.iter().map(|s| format!("\"{s}\"")).collect();
+            toml_str.push_str(&format!("skills = [{}]\n", skills_toml.join(", ")));
+        }
+    }
+
+    // Tool blocklist from OpenClaw's tools.deny list — previously dropped,
+    // which widened the agent's tool access relative to the source config.
+    if !tool_blocklist.is_empty() {
+        let blocklist_toml: Vec<String> =
+            tool_blocklist.iter().map(|t| format!("\"{t}\"")).collect();
+        toml_str.push_str(&format!(
+            "tool_blocklist = [{}]\n",
+            blocklist_toml.join(", ")
+        ));
+    }
+
+    // Custom workspace path (previously dropped — agents reverted to default).
+    if let Some(ref workspace) = entry.workspace {
+        if !workspace.is_empty() {
+            toml_str.push_str(&format!(
+                "workspace = \"{}\"\n",
+                workspace.replace('"', "\\\"")
+            ));
+        }
     }
 
     toml_str.push_str("\n[model]\n");

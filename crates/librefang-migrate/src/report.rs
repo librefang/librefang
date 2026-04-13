@@ -121,7 +121,7 @@ impl MigrationReport {
 
         // Next steps
         out.push_str("## Next Steps\n\n");
-        out.push_str("1. Review imported agent manifests in `~/.librefang/agents/`\n");
+        out.push_str("1. Review imported agent manifests in `~/.librefang/workspaces/agents/` (relocated on daemon start)\n");
         out.push_str(
             "2. Review `~/.librefang/secrets.env` — verify tokens were migrated correctly\n",
         );

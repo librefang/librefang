@@ -50,6 +50,26 @@ pub enum OutputFormat {
     PlainText,
 }
 
+/// Auto-routing strategy for a channel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoRouteStrategy {
+    /// Disable auto-routing entirely (default). Channel messages always go to
+    /// the configured agent without keyword/semantic classification.
+    #[default]
+    Off,
+    /// Only route if the cache already has an entry; never trigger LLM
+    /// classification on the first message.
+    ExplicitOnly,
+    /// Use the cached route for up to `auto_route_ttl_minutes`; re-classify
+    /// via LLM once the TTL expires.
+    StickyTtl,
+    /// Use a cheap metadata heuristic to decide whether the cached route is
+    /// still valid; fall back to full LLM classification after
+    /// `auto_route_divergence_count` consecutive mismatches.
+    StickyHeuristic,
+}
+
 /// Per-channel behavior overrides.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -122,6 +142,24 @@ pub struct ChannelOverrides {
     /// the agent.
     #[serde(default)]
     pub blocked_commands: Vec<String>,
+    /// Auto-routing strategy for this channel. Defaults to `off` (no routing).
+    #[serde(default)]
+    pub auto_route: AutoRouteStrategy,
+    /// How long (in minutes) a cached route stays valid for `sticky_ttl` strategy.
+    #[serde(default = "default_auto_route_ttl")]
+    pub auto_route_ttl_minutes: u32,
+    /// Minimum heuristic confidence score (0–10) before a route is cached for
+    /// `sticky_heuristic` strategy.
+    #[serde(default = "default_auto_route_confidence")]
+    pub auto_route_confidence_threshold: u32,
+    /// Extra score added to the cached route in `sticky_heuristic` to prefer
+    /// stability over churn.
+    #[serde(default = "default_auto_route_bonus")]
+    pub auto_route_sticky_bonus: u32,
+    /// How many consecutive heuristic mismatches trigger a full LLM
+    /// re-classification in `sticky_heuristic` mode.
+    #[serde(default = "default_auto_route_divergence")]
+    pub auto_route_divergence_count: u32,
 }
 
 impl Default for ChannelOverrides {
@@ -145,6 +183,11 @@ impl Default for ChannelOverrides {
             disable_commands: false,
             allowed_commands: Vec::new(),
             blocked_commands: Vec::new(),
+            auto_route: AutoRouteStrategy::Off,
+            auto_route_ttl_minutes: default_auto_route_ttl(),
+            auto_route_confidence_threshold: default_auto_route_confidence(),
+            auto_route_sticky_bonus: default_auto_route_bonus(),
+            auto_route_divergence_count: default_auto_route_divergence(),
         }
     }
 }
@@ -155,6 +198,22 @@ fn default_message_debounce_max_ms() -> u64 {
 
 fn default_message_debounce_max_buffer() -> usize {
     64
+}
+
+fn default_auto_route_ttl() -> u32 {
+    30
+}
+
+fn default_auto_route_confidence() -> u32 {
+    6
+}
+
+fn default_auto_route_bonus() -> u32 {
+    4
+}
+
+fn default_auto_route_divergence() -> u32 {
+    2
 }
 
 /// Controls what usage info appears in response footers.
@@ -1154,6 +1213,9 @@ pub struct ExecPolicy {
     pub safe_bins: Vec<String>,
     /// Global command allowlist (when mode = allowlist).
     pub allowed_commands: Vec<String>,
+    /// Environment variables explicitly allowed to pass through to `shell_exec`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_env_vars: Vec<String>,
     /// Max execution timeout in seconds. Default: 30.
     pub timeout_secs: u64,
     /// Max output size in bytes. Default: 100KB.
@@ -1180,6 +1242,7 @@ impl Default for ExecPolicy {
             .map(String::from)
             .collect(),
             allowed_commands: Vec::new(),
+            allowed_env_vars: Vec::new(),
             timeout_secs: 30,
             max_output_bytes: 100 * 1024,
             no_output_timeout_secs: default_no_output_timeout(),
@@ -2153,6 +2216,35 @@ pub struct ContextEngineTomlConfig {
     /// Plugin name. Resolves to `~/.librefang/plugins/<name>/plugin.toml`.
     /// Takes precedence over manual `hooks` if set.
     pub plugin: Option<String>,
+    /// Stack multiple plugins on a single context engine.
+    ///
+    /// When 2 or more plugin names are listed the runtime builds a
+    /// [`StackedContextEngine`] that chains them in declaration order.
+    /// Ignored when fewer than 2 entries are present; use `plugin` for the
+    /// single-plugin case instead.
+    ///
+    /// Example:
+    /// ```toml
+    /// [context_engine]
+    /// plugin_stack = ["qdrant-recall", "my-indexer"]
+    /// ```
+    #[serde(default)]
+    pub plugin_stack: Option<Vec<String>>,
+    /// Priority weight for each layer in `plugin_stack` (default 1.0).
+    ///
+    /// Higher weights cause that layer's recalled memories to appear first in
+    /// the merged ingest result.  Values are matched by position — the first
+    /// weight applies to the first entry in `plugin_stack`, and so on.
+    /// Missing trailing weights default to `1.0`.
+    ///
+    /// Example:
+    /// ```toml
+    /// [context_engine]
+    /// plugin_stack = ["qdrant-recall", "my-indexer"]
+    /// plugin_stack_weights = [2.0, 1.0]   # qdrant-recall has higher priority
+    /// ```
+    #[serde(default)]
+    pub plugin_stack_weights: Vec<f32>,
     /// Optional Python script hooks that override specific lifecycle methods.
     pub hooks: ContextEngineHooks,
     /// Plugin registries (GitHub repos) to browse for installable plugins.
@@ -2166,6 +2258,8 @@ impl Default for ContextEngineTomlConfig {
         Self {
             engine: "default".to_string(),
             plugin: None,
+            plugin_stack: None,
+            plugin_stack_weights: Vec::new(),
             hooks: ContextEngineHooks::default(),
             plugin_registries: default_plugin_registries(),
         }
@@ -2199,22 +2293,334 @@ fn default_plugin_registries() -> Vec<PluginRegistrySource> {
     }]
 }
 
-/// Python script overrides for individual context engine lifecycle hooks.
+/// Script overrides for individual context engine lifecycle hooks.
+///
+/// Hook scripts speak a language-agnostic JSON-over-stdin/stdout protocol —
+/// they read one JSON object from stdin and emit one JSON line on stdout.
+/// The `runtime` field picks which interpreter / launcher to use; it defaults
+/// to `"python"` so existing Python plugins keep working without edits.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextEngineHooks {
-    /// Python script for the `ingest` hook (called on new user message).
+    /// Script for the `ingest` hook (called on new user message).
     /// Receives: `{"type": "ingest", "agent_id": "...", "message": "..."}`
     /// Returns: `{"type": "ingest_result", "memories": [{"content": "..."}]}`
     pub ingest: Option<String>,
-    /// Python script for the `after_turn` hook (called after each turn).
+    /// Script for the `after_turn` hook (called after each turn).
     /// Receives: `{"type": "after_turn", "agent_id": "...", "messages": [...]}`
     /// Returns: `{"type": "ok"}` (acknowledgement)
     pub after_turn: Option<String>,
+    /// Script for the `bootstrap` hook (called once on engine init).
+    /// Receives: `{"type": "bootstrap", "context_window_tokens": N, "stable_prefix_mode": bool, "max_recall_results": N}`
+    /// Returns: `{"type": "ok"}`
+    pub bootstrap: Option<String>,
+    /// Script for the `assemble` hook (called before each LLM call).
+    /// Receives: `{"type": "assemble", "agent_id": "...", "messages": [...], "system_prompt": "...", "context_window_tokens": N}`
+    /// Returns: `{"type": "assemble_result", "messages": [...]}` — script controls what the model sees.
+    /// Falls back to default engine if script fails or returns no messages.
+    pub assemble: Option<String>,
+    /// Script for the `compact` hook (called under context pressure).
+    /// Receives: `{"type": "compact", "agent_id": "...", "messages": [...], "model": "...", "context_window_tokens": N}`
+    /// Returns: `{"type": "compact_result", "messages": [...]}` — compacted message list.
+    /// Falls back to default LLM-based compaction if script fails.
+    pub compact: Option<String>,
+    /// Script for the `prepare_subagent` hook (called before sub-agent spawn).
+    /// Receives: `{"type": "prepare_subagent", "parent_id": "...", "child_id": "..."}`
+    /// Returns: `{"type": "ok"}`
+    pub prepare_subagent: Option<String>,
+    /// Script for the `merge_subagent` hook (called after sub-agent completes).
+    /// Receives: `{"type": "merge_subagent", "parent_id": "...", "child_id": "..."}`
+    /// Returns: `{"type": "ok"}`
+    pub merge_subagent: Option<String>,
+    /// Which runtime launches the hook scripts.
+    ///
+    /// Supported: `"python"` (default, runs `.py` via `python3`), `"native"`
+    /// (exec a pre-compiled binary directly), `"v"` (`v run *.v`), `"node"`,
+    /// `"deno"`, `"go"` (`go run *.go`). Unknown values fall back to
+    /// `"python"` with a warning.
+    pub runtime: Option<String>,
+    /// Per-invocation timeout for hook scripts, in seconds.
+    ///
+    /// Defaults to `30`. The `bootstrap` hook gets **double** this value because
+    /// it runs only once and may need time to connect to external services (e.g.
+    /// a vector database). Set higher if your hooks do heavy I/O at startup.
+    #[serde(default)]
+    pub hook_timeout_secs: Option<u64>,
+    /// What to do when a hook script fails (crash, timeout, bad JSON).
+    ///
+    /// - `"warn"` (default) — log a warning, continue with fallback behaviour.
+    /// - `"abort"` — propagate the error to the caller; the agent turn fails.
+    /// - `"skip"` — silently ignore the failure, no log, use fallback.
+    #[serde(default)]
+    pub on_hook_failure: HookFailurePolicy,
+    /// How many times to retry a failing hook before applying `on_hook_failure`.
+    ///
+    /// Defaults to `0` (no retries). Each retry respects the same timeout.
+    /// Useful for hooks that call flaky external services.
+    #[serde(default)]
+    pub max_retries: u32,
+    /// Milliseconds to wait between hook retries.
+    ///
+    /// Defaults to `500`. Ignored when `max_retries = 0`.
+    #[serde(default = "default_hook_retry_delay_ms")]
+    pub retry_delay_ms: u64,
+    /// Optional substring filter for the `ingest` hook.
+    ///
+    /// When set, the ingest hook is only invoked if the incoming user message
+    /// contains this string (case-sensitive). If the message does not match,
+    /// the default recall path runs without starting a subprocess.
+    ///
+    /// Example: `ingest_filter = "remember"` — only index messages that
+    /// explicitly ask the agent to remember something.
+    #[serde(default)]
+    pub ingest_filter: Option<String>,
+    /// Hook protocol version this plugin was written for.
+    ///
+    /// LibreFang's current hook protocol is version **1**. If a plugin declares
+    /// a higher version the runtime logs a compatibility warning and may refuse
+    /// to load. Omit or set to `1` for full compatibility.
+    #[serde(default)]
+    pub hook_protocol_version: Option<u32>,
+    /// Memory limit (MiB) for each hook subprocess.
+    ///
+    /// Enforced via `RLIMIT_AS` on Linux. On other platforms a warning is
+    /// logged and the limit is not applied. Omit to use the OS default.
+    #[serde(default)]
+    pub max_memory_mb: Option<u64>,
+    /// Whether hook subprocesses are allowed to make network connections.
+    ///
+    /// When `false` the runtime attempts soft network isolation: on Linux it
+    /// wraps the hook with `unshare --net` (if available); on other platforms
+    /// it injects `no_proxy=*` / `NO_PROXY=*` into the subprocess environment.
+    /// Defaults to `true`.
+    #[serde(default = "default_true_bool")]
+    pub allow_network: bool,
+    /// Restrict the `ingest`/`after_turn`/`assemble` hooks to specific agent IDs.
+    ///
+    /// Each entry is matched as a substring of the agent's UUID string. Leave
+    /// empty (default) to run hooks for every agent.
+    ///
+    /// ```toml
+    /// only_for_agent_ids = ["3f2a", "9c01"]  # prefix match is fine
+    /// ```
+    #[serde(default)]
+    pub only_for_agent_ids: Vec<String>,
+    /// Per-hook JSON Schema definitions for input/output validation.
+    ///
+    /// Map keys are hook names (`"ingest"`, `"assemble"`, …). Each value is
+    /// an object with optional `"input"` and `"output"` JSON Schema objects.
+    /// When declared, the runtime validates hook payloads and responses against
+    /// the schema and logs a warning on mismatch (never blocks execution).
+    ///
+    /// ```toml
+    /// [hooks.hook_schemas.ingest.output]
+    /// type = "object"
+    /// required = ["memories"]
+    /// ```
+    #[serde(default)]
+    pub hook_schemas: std::collections::HashMap<String, HookSchema>,
+    /// Optional TTL (seconds) for caching `ingest` hook results.
+    ///
+    /// When set, the runtime caches the hook output keyed on the exact input
+    /// JSON. Subsequent calls with identical input within the TTL window skip
+    /// the subprocess entirely and return the cached result. Useful for
+    /// embedding-based recall hooks that are deterministic and expensive.
+    ///
+    /// Set to `0` or omit to disable caching (default).
+    ///
+    /// ```toml
+    /// hook_cache_ttl_secs = 60   # cache ingest results for 1 minute
+    /// ```
+    #[serde(default)]
+    pub hook_cache_ttl_secs: Option<u64>,
+    /// Keep hook subprocesses alive between calls (persistent process pool).
+    ///
+    /// When `true`, the runtime keeps one subprocess per hook script alive
+    /// between invocations, communicating via JSON-lines on stdin/stdout.
+    /// Eliminates interpreter startup overhead (significant for Python/Node).
+    /// Defaults to `false`.
+    ///
+    /// ```toml
+    /// persistent_subprocess = true
+    /// ```
+    #[serde(default)]
+    pub persistent_subprocess: bool,
+    /// Cache TTL (seconds) for `assemble` hook results.
+    ///
+    /// When set, identical assemble inputs (same messages + system_prompt) return
+    /// the cached output without invoking the subprocess. Useful for expensive
+    /// context-shaping hooks that produce deterministic output.
+    #[serde(default)]
+    pub assemble_cache_ttl_secs: Option<u64>,
+    /// Cache TTL (seconds) for `compact` hook results.
+    #[serde(default)]
+    pub compact_cache_ttl_secs: Option<u64>,
+    /// Execution priority in a stacked engine (higher = runs first).
+    ///
+    /// Plugins with higher priority run first for `ingest` and `assemble`
+    /// hooks. Plugins with equal priority keep declaration order.
+    /// Defaults to `0`.
+    ///
+    /// ```toml
+    /// priority = 10   # run before plugins with default priority 0
+    /// ```
+    #[serde(default)]
+    pub priority: i32,
+    /// Regex filter for the `ingest` hook (applied before `ingest_filter`).
+    ///
+    /// The hook is only invoked when the user message matches this regex.
+    /// ```toml
+    /// ingest_regex = "(?i)remember|note|save"
+    /// ```
+    #[serde(default)]
+    pub ingest_regex: Option<String>,
+    /// Declared environment variable schema for this plugin.
+    ///
+    /// Maps env var name → description. Keys prefixed with `!` are required;
+    /// the runtime warns at load time if a required var is not set.
+    ///
+    /// ```toml
+    /// [hooks.env_schema]
+    /// "!QDRANT_URL" = "Required: Qdrant HTTP endpoint"
+    /// "COLLECTION"  = "Optional: collection name (default: memories)"
+    /// ```
+    #[serde(default)]
+    pub env_schema: std::collections::HashMap<String, String>,
+    /// Enable shared state KV store for this plugin's hooks.
+    ///
+    /// When enabled, the runtime injects `LIBREFANG_STATE_FILE=/path/to/state.json`
+    /// into every hook subprocess. Hooks can read/write this JSON file to persist
+    /// state across calls. The file is scoped per-plugin.
+    ///
+    /// ```toml
+    /// enable_shared_state = true
+    /// ```
+    #[serde(default)]
+    pub enable_shared_state: bool,
+    /// Circuit-breaker configuration for hook failures.
+    ///
+    /// After `max_failures` consecutive failures the hook is suspended for
+    /// `reset_secs` seconds before being retried in half-open state.
+    ///
+    /// ```toml
+    /// [hooks.circuit_breaker]
+    /// max_failures = 5
+    /// reset_secs   = 60
+    /// ```
+    #[serde(default)]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+    /// Maximum concurrent `after_turn` background tasks (default 16).
+    #[serde(default = "default_after_turn_queue_depth")]
+    pub after_turn_queue_depth: u32,
+    /// Pre-warm persistent subprocesses at engine init (requires `persistent_subprocess = true`).
+    #[serde(default)]
+    pub prewarm_subprocesses: bool,
+    /// Restrict hook filesystem access: sets `HOME=/dev/null`, per-call `TMPDIR`,
+    /// and `LIBREFANG_READONLY_FS=1`. Defaults to `true` (no restriction).
+    #[serde(default = "default_true_bool")]
+    pub allow_filesystem: bool,
+    /// OTel OTLP gRPC endpoint for hook span export (overrides global setting).
+    #[serde(default)]
+    pub otel_endpoint: Option<String>,
+    /// Script path for the `on_event` hook.
+    /// Called when another plugin emits an event via the event bus.
+    #[serde(default)]
+    pub on_event: Option<String>,
+    /// Vault secret names that this plugin's hooks are allowed to access.
+    ///
+    /// Each entry is a key name in the LibreFang credential vault. The runtime
+    /// resolves the secret value at engine init time and injects it into every
+    /// hook subprocess as `LIBREFANG_SECRET_<NAME>` (uppercased). If a named
+    /// secret does not exist in the vault a warning is logged and the variable
+    /// is not injected.
+    ///
+    /// ```toml
+    /// [hooks]
+    /// allowed_secrets = ["GITHUB_TOKEN", "OPENAI_KEY"]
+    /// ```
+    #[serde(default)]
+    pub allowed_secrets: Vec<String>,
+}
+
+/// Circuit-breaker settings for a hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitBreakerConfig {
+    /// Consecutive failures before the circuit opens.
+    #[serde(default = "default_cb_max_failures")]
+    pub max_failures: u32,
+    /// Cooldown in seconds before half-open retry.
+    #[serde(default = "default_cb_reset_secs")]
+    pub reset_secs: u64,
+}
+
+fn default_cb_max_failures() -> u32 {
+    5
+}
+fn default_cb_reset_secs() -> u64 {
+    60
+}
+fn default_after_turn_queue_depth() -> u32 {
+    16
+}
+
+fn default_true_bool() -> bool {
+    true
+}
+
+/// Per-hook input/output JSON Schema definition.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HookSchema {
+    /// JSON Schema for the value sent to the hook script on stdin.
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+    /// JSON Schema for the value the hook script must return on stdout.
+    #[serde(default)]
+    pub output: Option<serde_json::Value>,
+}
+
+fn default_hook_retry_delay_ms() -> u64 {
+    500
+}
+
+/// What to do when a hook script invocation fails.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookFailurePolicy {
+    /// Log a warning and continue with the engine's built-in fallback (default).
+    #[default]
+    Warn,
+    /// Propagate the error to the caller — the current agent operation fails.
+    Abort,
+    /// Silently ignore the failure and proceed with fallback, no log emitted.
+    Skip,
 }
 
 /// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.
 ///
+/// Type of a plugin config field.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginConfigFieldType {
+    #[default]
+    String,
+    Number,
+    Boolean,
+}
+
+/// A single user-configurable field declared in `[config]` of plugin.toml.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginConfigField {
+    /// Field value type.
+    #[serde(rename = "type", default)]
+    pub field_type: PluginConfigFieldType,
+    /// Default value (always a JSON-compatible value).
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    /// Human-readable description of what this field controls.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// # Example `plugin.toml`
 ///
 /// ```toml
@@ -2227,7 +2633,7 @@ pub struct ContextEngineHooks {
 /// ingest = "hooks/ingest.py"      # relative to plugin dir
 /// after_turn = "hooks/after_turn.py"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginManifest {
     /// Plugin name (must match directory name).
     pub name: String,
@@ -2242,9 +2648,94 @@ pub struct PluginManifest {
     /// Hook script paths, relative to the plugin directory.
     #[serde(default)]
     pub hooks: ContextEngineHooks,
-    /// Python dependencies file (relative to plugin dir, default: `requirements.txt`).
+    /// Dependencies file (relative to plugin dir). For Python: `requirements.txt`.
+    /// Other runtimes ignore this field (use `go.mod`, `package.json`, etc. directly).
     #[serde(default)]
     pub requirements: Option<String>,
+    /// Environment variables injected into every hook subprocess spawned by this plugin.
+    ///
+    /// Values starting with `${VAR_NAME}` are expanded from the daemon's own environment
+    /// at invocation time. Unknown references expand to an empty string.
+    ///
+    /// ```toml
+    /// [env]
+    /// QDRANT_URL     = "http://localhost:6333"
+    /// COLLECTION     = "agent-memories"
+    /// QDRANT_API_KEY = "${QDRANT_API_KEY}"   # expanded from daemon env
+    /// ```
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    /// Minimum LibreFang version required by this plugin.
+    ///
+    /// The runtime refuses to load the plugin when the running daemon's version
+    /// is lower than this string (compared lexicographically on the semver
+    /// portion before any `-` pre-release suffix). Omit to allow all versions.
+    ///
+    /// ```toml
+    /// librefang_min_version = "2026.4.0"
+    /// ```
+    #[serde(default)]
+    pub librefang_min_version: Option<String>,
+    /// SHA-256 integrity hashes for hook script files.
+    ///
+    /// Maps a file path (relative to the plugin directory) to its expected
+    /// lowercase hex SHA-256 digest. Verified at load time; mismatches abort
+    /// loading with an error so tampered scripts are never executed.
+    ///
+    /// Generate with: `sha256sum hooks/ingest.py`
+    ///
+    /// ```toml
+    /// [integrity]
+    /// "hooks/ingest.py"    = "e3b0c44298fc1c149afb..."
+    /// "hooks/after_turn.py" = "a87ff679a2f3e71d9181..."
+    /// ```
+    #[serde(default)]
+    pub integrity: std::collections::HashMap<String, String>,
+    /// Other plugins this plugin depends on.
+    ///
+    /// Listed names must be installed (present in `~/.librefang/plugins/`)
+    /// before this plugin is allowed to load. The runtime returns an error
+    /// listing any missing dependencies.
+    ///
+    /// ```toml
+    /// plugin_depends = ["base-recall", "embedding-indexer"]
+    /// ```
+    #[serde(default)]
+    pub plugin_depends: Vec<String>,
+    /// User-configurable plugin settings declared in `[config]`.
+    ///
+    /// ```toml
+    /// [config]
+    /// model = { type = "string", default = "small", description = "Whisper model size" }
+    /// max_file_size_mb = { type = "number", default = 10 }
+    /// ```
+    ///
+    /// The resolved config (defaults merged with user overrides) is written as JSON to
+    /// the path in `LIBREFANG_PLUGIN_CONFIG` before each hook subprocess runs.
+    #[serde(default)]
+    pub config: std::collections::HashMap<String, PluginConfigField>,
+    /// System binaries required by this plugin.
+    ///
+    /// The runtime checks each binary against `PATH` at install and lint time
+    /// and warns when one is missing. Hooks still execute — this is advisory only.
+    ///
+    /// ```toml
+    /// [[requires]]
+    /// binary = "ffmpeg"
+    /// install_hint = "brew install ffmpeg"
+    /// ```
+    #[serde(default)]
+    pub requires: Vec<PluginSystemRequirement>,
+}
+
+/// A single system-binary requirement declared in `plugin.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginSystemRequirement {
+    /// Name of the binary that must exist on `PATH`.
+    pub binary: String,
+    /// Human-readable install hint shown when the binary is missing.
+    #[serde(default)]
+    pub install_hint: Option<String>,
 }
 
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"
@@ -3083,6 +3574,16 @@ pub struct DefaultModelConfig {
     /// many seconds of silence on stdout, not wall-clock time.
     #[serde(default = "default_message_timeout_secs")]
     pub message_timeout_secs: u64,
+    /// Provider-specific extension parameters that are flattened directly
+    /// into the API request body.
+    #[serde(default, flatten)]
+    pub extra_params: HashMap<String, serde_json::Value>,
+    /// Claude Code CLI profile directories for token rotation.
+    /// Each entry is a path to a `.claude/` config dir (e.g. `~/.claude-profiles/account-2`).
+    /// When multiple profiles are configured, a TokenRotationDriver wraps them
+    /// for automatic failover on rate limits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cli_profile_dirs: Vec<String>,
 }
 
 fn default_message_timeout_secs() -> u64 {
@@ -3097,6 +3598,8 @@ impl Default for DefaultModelConfig {
             api_key_env: String::new(),
             base_url: None,
             message_timeout_secs: default_message_timeout_secs(),
+            extra_params: HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         }
     }
 }

@@ -197,6 +197,7 @@ engine = "default"
 [context_engine.hooks]
 # ingest = "~/.librefang/scripts/my_recall.py"
 # after_turn = "~/.librefang/scripts/my_indexer.py"
+# runtime = "python"   # python (default) | v | node | deno | go | native
 
 [[context_engine.plugin_registries]]
 name = "Official"
@@ -207,8 +208,9 @@ github_repo = "librefang/librefang-registry"
 |-------|------|---------|-------------|
 | `engine` | string | `"default"` | Built-in engine name. Currently only `"default"` is supported. |
 | `plugin` | string or null | `null` | Plugin name. Resolves to `~/.librefang/plugins/<name>/plugin.toml`. Takes precedence over manual `hooks` if set. |
-| `hooks.ingest` | string or null | `null` | Python script path for the `ingest` hook (called on new user message). |
-| `hooks.after_turn` | string or null | `null` | Python script path for the `after_turn` hook (called after each completed turn). |
+| `hooks.ingest` | string or null | `null` | Script path for the `ingest` hook (called on new user message). |
+| `hooks.after_turn` | string or null | `null` | Script path for the `after_turn` hook (called after each completed turn). |
+| `hooks.runtime` | string or null | `"python"` | Which launcher runs the hook scripts. Supported: `python`, `v`, `node`, `deno`, `go`, `native` (exec a pre-compiled binary). |
 | `plugin_registries` | list of objects | Official registry | Plugin registries (GitHub `owner/repo`) to browse for installable plugins. |
 
 ---
@@ -260,7 +262,7 @@ plugin_registries = ["acme-corp/librefang-plugins"]
 
 ### `[prompt_intelligence]`
 
-Configures prompt versioning and A/B experiment support. When enabled, LibreFang automatically tracks prompt version history and supports running A/B experiments to compare prompt variants. See the [Prompt Intelligence guide](/prompt-intelligence) for full documentation.
+Configures prompt versioning and A/B experiment support. When enabled, LibreFang automatically tracks prompt version history and supports running A/B experiments to compare prompt variants. See the [Prompt Intelligence guide](/agent/prompt-intelligence) for full documentation.
 
 ```toml
 [prompt_intelligence]

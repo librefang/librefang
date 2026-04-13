@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::tool::ToolExecutionStatus;
+
 /// A message in an LLM conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -41,7 +43,7 @@ pub enum MessageContent {
 }
 
 /// A content block within a message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     /// A text block.
@@ -62,6 +64,14 @@ pub enum ContentBlock {
         media_type: String,
         /// Base64-encoded image data.
         data: String,
+    },
+    /// An image stored as a file on disk, referenced by absolute path.
+    #[serde(rename = "image_file")]
+    ImageFile {
+        /// MIME type (e.g. "image/jpeg", "image/png").
+        media_type: String,
+        /// Absolute path to the image file on disk.
+        path: String,
     },
     /// A tool use request from the assistant.
     #[serde(rename = "tool_use")]
@@ -90,6 +100,12 @@ pub enum ContentBlock {
         content: String,
         /// Whether the tool execution errored.
         is_error: bool,
+        /// Detailed execution status.
+        #[serde(default)]
+        status: ToolExecutionStatus,
+        /// Approval request ID, set when status is WaitingApproval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_request_id: Option<String>,
     },
     /// Extended thinking content block (model's reasoning trace).
     #[serde(rename = "thinking")]
@@ -156,6 +172,7 @@ impl MessageContent {
                     ContentBlock::Thinking { thinking, .. } => thinking.len(),
                     ContentBlock::ToolUse { .. }
                     | ContentBlock::Image { .. }
+                    | ContentBlock::ImageFile { .. }
                     | ContentBlock::Unknown => 0,
                 })
                 .sum(),
@@ -181,9 +198,12 @@ impl MessageContent {
     pub fn has_images(&self) -> bool {
         match self {
             MessageContent::Text(_) => false,
-            MessageContent::Blocks(blocks) => blocks
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Image { .. })),
+            MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
+                matches!(
+                    b,
+                    ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
+                )
+            }),
         }
     }
 
@@ -201,8 +221,13 @@ impl MessageContent {
             MessageContent::Blocks(blocks) => {
                 let mut stripped = false;
                 for block in blocks.iter_mut() {
-                    if let ContentBlock::Image { media_type, .. } = block {
-                        let placeholder = format!("[Image ({media_type}) previously processed]");
+                    let media = match block {
+                        ContentBlock::Image { media_type, .. }
+                        | ContentBlock::ImageFile { media_type, .. } => Some(media_type.clone()),
+                        _ => None,
+                    };
+                    if let Some(mt) = media {
+                        let placeholder = format!("[Image ({mt}) previously processed]");
                         *block = ContentBlock::Text {
                             text: placeholder,
                             provider_metadata: None,
@@ -492,6 +517,80 @@ mod tests {
     }
 
     #[test]
+    fn test_image_file_serde_roundtrip() {
+        let block = ContentBlock::ImageFile {
+            media_type: "image/jpeg".to_string(),
+            path: "/tmp/test.jpg".to_string(),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let deserialized: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(block, deserialized);
+    }
+
+    #[test]
+    fn test_image_file_serde_tag() {
+        let block = ContentBlock::ImageFile {
+            media_type: "image/jpeg".to_string(),
+            path: "/tmp/test.jpg".to_string(),
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "image_file");
+        assert_eq!(json["media_type"], "image/jpeg");
+        assert_eq!(json["path"], "/tmp/test.jpg");
+    }
+
+    #[test]
+    fn test_image_retrocompat() {
+        let json = serde_json::json!({
+            "type": "image",
+            "media_type": "image/png",
+            "data": "abc123"
+        });
+        let block: ContentBlock = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(block, ContentBlock::Image { ref media_type, ref data }
+            if media_type == "image/png" && data == "abc123")
+        );
+    }
+
+    #[test]
+    fn test_image_file_text_length() {
+        let content = MessageContent::Blocks(vec![ContentBlock::ImageFile {
+            media_type: "image/jpeg".to_string(),
+            path: "/tmp/test.jpg".to_string(),
+        }]);
+        assert_eq!(content.text_length(), 0);
+    }
+
+    #[test]
+    fn test_image_file_has_images() {
+        let content = MessageContent::Blocks(vec![ContentBlock::ImageFile {
+            media_type: "image/jpeg".to_string(),
+            path: "/tmp/test.jpg".to_string(),
+        }]);
+        assert!(content.has_images());
+    }
+
+    #[test]
+    fn test_image_file_strip_images() {
+        let mut content = MessageContent::Blocks(vec![ContentBlock::ImageFile {
+            media_type: "image/jpeg".to_string(),
+            path: "/tmp/x.jpg".to_string(),
+        }]);
+        assert!(content.strip_images());
+        assert!(!content.has_images());
+        let text = content.text_content();
+        assert!(text.contains("[Image (image/jpeg) previously processed]"));
+    }
+
+    #[test]
+    fn test_unknown_variant_still_works() {
+        let json = serde_json::json!({"type": "some_future_type"});
+        let block: ContentBlock = serde_json::from_value(json).unwrap();
+        assert!(matches!(block, ContentBlock::Unknown));
+    }
+
+    #[test]
     fn test_strip_images_multiple_images() {
         let mut content = MessageContent::Blocks(vec![
             ContentBlock::Image {
@@ -513,5 +612,88 @@ mod tests {
         assert!(text.contains("[Image (image/png) previously processed]"));
         assert!(text.contains("[Image (image/jpeg) previously processed]"));
         assert!(text.contains("between"));
+    }
+
+    // -----------------------------------------------------------------------
+    // ContentBlock::ToolResult tests (Step 1 from plan)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_content_block_tool_result_serde() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "toolu_abc".to_string(),
+            tool_name: "shell_exec".to_string(),
+            content: "Command output".to_string(),
+            is_error: false,
+            status: crate::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let deserialized: ContentBlock = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                status,
+                approval_request_id,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "toolu_abc");
+                assert_eq!(status, crate::tool::ToolExecutionStatus::Completed);
+                assert!(approval_request_id.is_none());
+            }
+            _ => panic!("Expected ToolResult block"),
+        }
+    }
+
+    #[test]
+    fn test_content_block_tool_result_deserialization_old_format() {
+        // Old format without status and approval_request_id fields
+        let json = r#"{
+            "type": "tool_result",
+            "tool_use_id": "toolu_old",
+            "tool_name": "file_read",
+            "content": "File contents",
+            "is_error": false
+        }"#;
+        let block: ContentBlock = serde_json::from_str(json).unwrap();
+        match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                status,
+                approval_request_id,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "toolu_old");
+                assert_eq!(status, crate::tool::ToolExecutionStatus::Completed); // Default
+                assert!(approval_request_id.is_none()); // Default
+            }
+            _ => panic!("Expected ToolResult block"),
+        }
+    }
+
+    #[test]
+    fn test_content_block_tool_result_with_approval_request_id() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "toolu_abc".to_string(),
+            tool_name: "shell_exec".to_string(),
+            content: "Waiting for approval".to_string(),
+            is_error: false,
+            status: crate::tool::ToolExecutionStatus::WaitingApproval,
+            approval_request_id: Some("req-123".to_string()),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("waiting_approval"));
+        assert!(json.contains("req-123"));
+
+        let deserialized: ContentBlock = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            ContentBlock::ToolResult {
+                approval_request_id,
+                ..
+            } => {
+                assert_eq!(approval_request_id, Some("req-123".to_string()));
+            }
+            _ => panic!("Expected ToolResult block"),
+        }
     }
 }

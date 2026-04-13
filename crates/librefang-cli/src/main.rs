@@ -2647,8 +2647,9 @@ fn spawn_detached_daemon(
 
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 
     command
@@ -3589,9 +3590,9 @@ fn cmd_doctor(json: bool, repair: bool) {
             if answer.is_empty() || answer.starts_with('y') || answer.starts_with('Y') {
                 if std::fs::create_dir_all(&librefang_dir).is_ok() {
                     restrict_dir_permissions(&librefang_dir);
-                    for sub in ["data", "agents"] {
-                        let _ = std::fs::create_dir_all(librefang_dir.join(sub));
-                    }
+                    let _ = std::fs::create_dir_all(librefang_dir.join("data"));
+                    let _ =
+                        std::fs::create_dir_all(librefang_dir.join("workspaces").join("agents"));
                     if !json {
                         ui::check_ok("Created LibreFang directory");
                     }

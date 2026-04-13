@@ -1,0 +1,829 @@
+# 通信与网络 API
+
+通道、Webhooks、集成、MCP/A2A 协议、通信、配对、OAuth/OIDC、网络对等节点、审计、用量分析、预算和审批的端点。
+
+## 通道端点
+
+### GET /api/channels
+
+列出已配置的通道适配器及其状态。支持 44 种通道适配器，包括 Telegram、Discord、Slack、WhatsApp、Matrix、Email、Teams、Mattermost、IRC、Google Chat、Twitch、Rocket.Chat、Zulip、XMPP、LINE、Viber、Messenger、Reddit、Mastodon、Bluesky 等。
+
+**响应** `200 OK`：
+
+```json
+{
+  "channels": [
+    {
+      "name": "telegram",
+      "enabled": true,
+      "has_token": true
+    },
+    {
+      "name": "discord",
+      "enabled": true,
+      "has_token": false
+    }
+  ],
+  "total": 2
+}
+```
+
+### GET /api/channels/&lbrace;name&rbrace;
+
+获取指定通道适配器的配置和状态。
+
+### POST /api/channels/&lbrace;name&rbrace;/configure
+
+配置通道适配器（设置令牌、Bot 名称、选项等）。
+
+**请求体**（以 Telegram 为例）：
+
+```json
+{
+  "token": "123456:ABC-DEF...",
+  "agent_name": "my-agent"
+}
+```
+
+### DELETE /api/channels/&lbrace;name&rbrace;/configure
+
+移除通道适配器的配置。
+
+### POST /api/channels/&lbrace;name&rbrace;/test
+
+通过通道适配器发送测试消息以验证连通性。
+
+### POST /api/channels/reload
+
+从配置文件重新加载所有通道适配器，无需重启守护进程。
+
+### POST /api/channels/whatsapp/qr/start
+
+启动 WhatsApp 二维码认证会话。
+
+### GET /api/channels/whatsapp/qr/status
+
+获取 WhatsApp 二维码会话的当前状态（pending/scanned/authenticated）。
+
+---
+
+## MCP 和 A2A 协议端点
+
+LibreFang 支持 Model Context Protocol（MCP）用于工具互操作，以及 Agent-to-Agent（A2A）协议用于跨系统的 Agent 通信。
+
+### GET /api/mcp/servers
+
+列出已配置并连接的 MCP 服务器及其可用工具。
+
+**响应** `200 OK`：
+
+```json
+{
+  "servers": [
+    {
+      "name": "filesystem",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+      "connected": true,
+      "tools": [
+        {
+          "name": "mcp_filesystem_read_file",
+          "description": "Read a file from the filesystem"
+        }
+      ]
+    }
+  ],
+  "total": 1
+}
+```
+
+### POST /api/mcp/servers
+
+添加新的 MCP 服务器配置。
+
+**请求体**：
+
+```json
+{
+  "name": "filesystem",
+  "transport": "stdio",
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-filesystem"]
+}
+```
+
+### GET /api/mcp/servers/&lbrace;name&rbrace;
+
+获取指定 MCP 服务器的配置和连接状态。
+
+### PUT /api/mcp/servers/&lbrace;name&rbrace;
+
+更新 MCP 服务器配置。
+
+### DELETE /api/mcp/servers/&lbrace;name&rbrace;
+
+移除 MCP 服务器配置。
+
+### GET /api/a2a/agents
+
+列出已发现或注册的外部 A2A Agent。
+
+### GET /api/a2a/agents/&lbrace;id&rbrace;
+
+获取指定外部 A2A Agent 的详情。
+
+### POST /api/a2a/discover
+
+通过 URL 发现外部 A2A Agent（获取其 `/.well-known/agent.json`）。
+
+**请求体**：
+
+```json
+{
+  "url": "https://other-instance.example.com"
+}
+```
+
+### POST /api/a2a/send
+
+向外部 A2A Agent 发送任务。
+
+**请求体**：
+
+```json
+{
+  "agent_id": "external-agent-id",
+  "message": "Summarize this document: ..."
+}
+```
+
+### GET /api/a2a/tasks/&lbrace;id&rbrace;/status
+
+查询发送到外部 A2A Agent 的任务状态。
+
+### POST /mcp
+
+MCP HTTP 传输端点。接受 JSON-RPC 2.0 请求，通过 MCP 协议向外部客户端暴露 LibreFang 工具。
+
+**请求体**（JSON-RPC 2.0）：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/list",
+  "id": 1
+}
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "tools": [
+      {
+        "name": "file_read",
+        "description": "Read a file's contents",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {"type": "string"}
+          }
+        }
+      }
+    ]
+  },
+  "id": 1
+}
+```
+
+### GET /.well-known/agent.json
+
+A2A Agent Card 发现端点。返回服务器的 A2A Agent Card，描述其能力、支持的协议和可用 Agent。
+
+**响应** `200 OK`：
+
+```json
+{
+  "name": "LibreFang",
+  "description": "LibreFang Agent Operating System",
+  "url": "http://127.0.0.1:4545",
+  "version": "0.1.0",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false
+  },
+  "skills": [
+    {
+      "id": "chat",
+      "name": "Chat",
+      "description": "General-purpose chat with any agent"
+    }
+  ]
+}
+```
+
+### GET /a2a/agents
+
+列出通过 A2A 协议可用的本地 Agent（无版本前缀的协议级端点）。
+
+### POST /a2a/tasks/send
+
+通过 A2A 协议向本地 Agent 发送任务（无版本前缀）。
+
+**请求体**：
+
+```json
+{
+  "agent_id": "a1b2c3d4-...",
+  "message": {
+    "role": "user",
+    "parts": [
+      {"text": "Review this code for security issues"}
+    ]
+  }
+}
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "task_id": "task-1234-...",
+  "status": "completed",
+  "result": {
+    "role": "agent",
+    "parts": [
+      {"text": "I found 2 potential security issues..."}
+    ]
+  }
+}
+```
+
+### GET /a2a/tasks/&lbrace;id&rbrace;
+
+获取 A2A 任务的状态和结果（无版本前缀）。
+
+### POST /a2a/tasks/&lbrace;id&rbrace;/cancel
+
+取消正在运行的 A2A 任务（无版本前缀）。
+
+**响应** `200 OK`：
+
+```json
+{
+  "task_id": "task-1234-...",
+  "status": "cancelled"
+}
+```
+
+---
+
+## 审计和安全端点
+
+LibreFang 维护一条 Merkle 哈希链审计轨迹，记录所有安全相关操作。这些端点用于检查和验证审计日志的完整性。
+
+### GET /api/audit/recent
+
+获取最近的审计日志条目。
+
+**查询参数：**
+- `limit`（可选）：返回的条目数量（默认：50，最大：500）
+
+**响应** `200 OK`：
+
+```json
+{
+  "entries": [
+    {
+      "id": 1042,
+      "timestamp": "2025-01-15T10:30:00Z",
+      "event_type": "agent_spawned",
+      "agent_id": "a1b2c3d4-...",
+      "details": "Agent 'coder' spawned with model groq/llama-3.3-70b-versatile",
+      "hash": "a1b2c3d4e5f6...",
+      "prev_hash": "f6e5d4c3b2a1..."
+    }
+  ],
+  "total": 1042
+}
+```
+
+### GET /api/audit/verify
+
+验证 Merkle 哈希链审计轨迹的完整性。遍历整条链并报告任何断裂的环节。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "valid",
+  "chain_length": 1042,
+  "first_entry": "2025-01-10T08:00:00Z",
+  "last_entry": "2025-01-15T10:30:00Z"
+}
+```
+
+### GET /api/security
+
+安全状态概览，展示全部 16 个安全系统的状态。
+
+**响应** `200 OK`：
+
+```json
+{
+  "security_systems": {
+    "merkle_audit_trail": "active",
+    "taint_tracking": "active",
+    "wasm_dual_metering": "active",
+    "security_headers": "active",
+    "health_redaction": "active",
+    "subprocess_sandbox": "active",
+    "manifest_signing": "active",
+    "gcra_rate_limiter": "active",
+    "secret_zeroization": "active",
+    "path_traversal_prevention": "active",
+    "ssrf_protection": "active",
+    "capability_inheritance_validation": "active",
+    "ofp_hmac_auth": "active",
+    "prompt_injection_scanning": "active",
+    "loop_guard": "active",
+    "session_repair": "active"
+  },
+  "total_systems": 16,
+  "all_active": true
+}
+```
+
+### GET /api/logs/stream
+
+守护进程输出的结构化日志行的 SSE 流。适用于实时仪表盘和日志追踪。
+
+---
+
+## 用量和分析端点
+
+追踪所有 Agent 的 Token 使用量、费用和模型利用率。由计量引擎驱动，使用模型目录中的费用估算。
+
+### GET /api/usage
+
+获取整体用量统计。
+
+**查询参数：**
+- `period`（可选）：时间段（`hour`、`day`、`week`、`month`；默认：`day`）
+
+**响应** `200 OK`：
+
+```json
+{
+  "period": "day",
+  "total_input_tokens": 125000,
+  "total_output_tokens": 87000,
+  "total_cost_usd": 0.42,
+  "request_count": 156,
+  "active_agents": 5
+}
+```
+
+### GET /api/usage/summary
+
+获取包含配额信息的高级用量摘要。
+
+**响应** `200 OK`：
+
+```json
+{
+  "today": {
+    "input_tokens": 125000,
+    "output_tokens": 87000,
+    "cost_usd": 0.42,
+    "requests": 156
+  },
+  "quota": {
+    "hourly_token_limit": 1000000,
+    "hourly_tokens_used": 45000,
+    "hourly_reset_at": "2025-01-15T11:00:00Z"
+  }
+}
+```
+
+### GET /api/usage/by-model
+
+获取按模型分类的用量明细。
+
+**响应** `200 OK`：
+
+```json
+{
+  "models": [
+    {
+      "model": "llama-3.3-70b-versatile",
+      "provider": "groq",
+      "input_tokens": 80000,
+      "output_tokens": 55000,
+      "cost_usd": 0.09,
+      "request_count": 120
+    }
+  ]
+}
+```
+
+### GET /api/usage/daily
+
+获取按天的用量明细，适用于图表和报告。
+
+---
+
+## 预算端点
+
+设置每个 Agent 和全局的消费限额，防止费用失控。
+
+### GET /api/budget
+
+获取全局预算状态和消费摘要。
+
+**响应** `200 OK`：
+
+```json
+{
+  "daily_limit_usd": 10.0,
+  "monthly_limit_usd": 200.0,
+  "today_spent_usd": 1.42,
+  "month_spent_usd": 38.50,
+  "status": "ok"
+}
+```
+
+### PUT /api/budget
+
+更新全局预算限额。
+
+**请求体**：
+
+```json
+{
+  "daily_limit_usd": 15.0,
+  "monthly_limit_usd": 300.0
+}
+```
+
+### GET /api/budget/agents
+
+获取按当前消费排名的 Agent 列表。
+
+**响应** `200 OK`：
+
+```json
+[
+  {
+    "agent_id": "a1b2c3d4-...",
+    "agent_name": "coder",
+    "total_cost_usd": 0.87,
+    "today_cost_usd": 0.12
+  }
+]
+```
+
+### GET /api/budget/agents/&lbrace;id&rbrace;
+
+获取指定 Agent 的预算状态和消费详情。
+
+### PUT /api/budget/agents/&lbrace;id&rbrace;
+
+设置或更新指定 Agent 的预算限额。
+
+**请求体**：
+
+```json
+{
+  "daily_limit_usd": 2.0,
+  "monthly_limit_usd": 40.0
+}
+```
+
+---
+
+## Webhooks 端点
+
+### GET /api/webhooks/events
+
+列出事件 Webhook 订阅（触发 Agent 操作的入站事件）。
+
+### POST /api/webhooks/events
+
+创建新的事件 Webhook 订阅。
+
+**请求体**：
+
+```json
+{
+  "event_type": "agent_spawned",
+  "url": "https://my-service.example.com/events",
+  "secret": "webhook-secret"
+}
+```
+
+### PUT /api/webhooks/events/&lbrace;id&rbrace;
+
+更新事件 Webhook 订阅。
+
+### DELETE /api/webhooks/events/&lbrace;id&rbrace;
+
+删除事件 Webhook 订阅。
+
+### GET /api/webhooks
+
+列出出站 Webhook 配置。
+
+### POST /api/webhooks
+
+创建新的出站 Webhook。
+
+### GET /api/webhooks/&lbrace;id&rbrace;
+
+获取指定出站 Webhook 的配置。
+
+### PUT /api/webhooks/&lbrace;id&rbrace;
+
+更新出站 Webhook 配置。
+
+### DELETE /api/webhooks/&lbrace;id&rbrace;
+
+删除出站 Webhook。
+
+### POST /api/webhooks/&lbrace;id&rbrace;/test
+
+向出站 Webhook 发送测试负载并返回结果。
+
+### POST /api/hooks/wake
+
+Webhook 触发端点（无版本前缀）。通过外部 HTTP 调用唤醒 Agent。
+
+### POST /api/hooks/agent
+
+Webhook 触发端点（无版本前缀）。通过外部 HTTP 调用向 Agent 发送消息。
+
+---
+
+## 集成端点
+
+将 LibreFang 连接到外部服务（GitHub、Jira、Notion、Google Drive 等）。
+
+### GET /api/integrations
+
+列出所有已连接的集成及其状态。
+
+### GET /api/integrations/available
+
+列出所有可安装的集成。
+
+### GET /api/integrations/health
+
+获取所有已连接集成的健康状态。
+
+### POST /api/integrations/add
+
+添加并连接新的集成。
+
+**请求体**：
+
+```json
+{
+  "type": "github",
+  "token": "ghp_...",
+  "name": "my-github"
+}
+```
+
+### POST /api/integrations/reload
+
+从配置文件重新加载所有集成。
+
+### GET /api/integrations/&lbrace;id&rbrace;
+
+获取指定集成的详情。
+
+### DELETE /api/integrations/&lbrace;id&rbrace;
+
+移除集成。
+
+### POST /api/integrations/&lbrace;id&rbrace;/reconnect
+
+重新认证并重新连接已断开的集成。
+
+---
+
+## 配对端点
+
+将移动应用或辅助设备与守护进程配对，用于远程控制和通知。
+
+### POST /api/pairing/request
+
+发起配对请求。返回配对码，用户需在远程设备上输入。
+
+**响应** `200 OK`：
+
+```json
+{
+  "pairing_code": "XK9-47B",
+  "expires_at": "2025-01-15T10:35:00Z"
+}
+```
+
+### POST /api/pairing/complete
+
+通过确认来自远程设备的配对码完成配对。
+
+### POST /api/pairing/notify
+
+向所有已配对设备发送推送通知。
+
+### GET /api/pairing/devices
+
+列出所有已配对设备。
+
+### DELETE /api/pairing/devices/&lbrace;id&rbrace;
+
+移除已配对设备。
+
+---
+
+## OAuth / OIDC 端点
+
+通过 OAuth 2.0 和 OpenID Connect 提供商进行外部认证。为 WebChat 仪表盘启用单点登录。
+
+### GET /api/auth/providers
+
+列出已配置的 OAuth/OIDC 提供商（例如 Google、GitHub、Authentik）。
+
+### GET /api/auth/login
+
+重定向到默认配置的 OAuth 提供商登录页面。
+
+### GET /api/auth/login/&lbrace;provider&rbrace;
+
+重定向到指定提供商的 OAuth 登录页面。
+
+### GET /api/auth/callback
+
+OAuth 回调处理程序（GET）。接收来自提供商的授权码。
+
+### POST /api/auth/callback
+
+OAuth 回调处理程序（POST）。处理 form-post 样式的回调。
+
+### GET /api/auth/userinfo
+
+返回已认证用户的 OIDC userinfo 端点的个人资料。
+
+### POST /api/auth/introspect
+
+Token 内省端点。验证并返回 OAuth 访问令牌的元数据。
+
+---
+
+## 通信端点
+
+通信层管理 Agent 间通信、事件路由和消息拓扑。
+
+### GET /api/comms/topology
+
+获取当前的通信拓扑（Agent 图谱、路由表）。
+
+### GET /api/comms/events
+
+获取最近的通信事件（Agent 和通道之间路由的消息）。
+
+### GET /api/comms/events/stream
+
+实时通信事件的 SSE 流。
+
+### POST /api/comms/send
+
+通过通信层直接向 Agent 或通道发送消息。
+
+**请求体**：
+
+```json
+{
+  "to": "agent:a1b2c3d4-...",
+  "content": "Please review the latest PR",
+  "from": "system"
+}
+```
+
+### POST /api/comms/task
+
+通过通信层分派任务（路由到合适的 Agent）。
+
+---
+
+## 审批端点
+
+人机协作审批工作流。Agent 在执行敏感操作前可以请求审批。
+
+### GET /api/approvals
+
+列出待处理和最近的审批请求。
+
+### POST /api/approvals
+
+创建审批请求（通常由 Agent 工具调用）。
+
+**请求体**：
+
+```json
+{
+  "agent_id": "a1b2c3d4-...",
+  "action": "delete_file",
+  "description": "Agent wants to delete /important/config.toml",
+  "payload": {"path": "/important/config.toml"}
+}
+```
+
+### GET /api/approvals/&lbrace;id&rbrace;
+
+获取指定审批请求的详情。
+
+### POST /api/approvals/&lbrace;id&rbrace;/approve
+
+批准待处理的请求。等待中的 Agent 将继续执行该操作。
+
+当启用 TOTP 二次验证（配置中 `second_factor = "totp"`）时，需要在请求体中包含 TOTP 验证码：
+
+```json
+{ "totp_code": "123456" }
+```
+
+未提供有效 TOTP 码将返回 `400 Bad Request`。
+
+### POST /api/approvals/&lbrace;id&rbrace;/reject
+
+拒绝待处理的请求。等待中的 Agent 将收到拒绝通知并中止该操作。
+
+### POST /api/approvals/totp/setup
+
+生成新的 TOTP 密钥用于二次验证注册。返回 base32 密钥和 `otpauth://` URI，可用于验证器应用。密钥存储在加密保管库中，但在确认前不会激活。
+
+### POST /api/approvals/totp/confirm
+
+通过验证验证器应用生成的 6 位验证码来确认 TOTP 注册。
+
+```json
+{ "code": "123456" }
+```
+
+### GET /api/approvals/totp/status
+
+查询 TOTP 注册状态。返回：
+
+```json
+{ "enrolled": true, "confirmed": true, "enforced": false, "remaining_recovery_codes": 7 }
+```
+
+### DELETE /api/approvals/totp
+
+撤销 TOTP 注册。需要提供有效的 TOTP 或恢复码进行验证。
+
+```json
+{ "code": "123456" }
+```
+
+验证码无效或 TOTP 未注册时返回 `400`。
+
+---
+
+## 网络和对等节点端点
+
+### GET /api/peers
+
+列出 OFP（LibreFang 协议）线网对等节点及其连接状态。
+
+**响应** `200 OK`：
+
+```json
+{
+  "peers": [
+    {
+      "node_id": "peer-1",
+      "address": "192.168.1.100:4000",
+      "state": "connected",
+      "authenticated": true,
+      "last_seen": "2025-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+### GET /api/peers/&lbrace;id&rbrace;
+
+获取指定 OFP 对等节点的详情。
+
+### GET /api/network/status
+
+获取 OFP 网络的整体状态（节点 ID、已连接对等节点数、消息吞吐量）。
+
+---
+

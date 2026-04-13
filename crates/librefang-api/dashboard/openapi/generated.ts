@@ -3780,7 +3780,7 @@ export interface components {
              */
             signed_manifest?: string | null;
             /**
-             * @description Template name from `~/.librefang/agents/{template}/agent.toml`.
+             * @description Template name from `~/.librefang/workspaces/agents/{template}/agent.toml`.
              *     When provided and `manifest_toml` is empty, the template is loaded automatically.
              */
             template?: string | null;

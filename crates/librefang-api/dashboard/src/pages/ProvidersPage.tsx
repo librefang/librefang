@@ -12,6 +12,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
+import { Modal } from "../components/ui/Modal";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
@@ -70,6 +71,10 @@ interface Provider {
   last_tested?: string;
   error_message?: string;
   media_capabilities?: string[];
+  /** True for providers added by the user at runtime; false for ones shipped
+   *  by the registry. Only custom providers can actually be deleted — built-ins
+   *  are recreated by the next registry sync, so we hide the delete control. */
+  is_custom?: boolean;
 }
 
 interface ProviderCardProps {
@@ -170,7 +175,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               <span className="hidden sm:inline">{t("common.edit")}</span>
             </Button>
           )}
-          {isConfigured && (
+          {isConfigured && p.is_custom && (
             <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
               <span className="hidden sm:inline text-error">{t("common.delete")}</span>
             </Button>
@@ -339,7 +344,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               {t("common.edit")}
             </Button>
           )}
-          {isConfigured && (
+          {isConfigured && p.is_custom && (
             <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
               {t("common.delete")}
             </Button>
@@ -386,7 +391,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
                 <p className="text-xs font-black uppercase tracking-widest text-text-dim/60">{provider.id}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors">
+            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}>
               <X className="w-5 h-5 text-text-dim" />
             </button>
           </div>
@@ -534,6 +539,7 @@ export function ProvidersPage() {
   useCreateShortcut(() => setShowCreateForm(true));
   const [keyInput, setKeyInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
+  const [hasStoredKey, setHasStoredKey] = useState(false);
   const [keySaving, setKeySaving] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [keyTesting, setKeyTesting] = useState(false);
@@ -660,6 +666,7 @@ export function ProvidersPage() {
     setConfigProvider(provider);
     setKeyInput("");
     setUrlInput(provider.base_url || "");
+    setHasStoredKey(provider.auth_status === "configured" || provider.auth_status === "validated_key");
     setKeyError(null);
     setKeyTestResult(null);
   };
@@ -674,6 +681,8 @@ export function ProvidersPage() {
       }
       if (keyInput.trim()) {
         await setProviderKey(configProvider.id, keyInput.trim());
+        setHasStoredKey(true);
+        setKeyInput("");
       }
       await providersQuery.refetch();
       setConfigProvider(null);
@@ -691,6 +700,7 @@ export function ProvidersPage() {
     try {
       await deleteProviderKey(configProvider.id);
       await providersQuery.refetch();
+      setHasStoredKey(false);
       setConfigProvider(null);
       addToast(t("providers.key_removed"), "success");
     } catch (e: any) {
@@ -725,6 +735,7 @@ export function ProvidersPage() {
       // Save any pending key/url input before testing so the backend uses the new value
       if (keyInput.trim()) {
         await setProviderKey(configProvider.id, keyInput.trim());
+        setHasStoredKey(true);
         setKeyInput("");
       }
       if (urlInput.trim() && urlInput !== configProvider.base_url) {
@@ -788,7 +799,7 @@ export function ProvidersPage() {
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
-              <button onClick={() => setSearch("")} className="hover:text-text-main">
+              <button onClick={() => setSearch("")} className="hover:text-text-main" aria-label={t("common.clear_search", { defaultValue: "Clear search" })}>
                 <X className="w-3 h-3" />
               </button>
             )}
@@ -948,17 +959,9 @@ export function ProvidersPage() {
       )}
 
       {/* API Key Config Modal */}
-      {configProvider && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setConfigProvider(null)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <div className="flex items-center gap-2">
-                <Key className="w-4 h-4 text-brand" />
-                <h3 className="text-sm font-bold">{t("providers.configure_provider")}</h3>
-              </div>
-              <button onClick={() => setConfigProvider(null)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="p-5 space-y-4">
+      <Modal isOpen={!!configProvider} onClose={() => setConfigProvider(null)} title={t("providers.configure_provider")} size="md">
+        {configProvider && (
+          <div className="p-5 space-y-4">
               <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
                 <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
                   {providerIcons[configProvider.id] || <Server className="w-5 h-5 text-brand" />}
@@ -1005,21 +1008,20 @@ export function ProvidersPage() {
                   {keySaving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
                   {t("common.save")}
                 </Button>
-                <Button variant="secondary" onClick={handleTestKey} disabled={keySaving || keyTesting || (!isProviderAvailable(configProvider.auth_status) && !keyInput.trim())}>
+                <Button variant="secondary" onClick={handleTestKey} disabled={keySaving || keyTesting || (!hasStoredKey && !keyInput.trim())}>
                   {keyTesting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
                   {t("providers.test")}
                 </Button>
-                {(configProvider.auth_status === "configured" || configProvider.auth_status === "validated_key") && (
+                {hasStoredKey && (
                   <Button variant="secondary" onClick={handleDeleteKey} disabled={keySaving || keyTesting}>
                     <XCircle className="w-4 h-4 mr-1 text-error" />
                     {t("providers.remove_key")}
                   </Button>
                 )}
               </div>
-            </div>
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
 
       {/* Delete Confirmation Modal */}
       {deleteConfirmProvider && (
@@ -1030,7 +1032,7 @@ export function ProvidersPage() {
                 <Trash2 className="w-4 h-4 text-error" />
                 <h3 className="text-sm font-bold">{t("providers.delete_confirm_title")}</h3>
               </div>
-              <button onClick={() => setDeleteConfirmProvider(null)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+              <button onClick={() => setDeleteConfirmProvider(null)} className="p-1 rounded hover:bg-main" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
             </div>
             <div className="p-5 space-y-4">
               <div className="flex items-center gap-3 p-3 rounded-xl bg-main">

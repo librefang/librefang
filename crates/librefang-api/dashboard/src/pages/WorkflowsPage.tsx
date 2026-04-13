@@ -341,7 +341,8 @@ export function WorkflowsPage() {
                     </div>
                   ) : (
                     <button onClick={() => handleDelete(wf.id)}
-                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
+                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors"
+                      aria-label={t("common.delete")}>
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}
@@ -611,10 +612,11 @@ export function WorkflowsPage() {
           title={t("nav.scheduler")}
           subtitle={workflows.find(w => w.id === scheduleWorkflowId)?.name}
           initialCron={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.cron || "0 9 * * *"}
-          onSave={async (cron) => {
+          initialTz={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.tz}
+          onSave={async (cron, tz) => {
             const wf = workflows.find(w => w.id === scheduleWorkflowId);
             try {
-              await createSchedule({ name: `${wf?.name || "workflow"} schedule`, cron, workflow_id: scheduleWorkflowId, enabled: true });
+              await createSchedule({ name: `${wf?.name || "workflow"} schedule`, cron, tz, workflow_id: scheduleWorkflowId, enabled: true });
               setScheduleWorkflowId(null);
               await queryClient.invalidateQueries({ queryKey: ["workflows"] });
             } catch { /* ignore */ }

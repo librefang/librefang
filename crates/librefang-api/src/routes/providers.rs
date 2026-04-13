@@ -373,6 +373,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "api_key_env": p.api_key_env,
             "base_url": p.base_url,
             "media_capabilities": p.media_capabilities,
+            "is_custom": p.is_custom,
         });
 
         // Attach region map so the dashboard can show available regions
@@ -435,6 +436,68 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "total": total,
         })),
     )
+}
+
+/// Returns providers list for the dashboard snapshot endpoint.
+pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json::Value> {
+    let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog.list_providers().to_vec()
+    };
+
+    let local_providers: Vec<(usize, String, String)> = provider_list
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            librefang_runtime::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
+        })
+        .map(|(i, p)| (i, p.id.clone(), p.base_url.clone()))
+        .collect();
+
+    let cache = &state.provider_probe_cache;
+    let probe_futures: Vec<_> = local_providers
+        .iter()
+        .map(|(_, id, url)| {
+            librefang_runtime::provider_health::probe_provider_cached(id, url, cache)
+        })
+        .collect();
+    let probe_results = futures::future::join_all(probe_futures).await;
+
+    let mut probe_map: HashMap<usize, librefang_runtime::provider_health::ProbeResult> =
+        HashMap::with_capacity(local_providers.len());
+    for ((idx, _, _), result) in local_providers.iter().zip(probe_results.into_iter()) {
+        probe_map.insert(*idx, result);
+    }
+
+    let mut providers: Vec<serde_json::Value> = Vec::with_capacity(provider_list.len());
+    for (i, p) in provider_list.iter().enumerate() {
+        let mut entry = serde_json::json!({
+            "id": p.id,
+            "display_name": p.display_name,
+            "auth_status": p.auth_status,
+            "model_count": p.model_count,
+            "key_required": p.key_required,
+            "api_key_env": p.api_key_env,
+            "base_url": p.base_url,
+            "media_capabilities": p.media_capabilities,
+            "is_custom": p.is_custom,
+        });
+        if let Some(probe) = probe_map.remove(&i) {
+            attach_probe_result(&mut entry, &probe, &p.id, state.kernel.model_catalog_ref());
+            if !probe.reachable {
+                entry["auth_status"] = serde_json::json!("missing");
+            }
+        } else if librefang_runtime::provider_health::is_local_provider(&p.id) {
+            entry["is_local"] = serde_json::json!(true);
+        }
+        providers.push(entry);
+    }
+
+    providers
 }
 
 /// GET /api/providers/{name} — Get details for a single provider.

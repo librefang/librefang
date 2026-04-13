@@ -10,6 +10,7 @@ use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -115,6 +116,12 @@ struct OaiRequest {
     /// Structured output: `response_format` field (json_object or json_schema).
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<serde_json::Value>,
+    /// Provider-specific extension parameters.  Skipped during normal serde
+    /// serialization — merged into the top-level JSON request body manually in
+    /// `complete()` and `stream()` so that extra_body values **override** any
+    /// standard field with the same name.
+    #[serde(skip_serializing)]
+    extra_body: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// Convert a [`ResponseFormat`] into the OpenAI `response_format` JSON value.
@@ -364,6 +371,23 @@ impl OpenAIDriver {
                                     },
                                 });
                             }
+                            ContentBlock::ImageFile { media_type, path } => {
+                                match std::fs::read(path) {
+                                    Ok(bytes) => {
+                                        use base64::Engine;
+                                        let data = base64::engine::general_purpose::STANDARD
+                                            .encode(&bytes);
+                                        parts.push(OaiContentPart::ImageUrl {
+                                            image_url: OaiImageUrl {
+                                                url: format!("data:{media_type};base64,{data}"),
+                                            },
+                                        });
+                                    }
+                                    Err(e) => {
+                                        warn!(path = %path, error = %e, "ImageFile missing, skipping");
+                                    }
+                                }
+                            }
                             ContentBlock::Thinking { .. } => {}
                             _ => {}
                         }
@@ -515,6 +539,7 @@ impl OpenAIDriver {
                 .response_format
                 .as_ref()
                 .and_then(oai_response_format),
+            extra_body: request.extra_body.clone(),
         })
     }
 }
@@ -532,11 +557,21 @@ impl LlmDriver for OpenAIDriver {
             };
             debug!(url = %url, attempt, "Sending OpenAI API request");
 
+            // Serialize to Value, then merge extra_body so extra params
+            // override any standard field with the same name.
+            let mut body =
+                serde_json::to_value(&oai_request).map_err(|e| LlmError::Http(e.to_string()))?;
+            if let (Some(extra), Some(obj)) = (&oai_request.extra_body, body.as_object_mut()) {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+
             let mut req_builder = self
                 .client
                 .post(&url)
                 .header("content-type", "application/json")
-                .json(&oai_request);
+                .json(&body);
 
             if !self.api_key.as_str().is_empty() {
                 if self.use_api_key_header {
@@ -565,6 +600,7 @@ impl LlmDriver for OpenAIDriver {
                 }
                 return Err(LlmError::RateLimited {
                     retry_after_ms: 5000,
+                    message: None,
                 });
             }
 
@@ -861,11 +897,21 @@ impl LlmDriver for OpenAIDriver {
             };
             debug!(url = %url, attempt, "Sending OpenAI streaming request");
 
+            // Serialize to Value, then merge extra_body so extra params
+            // override any standard field with the same name.
+            let mut body =
+                serde_json::to_value(&oai_request).map_err(|e| LlmError::Http(e.to_string()))?;
+            if let (Some(extra), Some(obj)) = (&oai_request.extra_body, body.as_object_mut()) {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+
             let mut req_builder = self
                 .client
                 .post(&url)
                 .header("content-type", "application/json")
-                .json(&oai_request);
+                .json(&body);
 
             if !self.api_key.as_str().is_empty() {
                 if self.use_api_key_header {
@@ -894,6 +940,7 @@ impl LlmDriver for OpenAIDriver {
                 }
                 return Err(LlmError::RateLimited {
                     retry_after_ms: 5000,
+                    message: None,
                 });
             }
 
@@ -1960,5 +2007,85 @@ mod tests {
             ensure_object(input),
             serde_json::json!({"raw_input": "[1, 2, 3]"})
         );
+    }
+
+    #[test]
+    fn test_oai_request_extra_body_merged_overrides_standard_field() {
+        // extra_body is #[serde(skip_serializing)] — it does NOT appear in
+        // the raw serde output.  In complete() / stream() we serialize to
+        // Value first, then merge extra_body on top so it overrides any
+        // standard field with the same name.  This test verifies the merge
+        // logic directly.
+        let mut extra = HashMap::new();
+        extra.insert("temperature".to_string(), serde_json::json!(1.0));
+        extra.insert("enable_memory".to_string(), serde_json::json!(true));
+
+        let req = OaiRequest {
+            model: "qwen3.6".to_string(),
+            messages: vec![OaiMessage {
+                role: "user".to_string(),
+                content: Some(OaiMessageContent::Text("hello".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            max_tokens: Some(4096),
+            max_completion_tokens: None,
+            temperature: Some(0.7),
+            tools: vec![],
+            tool_choice: None,
+            stream: false,
+            stream_options: None,
+            thinking: None,
+            response_format: None,
+            extra_body: Some(extra),
+        };
+
+        // Simulate the merge logic used in complete() / stream()
+        let mut body = serde_json::to_value(&req).unwrap();
+        if let (Some(extra), Some(obj)) = (&req.extra_body, body.as_object_mut()) {
+            for (k, v) in extra {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+
+        // extra_body values should override standard fields
+        assert_eq!(body.get("temperature").unwrap(), &serde_json::json!(1.0));
+        assert_eq!(body.get("enable_memory").unwrap(), &serde_json::json!(true));
+        // No duplicate keys — only ONE temperature
+        let raw = body.to_string();
+        assert_eq!(
+            raw.matches("temperature").count(),
+            1,
+            "There should be exactly ONE temperature key after merge. Raw: {raw}"
+        );
+    }
+
+    #[test]
+    fn test_oai_request_extra_body_none_skipped() {
+        let req = OaiRequest {
+            model: "test-model".to_string(),
+            messages: vec![OaiMessage {
+                role: "user".to_string(),
+                content: Some(OaiMessageContent::Text("hi".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            max_tokens: Some(100),
+            max_completion_tokens: None,
+            temperature: Some(0.5),
+            tools: vec![],
+            tool_choice: None,
+            stream: false,
+            stream_options: None,
+            thinking: None,
+            response_format: None,
+            extra_body: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("extra_body").is_none());
     }
 }

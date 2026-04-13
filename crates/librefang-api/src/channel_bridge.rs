@@ -7,6 +7,7 @@ use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::{ChannelAdapter, SenderContext};
+use librefang_kernel::approval::ApprovalManager;
 
 /// Sanitize LLM/driver errors into user-friendly messages for channel delivery.
 ///
@@ -319,6 +320,7 @@ fn start_stream_text_bridge(
     kernel_handle: tokio::task::JoinHandle<
         KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
     >,
+    is_group: bool,
 ) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel::<String>(64);
     let error_tx = tx.clone();
@@ -391,8 +393,29 @@ fn start_stream_text_bridge(
                         "\n\n---\n[Task timed out. The output above may be incomplete.]"
                             .to_string(),
                     )
+                } else if is_group {
+                    // In groups: suppress all errors (no leaked technical messages)
+                    None
                 } else {
-                    Some(sanitize_channel_error(&err_str))
+                    // In DMs: try to show original rate-limit message with reset time
+                    let lower = err_str.to_lowercase();
+                    if lower.contains("hit your limit")
+                        || lower.contains("out of extra usage")
+                        || lower.contains("resets")
+                    {
+                        // Extract original message after the first ": "
+                        let original = err_str.split(": ").skip(1).collect::<Vec<_>>().join(": ");
+                        if original.contains("hit your limit")
+                            || original.contains("out of extra usage")
+                            || original.contains("resets")
+                        {
+                            Some(original)
+                        } else {
+                            Some(sanitize_channel_error(&err_str))
+                        }
+                    } else {
+                        Some(sanitize_channel_error(&err_str))
+                    }
                 }
             }
             Ok(Ok(result)) => {
@@ -493,7 +516,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .send_message_streaming_with_routing(agent_id, message, None)
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(start_stream_text_bridge(event_rx, kernel_handle))
+        Ok(start_stream_text_bridge(event_rx, kernel_handle, false))
     }
 
     async fn send_message_streaming_with_sender(
@@ -507,7 +530,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(start_stream_text_bridge(event_rx, kernel_handle))
+        Ok(start_stream_text_bridge(
+            event_rx,
+            kernel_handle,
+            sender.is_group,
+        ))
     }
 
     async fn send_message_with_sender(
@@ -582,15 +609,17 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .agent_registry()
             .list()
             .iter()
+            .filter(|e| !e.is_hand)
             .map(|e| (e.id, e.name.clone()))
             .collect())
     }
 
     async fn spawn_agent_by_name(&self, manifest_name: &str) -> Result<AgentId, String> {
-        // Look for manifest at ~/.librefang/agents/{name}/agent.toml
+        // Look for manifest at ~/.librefang/workspaces/agents/{name}/agent.toml
         let manifest_path = self
             .kernel
             .home_dir()
+            .join("workspaces")
             .join("agents")
             .join(manifest_name)
             .join("agent.toml");
@@ -1132,11 +1161,25 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 msg.push_str(&format!("    {}\n", req.action_summary));
             }
         }
-        msg.push_str("\nUse /approve <id> or /reject <id>");
+        let policy = self.kernel.approvals().policy();
+        let any_needs_totp = pending
+            .iter()
+            .any(|r| policy.tool_requires_totp(&r.tool_name));
+        if any_needs_totp {
+            msg.push_str("\nUse /approve <id> [<totp-code>] or /reject <id> (some tools require a TOTP code)");
+        } else {
+            msg.push_str("\nUse /approve <id> or /reject <id>");
+        }
         msg
     }
 
-    async fn resolve_approval_text(&self, id_prefix: &str, approve: bool) -> String {
+    async fn resolve_approval_text(
+        &self,
+        id_prefix: &str,
+        approve: bool,
+        totp_code: Option<&str>,
+        sender_id: &str,
+    ) -> String {
         let pending = self.kernel.approvals().list_pending();
         let matched: Vec<_> = pending
             .iter()
@@ -1151,11 +1194,77 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 } else {
                     librefang_types::approval::ApprovalDecision::Denied
                 };
-                match self
+
+                // Pre-verify TOTP or recovery code if required.
+                // Use per-tool check so tools not in totp_tools are never gated
+                // or blocked by lockout — even when second_factor = totp globally.
+                let tool_requires_totp = self
                     .kernel
                     .approvals()
-                    .resolve(req.id, decision, Some("channel".to_string()))
-                {
+                    .policy()
+                    .tool_requires_totp(&req.tool_name);
+                let totp_verified = if approve && tool_requires_totp {
+                    if self.kernel.approvals().is_totp_locked_out(sender_id) {
+                        return "Too many failed TOTP attempts. Try again later.".into();
+                    }
+                    match totp_code {
+                        Some(code) if ApprovalManager::is_recovery_code_format(code) => {
+                            // Recovery code
+                            match self.kernel.vault_get("totp_recovery_codes") {
+                                Some(stored) => {
+                                    match librefang_kernel::approval::ApprovalManager::verify_recovery_code(
+                                        &stored,
+                                        code,
+                                    ) {
+                                        Ok((true, updated)) => {
+                                            let _ = self
+                                                .kernel
+                                                .vault_set("totp_recovery_codes", &updated);
+                                            true
+                                        }
+                                        Ok((false, _)) => {
+                                            self.kernel.approvals().record_totp_failure(sender_id);
+                                            return "Invalid recovery code.".into();
+                                        }
+                                        Err(e) => return format!("Recovery code error: {e}"),
+                                    }
+                                }
+                                None => return "No recovery codes configured.".into(),
+                            }
+                        }
+                        Some(code) => {
+                            // TOTP code
+                            let secret = match self.kernel.vault_get("totp_secret") {
+                                Some(s) => s,
+                                None => return "TOTP not configured. Set up TOTP first.".into(),
+                            };
+                            let totp_issuer = self.kernel.approvals().policy().totp_issuer.clone();
+                            match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                                &secret,
+                                code,
+                                &totp_issuer,
+                            ) {
+                                Ok(true) => true,
+                                Ok(false) => {
+                                    self.kernel.approvals().record_totp_failure(sender_id);
+                                    return "Invalid TOTP code.".into();
+                                }
+                                Err(e) => return format!("TOTP error: {e}"),
+                            }
+                        }
+                        None => false, // Let resolve() check grace period
+                    }
+                } else {
+                    false
+                };
+
+                match self.kernel.approvals().resolve(
+                    req.id,
+                    decision,
+                    Some("channel".to_string()),
+                    totp_verified,
+                    Some(sender_id),
+                ) {
                     Ok(_) => {
                         let verb = if approve { "Approved" } else { "Rejected" };
                         let id_str = req.id.to_string();
@@ -1167,7 +1276,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             req.agent_id
                         )
                     }
-                    Err(e) => e, // e.g. "Already approved by channel"
+                    Err(e) if e.contains("TOTP") => {
+                        format!(
+                            "TOTP code required. Use: /approve {} <6-digit-code>",
+                            id_prefix
+                        )
+                    }
+                    Err(e) => e,
                 }
             }
             n => format!("{n} approvals match '{id_prefix}'. Be more specific."),

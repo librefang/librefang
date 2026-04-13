@@ -36,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-venv \
     libicu72 \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/packages /opt/librefang/packages

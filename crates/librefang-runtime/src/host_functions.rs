@@ -382,7 +382,14 @@ fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json
 
     // Command::new does NOT use a shell — safe from shell injection.
     // Each argument is passed directly to the process.
-    match std::process::Command::new(command).args(&args).output() {
+    let mut cmd = std::process::Command::new(command);
+    cmd.args(&args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    match cmd.output() {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();

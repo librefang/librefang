@@ -1,0 +1,360 @@
+# Usage Examples
+
+This page is organized around LibreFang's core capabilities: agents, hands, channels, workflows, scheduling, webhooks, memory, and API usage. The examples below follow the current CLI, REST API, and config shapes in the source tree.
+
+For full field-by-field references, continue with:
+
+- [Agent Templates](/agent/templates)
+- [Workflows](/agent/workflows)
+- [Hands](/agent/hands)
+- [Channel Configuration](/configuration/channels)
+
+---
+
+## What LibreFang Can Do
+
+Start with the capability map, then move to concrete usage.
+
+In the current source tree, LibreFang is not just a chat wrapper. It is an Agent OS with several layers:
+
+- `Agents`: spawn built-in templates or custom `agent.toml` manifests, then talk to them over CLI, dashboard, or REST API.
+- `Hands`: pre-packaged autonomous capability modules such as `researcher`, `lead`, `browser`, `clip`, and `devops`.
+- `Channels`: connect agents to Telegram, Discord, Slack, WeChat, and other external messaging surfaces.
+- `Workflows`: build multi-step pipelines across agents. The current engine supports sequential, fan-out / collect, conditional, and loop execution modes.
+- `Scheduling`: use `cron` to periodically send prompts to agents so they run without manual input.
+- `Webhooks / Triggers`: let external HTTP callbacks or system events invoke agents.
+- `Memory`: each agent gets its own key-value memory space for persistent state.
+- `Skills / MCP / Extensions`: expand an agent's tools by installing skills or connecting MCP servers.
+- `Control Plane`: dashboard, REST API, TUI, approvals, and security/audit features for operating the system.
+
+This page answers two questions:
+
+1. What can LibreFang be used for?
+2. How do those capabilities map to the current codebase and commands?
+
+The examples below follow that structure.
+
+---
+
+## 1. Get LibreFang Running
+
+On first run, `librefang start` auto-runs quick initialization. By default, the API and dashboard listen on `http://127.0.0.1:4545`.
+
+```bash
+# Set one provider API key first. Groq is used here as an example.
+export GROQ_API_KEY="gsk_your_key_here"
+
+# Start the daemon. On first run this also performs quick init.
+librefang start
+
+# Talk to the default assistant
+librefang chat
+
+# Open the dashboard
+librefang dashboard
+```
+
+If you want to initialize explicitly:
+
+```bash
+librefang init
+# or
+librefang init --quick
+```
+
+---
+
+## 2. Use a Built-In Agent Template
+
+The fastest way to use LibreFang is to spawn a built-in template and send it a message.
+
+```bash
+# Spawn the built-in coder agent
+librefang agent new coder
+
+# See what is running
+librefang agent list
+
+# Send a one-shot message
+librefang message coder "Review the error handling in src/main.rs"
+
+# Start an interactive chat
+librefang chat coder
+```
+
+Common built-in templates include `assistant`, `coder`, `researcher`, `writer`, `customer-support`, and `meeting-assistant`.
+
+This is the base layer of LibreFang: run an agent and make it complete a concrete task. If your use case is code generation, review, writing, research, or support, this is usually the first layer to reach for.
+
+---
+
+## 3. Spawn an Agent from `agent.toml`
+
+In the current source, the agent prompt belongs under `[model].system_prompt`, not in a separate `[system_prompt]` table.
+
+```toml
+# customer-support.toml
+name = "customer-support"
+version = "0.1.0"
+description = "Customer support agent"
+author = "your-name"
+module = "builtin:chat"
+tags = ["support", "example"]
+
+[model]
+provider = "default"
+model = "default"
+system_prompt = """
+You are a customer support agent.
+
+Rules:
+- Reply politely and concisely.
+- If the user asks about refunds or billing, collect facts first.
+- Store important customer facts in memory.
+- If you are unsure, say so clearly.
+"""
+
+[resources]
+max_llm_tokens_per_hour = 50000
+
+[capabilities]
+tools = ["file_read", "web_fetch", "memory_recall", "memory_store"]
+memory_read = ["customer:*"]
+memory_write = ["customer:*"]
+network = ["*"]
+```
+
+Spawn and use it:
+
+```bash
+librefang agent spawn ./customer-support.toml
+librefang message customer-support "A user says their payment failed."
+```
+
+---
+
+## 4. Connect a Channel to an Agent
+
+Channel config lives under `[channels.<name>]` in `~/.librefang/config.toml`, not under top-level tables like `[telegram]` or `[discord]`.
+
+This is LibreFang's external interface layer: the agent is no longer only a local CLI object, but something users can interact with from Telegram, Discord, Slack, WeChat, and similar systems.
+
+The easiest path is the interactive setup flow:
+
+```bash
+librefang channel setup telegram
+librefang channel list
+```
+
+Manual config example:
+
+```toml
+[channels.telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+default_agent = "customer-support"
+allowed_users = []
+
+[channels.telegram.overrides]
+system_prompt = "Reply as a concise and polite support bot."
+rate_limit_per_user = 10
+```
+
+Restart after editing config:
+
+```bash
+librefang restart
+```
+
+If you already have a chat target, you can test connectivity:
+
+```bash
+librefang channel test telegram --chat-id 123456789
+```
+
+---
+
+## 5. Run an Agent on a Schedule
+
+In the current CLI, scheduled jobs are handled by the separate `cron` command, not by embedding `trigger` objects into workflow JSON.
+
+This is the simplest form of autonomous execution: run an agent on a time-based schedule.
+
+```bash
+# Every morning at 8 AM, ask researcher for a news digest
+librefang cron create researcher "0 8 * * *" \
+  "Fetch the top AI and tech news and write a 10-bullet digest"
+
+# Inspect scheduled jobs
+librefang cron list
+```
+
+You can do the same with a custom agent:
+
+```bash
+librefang cron create customer-support "0 */2 * * *" \
+  "Summarize unresolved support issues from the last 2 hours"
+```
+
+---
+
+## 6. Create a Multi-Step Workflow
+
+The current `/api/workflows` route expects step fields such as `name`, `agent_name` or `agent_id`, `prompt`, `mode`, `timeout_secs`, `error_mode`, and `output_var`.
+
+This is the orchestration layer: instead of one agent replying once, multiple agents cooperate across an explicit pipeline.
+
+That means these older shapes are not the current workflow format:
+
+- `steps[].type = "agent"`
+- `steps[].agent = "writer"`
+- `steps[].input = "..."`
+- `steps[].type = "notification"`
+- top-level `trigger`
+
+A workflow file that matches the current source looks like this:
+
+```json
+{
+  "name": "review-pipeline",
+  "description": "Analyze code and then turn the findings into a review note",
+  "steps": [
+    {
+      "name": "analyze",
+      "agent_name": "coder",
+      "prompt": "Analyze the following patch for bugs, regressions, and missing tests:\\n\\n{{input}}",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "fail",
+      "output_var": "analysis"
+    },
+    {
+      "name": "summary",
+      "agent_name": "writer",
+      "prompt": "Turn this analysis into a concise review comment:\\n\\n{{analysis}}",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "fail"
+    }
+  ]
+}
+```
+
+Create and run it:
+
+```bash
+librefang workflow create ./review-pipeline.json
+librefang workflow list
+librefang workflow run <WORKFLOW_ID> "Review this Rust patch for behavioural regressions"
+```
+
+If what you need is “run an agent when an HTTP callback arrives”, the current CLI uses separate webhook commands:
+
+```bash
+librefang webhooks create code-reviewer https://example.com/github-pr
+librefang webhooks list
+```
+
+---
+
+## 7. Use Hands
+
+Hands are pre-packaged autonomous capability modules. For many use cases, activating a Hand is simpler than building the whole setup yourself.
+
+This is the part of LibreFang that is closest to “productized capabilities”. For research, OSINT, lead generation, browser automation, content workflows, and similar tasks, Hands are often the right starting point instead of assembling raw agents from scratch.
+
+```bash
+# See available Hands
+librefang hand list
+
+# Activate researcher
+librefang hand activate researcher
+
+# Check status
+librefang hand status researcher
+
+# Inspect / update settings
+librefang hand settings researcher
+librefang hand set researcher max_results 20
+
+# Chat with the Hand
+librefang hand chat researcher
+```
+
+If a Hand depends on local tooling, check that first:
+
+```bash
+librefang hand check-deps researcher
+librefang hand install-deps researcher
+```
+
+---
+
+## 8. Use Agent Memory
+
+The current CLI exposes memory as per-agent key-value storage. It is not a global `--key/--value` command shape.
+
+```bash
+# Store a value
+librefang memory set customer-support customer:alice:last_order "A-1024"
+
+# Read it back
+librefang memory get customer-support customer:alice:last_order
+
+# List all keys for that agent
+librefang memory list customer-support
+
+# Delete it
+librefang memory delete customer-support customer:alice:last_order
+```
+
+---
+
+## 9. Call LibreFang over REST
+
+The most common external flow is: create an agent, then send it a message.
+
+### Create an agent from a built-in template
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/agents \
+  -H "Content-Type: application/json" \
+  -d '{"template": "assistant"}'
+```
+
+### Send a message to an agent
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/agents/<AGENT_ID>/message \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Summarize the current status of the project."}'
+```
+
+### Upload a manifest directly
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/agents \
+  -H "Content-Type: application/json" \
+  -d @- <<'JSON'
+{
+  "manifest_toml": "name = \"api-agent\"\nmodule = \"builtin:chat\"\n\n[model]\nprovider = \"default\"\nmodel = \"default\"\nsystem_prompt = \"You are a concise API agent.\"\n"
+}
+JSON
+```
+
+---
+
+## 10. Important Source-Level Notes
+
+- Agent prompts belong under `[model].system_prompt`, not `[system_prompt].prompt`.
+- Channel config belongs under `[channels.<name>]`, for example `[channels.telegram]`.
+- Workflow steps use `agent_name` or `agent_id` plus `prompt`, not the older `type/agent/input` shape.
+- Scheduling is done with `librefang cron ...`, and webhook triggers with `librefang webhooks ...`.
+- The current CLI does not provide `librefang memory search` or `librefang kg query`.
+
+If your goal is customer support, daily summaries, code review, or channel integrations, the shortest reliable path is:
+
+1. `librefang start`
+2. `librefang agent new <template>` or `librefang agent spawn ./agent.toml`
+3. `librefang message <agent> "..."`
+4. `librefang channel setup <channel>` or edit `[channels.<name>]`
+5. `librefang cron create ...` or `librefang workflow create ...`

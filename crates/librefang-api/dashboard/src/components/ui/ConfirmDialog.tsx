@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useFocusTrap } from "../../lib/useFocusTrap";
 
 interface ConfirmDialogProps {
   isOpen: boolean;
@@ -30,6 +31,8 @@ export function ConfirmDialog({
   onClose,
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(isOpen, dialogRef);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -56,6 +59,10 @@ export function ConfirmDialog({
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-dialog-title"
         className="relative w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl animate-fade-in-scale"
         onClick={(e) => e.stopPropagation()}
       >
@@ -75,7 +82,7 @@ export function ConfirmDialog({
             <AlertTriangle className="h-5 w-5" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-black tracking-tight">{title}</h3>
+            <h3 id="confirm-dialog-title" className="text-sm font-black tracking-tight">{title}</h3>
             <p className="mt-1.5 text-xs text-text-dim leading-relaxed">{message}</p>
           </div>
         </div>

@@ -1,7 +1,7 @@
 import { Link, Outlet } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge, LogOut, UserCircle, X, Sparkles } from "lucide-react";
+import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge, LogOut, UserCircle, X, Sparkles, Terminal, Plug } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
@@ -14,8 +14,16 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   const [key, setKey] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [authMethod, setAuthMethod] = useState<"credentials" | "api_key">(
+    mode === "api_key" ? "api_key" : "credentials",
+  );
   const [errorKey, setErrorKey] = useState<"invalid_api_key" | "invalid_credentials" | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    setAuthMethod(mode === "api_key" ? "api_key" : "credentials");
+    setErrorKey(null);
+  }, [mode]);
 
   async function handleApiKeySubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -67,7 +75,8 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
     }
   }
 
-  const isCredentials = mode === "credentials";
+  const isHybrid = mode === "hybrid";
+  const isCredentials = authMethod === "credentials";
 
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/70 backdrop-blur-md">
@@ -80,6 +89,28 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             <h2 className="text-xl font-black tracking-tight">{t(isCredentials ? "auth.credentials_title" : "auth.title")}</h2>
             <p className="text-sm text-text-dim mt-1">{t(isCredentials ? "auth.credentials_description" : "auth.description")}</p>
           </div>
+          {isHybrid && (
+            <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-main p-1">
+              <button
+                type="button"
+                onClick={() => { setAuthMethod("credentials"); setErrorKey(null); setKey(""); }}
+                className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                  isCredentials ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-brand"
+                }`}
+              >
+                {t("auth.credentials_tab")}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setAuthMethod("api_key"); setErrorKey(null); setUsername(""); setPassword(""); }}
+                className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                  !isCredentials ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-brand"
+                }`}
+              >
+                {t("auth.api_key_tab")}
+              </button>
+            </div>
+          )}
           <form onSubmit={isCredentials ? handleCredentialsSubmit : handleApiKeySubmit} className="space-y-4">
             {isCredentials ? (
               <>
@@ -414,6 +445,7 @@ export function App() {
         { to: "/channels", label: t("nav.channels"), icon: Network },
         { to: "/skills", label: t("nav.skills"), icon: Bell },
         { to: "/plugins", label: t("nav.plugins"), icon: Puzzle },
+        { to: "/mcp-servers", label: t("nav.mcp_servers"), icon: Plug },
       ],
     },
     {
@@ -440,6 +472,7 @@ export function App() {
       label: t("nav.advanced"),
       items: [
         { to: "/comms", label: t("nav.comms"), icon: Activity },
+        { to: "/terminal", label: t("nav.terminal"), icon: Terminal },
         { to: "/network", label: t("nav.network"), icon: Share2 },
         { to: "/a2a", label: t("nav.a2a"), icon: Globe },
         { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
@@ -449,6 +482,14 @@ export function App() {
 
   return (
     <div className="flex h-screen flex-col bg-main text-slate-900 dark:text-slate-100 lg:flex-row transition-colors duration-300 overflow-hidden">
+      {/* Skip to content — visible only when focused (keyboard users) */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[200] focus:rounded-lg focus:bg-brand focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-white focus:shadow-lg focus:outline-none"
+      >
+        {t("nav.skip_to_content", { defaultValue: "Skip to content" })}
+      </a>
+
       {/* Sidebar Overlay (Mobile) */}
       {isMobileMenuOpen && (
         <div 
@@ -480,7 +521,9 @@ export function App() {
           <button
             onClick={toggleSidebar}
             className="hidden lg:flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-            title={isSidebarCollapsed ? "Expand" : "Collapse"}
+            title={isSidebarCollapsed ? t("nav.expand_sidebar", { defaultValue: "Expand sidebar" }) : t("nav.collapse_sidebar", { defaultValue: "Collapse sidebar" })}
+            aria-label={isSidebarCollapsed ? t("nav.expand_sidebar", { defaultValue: "Expand sidebar" }) : t("nav.collapse_sidebar", { defaultValue: "Collapse sidebar" })}
+            aria-expanded={!isSidebarCollapsed}
           >
             {isSidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
           </button>
@@ -492,10 +535,11 @@ export function App() {
           <button
             onClick={() => setPaletteOpen(true)}
             className={`mb-4 flex w-full items-center gap-2 rounded-xl border border-border-subtle bg-surface-hover px-3 py-2.5 text-text-dim hover:border-brand/30 hover:text-brand ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
-            title="Search (Cmd+K)"
+            title={`${t("common.search")} (⌘K)`}
+            aria-label={`${t("common.search")} (⌘K)`}
           >
             <Search className="h-4 w-4" />
-            <span className="flex-1 text-left text-xs font-medium">Search</span>
+            <span className="flex-1 text-left text-xs font-medium">{t("common.search")}</span>
             <kbd className="text-[10px] font-mono bg-main px-1.5 py-0.5 rounded">⌘K</kbd>
           </button>
 
@@ -520,6 +564,7 @@ export function App() {
                           className={navBase}
                           activeProps={{ className: `${navBase} ${navActive}` }}
                           onClick={() => setMobileMenuOpen(false)}
+                          title={isSidebarCollapsed ? item.label : undefined}
                         >
                           {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
                           <span className={`flex-1 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
@@ -541,6 +586,7 @@ export function App() {
                           className={navBase}
                           activeProps={{ className: `${navBase} ${navActive}` }}
                           onClick={() => setMobileMenuOpen(false)}
+                          title={isSidebarCollapsed ? item.label : undefined}
                         >
                           {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
                           <span className={`flex-1 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
@@ -583,6 +629,8 @@ export function App() {
             <button
               onClick={() => setMobileMenuOpen(true)}
               className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200 lg:hidden"
+              aria-label={t("nav.open_menu", { defaultValue: "Open navigation menu" })}
+              aria-expanded={isMobileMenuOpen}
             >
               <Menu className="h-5 w-5" />
             </button>
@@ -599,6 +647,7 @@ export function App() {
               onClick={() => setLanguage(language === "en" ? "zh" : "en")}
               className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
               title={t("common.change_language")}
+              aria-label={t("common.change_language")}
             >
               <Globe className="h-4 w-4" />
             </button>
@@ -606,6 +655,7 @@ export function App() {
               onClick={toggleTheme}
               className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
               title={t("common.toggle_theme")}
+              aria-label={t("common.toggle_theme")}
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
@@ -614,6 +664,9 @@ export function App() {
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
                 className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
                 title={t("nav.user_center")}
+                aria-label={t("nav.user_center")}
+                aria-expanded={userMenuOpen}
+                aria-haspopup="menu"
               >
                 <UserCircle className="h-5 w-5" />
               </button>
@@ -653,7 +706,7 @@ export function App() {
         </header>
 
         {/* Main Content */}
-        <main className="flex-1 overflow-y-auto overflow-x-hidden bg-main">
+        <main id="main-content" className="flex-1 overflow-y-auto overflow-x-hidden bg-main" tabIndex={-1}>
           <div className="mx-auto max-w-7xl p-3 sm:p-4 lg:p-8">
             <Outlet />
           </div>

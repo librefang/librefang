@@ -20,7 +20,10 @@ const MAX_TOOL_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
 
 /// Maximum length of an action summary (chars).
-const MAX_ACTION_SUMMARY_LEN: usize = 512;
+pub const MAX_ACTION_SUMMARY_LEN: usize = 512;
+
+/// Maximum length of modify-and-retry feedback (chars).
+pub const MAX_APPROVAL_FEEDBACK_LEN: usize = 4096;
 
 /// Minimum approval timeout in seconds.
 const MIN_TIMEOUT_SECS: u64 = 10;
@@ -39,6 +42,27 @@ const MAX_CHANNEL_NAME_LEN: usize = 64;
 
 /// Maximum number of tools in a single channel rule allow/deny list.
 const MAX_CHANNEL_RULE_TOOLS: usize = 50;
+
+// ---------------------------------------------------------------------------
+// SecondFactor
+// ---------------------------------------------------------------------------
+
+/// Second-factor verification method for critical tool approvals.
+///
+/// When set to `Totp`, approvals require a valid TOTP code from an
+/// authenticator app in addition to the normal approve action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SecondFactor {
+    /// No second factor required (default).
+    #[default]
+    None,
+    /// TOTP (RFC 6238) verification via authenticator app.
+    Totp,
+}
+
+/// Maximum TOTP grace period in seconds (1 hour).
+const MAX_TOTP_GRACE_PERIOD_SECS: u64 = 3600;
 
 // ---------------------------------------------------------------------------
 // RiskLevel
@@ -501,6 +525,9 @@ pub struct ApprovalAuditEntry {
     pub decided_at: String,
     pub requested_at: String,
     pub feedback: Option<String>,
+    /// Whether TOTP second-factor was used for this decision.
+    #[serde(default)]
+    pub second_factor_used: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -544,6 +571,21 @@ pub struct ApprovalPolicy {
     /// Rules for routing approval requests to specific notification targets.
     #[serde(default)]
     pub routing: Vec<ApprovalRoutingRule>,
+    /// Second-factor verification method for approvals.
+    #[serde(default)]
+    pub second_factor: SecondFactor,
+    /// Issuer name shown in authenticator apps (e.g. "LibreFang").
+    #[serde(default = "default_totp_issuer")]
+    pub totp_issuer: String,
+    /// Grace period in seconds after a successful TOTP verification.
+    /// Subsequent approvals within this window skip the TOTP check.
+    #[serde(default = "default_totp_grace_period")]
+    pub totp_grace_period_secs: u64,
+    /// Tools that require TOTP verification (glob patterns supported).
+    /// Empty list means ALL tools in `require_approval` need TOTP.
+    /// Example: `["shell_exec", "file_delete"]` — only these tools need TOTP.
+    #[serde(default)]
+    pub totp_tools: Vec<String>,
 }
 
 impl Default for ApprovalPolicy {
@@ -562,8 +604,20 @@ impl Default for ApprovalPolicy {
             channel_rules: Vec::new(),
             timeout_fallback: TimeoutFallback::default(),
             routing: Vec::new(),
+            second_factor: SecondFactor::default(),
+            totp_issuer: default_totp_issuer(),
+            totp_grace_period_secs: default_totp_grace_period(),
+            totp_tools: Vec::new(),
         }
     }
+}
+
+fn default_totp_issuer() -> String {
+    "LibreFang".to_string()
+}
+
+fn default_totp_grace_period() -> u64 {
+    300
 }
 
 /// Custom deserializer that accepts:
@@ -615,6 +669,23 @@ impl ApprovalPolicy {
         if self.auto_approve {
             self.require_approval.clear();
         }
+    }
+
+    /// Check if a specific tool requires TOTP verification.
+    ///
+    /// Returns `true` if `second_factor` is `Totp` AND (totp_tools is empty
+    /// OR the tool matches a pattern in totp_tools).
+    pub fn tool_requires_totp(&self, tool_name: &str) -> bool {
+        if self.second_factor != SecondFactor::Totp {
+            return false;
+        }
+        if self.totp_tools.is_empty() {
+            return true; // All tools require TOTP
+        }
+        use crate::capability::glob_matches;
+        self.totp_tools
+            .iter()
+            .any(|pattern| glob_matches(pattern, tool_name))
     }
 
     /// Check if the given sender is trusted (auto-approve bypass).
@@ -681,6 +752,24 @@ impl ApprovalPolicy {
         for (i, rule) in self.channel_rules.iter().enumerate() {
             rule.validate()
                 .map_err(|e| format!("channel_rules[{i}]: {e}"))?;
+        }
+
+        // -- totp_tools --
+        for (i, name) in self.totp_tools.iter().enumerate() {
+            validate_tool_name(name, &format!("totp_tools[{i}]"))?;
+        }
+
+        // -- totp_grace_period_secs --
+        if self.totp_grace_period_secs > MAX_TOTP_GRACE_PERIOD_SECS {
+            return Err(format!(
+                "totp_grace_period_secs too large ({}, max {MAX_TOTP_GRACE_PERIOD_SECS})",
+                self.totp_grace_period_secs
+            ));
+        }
+
+        // -- totp_issuer --
+        if self.second_factor == SecondFactor::Totp && self.totp_issuer.is_empty() {
+            return Err("totp_issuer must not be empty when second_factor is totp".into());
         }
 
         Ok(())
@@ -1160,6 +1249,10 @@ mod tests {
             }],
             timeout_fallback: TimeoutFallback::default(),
             routing: Vec::new(),
+            second_factor: SecondFactor::default(),
+            totp_issuer: "LibreFang".into(),
+            totp_grace_period_secs: 300,
+            totp_tools: Vec::new(),
         };
         let json = serde_json::to_string(&policy).unwrap();
         let back: ApprovalPolicy = serde_json::from_str(&json).unwrap();
@@ -1497,6 +1590,7 @@ mod tests {
             decided_at: "2024-01-01T00:00:00Z".into(),
             requested_at: "2024-01-01T00:00:00Z".into(),
             feedback: None,
+            second_factor_used: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: ApprovalAuditEntry = serde_json::from_str(&json).unwrap();

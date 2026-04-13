@@ -17,6 +17,8 @@ sdk/**/target
 .env
 .env.*
 !.env.example
+secrets.env
+secrets.env.*
 
 # Database
 *.db
@@ -57,6 +59,7 @@ result
 .idea/
 .vscode/
 .claude/
+.codex
 .qwen/
 *.swp
 *.swo

@@ -27,6 +27,7 @@ pub mod prompts;
 pub mod providers;
 pub mod skills;
 pub mod system;
+pub mod terminal;
 pub mod workflows;
 
 // Glob re-export to keep `routes::handler_name` backward compatible
@@ -52,6 +53,7 @@ pub use plugins::*;
 pub use providers::*;
 pub use skills::*;
 pub use system::*;
+pub use terminal::*;
 pub use workflows::*;
 
 use crate::middleware::RequestLanguage;

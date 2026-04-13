@@ -3,15 +3,16 @@ import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { listAgents, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
+import { loadDashboardSnapshot, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics,
-  listModels, listProviders, listAgentTemplates, deleteAgent, cloneAgent, resetAgentSession } from "../api";
+  listModels, listProviders, listAgentTemplates, getAgentTemplateToml, deleteAgent, cloneAgent, resetAgentSession } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { Modal } from "../components/ui/Modal";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Card } from "../components/ui/Card";
 import { Input } from "../components/ui/Input";
@@ -24,7 +25,7 @@ import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pa
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
 
-const REFRESH_MS = 30000;
+const REFRESH_MS = 5000;
 
 export function AgentsPage() {
   const { t } = useTranslation();
@@ -36,6 +37,7 @@ export function AgentsPage() {
   const [createMode, setCreateMode] = useState<"template" | "toml">("template");
   const [templateName, setTemplateName] = useState("");
   const [manifestToml, setManifestToml] = useState("");
+  const [templateTomlLoading, setTemplateTomlLoading] = useState(false);
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
   const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
@@ -54,6 +56,21 @@ export function AgentsPage() {
   useCreateShortcut(() => setShowCreate(true));
   const queryClient = useQueryClient();
   const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
+  const localizedTemplates = useMemo(
+    () =>
+      (templatesQuery.data ?? []).map((template) => ({
+        ...template,
+        displayName: t(`agents.builtin.${template.name}.name`, { defaultValue: template.name }),
+        displayDescription: t(`agents.builtin.${template.name}.description`, {
+          defaultValue: template.description || template.name,
+        }),
+      })),
+    [templatesQuery.data, t],
+  );
+  const selectedTemplate = useMemo(
+    () => localizedTemplates.find((template) => template.name === templateName) ?? null,
+    [localizedTemplates, templateName],
+  );
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,
     onSuccess: () => {
@@ -141,10 +158,13 @@ export function AgentsPage() {
     patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: patch });
   }
 
+  // Share the snapshot query with OverviewPage — same cache key means React Query
+  // deduplicates the poll when both pages are mounted, and agent counts on the
+  // Overview tab stay in sync with this list automatically.
   const agentsQuery = useQuery({
-    queryKey: ["agents", "list"],
-    queryFn: listAgents,
-    refetchInterval: REFRESH_MS
+    queryKey: ["dashboard", "snapshot"],
+    queryFn: loadDashboardSnapshot,
+    refetchInterval: REFRESH_MS,
   });
 
   const modelsQuery = useQuery({
@@ -173,7 +193,7 @@ export function AgentsPage() {
     [modelsQuery.data?.models, hiddenSet],
   );
 
-  const agents = agentsQuery.data ?? [];
+  const agents = agentsQuery.data?.agents ?? [];
   // Counts for the filter chips so operators can see "5 running / 2
   // suspended" without running through the filter first.
   const agentCounts = useMemo(() => {
@@ -253,11 +273,11 @@ export function AgentsPage() {
         </div>
         <div className="pt-4 border-t border-border-subtle/30 flex gap-2">
           {isSuspended ? (
-            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); await resumeAgent(agent.id); agentsQuery.refetch(); }}>
+            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); try { await resumeAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
               <Play className="h-3.5 w-3.5 mr-1" /> {t("agents.resume")}
             </Button>
           ) : (
-            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); await suspendAgent(agent.id); agentsQuery.refetch(); }}>
+            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); try { await suspendAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
               <Pause className="h-3.5 w-3.5 mr-1" /> {t("agents.suspend")}
             </Button>
           )}
@@ -416,7 +436,7 @@ export function AgentsPage() {
                     </div>
                   </div>
                 </div>
-                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
               </div>
             </div>
             <div className="p-6 space-y-5">
@@ -627,17 +647,17 @@ export function AgentsPage() {
                 {/* Management actions */}
                 <div className="grid grid-cols-4 gap-2">
                   {isDetailSuspended ? (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await resumeAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await resumeAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
                       <Play className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.resume")}</span>
                     </Button>
                   ) : (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await suspendAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await suspendAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
                       <Pause className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.suspend")}</span>
                     </Button>
                   )}
-                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await cloneAgent(detailAgent.id); agentsQuery.refetch(); }}>
+                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await cloneAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.clone_failed", { defaultValue: "Failed to clone agent" }), "error"); } }}>
                     <Copy className="w-4 h-4" />
                     <span className="text-[9px]">{t("agents.clone")}</span>
                   </Button>
@@ -691,68 +711,87 @@ export function AgentsPage() {
       })()}
 
       {/* Create Agent Modal */}
-      {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreate(false)}>
-          <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[480px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <h3 className="text-sm font-bold">{t("agents.create_agent")}</h3>
-              <button onClick={() => setShowCreate(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="p-5 space-y-4">
-              {/* Mode tabs */}
-              <div className="flex gap-2">
-                <button onClick={() => setCreateMode("template")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
-                  {t("agents.from_template")}
-                </button>
-                <button onClick={() => setCreateMode("toml")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "toml" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
-                  {t("agents.from_toml")}
-                </button>
-              </div>
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("agents.create_agent")} size="lg">
+        <div className="p-5 space-y-4">
+          {/* Mode tabs */}
+          <div className="flex gap-2">
+            <button onClick={() => setCreateMode("template")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+              {t("agents.from_template")}
+            </button>
+            <button onClick={() => setCreateMode("toml")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "toml" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+              {t("agents.from_toml")}
+            </button>
+          </div>
 
-              {createMode === "template" ? (
-                <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
-                  <select value={templateName} onChange={e => setTemplateName(e.target.value)}
-                    className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
-                    <option value="">{t("agents.template_placeholder")}</option>
-                    {(templatesQuery.data ?? []).map(tmpl => (
-                      <option key={tmpl.name} value={tmpl.name}>{tmpl.name}</option>
-                    ))}
-                  </select>
-                </div>
-              ) : (
-                <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.manifest_toml")}</label>
-                  <textarea value={manifestToml} onChange={e => setManifestToml(e.target.value)}
-                    placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n\n[thinking]\nbudget_tokens = 10000\nstream_thinking = false'}
-                    rows={12}
-                    className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-none" />
-                  <p className="text-[9px] text-text-dim/50 mt-1 flex items-center gap-1">
-                    <Brain className="w-3 h-3" />
-                    {t("agents.thinking_toml_hint")}
-                  </p>
+          {createMode === "template" ? (
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
+              <select value={templateName}
+                onChange={async e => {
+                  const selected = e.target.value;
+                  setTemplateName(selected);
+                  if (!selected) return;
+                  setTemplateTomlLoading(true);
+                  try {
+                    const toml = await getAgentTemplateToml(selected);
+                    setManifestToml(toml);
+                    setCreateMode("toml");
+                  } catch {
+                    // Fetch failed — stay on template tab, fall back to template-name submit
+                  } finally {
+                    setTemplateTomlLoading(false);
+                  }
+                }}
+                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
+                <option value="">{t("agents.template_placeholder")}</option>
+                {localizedTemplates.map(tmpl => (
+                  <option key={tmpl.name} value={tmpl.name}>{tmpl.displayName}</option>
+                ))}
+              </select>
+              {selectedTemplate && (
+                <div className="mt-2 rounded-xl border border-border-subtle/60 bg-surface/60 px-3 py-2">
+                  <p className="text-xs font-bold text-text">{selectedTemplate.displayName}</p>
+                  <p className="mt-1 text-[11px] leading-relaxed text-text-dim">{selectedTemplate.displayDescription}</p>
                 </div>
               )}
-
-              {spawnMutation.error && (
-                <p className="text-xs text-error">{(spawnMutation.error as any)?.message || String(spawnMutation.error)}</p>
+              {templateTomlLoading && (
+                <p className="text-[10px] text-text-dim mt-1 flex items-center gap-1">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  {t("agents.loading_template_toml", { defaultValue: "Loading template…" })}
+                </p>
               )}
-
-              <div className="flex gap-2 pt-2">
-                <Button variant="primary" className="flex-1"
-                  onClick={() => spawnMutation.mutate(createMode === "template" ? { template: templateName } : { manifest_toml: manifestToml })}
-                  disabled={spawnMutation.isPending || (createMode === "template" ? !templateName.trim() : !manifestToml.trim())}>
-                  {spawnMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
-                  {t("agents.create_agent")}
-                </Button>
-                <Button variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
-              </div>
             </div>
+          ) : (
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.manifest_toml")}</label>
+              <textarea value={manifestToml} onChange={e => setManifestToml(e.target.value)}
+                placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n\n[thinking]\nbudget_tokens = 10000\nstream_thinking = false'}
+                rows={12}
+                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-none" />
+              <p className="text-[9px] text-text-dim/50 mt-1 flex items-center gap-1">
+                <Brain className="w-3 h-3" />
+                {t("agents.thinking_toml_hint")}
+              </p>
+            </div>
+          )}
+
+          {spawnMutation.error && (
+            <p className="text-xs text-error">{(spawnMutation.error as any)?.message || String(spawnMutation.error)}</p>
+          )}
+
+          <div className="flex gap-2 pt-2">
+            <Button variant="primary" className="flex-1"
+              onClick={() => spawnMutation.mutate(createMode === "template" ? { template: templateName } : { manifest_toml: manifestToml })}
+              disabled={spawnMutation.isPending || templateTomlLoading || (createMode === "template" ? !templateName.trim() : !manifestToml.trim())}>
+              {spawnMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
+              {t("agents.create_agent")}
+            </Button>
+            <Button variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
           </div>
         </div>
-      )}
+      </Modal>
 
       {/* Prompts & Experiments Modal */}
       {showPrompts && detailAgent && (
@@ -775,6 +814,7 @@ export function AgentsPage() {
 }
 
 function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: string; agentName: string; onClose: () => void }) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<"versions" | "experiments">("versions");
   const [showCreateVersion, setShowCreateVersion] = useState(false);
@@ -867,7 +907,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
             <h3 className="text-lg font-black">{agentName}</h3>
             <p className="text-xs text-text-dim">Prompts & Experiments</p>
           </div>
-          <button onClick={onClose} className="p-2 rounded-xl hover:bg-main"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-main" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
         </div>
         
         <div className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0">

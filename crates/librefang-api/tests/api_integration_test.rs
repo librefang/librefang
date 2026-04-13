@@ -81,6 +81,8 @@ async fn start_test_server_with_provider(
             api_key_env: api_key_env.to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
     };
@@ -212,6 +214,8 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
     };
@@ -527,10 +531,13 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
     assert_eq!(json["dry_run"], false);
 
     let config_path = harness.state.kernel.home_dir().join("config.toml");
+    // Migrate writes to <home>/agents/ but the daemon relocates the dirs to
+    // the canonical workspaces/agents/ layout immediately after migration.
     let agent_path = harness
         .state
         .kernel
         .home_dir()
+        .join("workspaces")
         .join("agents")
         .join("main")
         .join("agent.toml");
@@ -1325,6 +1332,8 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
     };
@@ -1365,6 +1374,8 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
     let api_key_state = middleware::AuthState {
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
+        dashboard_auth_enabled: false,
+        user_api_keys: Arc::new(Vec::new()),
     };
 
     let app = Router::new()

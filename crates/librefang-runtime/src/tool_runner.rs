@@ -13,7 +13,7 @@ use librefang_types::tool_compat::normalize_tool_name;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
 #[allow(dead_code)]
@@ -52,24 +52,44 @@ fn check_taint_shell_exec(command: &str) -> Option<String> {
 ///
 /// Blocks URLs that appear to contain API keys, tokens, or other secrets
 /// in query parameters (potential data exfiltration). Implements TaintSink::net_fetch().
+///
+/// Both the raw URL and its percent-decoded query parameter names are
+/// checked — an attacker can otherwise bypass the filter with encoding
+/// tricks such as `api%5Fkey=secret` (the server decodes `%5F` to `_`
+/// and receives the real `api_key=secret`).
 fn check_taint_net_fetch(url: &str) -> Option<String> {
-    let exfil_patterns = [
-        "api_key=",
-        "apikey=",
-        "token=",
-        "secret=",
-        "password=",
-        "Authorization:",
-    ];
-    for pattern in &exfil_patterns {
-        if url.to_lowercase().contains(&pattern.to_lowercase()) {
-            let mut labels = HashSet::new();
-            labels.insert(TaintLabel::Secret);
-            let tainted = TaintedValue::new(url, labels, "llm_tool_call");
-            if let Err(violation) = tainted.check_sink(&TaintSink::net_fetch()) {
-                warn!(url = crate::str_utils::safe_truncate_str(url, 80), %violation, "Net fetch taint check failed");
-                return Some(violation.to_string());
+    const SECRET_KEYS: &[&str] = &["api_key", "apikey", "token", "secret", "password"];
+
+    // Scan 1: raw URL literal for `<key>=` and the Authorization header prefix.
+    let url_lower = url.to_lowercase();
+    let mut hit = url_lower.contains("authorization:");
+    if !hit {
+        hit = SECRET_KEYS
+            .iter()
+            .any(|k| url_lower.contains(&format!("{k}=")));
+    }
+
+    // Scan 2: percent-decoded query parameter names. Parsing via
+    // `url::Url` decodes each name so `api%5Fkey` becomes `api_key`.
+    if !hit {
+        if let Ok(parsed) = url::Url::parse(url) {
+            for (name, _value) in parsed.query_pairs() {
+                let name_lower = name.to_lowercase();
+                if SECRET_KEYS.iter().any(|k| name_lower == *k) {
+                    hit = true;
+                    break;
+                }
             }
+        }
+    }
+
+    if hit {
+        let mut labels = HashSet::new();
+        labels.insert(TaintLabel::Secret);
+        let tainted = TaintedValue::new(url, labels, "llm_tool_call");
+        if let Err(violation) = tainted.check_sink(&TaintSink::net_fetch()) {
+            warn!(url = crate::str_utils::safe_truncate_str(url, 80), %violation, "Net fetch taint check failed");
+            return Some(violation.to_string());
         }
     }
     None
@@ -88,197 +108,120 @@ pub fn current_agent_depth() -> u32 {
     AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0)
 }
 
-/// Execute a tool by name with the given input, returning a ToolResult.
+/// Runtime context for bare tool dispatch.
 ///
-/// The optional `kernel` handle enables inter-agent tools. If `None`,
-/// agent tools will return an error indicating the kernel is not available.
+/// Used by [`execute_tool_raw`] so that tool dispatch is fully separated from
+/// the approval / capability / taint gate logic in [`execute_tool`].  Build this
+/// from the flat parameter list and pass it down; it can also be constructed
+/// directly from a [`librefang_types::tool::DeferredToolExecution`] payload
+/// during the resume path.
+pub struct ToolExecContext<'a> {
+    pub kernel: Option<&'a Arc<dyn KernelHandle>>,
+    pub allowed_tools: Option<&'a [String]>,
+    pub caller_agent_id: Option<&'a str>,
+    pub skill_registry: Option<&'a SkillRegistry>,
+    pub mcp_connections: Option<&'a tokio::sync::Mutex<Vec<mcp::McpConnection>>>,
+    pub web_ctx: Option<&'a WebToolsContext>,
+    pub browser_ctx: Option<&'a crate::browser::BrowserManager>,
+    pub allowed_env_vars: Option<&'a [String]>,
+    pub workspace_root: Option<&'a Path>,
+    pub media_engine: Option<&'a crate::media_understanding::MediaEngine>,
+    pub media_drivers: Option<&'a crate::media::MediaDriverCache>,
+    pub exec_policy: Option<&'a librefang_types::config::ExecPolicy>,
+    pub tts_engine: Option<&'a crate::tts::TtsEngine>,
+    pub docker_config: Option<&'a librefang_types::config::DockerSandboxConfig>,
+    pub process_manager: Option<&'a crate::process_manager::ProcessManager>,
+    pub sender_id: Option<&'a str>,
+    pub channel: Option<&'a str>,
+}
+
+/// Execute a tool without running the approval / capability / taint gate.
 ///
-/// `allowed_tools` enforces capability-based security: if provided, only
-/// tools in the list may execute. This prevents an LLM from hallucinating
-/// tool names outside the agent's capability grants.
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_tool(
+/// This is the pure dispatch layer: it pattern-matches on `tool_name` and calls
+/// the right implementation.  All pre-flight checks (capability enforcement,
+/// approval gate, taint checks, truncated-args detection) live in the outer
+/// [`execute_tool`] wrapper; this function only handles the match.
+pub async fn execute_tool_raw(
     tool_use_id: &str,
     tool_name: &str,
     input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-    allowed_tools: Option<&[String]>,
-    caller_agent_id: Option<&str>,
-    skill_registry: Option<&SkillRegistry>,
-    mcp_connections: Option<&tokio::sync::Mutex<Vec<mcp::McpConnection>>>,
-    web_ctx: Option<&WebToolsContext>,
-    browser_ctx: Option<&crate::browser::BrowserManager>,
-    allowed_env_vars: Option<&[String]>,
-    workspace_root: Option<&Path>,
-    media_engine: Option<&crate::media_understanding::MediaEngine>,
-    media_drivers: Option<&crate::media::MediaDriverCache>,
-    exec_policy: Option<&librefang_types::config::ExecPolicy>,
-    tts_engine: Option<&crate::tts::TtsEngine>,
-    docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
-    process_manager: Option<&crate::process_manager::ProcessManager>,
-    sender_id: Option<&str>,
-    channel: Option<&str>,
+    ctx: &ToolExecContext<'_>,
 ) -> ToolResult {
-    // Normalize the tool name through compat mappings so LLM-hallucinated aliases
-    // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
     let tool_name = normalize_tool_name(tool_name);
+    let ToolExecContext {
+        kernel,
+        allowed_tools,
+        caller_agent_id,
+        skill_registry,
+        mcp_connections,
+        web_ctx,
+        browser_ctx,
+        allowed_env_vars,
+        workspace_root,
+        media_engine,
+        media_drivers,
+        exec_policy,
+        tts_engine,
+        docker_config,
+        process_manager,
+        sender_id,
+        channel: _,
+    } = ctx;
 
-    // Capability enforcement: reject tools not in the allowed list.
-    // Entries support wildcard patterns (e.g. "file_*" matches "file_read").
-    if let Some(allowed) = allowed_tools {
-        if !allowed
-            .iter()
-            .any(|pattern| librefang_types::capability::glob_matches(pattern, tool_name))
-        {
-            warn!(tool_name, "Capability denied: tool not in allowed list");
-            return ToolResult {
-                tool_use_id: tool_use_id.to_string(),
-                content: format!(
-                    "Permission denied: agent does not have capability to use tool '{tool_name}'"
-                ),
-                is_error: true,
-            };
-        }
-    }
-
-    let skip_approval_for_full_exec = tool_name == "shell_exec"
-        && exec_policy.is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
-
-    // Approval gate: check if this tool requires human approval before execution.
-    // Uses sender/channel context for per-sender trust and channel-specific policies.
-    if let Some(kh) = kernel {
-        if kh.is_tool_denied_with_context(tool_name, sender_id, channel) {
-            warn!(tool_name, channel, "Execution denied by channel policy");
-            return ToolResult {
-                tool_use_id: tool_use_id.to_string(),
-                content: format!(
-                    "Execution denied: '{tool_name}' is blocked by the active channel policy."
-                ),
-                is_error: true,
-            };
-        }
-
-        if !skip_approval_for_full_exec
-            && kh.requires_approval_with_context(tool_name, sender_id, channel)
-        {
-            let agent_id_str = caller_agent_id.unwrap_or("unknown");
-            let input_str = input.to_string();
-            let summary = format!(
-                "{}: {}",
-                tool_name,
-                librefang_types::truncate_str(&input_str, 200)
-            );
-            match kh.request_approval(agent_id_str, tool_name, &summary).await {
-                Ok(librefang_types::approval::ApprovalDecision::Approved) => {
-                    debug!(tool_name, "Approval granted — proceeding with execution");
-                }
-                Ok(librefang_types::approval::ApprovalDecision::ModifyAndRetry { feedback }) => {
-                    warn!(tool_name, "Approval: human requested modification");
-                    return ToolResult {
-                        tool_use_id: tool_use_id.to_string(),
-                        content: format!(
-                            "[MODIFY_AND_RETRY] Human feedback for '{}': {}",
-                            tool_name, feedback
-                        ),
-                        is_error: true,
-                    };
-                }
-                Ok(librefang_types::approval::ApprovalDecision::Skipped) => {
-                    info!(tool_name, "Approval timed out — tool skipped by policy");
-                    return ToolResult {
-                        tool_use_id: tool_use_id.to_string(),
-                        content: format!(
-                            "Tool '{}' skipped: approval timed out and policy is set to skip. Continue without this tool.",
-                            tool_name
-                        ),
-                        is_error: false,
-                    };
-                }
-                Ok(_) => {
-                    warn!(tool_name, "Approval denied — blocking tool execution");
-                    return ToolResult {
-                        tool_use_id: tool_use_id.to_string(),
-                        content: format!(
-                            "Execution denied: '{}' requires human approval and was denied or timed out. The operation was not performed.",
-                            tool_name
-                        ),
-                        is_error: true,
-                    };
-                }
-                Err(e) => {
-                    warn!(tool_name, error = %e, "Approval system error");
-                    return ToolResult {
-                        tool_use_id: tool_use_id.to_string(),
-                        content: format!("Approval system error: {e}"),
-                        is_error: true,
-                    };
-                }
-            }
-        }
-    }
-
-    // Check for truncated tool call arguments from the LLM driver (#2027).
-    // When the LLM's response is cut off mid-JSON (max_tokens exceeded), the
-    // driver marks the input with __args_truncated. Return a helpful error
-    // so the LLM can retry with smaller content.
-    if input
-        .get(crate::drivers::openai::TRUNCATED_ARGS_KEY)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        let error_msg = input["__error"].as_str().unwrap_or(
-            "Tool call arguments were truncated. Try smaller content or split into multiple calls.",
-        );
-        return ToolResult {
-            tool_use_id: tool_use_id.to_string(),
-            content: error_msg.to_string(),
-            is_error: true,
-        };
-    }
-
-    debug!(tool_name, "Executing tool");
     let result = match tool_name {
         // Filesystem tools
-        "file_read" => tool_file_read(input, workspace_root).await,
-        "file_write" => tool_file_write(input, workspace_root).await,
-        "file_list" => tool_file_list(input, workspace_root).await,
-        "apply_patch" => tool_apply_patch(input, workspace_root).await,
+        "file_read" => tool_file_read(input, *workspace_root).await,
+        "file_write" => tool_file_write(input, *workspace_root).await,
+        "file_list" => tool_file_list(input, *workspace_root).await,
+        "apply_patch" => tool_apply_patch(input, *workspace_root).await,
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
-        "web_fetch" => {
-            // Taint check: block URLs containing secrets/PII from being exfiltrated
-            let url = input["url"].as_str().unwrap_or("");
-            if let Some(violation) = check_taint_net_fetch(url) {
-                return ToolResult {
-                    tool_use_id: tool_use_id.to_string(),
-                    content: format!("Taint violation: {violation}"),
-                    is_error: true,
-                };
+        "web_fetch" => match input["url"].as_str() {
+            None => Err("Missing 'url' parameter".to_string()),
+            Some(url) => {
+                // Taint check: block URLs containing secrets/PII from being exfiltrated
+                if let Some(violation) = check_taint_net_fetch(url) {
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!("Taint violation: {violation}"),
+                        is_error: true,
+                        ..Default::default()
+                    };
+                }
+                let method = input["method"].as_str().unwrap_or("GET");
+                let headers = input.get("headers").and_then(|v| v.as_object());
+                let body = input["body"].as_str();
+                if let Some(ctx) = web_ctx {
+                    ctx.fetch
+                        .fetch_with_options(url, method, headers, body)
+                        .await
+                } else {
+                    tool_web_fetch_legacy(input).await
+                }
             }
-            let method = input["method"].as_str().unwrap_or("GET");
-            let headers = input.get("headers").and_then(|v| v.as_object());
-            let body = input["body"].as_str();
-            if let Some(ctx) = web_ctx {
-                ctx.fetch
-                    .fetch_with_options(url, method, headers, body)
-                    .await
-            } else {
-                tool_web_fetch_legacy(input).await
-            }
-        }
-        "web_search" => {
-            if let Some(ctx) = web_ctx {
-                let query = input["query"].as_str().unwrap_or("");
+        },
+        "web_search" => match input["query"].as_str() {
+            None => Err("Missing 'query' parameter".to_string()),
+            Some(query) => {
                 let max_results = input["max_results"].as_u64().unwrap_or(5) as usize;
-                ctx.search.search(query, max_results).await
-            } else {
-                tool_web_search_legacy(input).await
+                if let Some(ctx) = web_ctx {
+                    ctx.search.search(query, max_results).await
+                } else {
+                    tool_web_search_legacy(input).await
+                }
             }
-        }
+        },
 
         // Shell tool — exec policy + metacharacter check + taint check
         "shell_exec" => {
-            let command = input["command"].as_str().unwrap_or("");
+            let Some(command) = input["command"].as_str() else {
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: "Missing 'command' parameter".to_string(),
+                    is_error: true,
+                    ..Default::default()
+                };
+            };
 
             let is_full_exec = exec_policy
                 .is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
@@ -296,6 +239,7 @@ pub async fn execute_tool(
                             policy.mode
                         ),
                         is_error: true,
+                        ..Default::default()
                     };
                 }
             }
@@ -313,6 +257,7 @@ pub async fn execute_tool(
                              Shell metacharacters are not allowed in allowlist mode."
                         ),
                         is_error: true,
+                        ..Default::default()
                     };
                 }
             }
@@ -324,69 +269,79 @@ pub async fn execute_tool(
                         tool_use_id: tool_use_id.to_string(),
                         content: format!("Taint violation: {violation}"),
                         is_error: true,
+                        ..Default::default()
                     };
                 }
             }
+            let effective_allowed_env_vars = allowed_env_vars.or_else(|| {
+                exec_policy.and_then(|policy| {
+                    if policy.allowed_env_vars.is_empty() {
+                        None
+                    } else {
+                        Some(policy.allowed_env_vars.as_slice())
+                    }
+                })
+            });
             tool_shell_exec(
                 input,
-                allowed_env_vars.unwrap_or(&[]),
-                workspace_root,
-                exec_policy,
+                effective_allowed_env_vars.unwrap_or(&[]),
+                *workspace_root,
+                *exec_policy,
             )
             .await
         }
 
         // Inter-agent tools (require kernel handle)
-        "agent_send" => tool_agent_send(input, kernel).await,
-        "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id, allowed_tools).await,
-        "agent_list" => tool_agent_list(kernel),
-        "agent_kill" => tool_agent_kill(input, kernel),
+        "agent_send" => tool_agent_send(input, *kernel).await,
+        "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools).await,
+        "agent_list" => tool_agent_list(*kernel),
+        "agent_kill" => tool_agent_kill(input, *kernel),
 
         // Shared memory tools (peer-scoped when sender_id is present)
-        "memory_store" => tool_memory_store(input, kernel, sender_id),
-        "memory_recall" => tool_memory_recall(input, kernel, sender_id),
-        "memory_list" => tool_memory_list(kernel, sender_id),
+        "memory_store" => tool_memory_store(input, *kernel, *sender_id),
+        "memory_recall" => tool_memory_recall(input, *kernel, *sender_id),
+        "memory_list" => tool_memory_list(*kernel, *sender_id),
 
         // Collaboration tools
-        "agent_find" => tool_agent_find(input, kernel),
-        "task_post" => tool_task_post(input, kernel, caller_agent_id).await,
-        "task_claim" => tool_task_claim(kernel, caller_agent_id).await,
-        "task_complete" => tool_task_complete(input, kernel).await,
-        "task_list" => tool_task_list(input, kernel).await,
-        "event_publish" => tool_event_publish(input, kernel).await,
+        "agent_find" => tool_agent_find(input, *kernel),
+        "task_post" => tool_task_post(input, *kernel, *caller_agent_id).await,
+        "task_claim" => tool_task_claim(*kernel, *caller_agent_id).await,
+        "task_complete" => tool_task_complete(input, *kernel).await,
+        "task_list" => tool_task_list(input, *kernel).await,
+        "event_publish" => tool_event_publish(input, *kernel).await,
 
         // Scheduling tools (delegate to CronScheduler via kernel handle)
-        "schedule_create" => tool_schedule_create(input, kernel, caller_agent_id).await,
-        "schedule_list" => tool_schedule_list(kernel, caller_agent_id).await,
-        "schedule_delete" => tool_schedule_delete(input, kernel).await,
+        "schedule_create" => tool_schedule_create(input, *kernel, *caller_agent_id).await,
+        "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
+        "schedule_delete" => tool_schedule_delete(input, *kernel).await,
 
         // Knowledge graph tools
-        "knowledge_add_entity" => tool_knowledge_add_entity(input, kernel).await,
-        "knowledge_add_relation" => tool_knowledge_add_relation(input, kernel).await,
-        "knowledge_query" => tool_knowledge_query(input, kernel).await,
+        "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel).await,
+        "knowledge_add_relation" => tool_knowledge_add_relation(input, *kernel).await,
+        "knowledge_query" => tool_knowledge_query(input, *kernel).await,
 
         // Image analysis tool
-        "image_analyze" => tool_image_analyze(input).await,
+        "image_analyze" => tool_image_analyze(input, *workspace_root).await,
 
         // Media understanding tools
-        "media_describe" => tool_media_describe(input, media_engine).await,
-        "media_transcribe" => tool_media_transcribe(input, media_engine).await,
+        "media_describe" => tool_media_describe(input, *media_engine, *workspace_root).await,
+        "media_transcribe" => tool_media_transcribe(input, *media_engine, *workspace_root).await,
 
         // Media generation tools (MediaDriver-based)
-        "image_generate" => tool_image_generate(input, media_drivers, workspace_root).await,
-        "video_generate" => tool_video_generate(input, media_drivers).await,
-        "video_status" => tool_video_status(input, media_drivers).await,
-        "music_generate" => tool_music_generate(input, media_drivers, workspace_root).await,
+        "image_generate" => tool_image_generate(input, *media_drivers, *workspace_root).await,
+        "video_generate" => tool_video_generate(input, *media_drivers).await,
+        "video_status" => tool_video_status(input, *media_drivers).await,
+        "music_generate" => tool_music_generate(input, *media_drivers, *workspace_root).await,
 
         // TTS/STT tools
         "text_to_speech" => {
-            tool_text_to_speech(input, media_drivers, tts_engine, workspace_root).await
+            tool_text_to_speech(input, *media_drivers, *tts_engine, *workspace_root).await
         }
-        "speech_to_text" => tool_speech_to_text(input, media_engine, workspace_root).await,
+        "speech_to_text" => tool_speech_to_text(input, *media_engine, *workspace_root).await,
 
         // Docker sandbox tool
         "docker_exec" => {
-            tool_docker_exec(input, docker_config, workspace_root, caller_agent_id).await
+            tool_docker_exec(input, *docker_config, *workspace_root, *caller_agent_id).await
         }
 
         // Location tool
@@ -396,41 +351,52 @@ pub async fn execute_tool(
         "system_time" => Ok(tool_system_time()),
 
         // Cron scheduling tools
-        "cron_create" => tool_cron_create(input, kernel, caller_agent_id).await,
-        "cron_list" => tool_cron_list(kernel, caller_agent_id).await,
-        "cron_cancel" => tool_cron_cancel(input, kernel, caller_agent_id).await,
+        "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id).await,
+        "cron_list" => tool_cron_list(*kernel, *caller_agent_id).await,
+        "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
 
         // Channel send tool (proactive outbound messaging)
-        "channel_send" => tool_channel_send(input, kernel, workspace_root).await,
+        "channel_send" => tool_channel_send(input, *kernel, *workspace_root).await,
 
         // Persistent process tools
-        "process_start" => tool_process_start(input, process_manager, caller_agent_id).await,
-        "process_poll" => tool_process_poll(input, process_manager).await,
-        "process_write" => tool_process_write(input, process_manager).await,
-        "process_kill" => tool_process_kill(input, process_manager).await,
-        "process_list" => tool_process_list(process_manager, caller_agent_id).await,
+        "process_start" => tool_process_start(input, *process_manager, *caller_agent_id).await,
+        "process_poll" => tool_process_poll(input, *process_manager).await,
+        "process_write" => tool_process_write(input, *process_manager).await,
+        "process_kill" => tool_process_kill(input, *process_manager).await,
+        "process_list" => tool_process_list(*process_manager, *caller_agent_id).await,
 
         // Hand tools (curated autonomous capability packages)
-        "hand_list" => tool_hand_list(kernel).await,
-        "hand_activate" => tool_hand_activate(input, kernel).await,
-        "hand_status" => tool_hand_status(input, kernel).await,
-        "hand_deactivate" => tool_hand_deactivate(input, kernel).await,
+        "hand_list" => tool_hand_list(*kernel).await,
+        "hand_activate" => tool_hand_activate(input, *kernel).await,
+        "hand_status" => tool_hand_status(input, *kernel).await,
+        "hand_deactivate" => tool_hand_deactivate(input, *kernel).await,
 
         // A2A outbound tools (cross-instance agent communication)
         "a2a_discover" => tool_a2a_discover(input).await,
-        "a2a_send" => tool_a2a_send(input, kernel).await,
+        "a2a_send" => tool_a2a_send(input, *kernel).await,
 
         // Goal tracking tool
-        "goal_update" => tool_goal_update(input, kernel),
+        "goal_update" => tool_goal_update(input, *kernel),
+
+        // Workflow execution tool
+        "workflow_run" => tool_workflow_run(input, *kernel).await,
 
         // Browser automation tools
         "browser_navigate" => {
-            let url = input["url"].as_str().unwrap_or("");
+            let Some(url) = input["url"].as_str() else {
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: "Missing 'url' parameter".to_string(),
+                    is_error: true,
+                    ..Default::default()
+                };
+            };
             if let Some(violation) = check_taint_net_fetch(url) {
                 return ToolResult {
                     tool_use_id: tool_use_id.to_string(),
                     content: format!("Taint violation: {violation}"),
                     is_error: true,
+                    ..Default::default()
                 };
             }
             match browser_ctx {
@@ -526,16 +492,12 @@ pub async fn execute_tool(
         },
 
         // Canvas / A2UI tool
-        "canvas_present" => tool_canvas_present(input, workspace_root).await,
+        "canvas_present" => tool_canvas_present(input, *workspace_root).await,
 
         other => {
             // Fallback 1: MCP tools (mcp_{server}_{tool} prefix)
             if mcp::is_mcp_tool(other) {
                 // SECURITY: Verify MCP tool is in the agent's allowed_tools list.
-                // The primary check at the top of execute_tool covers this when
-                // allowed_tools is Some, but we add an explicit guard here to
-                // ensure MCP tools are never dispatched without authorization,
-                // even if called from a context that omits allowed_tools.
                 if let Some(allowed) = allowed_tools {
                     if !allowed
                         .iter()
@@ -548,6 +510,7 @@ pub async fn execute_tool(
                                 "Permission denied: MCP tool '{other}' is not in the agent's allowed tools list"
                             ),
                             is_error: true,
+                            ..Default::default()
                         };
                     }
                 }
@@ -616,13 +579,191 @@ pub async fn execute_tool(
             tool_use_id: tool_use_id.to_string(),
             content,
             is_error: false,
+            ..Default::default()
         },
         Err(err) => ToolResult {
             tool_use_id: tool_use_id.to_string(),
             content: format!("Error: {err}"),
             is_error: true,
+            ..Default::default()
         },
     }
+}
+
+/// Execute a tool by name with the given input, returning a ToolResult.
+///
+/// The optional `kernel` handle enables inter-agent tools. If `None`,
+/// agent tools will return an error indicating the kernel is not available.
+///
+/// `allowed_tools` enforces capability-based security: if provided, only
+/// tools in the list may execute. This prevents an LLM from hallucinating
+/// tool names outside the agent's capability grants.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_tool(
+    tool_use_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    allowed_tools: Option<&[String]>,
+    caller_agent_id: Option<&str>,
+    skill_registry: Option<&SkillRegistry>,
+    mcp_connections: Option<&tokio::sync::Mutex<Vec<mcp::McpConnection>>>,
+    web_ctx: Option<&WebToolsContext>,
+    browser_ctx: Option<&crate::browser::BrowserManager>,
+    allowed_env_vars: Option<&[String]>,
+    workspace_root: Option<&Path>,
+    media_engine: Option<&crate::media_understanding::MediaEngine>,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
+    exec_policy: Option<&librefang_types::config::ExecPolicy>,
+    tts_engine: Option<&crate::tts::TtsEngine>,
+    docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
+    process_manager: Option<&crate::process_manager::ProcessManager>,
+    sender_id: Option<&str>,
+    channel: Option<&str>,
+) -> ToolResult {
+    // Normalize the tool name through compat mappings so LLM-hallucinated aliases
+    // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
+    let tool_name = normalize_tool_name(tool_name);
+
+    // Capability enforcement: reject tools not in the allowed list.
+    // Entries support wildcard patterns (e.g. "file_*" matches "file_read").
+    if let Some(allowed) = allowed_tools {
+        if !allowed
+            .iter()
+            .any(|pattern| librefang_types::capability::glob_matches(pattern, tool_name))
+        {
+            warn!(tool_name, "Capability denied: tool not in allowed list");
+            return ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: format!(
+                    "Permission denied: agent does not have capability to use tool '{tool_name}'"
+                ),
+                is_error: true,
+                ..Default::default()
+            };
+        }
+    }
+
+    let skip_approval_for_full_exec = tool_name == "shell_exec"
+        && exec_policy.is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
+
+    // Approval gate: check if this tool requires human approval before execution.
+    // Uses sender/channel context for per-sender trust and channel-specific policies.
+    if let Some(kh) = kernel {
+        if kh.is_tool_denied_with_context(tool_name, sender_id, channel) {
+            warn!(tool_name, channel, "Execution denied by channel policy");
+            return ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: format!(
+                    "Execution denied: '{tool_name}' is blocked by the active channel policy."
+                ),
+                is_error: true,
+                ..Default::default()
+            };
+        }
+
+        if !skip_approval_for_full_exec
+            && kh.requires_approval_with_context(tool_name, sender_id, channel)
+        {
+            let agent_id_str = caller_agent_id.unwrap_or("unknown");
+            let input_str = input.to_string();
+            let summary = format!(
+                "{}: {}",
+                tool_name,
+                librefang_types::truncate_str(&input_str, 200)
+            );
+            let deferred_allowed_env_vars =
+                allowed_env_vars.map(|vars| vars.to_vec()).or_else(|| {
+                    exec_policy.and_then(|policy| {
+                        if policy.allowed_env_vars.is_empty() {
+                            None
+                        } else {
+                            Some(policy.allowed_env_vars.clone())
+                        }
+                    })
+                });
+            let deferred = librefang_types::tool::DeferredToolExecution {
+                agent_id: agent_id_str.to_string(),
+                tool_use_id: tool_use_id.to_string(),
+                tool_name: tool_name.to_string(),
+                input: input.clone(),
+                allowed_tools: allowed_tools.map(|a| a.to_vec()),
+                allowed_env_vars: deferred_allowed_env_vars,
+                exec_policy: exec_policy.cloned(),
+                sender_id: sender_id.map(|s| s.to_string()),
+                channel: channel.map(|c| c.to_string()),
+                workspace_root: workspace_root.map(|p| p.to_path_buf()),
+            };
+            match kh
+                .submit_tool_approval(agent_id_str, tool_name, &summary, deferred)
+                .await
+            {
+                Ok(librefang_types::tool::ToolApprovalSubmission::Pending { request_id }) => {
+                    return ToolResult::waiting_approval(
+                        tool_use_id.to_string(),
+                        request_id.to_string(),
+                        tool_name.to_string(),
+                    );
+                }
+                Ok(librefang_types::tool::ToolApprovalSubmission::AutoApproved) => {
+                    // Hand agents are auto-approved — fall through to execute_tool_raw
+                    debug!(
+                        tool_name,
+                        "Auto-approved for hand agent — proceeding with execution"
+                    );
+                }
+                Err(e) => {
+                    warn!(tool_name, error = %e, "Approval system error");
+                    return ToolResult::error(
+                        tool_use_id.to_string(),
+                        format!("Approval system error: {e}"),
+                    );
+                }
+            }
+        }
+    }
+
+    // Check for truncated tool call arguments from the LLM driver (#2027).
+    // When the LLM's response is cut off mid-JSON (max_tokens exceeded), the
+    // driver marks the input with __args_truncated. Return a helpful error
+    // so the LLM can retry with smaller content.
+    if input
+        .get(crate::drivers::openai::TRUNCATED_ARGS_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let error_msg = input["__error"].as_str().unwrap_or(
+            "Tool call arguments were truncated. Try smaller content or split into multiple calls.",
+        );
+        return ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: error_msg.to_string(),
+            is_error: true,
+            ..Default::default()
+        };
+    }
+
+    debug!(tool_name, "Executing tool");
+    let ctx = ToolExecContext {
+        kernel,
+        allowed_tools,
+        caller_agent_id,
+        skill_registry,
+        mcp_connections,
+        web_ctx,
+        browser_ctx,
+        allowed_env_vars,
+        workspace_root,
+        media_engine,
+        media_drivers,
+        exec_policy,
+        tts_engine,
+        docker_config,
+        process_manager,
+        sender_id,
+        channel,
+    };
+    execute_tool_raw(tool_use_id, tool_name, input, &ctx).await
 }
 
 /// Get definitions for all built-in tools.
@@ -772,11 +913,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "agent_kill".to_string(),
-            description: "Kill (terminate) another agent by its ID.".to_string(),
+            description: "Kill (terminate) another agent. Accepts UUID or agent name.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "agent_id": { "type": "string", "description": "The agent's UUID to kill" }
+                    "agent_id": { "type": "string", "description": "The target agent's UUID or name" }
                 },
                 "required": ["agent_id"]
             }),
@@ -1308,6 +1449,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "text": { "type": "string", "description": "The text to convert to speech (max 4096 chars)" },
                     "voice": { "type": "string", "description": "Voice name (provider-specific). OpenAI: 'alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'. Default: 'alloy'" },
                     "format": { "type": "string", "description": "Output format: 'mp3', 'opus', 'aac', 'flac', 'wav' (default: 'mp3')" },
+                    "output_format": { "type": "string", "enum": ["mp3", "ogg_opus"], "description": "Final output format. 'ogg_opus' converts to OGG Opus via ffmpeg (required for WhatsApp voice notes); falls back to provider format if ffmpeg is unavailable or conversion fails. Default: 'mp3'" },
                     "provider": { "type": "string", "description": "Provider: 'openai', 'gemini', 'minimax'. Auto-detected if omitted." },
                     "model": { "type": "string", "description": "Model ID (provider-specific). OpenAI: 'tts-1', 'tts-1-hd'. Default varies by provider." },
                     "speed": { "type": "number", "description": "Playback speed (0.25-4.0). OpenAI only. Default: 1.0" }
@@ -1412,6 +1554,19 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["goal_id"]
             }),
         },
+        // --- Workflow execution tool ---
+        ToolDefinition {
+            name: "workflow_run".to_string(),
+            description: "Run a registered workflow pipeline end-to-end. Workflows are multi-step agent pipelines (e.g., bug-triage, code-review, test-generation). Accepts a workflow UUID or name.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "workflow_id": { "type": "string", "description": "The workflow UUID or registered name (e.g., 'bug-triage', 'code-review')" },
+                    "input": { "type": "object", "description": "Optional input parameters to pass to the workflow's first step (JSON object)" }
+                },
+                "required": ["workflow_id"]
+            }),
+        },
         // --- System time tool ---
         ToolDefinition {
             name: "system_time".to_string(),
@@ -1441,19 +1596,6 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
 // ---------------------------------------------------------------------------
 // Filesystem tools
 // ---------------------------------------------------------------------------
-
-/// SECURITY: Reject path traversal attempts. Forbids `..` components in file paths.
-fn validate_path(path: &str) -> Result<&str, String> {
-    for component in std::path::Path::new(path).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Err(format!(
-                "{}: '..' components are forbidden",
-                crate::workspace_sandbox::ERR_PATH_TRAVERSAL
-            ));
-        }
-    }
-    Ok(path)
-}
 
 /// Resolve a file path through the workspace sandbox.
 ///
@@ -1507,7 +1649,9 @@ async fn tool_file_list(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
 ) -> Result<String, String> {
-    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    let raw_path = input["path"].as_str().ok_or(
+        "Missing 'path' parameter — retry with {\"path\": \".\"} to list the workspace root",
+    )?;
     let resolved = resolve_file_path(raw_path, workspace_root)?;
     let mut entries = tokio::fs::read_dir(&resolved)
         .await
@@ -2076,7 +2220,7 @@ async fn tool_task_claim(
     caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let agent_id = caller_agent_id.unwrap_or("");
+    let agent_id = caller_agent_id.ok_or("task_claim requires a calling agent context")?;
     match kh.task_claim(agent_id).await? {
         Some(task) => {
             serde_json::to_string_pretty(&task).map_err(|e| format!("Serialize error: {e}"))
@@ -2160,6 +2304,37 @@ fn tool_goal_update(
     let kh = require_kernel(kernel)?;
     let updated = kh.goal_update(goal_id, status, progress)?;
     Ok(serde_json::to_string_pretty(&updated).unwrap_or_else(|_| updated.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Workflow execution tool
+// ---------------------------------------------------------------------------
+
+async fn tool_workflow_run(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let workflow_id = input["workflow_id"]
+        .as_str()
+        .ok_or("Missing 'workflow_id' parameter")?;
+
+    // Serialize optional input object to a JSON string for the workflow engine.
+    let input_str = match input.get("input") {
+        Some(v) if v.is_object() => serde_json::to_string(v)
+            .map_err(|e| format!("Failed to serialize workflow input: {e}"))?,
+        Some(v) if v.is_null() => String::new(),
+        Some(_) => return Err("'input' must be a JSON object or null".to_string()),
+        None => String::new(),
+    };
+
+    let kh = require_kernel(kernel)?;
+    let (run_id, output) = kh.run_workflow(workflow_id, &input_str).await?;
+
+    Ok(serde_json::json!({
+        "run_id": run_id,
+        "output": output,
+    })
+    .to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -2871,13 +3046,19 @@ async fn tool_a2a_send(
 // Image analysis tool
 // ---------------------------------------------------------------------------
 
-async fn tool_image_analyze(input: &serde_json::Value) -> Result<String, String> {
-    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+async fn tool_image_analyze(
+    input: &serde_json::Value,
+    workspace_root: Option<&Path>,
+) -> Result<String, String> {
+    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     let prompt = input["prompt"].as_str().unwrap_or("");
+    // Route through the workspace sandbox so user-supplied paths cannot
+    // escape to arbitrary filesystem locations (e.g. /etc/passwd).
+    let resolved = resolve_file_path(raw_path, workspace_root)?;
 
-    let data = tokio::fs::read(path)
+    let data = tokio::fs::read(&resolved)
         .await
-        .map_err(|e| format!("Failed to read image '{path}': {e}"))?;
+        .map_err(|e| format!("Failed to read image '{raw_path}': {e}"))?;
 
     let file_size = data.len();
 
@@ -2904,7 +3085,7 @@ async fn tool_image_analyze(input: &serde_json::Value) -> Result<String, String>
     };
 
     let mut result = serde_json::json!({
-        "path": path,
+        "path": raw_path,
         "format": format,
         "file_size_bytes": file_size,
         "file_size_human": format_file_size(file_size),
@@ -3112,19 +3293,23 @@ fn tool_system_time() -> String {
 async fn tool_media_describe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
+    workspace_root: Option<&Path>,
 ) -> Result<String, String> {
     use base64::Engine;
     let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
-    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let _ = validate_path(path)?;
+    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    // Route through the workspace sandbox so all media reads stay inside
+    // the agent's dir — a plain `..` check would miss absolute paths like
+    // `/etc/passwd`.
+    let resolved = resolve_file_path(raw_path, workspace_root)?;
 
     // Read image file
-    let data = tokio::fs::read(path)
+    let data = tokio::fs::read(&resolved)
         .await
         .map_err(|e| format!("Failed to read image file: {e}"))?;
 
     // Detect MIME type from extension
-    let ext = std::path::Path::new(path)
+    let ext = resolved
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
@@ -3157,19 +3342,23 @@ async fn tool_media_describe(
 async fn tool_media_transcribe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
+    workspace_root: Option<&Path>,
 ) -> Result<String, String> {
     use base64::Engine;
     let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
-    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let _ = validate_path(path)?;
+    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    // Route through the workspace sandbox so all media reads stay inside
+    // the agent's dir — a plain `..` check would miss absolute paths like
+    // `/etc/passwd`.
+    let resolved = resolve_file_path(raw_path, workspace_root)?;
 
     // Read audio file
-    let data = tokio::fs::read(path)
+    let data = tokio::fs::read(&resolved)
         .await
         .map_err(|e| format!("Failed to read audio file: {e}"))?;
 
     // Detect MIME type from extension
-    let ext = std::path::Path::new(path)
+    let ext = resolved
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
@@ -3582,6 +3771,7 @@ async fn tool_text_to_speech(
     let voice = input["voice"].as_str();
     let format = input["format"].as_str();
     let provider = input["provider"].as_str();
+    let output_format = input["output_format"].as_str().unwrap_or("mp3");
 
     if let Some(cache) = media_drivers {
         let resolved_provider =
@@ -3635,6 +3825,7 @@ async fn tool_text_to_speech(
                 &result.provider,
                 result.duration_ms,
                 workspace_root,
+                output_format,
             )
             .await;
         }
@@ -3653,44 +3844,194 @@ async fn tool_text_to_speech(
         &result.provider,
         Some(result.duration_estimate_ms),
         workspace_root,
+        output_format,
     )
     .await
 }
 
+/// Convert audio data to OGG Opus via ffmpeg.
+/// Returns `Ok(None)` if ffmpeg is not installed (caller should fall back to
+/// saving the original format). Returns `Ok(Some(...))` on success with the
+/// saved path, format string, and file size.
+async fn convert_to_ogg_opus(
+    audio_data: &[u8],
+    output_dir: &Path,
+    timestamp: &str,
+) -> Result<Option<(Option<String>, String, usize)>, String> {
+    let ogg_filename = format!("tts_{timestamp}.ogg");
+    let ogg_path = output_dir.join(&ogg_filename);
+    let ogg_path_str = ogg_path
+        .to_str()
+        .ok_or_else(|| "Output path contains invalid UTF-8".to_string())?;
+
+    let spawn_result = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            "pipe:0",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "32k",
+            "-ar",
+            "48000",
+            "-ac",
+            "1",
+            ogg_path_str,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+
+    let mut child = match spawn_result {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to run ffmpeg: {e}")),
+    };
+
+    // Write audio to ffmpeg stdin, then close it (EOF triggers encoding).
+    // Sequential write→wait is safe: stdout is Stdio::null() so ffmpeg
+    // never blocks on output, and stderr is piped but read after exit.
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(audio_data)
+            .await
+            .map_err(|e| format!("Failed to pipe audio to ffmpeg: {e}"))?;
+        // stdin drops here → EOF sent to ffmpeg
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("ffmpeg process error: {e}"))?;
+
+    if !output.status.success() {
+        // Clean up partial output file
+        let _ = tokio::fs::remove_file(&ogg_path).await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let last_lines: String = stderr
+            .lines()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!(
+            "ffmpeg conversion to OGG Opus failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            last_lines
+        ));
+    }
+
+    let ogg_size = tokio::fs::metadata(&ogg_path)
+        .await
+        .map(|m| m.len() as usize)
+        .unwrap_or(0);
+
+    if ogg_size == 0 {
+        let _ = tokio::fs::remove_file(&ogg_path).await;
+        return Err("ffmpeg exited successfully but produced an empty OGG file".into());
+    }
+
+    Ok(Some((
+        Some(ogg_path.display().to_string()),
+        "ogg".to_string(),
+        ogg_size,
+    )))
+}
+
 /// Save TTS audio to workspace and build JSON response.
+/// When `output_format` is `"ogg_opus"` and ffmpeg is available, the saved file
+/// is converted from the provider format (typically MP3) to OGG Opus so it can
+/// be sent as a WhatsApp voice note. Falls back to the original format if ffmpeg
+/// is not installed.
 async fn finish_tts_result(
     audio_data: &[u8],
     format: &str,
     provider: &str,
     duration_ms: Option<u64>,
     workspace_root: Option<&Path>,
+    output_format: &str,
 ) -> Result<String, String> {
-    let saved_path = if let Some(workspace) = workspace_root {
+    let (saved_path, final_format, final_size, warning) = if let Some(workspace) = workspace_root {
         let output_dir = workspace.join("output");
         tokio::fs::create_dir_all(&output_dir)
             .await
             .map_err(|e| format!("Failed to create output dir: {e}"))?;
 
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let filename = format!("tts_{timestamp}.{format}");
-        let path = output_dir.join(&filename);
 
-        tokio::fs::write(&path, audio_data)
-            .await
-            .map_err(|e| format!("Failed to write audio file: {e}"))?;
+        if output_format == "ogg_opus" && !matches!(format, "ogg" | "opus" | "ogg_opus") {
+            // Try ffmpeg conversion; fall back to saving the original format if
+            // ffmpeg is not installed (preserves backward compatibility).
+            match convert_to_ogg_opus(audio_data, &output_dir, &timestamp).await {
+                Ok(Some(result)) => (result.0, result.1, result.2, None),
+                Ok(None) => {
+                    let filename = format!("tts_{timestamp}.{format}");
+                    let path = output_dir.join(&filename);
+                    tokio::fs::write(&path, audio_data)
+                        .await
+                        .map_err(|e| format!("Failed to write audio file: {e}"))?;
+                    (
+                        Some(path.display().to_string()),
+                        format.to_string(),
+                        audio_data.len(),
+                        Some(
+                            "ffmpeg not found; saved as original format instead of ogg_opus"
+                                .to_string(),
+                        ),
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!("OGG Opus conversion failed, falling back to {format}: {e}");
+                    let filename = format!("tts_{timestamp}.{format}");
+                    let path = output_dir.join(&filename);
+                    tokio::fs::write(&path, audio_data)
+                        .await
+                        .map_err(|e| format!("Failed to write audio file: {e}"))?;
+                    (
+                        Some(path.display().to_string()),
+                        format.to_string(),
+                        audio_data.len(),
+                        Some(format!(
+                            "OGG Opus conversion failed, saved as {format}: {e}"
+                        )),
+                    )
+                }
+            }
+        } else {
+            let filename = format!("tts_{timestamp}.{format}");
+            let path = output_dir.join(&filename);
+            tokio::fs::write(&path, audio_data)
+                .await
+                .map_err(|e| format!("Failed to write audio file: {e}"))?;
 
-        Some(path.display().to_string())
+            (
+                Some(path.display().to_string()),
+                format.to_string(),
+                audio_data.len(),
+                None,
+            )
+        }
     } else {
-        None
+        (None, format.to_string(), audio_data.len(), None)
     };
 
     let mut response = serde_json::json!({
         "saved_to": saved_path,
-        "format": format,
+        "format": final_format,
         "provider": provider,
         "duration_estimate_ms": duration_ms,
-        "size_bytes": audio_data.len(),
+        "size_bytes": final_size,
     });
+
+    if let Some(w) = &warning {
+        response["warning"] = serde_json::json!(w);
+    }
 
     // When no workspace is available (e.g. MCP context), include base64 audio
     if saved_path.is_none() && !audio_data.is_empty() {
@@ -4153,6 +4494,19 @@ mod tests {
             self.approval_requests.fetch_add(1, Ordering::SeqCst);
             Ok(librefang_types::approval::ApprovalDecision::Denied)
         }
+
+        async fn submit_tool_approval(
+            &self,
+            _agent_id: &str,
+            _tool_name: &str,
+            _action_summary: &str,
+            _deferred: librefang_types::tool::DeferredToolExecution,
+        ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
+            self.approval_requests.fetch_add(1, Ordering::SeqCst);
+            Ok(librefang_types::tool::ToolApprovalSubmission::Pending {
+                request_id: uuid::Uuid::new_v4(),
+            })
+        }
     }
 
     #[test]
@@ -4224,6 +4578,8 @@ mod tests {
         assert!(names.contains(&"docker_exec"));
         // Goal tracking tool
         assert!(names.contains(&"goal_update"));
+        // Workflow execution tool
+        assert!(names.contains(&"workflow_run"));
         // Canvas tool
         assert!(names.contains(&"canvas_present"));
     }
@@ -4703,9 +5059,81 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_error);
-        assert!(result.content.contains("requires human approval"));
+        // With non-blocking approval (Step 5), the tool is deferred rather than blocked.
+        // The result should be WaitingApproval (not is_error) with the appropriate message.
+        assert!(!result.is_error, "WaitingApproval should not be an error");
+        assert!(
+            result.content.contains("requires human approval"),
+            "content should mention approval requirement, got: {}",
+            result.content
+        );
+        assert_eq!(
+            result.status,
+            librefang_types::tool::ToolExecutionStatus::WaitingApproval
+        );
         assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_shell_exec_uses_exec_policy_allowed_env_vars() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let original = std::env::var("LIBREFANG_TEST_ALLOWED_ENV").ok();
+        unsafe {
+            std::env::set_var("LIBREFANG_TEST_ALLOWED_ENV", "present");
+        }
+
+        let allowed = ["shell_exec".to_string()];
+        let policy = librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Allowlist,
+            allowed_env_vars: vec!["LIBREFANG_TEST_ALLOWED_ENV".to_string()],
+            ..Default::default()
+        };
+
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": "env"}),
+            None,
+            Some(&allowed),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(workspace.path()),
+            None, // media_engine
+            None, // media_drivers
+            Some(&policy),
+            None,
+            None,
+            None,
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+
+        match original {
+            Some(val) => unsafe {
+                std::env::set_var("LIBREFANG_TEST_ALLOWED_ENV", val);
+            },
+            None => unsafe {
+                std::env::remove_var("LIBREFANG_TEST_ALLOWED_ENV");
+            },
+        }
+
+        assert!(
+            !result.is_error,
+            "shell_exec should succeed with env passthrough, got: {}",
+            result.content
+        );
+        assert!(
+            result
+                .content
+                .contains("LIBREFANG_TEST_ALLOWED_ENV=present"),
+            "allowed env var should be visible to subprocess, got: {}",
+            result.content
+        );
     }
 
     // --- Schedule parser tests ---
@@ -4850,10 +5278,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_image_analyze_missing_file() {
+        let workspace = tempfile::tempdir().expect("tempdir");
         let result = execute_tool(
             "test-id",
             "image_analyze",
-            &serde_json::json!({"path": "/nonexistent/image.png"}),
+            &serde_json::json!({"path": "nonexistent_image.png"}),
             None,
             None,
             None,
@@ -4862,7 +5291,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4874,7 +5303,11 @@ mod tests {
         )
         .await;
         assert!(result.is_error);
-        assert!(result.content.contains("Failed to read"));
+        assert!(
+            result.content.contains("Failed to read"),
+            "unexpected error content: {}",
+            result.content
+        );
     }
 
     #[test]

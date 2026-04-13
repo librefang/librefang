@@ -206,7 +206,11 @@ fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
             let Ok(toml_content) = fs::read_to_string(&hand_toml) else {
                 continue;
             };
-            let Ok(def) = librefang_hands::registry::parse_hand_toml(&toml_content, "") else {
+            let Ok(def) = librefang_hands::registry::parse_hand_toml(
+                &toml_content,
+                "",
+                std::collections::HashMap::new(),
+            ) else {
                 continue;
             };
             candidates.push(hand_route_candidate_from_definition(def));
