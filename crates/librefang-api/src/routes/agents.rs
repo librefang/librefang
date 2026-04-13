@@ -3342,10 +3342,7 @@ pub async fn patch_agent_config(
     // the old credentials and rejected with "Missing Authentication header".
     if let Some(ref new_model) = req.model {
         if !new_model.is_empty() {
-            let explicit_provider = req
-                .provider
-                .as_deref()
-                .filter(|p| !p.is_empty());
+            let explicit_provider = req.provider.as_deref().filter(|p| !p.is_empty());
             if let Err(e) = state
                 .kernel
                 .set_agent_model(agent_id, new_model, explicit_provider)

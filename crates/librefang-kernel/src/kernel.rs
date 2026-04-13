@@ -6031,8 +6031,7 @@ system_prompt = "You are a helpful assistant."
                 .registry
                 .get(agent_id)
                 .map(|e| e.manifest.model.provider.clone());
-            let provider_changed =
-                prev_provider.as_deref() != Some(provider.as_str());
+            let provider_changed = prev_provider.as_deref() != Some(provider.as_str());
             if provider_changed {
                 self.registry
                     .update_model_provider_config(
@@ -6045,11 +6044,7 @@ system_prompt = "You are a helpful assistant."
                     .map_err(KernelError::LibreFang)?;
             } else {
                 self.registry
-                    .update_model_and_provider(
-                        agent_id,
-                        normalized_model.clone(),
-                        provider.clone(),
-                    )
+                    .update_model_and_provider(agent_id, normalized_model.clone(), provider.clone())
                     .map_err(KernelError::LibreFang)?;
             }
             info!(agent_id = %agent_id, model = %normalized_model, provider = %provider, "Agent model+provider updated");
@@ -12840,9 +12835,7 @@ mod tests {
                         temperature: 0.7,
                         system_prompt: String::new(),
                         api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
-                        base_url: Some(
-                            "https://cloudverse.freshworkscorp.com/api/v1".to_string(),
-                        ),
+                        base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
                         extra_params: std::collections::HashMap::new(),
                     },
                     ..Default::default()
@@ -12854,10 +12847,7 @@ mod tests {
             .expect("agent should spawn");
 
         // Sanity: stale overrides are present.
-        let pre = kernel
-            .registry
-            .get(agent_id)
-            .expect("agent registry entry");
+        let pre = kernel.registry.get(agent_id).expect("agent registry entry");
         assert_eq!(pre.manifest.model.provider, "cloudverse");
         assert_eq!(
             pre.manifest.model.api_key_env.as_deref(),
@@ -12871,11 +12861,7 @@ mod tests {
         // Switch to an entirely different provider via the same path the
         // dashboard's model picker uses.
         kernel
-            .set_agent_model(
-                agent_id,
-                "anthropic/claude-3.5-sonnet",
-                Some("openrouter"),
-            )
+            .set_agent_model(agent_id, "anthropic/claude-3.5-sonnet", Some("openrouter"))
             .expect("provider switch should succeed");
 
         let post = kernel
@@ -12884,8 +12870,7 @@ mod tests {
             .expect("agent registry entry after switch");
         assert_eq!(post.manifest.model.provider, "openrouter");
         assert_eq!(
-            post.manifest.model.model,
-            "anthropic/claude-3.5-sonnet",
+            post.manifest.model.model, "anthropic/claude-3.5-sonnet",
             "model name should be updated (and prefix-stripped)"
         );
         assert!(
