@@ -4090,6 +4090,7 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "serial_test",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",

@@ -9747,20 +9747,26 @@ system_prompt = "You are a helpful assistant."
     }
 
     fn build_skill_summary(&self, skill_allowlist: &[String]) -> String {
+        use librefang_runtime::prompt_builder::sanitize_for_prompt;
+
         let skills = self.sorted_enabled_skills(skill_allowlist);
         if skills.is_empty() {
             return String::new();
         }
         let mut summary = format!("\n\n--- Available Skills ({}) ---\n", skills.len());
         for skill in &skills {
-            let name = &skill.manifest.skill.name;
-            let desc = &skill.manifest.skill.description;
-            let tools: Vec<_> = skill
+            // Sanitize third-party-authored fields before interpolation —
+            // a malicious skill author could otherwise smuggle newlines or
+            // `[...]` markers through the name/description/tool name slots
+            // and forge fake trust-boundary headers in the system prompt.
+            let name = sanitize_for_prompt(&skill.manifest.skill.name, 80);
+            let desc = sanitize_for_prompt(&skill.manifest.skill.description, 200);
+            let tools: Vec<String> = skill
                 .manifest
                 .tools
                 .provided
                 .iter()
-                .map(|t| t.name.as_str())
+                .map(|t| sanitize_for_prompt(&t.name, 64))
                 .collect();
             if tools.is_empty() {
                 summary.push_str(&format!("- {name}: {desc}\n"));
@@ -9861,7 +9867,9 @@ system_prompt = "You are a helpful assistant."
     // inject_user_personalization() — logic moved to prompt_builder::build_user_section()
 
     pub fn collect_prompt_context(&self, skill_allowlist: &[String]) -> String {
-        use librefang_runtime::prompt_builder::SKILL_PROMPT_CONTEXT_PER_SKILL_CAP;
+        use librefang_runtime::prompt_builder::{
+            sanitize_for_prompt, SKILL_PROMPT_CONTEXT_PER_SKILL_CAP,
+        };
 
         let skills = self.sorted_enabled_skills(skill_allowlist);
 
@@ -9888,6 +9896,14 @@ system_prompt = "You are a helpful assistant."
                 ctx.clone()
             };
 
+            // Sanitize the name slot so a hostile skill author cannot
+            // smuggle bracket/newline sequences through the boilerplate
+            // header and forge a fake `[END EXTERNAL SKILL CONTEXT]`
+            // marker — the cap math defends the *content*, this defends
+            // the *name*. Tracked overhead in `prompt_builder` already
+            // accounts for the 80-char ceiling.
+            let safe_name = sanitize_for_prompt(&skill.manifest.skill.name, 80);
+
             // SECURITY: Wrap skill context in a trust boundary so the model
             // treats the third-party content as data, not instructions.
             // Built via `concat!` so each line of the boilerplate stays at
@@ -9905,7 +9921,7 @@ system_prompt = "You are a helpful assistant."
                     "{}\n",
                     "[END EXTERNAL SKILL CONTEXT]",
                 ),
-                skill.manifest.skill.name, capped,
+                safe_name, capped,
             ));
         }
         context_parts.join("\n\n")
