@@ -406,17 +406,21 @@ impl QwenCodeDriver {
     }
 }
 
-/// Format an absolute path for embedding in a Qwen CLI `@path` token.
+/// Format an absolute path for handing to the Qwen CLI, either as an
+/// `@path` token in the prompt or as a `--add-dir` argument.
 ///
-/// On Windows, `Path::canonicalize` returns a verbatim path like
-/// `\\?\C:\Users\foo\pic.png`. The Qwen CLI's `@path` lexer does not
-/// understand that prefix — it treats `\\?\` as a UNC host. Strip it so
-/// the CLI sees a normal drive path. On non-Windows the canonical form is
-/// already plain, so this is a no-op.
+/// On Windows, `Path::canonicalize` returns a verbatim path. The Qwen
+/// CLI's path handling does not understand that prefix:
+///   - `\\?\C:\Users\foo\pic.png` must become `C:\Users\foo\pic.png`
+///   - `\\?\UNC\server\share\pic.png` must become `\\server\share\pic.png`
+/// On non-Windows the canonical form is already plain, so this is a no-op.
 fn display_cli_path(path: &Path) -> String {
     #[cfg(windows)]
     {
         let s = path.display().to_string();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
         if let Some(rest) = s.strip_prefix(r"\\?\") {
             return rest.to_string();
         }
@@ -526,9 +530,11 @@ impl QwenCodeDriver {
 
         // Allow the CLI to read every directory that backs an `@path` token
         // in the prompt: our owned temp dir for inline images, plus the
-        // parents of any ImageFile blocks.
+        // parents of any ImageFile blocks. Run paths through
+        // display_cli_path so Windows verbatim prefixes are stripped — the
+        // Qwen CLI rejects `\\?\` on both `@path` and `--add-dir`.
         for dir in prepared.read_dirs() {
-            cmd.arg("--add-dir").arg(dir);
+            cmd.arg("--add-dir").arg(display_cli_path(dir));
         }
 
         Self::apply_env_filter(&mut cmd);
@@ -633,9 +639,11 @@ impl QwenCodeDriver {
 
         // Allow the CLI to read every directory that backs an `@path` token
         // in the prompt: our owned temp dir for inline images, plus the
-        // parents of any ImageFile blocks.
+        // parents of any ImageFile blocks. Run paths through
+        // display_cli_path so Windows verbatim prefixes are stripped — the
+        // Qwen CLI rejects `\\?\` on both `@path` and `--add-dir`.
         for dir in prepared.read_dirs() {
-            cmd.arg("--add-dir").arg(dir);
+            cmd.arg("--add-dir").arg(display_cli_path(dir));
         }
 
         Self::apply_env_filter(&mut cmd);
