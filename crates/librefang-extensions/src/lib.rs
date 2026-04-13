@@ -8,6 +8,7 @@
 //! - **Installer**: One-click `librefang add <name>` flow
 
 pub mod credentials;
+pub mod dotenv;
 pub mod health;
 pub(crate) mod http_client;
 pub mod installer;

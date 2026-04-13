@@ -1648,6 +1648,13 @@ impl LibreFangKernel {
     }
 
     /// Boot the kernel with an explicit configuration.
+    ///
+    /// Callers must have loaded `.env` / `secrets.env` / vault into the
+    /// process env before calling this — use
+    /// [`librefang_extensions::dotenv::load_dotenv`] from a synchronous
+    /// `main()`. Mutating env from here would be UB: this function is
+    /// reached from inside a tokio runtime, and `std::env::set_var` is
+    /// unsound once other threads exist (Rust 1.80+).
     pub fn boot_with_config(mut config: KernelConfig) -> KernelResult<Self> {
         use librefang_types::config::KernelMode;
 

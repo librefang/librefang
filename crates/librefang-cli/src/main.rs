@@ -4,7 +4,6 @@
 //! Otherwise, commands boot an in-process kernel (single-shot mode).
 
 mod desktop_install;
-mod dotenv;
 mod http_client;
 pub mod i18n;
 mod launcher;
@@ -18,6 +17,7 @@ mod ui;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use librefang_api::server::read_daemon_info;
+use librefang_extensions::dotenv;
 use librefang_kernel::{config::load_config, LibreFangKernel};
 use librefang_types::agent::{AgentId, AgentManifest};
 use std::ffi::OsString;
