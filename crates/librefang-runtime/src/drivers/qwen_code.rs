@@ -272,15 +272,14 @@ impl QwenCodeDriver {
                                 // Decode first — if the base64 is bad, we
                                 // don't want to have created a temp dir or
                                 // burned an image index slot.
-                                let decoded = match base64::engine::general_purpose::STANDARD
-                                    .decode(data)
-                                {
-                                    Ok(d) => d,
-                                    Err(e) => {
-                                        warn!(error = %e, "Failed to decode base64 image");
-                                        continue;
-                                    }
-                                };
+                                let decoded =
+                                    match base64::engine::general_purpose::STANDARD.decode(data) {
+                                        Ok(d) => d,
+                                        Err(e) => {
+                                            warn!(error = %e, "Failed to decode base64 image");
+                                            continue;
+                                        }
+                                    };
 
                                 let dir = match image_dir.as_ref() {
                                     Some(d) => d.clone(),
@@ -413,6 +412,7 @@ impl QwenCodeDriver {
 /// CLI's path handling does not understand that prefix:
 ///   - `\\?\C:\Users\foo\pic.png` must become `C:\Users\foo\pic.png`
 ///   - `\\?\UNC\server\share\pic.png` must become `\\server\share\pic.png`
+///
 /// On non-Windows the canonical form is already plain, so this is a no-op.
 fn display_cli_path(path: &Path) -> String {
     #[cfg(windows)]
@@ -1035,6 +1035,39 @@ mod tests {
 
         drop(prepared);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_display_cli_path_strips_verbatim_drive_prefix() {
+        // `\\?\C:\Users\foo\pic.png` must become `C:\Users\foo\pic.png`
+        // so the Qwen CLI `@path` lexer and `--add-dir` parser accept it.
+        let p = std::path::PathBuf::from(r"\\?\C:\Users\foo\pic.png");
+        assert_eq!(display_cli_path(&p), r"C:\Users\foo\pic.png");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_display_cli_path_rewrites_verbatim_unc_prefix() {
+        // `\\?\UNC\server\share\pic.png` must become
+        // `\\server\share\pic.png`, not the bare `UNC\...` form.
+        let p = std::path::PathBuf::from(r"\\?\UNC\server\share\pic.png");
+        assert_eq!(display_cli_path(&p), r"\\server\share\pic.png");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_display_cli_path_passthrough_plain_path() {
+        // Plain paths (no verbatim prefix) must pass through unchanged.
+        let p = std::path::PathBuf::from(r"C:\Users\foo\pic.png");
+        assert_eq!(display_cli_path(&p), r"C:\Users\foo\pic.png");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_display_cli_path_noop_on_unix() {
+        let p = std::path::PathBuf::from("/tmp/librefang/pic.png");
+        assert_eq!(display_cli_path(&p), "/tmp/librefang/pic.png");
     }
 
     #[test]
