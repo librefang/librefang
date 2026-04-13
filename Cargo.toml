@@ -199,6 +199,10 @@ smallvec = "1"
 
 [profile.dev]
 split-debuginfo = "unpacked" # Speeds up incremental linking on macOS
+# Shrinks debug test binaries by ~60% to relieve Ubuntu CI memory pressure
+# (#1805, #1807, #2117). Panics and backtraces still carry file:line; only
+# interactive debugger (lldb/gdb) variable inspection is lost.
+debug = "line-tables-only"
 
 [profile.release]
 lto = true

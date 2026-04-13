@@ -7,7 +7,8 @@ use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmErr
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tracing::warn;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{info, warn};
 
 /// A driver that wraps multiple LLM drivers and tries each in order.
 ///
@@ -28,14 +29,25 @@ struct DriverEntry {
     model_name: String,
     /// Exponentially weighted moving average latency in ms.
     ewma_latency_ms: AtomicU64,
-    /// Consecutive error count. Reset to 0 on success.
+    /// Consecutive error count. Reset to 0 on success or after the
+    /// [`HEALTH_RECOVERY_MS`] cooldown elapses since the last failure.
     consecutive_errors: AtomicU64,
+    /// Wall-clock ms since UNIX epoch of the most recent failure. `0`
+    /// means "never failed". Used by [`FallbackDriver::maybe_recover`] to
+    /// clear stale unhealthy state so a driver that recovered from a
+    /// transient outage rejoins the healthy pool without needing an
+    /// explicit success event.
+    last_failure_at_ms: AtomicU64,
 }
 
 /// Penalty added to EWMA when a driver errors (makes it sort lower).
 const ERROR_PENALTY_MS: u64 = 30_000;
 /// EWMA smoothing factor (0.3 = new sample is 30% of the result).
 const EWMA_ALPHA: f64 = 0.3;
+/// How long a driver stays "unhealthy" with no new failures before it is
+/// lazily restored to the healthy pool. Five minutes matches typical
+/// provider rate-limit windows and transient-outage durations.
+const HEALTH_RECOVERY_MS: u64 = 5 * 60 * 1000;
 
 impl FallbackDriver {
     /// Create a new fallback driver from an ordered chain of (driver, model_name) pairs.
@@ -57,6 +69,7 @@ impl FallbackDriver {
                     model_name: String::new(),
                     ewma_latency_ms: AtomicU64::new(0),
                     consecutive_errors: AtomicU64::new(0),
+                    last_failure_at_ms: AtomicU64::new(0),
                 })
                 .collect(),
         }
@@ -79,8 +92,57 @@ impl FallbackDriver {
                     model_name: m,
                     ewma_latency_ms: AtomicU64::new(0),
                     consecutive_errors: AtomicU64::new(0),
+                    last_failure_at_ms: AtomicU64::new(0),
                 })
                 .collect(),
+        }
+    }
+
+    /// Current wall-clock time in ms since UNIX epoch, or `0` if the system
+    /// clock is earlier than the epoch (never happens on real systems).
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Lazily restore a driver to the healthy pool when its last failure
+    /// was more than [`HEALTH_RECOVERY_MS`] ago. Resets the consecutive
+    /// error counter and strips the accumulated EWMA penalty so the driver
+    /// competes for the head of the order on latency again.
+    ///
+    /// Called from [`Self::health_order`] on every dispatch — we cannot
+    /// rely on a background task because `FallbackDriver` has no lifecycle
+    /// of its own.
+    fn maybe_recover(entry: &DriverEntry, now_ms: u64) {
+        let errors = entry.consecutive_errors.load(Ordering::Relaxed);
+        if errors == 0 {
+            return;
+        }
+        let last = entry.last_failure_at_ms.load(Ordering::Relaxed);
+        if last == 0 {
+            return;
+        }
+        if now_ms.saturating_sub(last) < HEALTH_RECOVERY_MS {
+            return;
+        }
+        // Compare-and-swap so concurrent dispatchers don't double-subtract
+        // the penalty. If another thread already recovered the entry, the
+        // store will no-op and the `errors` value we read is stale.
+        if entry
+            .consecutive_errors
+            .compare_exchange(errors, 0, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let cur = entry.ewma_latency_ms.load(Ordering::Relaxed);
+            let restored = cur.saturating_sub(ERROR_PENALTY_MS.saturating_mul(errors));
+            entry.ewma_latency_ms.store(restored, Ordering::Relaxed);
+            info!(
+                model = %entry.model_name,
+                errors_cleared = errors,
+                "Fallback driver recovered after cooldown — rejoining healthy pool"
+            );
         }
     }
 
@@ -88,7 +150,15 @@ impl FallbackDriver {
     /// (consecutive_errors == 0) come first sorted by EWMA latency; unhealthy
     /// drivers follow sorted by error count (fewest errors first). The primary
     /// driver (index 0) gets a latency bonus to keep it preferred when healthy.
+    ///
+    /// Before ordering we give every unhealthy driver a chance to recover if
+    /// enough time has elapsed since its last failure — this is what keeps a
+    /// driver that was rate-limited from being stuck unhealthy forever.
     fn health_order(&self) -> Vec<usize> {
+        let now = Self::now_ms();
+        for entry in &self.drivers {
+            Self::maybe_recover(entry, now);
+        }
         let mut indices: Vec<usize> = (0..self.drivers.len()).collect();
         indices.sort_by(|&a, &b| {
             let ea = self.drivers[a].consecutive_errors.load(Ordering::Relaxed);
@@ -137,6 +207,9 @@ impl LlmDriver for FallbackDriver {
                 }
                 Err(e) => {
                     entry.consecutive_errors.fetch_add(1, Ordering::Relaxed);
+                    entry
+                        .last_failure_at_ms
+                        .store(Self::now_ms(), Ordering::Relaxed);
                     let prev = entry.ewma_latency_ms.load(Ordering::Relaxed);
                     entry
                         .ewma_latency_ms
@@ -190,6 +263,9 @@ impl LlmDriver for FallbackDriver {
                 }
                 Err(e) => {
                     entry.consecutive_errors.fetch_add(1, Ordering::Relaxed);
+                    entry
+                        .last_failure_at_ms
+                        .store(Self::now_ms(), Ordering::Relaxed);
                     let prev = entry.ewma_latency_ms.load(Ordering::Relaxed);
                     entry
                         .ewma_latency_ms
@@ -250,6 +326,70 @@ mod tests {
                 },
             })
         }
+    }
+
+    #[tokio::test]
+    async fn unhealthy_driver_recovers_after_cooldown() {
+        // Two drivers: primary fails, secondary succeeds. After a few primary
+        // failures we simulate the recovery window elapsing and verify that
+        // `maybe_recover` clears both the error counter and the EWMA penalty.
+        let fb = FallbackDriver::with_models(vec![
+            (
+                Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                "fail".to_string(),
+            ),
+            (Arc::new(OkDriver) as Arc<dyn LlmDriver>, "ok".to_string()),
+        ]);
+
+        // Three dispatches → primary accumulates 3 errors and 3×ERROR_PENALTY_MS.
+        for _ in 0..3 {
+            let _ = fb.complete(test_request()).await;
+        }
+        let primary = &fb.drivers[0];
+        assert_eq!(primary.consecutive_errors.load(Ordering::Relaxed), 3);
+        let penalised = primary.ewma_latency_ms.load(Ordering::Relaxed);
+        assert!(penalised >= ERROR_PENALTY_MS * 3);
+
+        // Simulate the cooldown elapsing by calling maybe_recover with a
+        // fabricated future timestamp.
+        let future = primary.last_failure_at_ms.load(Ordering::Relaxed)
+            + HEALTH_RECOVERY_MS
+            + 1;
+        FallbackDriver::maybe_recover(primary, future);
+
+        assert_eq!(
+            primary.consecutive_errors.load(Ordering::Relaxed),
+            0,
+            "consecutive_errors must be cleared after cooldown"
+        );
+        let recovered = primary.ewma_latency_ms.load(Ordering::Relaxed);
+        assert!(
+            recovered < penalised,
+            "EWMA penalty must be stripped on recovery ({penalised} → {recovered})"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_is_noop_within_cooldown() {
+        let fb = FallbackDriver::with_models(vec![
+            (
+                Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                "fail".to_string(),
+            ),
+            (Arc::new(OkDriver) as Arc<dyn LlmDriver>, "ok".to_string()),
+        ]);
+        let _ = fb.complete(test_request()).await;
+        let primary = &fb.drivers[0];
+        let last = primary.last_failure_at_ms.load(Ordering::Relaxed);
+
+        // One second after the failure — well inside the cooldown window.
+        FallbackDriver::maybe_recover(primary, last + 1_000);
+
+        assert_eq!(
+            primary.consecutive_errors.load(Ordering::Relaxed),
+            1,
+            "error counter must stay set until cooldown elapses"
+        );
     }
 
     fn test_request() -> CompletionRequest {
