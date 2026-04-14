@@ -244,6 +244,19 @@ let isConnecting = false;
 const MAX_RECONNECT_DELAY = 60_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
+// ST-01 heartbeat watchdog: if no inbound messages.upsert event arrives for
+// HEARTBEAT_MS, force-close the socket so the existing reconnect path takes
+// over. The 180s default matches the openclaw reference.
+const HEARTBEAT_MS = parseInt(process.env.WA_HEARTBEAT_MS || '180000', 10);
+const HEARTBEAT_CHECK_INTERVAL_MS = parseInt(process.env.WA_HEARTBEAT_CHECK_MS || '30000', 10);
+let lastInboundAt = Date.now();
+let heartbeatInterval = null;
+
+// Pure predicate — true when we've been silent longer than thresholdMs.
+function checkHeartbeat(now, lastInboundAt, thresholdMs) {
+  return (now - lastInboundAt) > thresholdMs;
+}
+
 // Cached agent UUID — resolved from DEFAULT_AGENT name on first use
 let cachedAgentId = null;
 
@@ -780,6 +793,12 @@ function resolveAgentId() {
 // Baileys connection
 // ---------------------------------------------------------------------------
 async function cleanupSocket() {
+  // ST-01: stop heartbeat watchdog whenever we tear down the socket — both
+  // planned reconnect and gracefulShutdown go through here.
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
   if (!sock) return;
   const previousSock = sock;
   sock = null;
@@ -903,6 +922,23 @@ async function startConnection() {
       statusMessage = 'Connected to WhatsApp';
       console.log('[gateway] Connected to WhatsApp!');
 
+      // ST-01: (re)start heartbeat watchdog. Paused while sock is null or
+      // status is not 'connected' (initial connect + planned reconnect gap).
+      lastInboundAt = Date.now();
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      heartbeatInterval = setInterval(() => {
+        if (!sock || connStatus !== 'connected') return;
+        const now = Date.now();
+        if (checkHeartbeat(now, lastInboundAt, HEARTBEAT_MS)) {
+          console.log(JSON.stringify({
+            event: 'heartbeat_timeout',
+            last_inbound_ms: now - lastInboundAt,
+            threshold_ms: HEARTBEAT_MS,
+          }));
+          try { sock.end(undefined); } catch { /* best-effort */ }
+        }
+      }, HEARTBEAT_CHECK_INTERVAL_MS);
+
       // Capture own JID for self-chat detection
       if (sock?.user?.id) {
         // Baileys user.id is like "1234567890:42@s.whatsapp.net" — normalize
@@ -940,6 +976,10 @@ async function startConnection() {
 
   // Incoming messages → forward to LibreFang
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    // ST-01: any inbound activity refreshes the heartbeat timestamp, even
+    // for non-notify events (history syncs, retries) — they still prove the
+    // socket is live.
+    lastInboundAt = Date.now();
     if (type !== 'notify') return;
 
     for (const msg of messages) {
@@ -2581,4 +2621,5 @@ module.exports = {
   forwardToLibreFangStreaming,
   shouldSkipCatchupForMissingJid,
   resolveLidProactively,
+  checkHeartbeat,
 };

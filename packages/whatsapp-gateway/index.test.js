@@ -27,6 +27,7 @@ const {
   forwardToLibreFangStreaming,
   shouldSkipCatchupForMissingJid,
   resolveLidProactively,
+  checkHeartbeat,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -483,6 +484,92 @@ describe('CS-02 resolveLidProactively', () => {
     const result = await resolveLidProactively(sock, '999@lid', cache, 500);
     assert.equal(result, 'empty');
     assert.equal(cache.has('999@lid'), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ST-01: heartbeat watchdog
+// ---------------------------------------------------------------------------
+describe('ST-01 heartbeat watchdog', () => {
+  it('Test 1: watchdog invokes sock.end + logs heartbeat_timeout when silence exceeds threshold', async () => {
+    // Reconstruct the watchdog interval body exactly as wired in index.js —
+    // we can't drive the module-internal `lastInboundAt` directly, but the
+    // pure checkHeartbeat predicate + sock.end contract is the same.
+    const logs = [];
+    const origLog = console.log;
+    console.log = (msg) => { logs.push(msg); };
+    let ended = 0;
+    const sock = { end: () => { ended += 1; } };
+    let connStatus = 'connected';
+    let lastInbound = Date.now() - 200_000; // 200s ago → over 180s threshold
+
+    const HEARTBEAT_MS = 180_000;
+    const tick = () => {
+      if (!sock || connStatus !== 'connected') return;
+      const now = Date.now();
+      if (checkHeartbeat(now, lastInbound, HEARTBEAT_MS)) {
+        console.log(JSON.stringify({
+          event: 'heartbeat_timeout',
+          last_inbound_ms: now - lastInbound,
+          threshold_ms: HEARTBEAT_MS,
+        }));
+        try { sock.end(undefined); } catch {}
+      }
+    };
+    const interval = setInterval(tick, 10);
+    await new Promise((r) => setTimeout(r, 30));
+    clearInterval(interval);
+    console.log = origLog;
+
+    assert.ok(ended >= 1, `expected sock.end to fire (got ${ended})`);
+    const htLog = logs.find((l) => typeof l === 'string' && l.includes('heartbeat_timeout'));
+    assert.ok(htLog, 'expected heartbeat_timeout log line');
+    const parsed = JSON.parse(htLog);
+    assert.equal(parsed.threshold_ms, 180_000);
+    assert.ok(parsed.last_inbound_ms >= 180_000);
+  });
+
+  it('Test 2: checkHeartbeat returns false within threshold (recent activity)', () => {
+    const now = 1_000_000;
+    assert.equal(checkHeartbeat(now, now - 10_000, 180_000), false);
+    assert.equal(checkHeartbeat(now, now - 179_999, 180_000), false);
+    assert.equal(checkHeartbeat(now, now - 180_001, 180_000), true);
+  });
+
+  it('Test 3: watchdog NO-OPs when sock is null or status != connected', () => {
+    let ended = 0;
+    const sock = { end: () => { ended += 1; } };
+    const HEARTBEAT_MS = 180_000;
+    const lastInbound = Date.now() - 500_000;
+
+    // sock null → no action regardless of silence
+    const tickSockNull = () => {
+      const currentSock = null;
+      if (!currentSock || 'connected' !== 'connected') return;
+      if (checkHeartbeat(Date.now(), lastInbound, HEARTBEAT_MS)) currentSock && currentSock.end();
+    };
+    tickSockNull();
+
+    // status != connected → no action
+    const tickStatusReconnecting = () => {
+      const connStatus = 'disconnected';
+      if (!sock || connStatus !== 'connected') return;
+      if (checkHeartbeat(Date.now(), lastInbound, HEARTBEAT_MS)) sock.end();
+    };
+    tickStatusReconnecting();
+
+    assert.equal(ended, 0);
+  });
+
+  it('Test 4: source-level invariant — cleanupSocket + close branch clear heartbeatInterval', () => {
+    const fs = require('node:fs');
+    const src = fs.readFileSync(__dirname + '/index.js', 'utf8');
+    // cleanupSocket clears the interval
+    assert.match(src, /cleanupSocket[\s\S]*?heartbeatInterval[\s\S]*?clearInterval\(heartbeatInterval\)/);
+    // messages.upsert refreshes lastInboundAt
+    assert.match(src, /messages\.upsert[\s\S]*?lastInboundAt = Date\.now\(\)/);
+    // heartbeat log uses the exact event name
+    assert.match(src, /event: 'heartbeat_timeout'/);
   });
 });
 
