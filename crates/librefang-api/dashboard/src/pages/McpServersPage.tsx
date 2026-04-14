@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   listMcpServers, addMcpServer, updateMcpServer, deleteMcpServer,
+  getMcpAuthStatus, startMcpAuth, revokeMcpAuth,
   type McpServerConfigured, type McpServerConnected, type McpServerTransport,
 } from "../api";
 import { Card } from "../components/ui/Card";
@@ -18,6 +19,7 @@ import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Plug, Plus, Trash2, Settings, ChevronDown, ChevronUp, Wrench, Terminal, Globe, Radio,
+  Shield, ShieldCheck, ShieldAlert, ShieldX,
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -105,6 +107,143 @@ function TransportIcon({ type }: { type: TransportType }) {
     case "sse": return <Radio className="h-4 w-4" />;
     case "http": return <Globe className="h-4 w-4" />;
   }
+}
+
+/** Auth badge for an MCP server — shows auth state and action buttons. */
+function AuthBadge({
+  server,
+  onAuthSuccess,
+}: {
+  server: McpServerConfigured;
+  onAuthSuccess: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const authState = server.auth_state?.state ?? "not_required";
+  const [polling, setPolling] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Poll only when auth flow is in progress (not for needs_auth)
+  useEffect(() => {
+    if ((authState === "pending_auth" && polling) || polling) {
+      pollRef.current = setInterval(async () => {
+        try {
+          const status = await getMcpAuthStatus(server.name);
+          if (status.auth.state === "authorized") {
+            setPolling(false);
+            onAuthSuccess();
+          } else if (status.auth.state === "error") {
+            setPolling(false);
+            addToast(status.auth.message || "Auth failed", "error");
+          }
+        } catch {
+          // ignore transient errors during polling
+        }
+      }, 2000);
+    }
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [authState, polling, server.name, onAuthSuccess, addToast]);
+
+  const handleStartAuth = useCallback(async () => {
+    // Open the window immediately on user click to avoid popup blocker.
+    // The async API call can take several seconds (discovery + registration),
+    // and browsers block window.open() if it's not in the click handler's
+    // synchronous call stack.
+    const authWindow = window.open("about:blank", "_blank");
+    try {
+      const result = await startMcpAuth(server.name);
+      if (authWindow && !authWindow.closed) {
+        authWindow.location.href = result.auth_url;
+      } else {
+        // Popup was blocked — fall back to same-tab redirect
+        window.location.href = result.auth_url;
+      }
+      setPolling(true);
+      addToast(t("mcp.auth_started"), "info");
+    } catch (e: any) {
+      if (authWindow && !authWindow.closed) {
+        authWindow.close();
+      }
+      addToast(e?.message || "Failed to start auth", "error");
+    }
+  }, [server.name, addToast, t]);
+
+  const handleRevoke = useCallback(async () => {
+    try {
+      await revokeMcpAuth(server.name);
+      onAuthSuccess(); // refresh
+      addToast(t("mcp.auth_revoked"), "success");
+    } catch (e: any) {
+      addToast(e?.message || "Failed to revoke auth", "error");
+    }
+  }, [server.name, onAuthSuccess, addToast, t]);
+
+  if (authState === "not_required") {
+    return null;
+  }
+
+  if (authState === "authorized") {
+    return (
+      <div className="flex items-center gap-1.5">
+        <Badge variant="success" dot>
+          <ShieldCheck className="h-3 w-3 mr-1" />
+          {t("mcp.auth_authorized")}
+        </Badge>
+        <button
+          onClick={handleRevoke}
+          className="text-[10px] font-bold text-text-dim hover:text-error transition-colors"
+        >
+          {t("mcp.auth_revoke")}
+        </button>
+      </div>
+    );
+  }
+
+  if (authState === "needs_auth") {
+    return (
+      <button
+        onClick={handleStartAuth}
+        className="inline-flex items-center gap-1 rounded-lg border border-warning/30 bg-warning/5 px-2 py-1 text-[10px] font-bold text-warning hover:bg-warning/10 transition-colors"
+      >
+        <Shield className="h-3 w-3" />
+        {t("mcp.auth_authorize")}
+      </button>
+    );
+  }
+
+  if (authState === "pending_auth" || polling) {
+    return (
+      <Badge variant="warning" dot className="animate-pulse">
+        <Shield className="h-3 w-3 mr-1" />
+        {t("mcp.auth_pending")}
+      </Badge>
+    );
+  }
+
+  if (authState === "expired" || authState === "error") {
+    return (
+      <button
+        onClick={handleStartAuth}
+        className="inline-flex items-center gap-1 rounded-lg border border-error/30 bg-error/5 px-2 py-1 text-[10px] font-bold text-error hover:bg-error/10 transition-colors"
+      >
+        <ShieldAlert className="h-3 w-3" />
+        {authState === "expired" ? t("mcp.auth_reauthorize") : t("mcp.auth_authorize")}
+      </button>
+    );
+  }
+
+  // Unknown state — offer authorize button
+  return (
+    <button
+      onClick={handleStartAuth}
+      className="inline-flex items-center gap-1 rounded-lg border border-warning/30 bg-warning/5 px-2 py-1 text-[10px] font-bold text-warning hover:bg-warning/10 transition-colors"
+    >
+      <ShieldX className="h-3 w-3" />
+      {t("mcp.auth_authorize")}
+    </button>
+  );
 }
 
 export function McpServersPage() {
@@ -277,6 +416,12 @@ export function McpServersPage() {
                       {isConnected ? t("mcp.connected") : t("mcp.disconnected")}
                     </Badge>
                   </div>
+
+                  {/* OAuth auth badge */}
+                  <AuthBadge
+                    server={server}
+                    onAuthSuccess={() => serversQuery.refetch()}
+                  />
 
                   {/* Transport detail */}
                   <div className="text-xs text-text-dim font-mono truncate">
