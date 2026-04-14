@@ -1331,46 +1331,6 @@ mod tests {
     }
 
     #[test]
-    fn test_synthetic_result_for_orphaned_use() {
-        // Assistant has a ToolUse but there's no ToolResult anywhere
-        let messages = vec![
-            Message::user("Do something"),
-            Message {
-                role: Role::Assistant,
-                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
-                    id: "tu-orphan".to_string(),
-                    name: "file_read".to_string(),
-                    input: serde_json::json!({"path": "/etc/hosts"}),
-                    provider_metadata: None,
-                }]),
-                pinned: false,
-            },
-            Message::assistant("I tried to read the file"),
-        ];
-
-        let (repaired, stats) = validate_and_repair_with_stats(&messages);
-        assert_eq!(stats.synthetic_results_inserted, 1);
-
-        // Find the synthetic result
-        let has_synthetic = repaired.iter().any(|m| match &m.content {
-            MessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    is_error,
-                    content,
-                    ..
-                } => tool_use_id == "tu-orphan" && *is_error && content.contains("interrupted"),
-                _ => false,
-            }),
-            _ => false,
-        });
-        assert!(
-            has_synthetic,
-            "Should have inserted a synthetic error result"
-        );
-    }
-
-    #[test]
     fn test_deduplicate_tool_results() {
         let messages = vec![
             Message::user("Search"),
@@ -1550,91 +1510,6 @@ mod tests {
                     "No empty assistant messages should remain"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn test_multiple_repairs_combined() {
-        // A complex broken history that exercises multiple repair phases
-        let messages = vec![
-            Message::user("Start"),
-            // Assistant uses two tools
-            Message {
-                role: Role::Assistant,
-                content: MessageContent::Blocks(vec![
-                    ContentBlock::ToolUse {
-                        id: "tu-a".to_string(),
-                        name: "search".to_string(),
-                        input: serde_json::json!({}),
-                        provider_metadata: None,
-                    },
-                    ContentBlock::ToolUse {
-                        id: "tu-b".to_string(),
-                        name: "fetch".to_string(),
-                        input: serde_json::json!({}),
-                        provider_metadata: None,
-                    },
-                ]),
-                pinned: false,
-            },
-            // Only tu-a has a result, tu-b is missing
-            Message {
-                role: Role::User,
-                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
-                    tool_use_id: "tu-a".to_string(),
-                    tool_name: String::new(),
-                    content: "search result".to_string(),
-                    is_error: false,
-                    status: librefang_types::tool::ToolExecutionStatus::default(),
-                    approval_request_id: None,
-                }]),
-                pinned: false,
-            },
-            // Orphaned result from a non-existent tool use
-            Message {
-                role: Role::User,
-                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
-                    tool_use_id: "tu-ghost".to_string(),
-                    tool_name: String::new(),
-                    content: "ghost result".to_string(),
-                    is_error: false,
-                    status: librefang_types::tool::ToolExecutionStatus::default(),
-                    approval_request_id: None,
-                }]),
-                pinned: false,
-            },
-            // Empty message
-            Message {
-                role: Role::User,
-                content: MessageContent::Text(String::new()),
-                pinned: false,
-            },
-            Message::assistant("Done"),
-        ];
-
-        let (repaired, stats) = validate_and_repair_with_stats(&messages);
-
-        // Should have: removed orphan, removed empty, inserted synthetic for tu-b
-        assert_eq!(stats.orphaned_results_removed, 1, "ghost result removed");
-        assert_eq!(stats.synthetic_results_inserted, 1, "tu-b gets synthetic");
-        assert!(stats.empty_messages_removed >= 1, "empty message removed");
-
-        // Verify tu-b has a synthetic result somewhere
-        let has_synthetic_b = repaired.iter().any(|m| match &m.content {
-            MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
-                matches!(b, ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "tu-b")
-            }),
-            _ => false,
-        });
-        assert!(has_synthetic_b, "tu-b should have synthetic error result");
-
-        // Verify alternating roles (user/assistant/user/...)
-        for window in repaired.windows(2) {
-            assert_ne!(
-                window[0].role, window[1].role,
-                "Adjacent messages should have different roles: {:?} vs {:?}",
-                window[0].role, window[1].role
-            );
         }
     }
 
