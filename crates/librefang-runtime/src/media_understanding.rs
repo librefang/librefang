@@ -327,7 +327,7 @@ async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String
             "pipe:0",
             "-vn",
             "-c:a",
-            "libopus",
+            "copy",
             "-f",
             "ogg",
             "pipe:1",
@@ -365,11 +365,7 @@ async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String
         buf
     });
 
-    let status = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        child.wait(),
-    )
-    .await
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await
     {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => return Err(format!("ffmpeg wait failed: {e}")),
@@ -497,14 +493,29 @@ mod tests {
         // then round-trip it through the transcoder. No scratch files.
         let gen = tokio::process::Command::new("ffmpeg")
             .args([
-                "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
-                "-t", "0.5", "-c:a", "libopus", "-f", "ogg", "pipe:1",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=16000:cl=mono",
+                "-t",
+                "0.5",
+                "-c:a",
+                "libopus",
+                "-f",
+                "ogg",
+                "pipe:1",
             ])
             .output()
             .await
             .expect("ffmpeg must run");
-        assert!(gen.status.success(), "stderr: {}", String::from_utf8_lossy(&gen.stderr));
+        assert!(
+            gen.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&gen.stderr)
+        );
         let input_bytes = gen.stdout;
         assert!(!input_bytes.is_empty());
 
