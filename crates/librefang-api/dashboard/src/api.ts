@@ -2183,11 +2183,20 @@ export interface PluginItem {
   hooks?: { ingest?: boolean; after_turn?: boolean };
 }
 
+export interface RegistryPluginListing {
+  name: string;
+  installed: boolean;
+  version?: string | null;
+  description?: string | null;
+  author?: string | null;
+  hooks?: string[];
+}
+
 export interface RegistryEntry {
   name: string;
   github_repo: string;
   error?: string | null;
-  plugins: Array<{ name: string; installed: boolean }>;
+  plugins: RegistryPluginListing[];
 }
 
 export async function listPlugins(): Promise<{ plugins: PluginItem[]; total: number; plugins_dir: string }> {
