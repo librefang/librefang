@@ -53,6 +53,7 @@ allowed_origins = ["https://dashboard.example.com"]
 | `enabled` | bool | `true` | 终端功能总开关。设为 `false` 时，终端 WebSocket 端点会被完全禁用。 |
 | `allow_remote` | bool | `false` | 在未配置认证时，允许来自远程或反向代理连接的未认证访问。默认行为是仅允许本地无认证访问。 |
 | `allowed_origins` | list of strings | `[]` | 除 localhost 之外，允许用于终端 WebSocket 连接的额外浏览器 `Origin` 列表。适用于 dashboard 部署在自定义域名下的情况。`["*"]` 表示允许任意 HTTP/HTTPS origin，应仅在明确知情的情况下使用。 |
+| `trust_proxy_headers` | bool | `false` | 当为 `true` 时，没有代理头（X-Forwarded-For、X-Real-IP）的环回连接将被拒绝。仅在使用注入这些头的反向代理时启用。 |
 
 说明：
 

@@ -53,6 +53,7 @@ allowed_origins = ["https://dashboard.example.com"]
 | `enabled` | bool | `true` | Master switch for the terminal feature. When `false`, the terminal WebSocket endpoint is disabled entirely. |
 | `allow_remote` | bool | `false` | Allows unauthenticated access from remote or proxied connections when no auth is configured. Default behavior is local-only access without auth. |
 | `allowed_origins` | list of strings | `[]` | Additional browser `Origin` values allowed for terminal WebSocket connections beyond localhost. Use this when the dashboard is served from a custom domain. `[*]` allows any HTTP/HTTPS origin and should only be used intentionally. |
+| `trust_proxy_headers` | bool | `false` | When `true`, loopback connections without proxy headers (X-Forwarded-For, X-Real-IP) are rejected. Enable only when running behind a reverse proxy that injects these headers. |
 
 Notes:
 

@@ -3489,7 +3489,13 @@ impl KernelConfig {
             .rsplit(':')
             .next()
             .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(4545)
+            .unwrap_or_else(|| {
+                eprintln!(
+                    "WARNING: Failed to parse port from api_listen '{}', falling back to 4545",
+                    self.api_listen
+                );
+                4545
+            })
     }
 
     /// Resolve the API key env var name for a provider.
@@ -5708,11 +5714,11 @@ impl Default for LinkedInConfig {
 ///
 /// Controls which clients may connect to the interactive terminal (WebSocket)
 /// and how locality is determined.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
     /// Master switch — set to false to disable the terminal entirely.
-    #[serde(default)]
+    #[serde(default = "default_terminal_enabled")]
     pub enabled: bool,
 
     /// Additional allowed WebSocket origins beyond auto-detected localhost.
@@ -5730,6 +5736,21 @@ pub struct TerminalConfig {
     /// a reverse proxy. Default: false.
     #[serde(default)]
     pub trust_proxy_headers: bool,
+}
+
+fn default_terminal_enabled() -> bool {
+    true
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowed_origins: Vec::new(),
+            allow_remote: false,
+            trust_proxy_headers: false,
+        }
+    }
 }
 
 #[cfg(test)]
