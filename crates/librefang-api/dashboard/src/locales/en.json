@@ -1067,6 +1067,7 @@
   "chat": {
     "title": "Chat",
     "neural_terminal": "Neural Terminal",
+    "group_standalone": "Standalone",
     "select_agent": "Select Agent",
     "select_agent_desc": "Choose an agent from the list to establish a communication link.",
     "transmit_command": "Transmit neural pulse...",

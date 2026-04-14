@@ -6,7 +6,7 @@ import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders, listActiveHands } from "../api";
-import type { ApprovalItem, SessionListItem, ModelItem, AgentTool } from "../api";
+import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
@@ -1541,6 +1541,55 @@ export function ChatPage() {
     prevMsgCountRef.current = messages.length;
   }, [messages]);
 
+  const renderAgentButton = (
+    agent: AgentItem,
+    role?: string,
+    isCoordinator?: boolean,
+  ) => (
+    <button
+      key={agent.id}
+      onClick={() => selectAgent(agent.id)}
+      className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors text-left group ${
+        selectedAgentId === agent.id
+          ? "bg-brand text-white shadow-lg shadow-brand/20"
+          : "hover:bg-surface-hover"
+      }`}
+    >
+      <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
+        selectedAgentId === agent.id ? "bg-white/20"
+        : (agent.state || "").toLowerCase() === "running" ? "bg-gradient-to-br from-brand/20 to-accent/20 text-brand"
+        : "bg-main text-text-dim/40"
+      }`}>
+        {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name }).charAt(0).toUpperCase()}
+        {(agent.state || "").toLowerCase() === "running" ? (
+          <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
+        ) : (
+          <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-text-dim/30 border-2 border-white dark:border-surface" />
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>
+            {role ?? t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
+          </p>
+          {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
+          {agent.auth_status === "configured_cli" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
+          {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning flex-shrink-0" />}
+        </div>
+        {isCoordinator ? (
+          <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
+            coordinator
+          </p>
+        ) : (
+          <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
+            {agent.model_provider || t("common.unknown")}
+          </p>
+        )}
+      </div>
+      <ArrowRight className={`h-4 w-4 flex-shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
+    </button>
+  );
+
   return (
     <div className="flex h-[calc(100vh-100px)] sm:h-[calc(100vh-140px)] flex-col">
       {/* Header */}
@@ -1571,45 +1620,32 @@ export function ChatPage() {
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
           </div>
           <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-thin">
-            {agents.length === 0 ? (
+            {picker.standalone.length === 0 && picker.handGroups.length === 0 ? (
               <div className="p-4 text-center text-text-dim text-sm">{t("common.no_data")}</div>
             ) : (
-              agents.map(agent => (
-                <button
-                  key={agent.id}
-                  onClick={() => selectAgent(agent.id)}
-                  className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors text-left group ${
-                    selectedAgentId === agent.id
-                      ? "bg-brand text-white shadow-lg shadow-brand/20"
-                      : "hover:bg-surface-hover"
-                  }`}
-                >
-                  <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
-                    selectedAgentId === agent.id ? "bg-white/20"
-                    : (agent.state || "").toLowerCase() === "running" ? "bg-gradient-to-br from-brand/20 to-accent/20 text-brand"
-                    : "bg-main text-text-dim/40"
-                  }`}>
-                    {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name }).charAt(0).toUpperCase()}
-                    {(agent.state || "").toLowerCase() === "running" ? (
-                      <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
-                    ) : (
-                      <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-text-dim/30 border-2 border-white dark:border-surface" />
+              <>
+                {picker.standalone.length > 0 && (
+                  <div className="space-y-2">
+                    {picker.handGroups.length > 0 && (
+                      <h4 className="px-1 pt-1 text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">
+                        {t("chat.group_standalone", { defaultValue: "Standalone" })}
+                      </h4>
+                    )}
+                    {picker.standalone.map((agent) => renderAgentButton(agent))}
+                  </div>
+                )}
+                {picker.handGroups.map((group) => (
+                  <div key={group.hand_id} className="space-y-2 pt-3">
+                    <h4 className="px-1 text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60 flex items-center gap-1.5">
+                      {group.hand_icon && <span aria-hidden="true">{group.hand_icon}</span>}
+                      <span>{group.hand_name}</span>
+                    </h4>
+                    {group.agents.map((agent) =>
+                      renderAgentButton(agent, agent.role, agent.isCoordinator),
                     )}
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</p>
-                      {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
-                      {agent.auth_status === "configured_cli" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
-                      {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning flex-shrink-0" />}
-                    </div>
-                    <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
-                      {agent.model_provider || t("common.unknown")}
-                    </p>
-                  </div>
-                  <ArrowRight className={`h-4 w-4 flex-shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
-                </button>
-              ))
+                ))}
+              </>
             )}
           </div>
         </aside>
