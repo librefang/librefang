@@ -446,6 +446,7 @@ export function App() {
         { to: "/skills", label: t("nav.skills"), icon: Bell },
         { to: "/plugins", label: t("nav.plugins"), icon: Puzzle },
         { to: "/mcp-servers", label: t("nav.mcp_servers"), icon: Plug },
+        { to: "/settings", label: t("nav.settings"), icon: Settings },
       ],
     },
     {

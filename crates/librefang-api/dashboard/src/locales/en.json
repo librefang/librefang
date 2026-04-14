@@ -1062,7 +1062,12 @@
     "totp_confirm_revoke": "Confirm Revoke",
     "totp_no_recovery": "No recovery codes remaining. Reset TOTP to generate new ones.",
     "totp_low_recovery": "Only {{count}} recovery code(s) remaining.",
-    "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools."
+    "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools.",
+    "config_system": "System Configuration",
+    "config_system_desc": "View and edit config.toml settings. Changes are saved immediately.",
+    "reload_config": "Reload",
+    "hot_reload": "Hot",
+    "root_level": "Root"
   },
   "chat": {
     "title": "Chat",

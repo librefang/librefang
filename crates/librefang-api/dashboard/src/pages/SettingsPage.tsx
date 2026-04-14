@@ -1,15 +1,19 @@
 import { useTranslation } from "react-i18next";
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, useMemo, useCallback } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
   Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Languages, LayoutDashboard,
-  Shield, CheckCircle, XCircle, Download,
+  Shield, CheckCircle, XCircle, Download, ChevronDown, RefreshCw, Save, Zap,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
-import { totpSetup, totpConfirm, totpStatus, totpRevoke } from "../api";
+import {
+  totpSetup, totpConfirm, totpStatus, totpRevoke,
+  getConfigSchema, getFullConfig, setConfigValue, reloadConfig,
+  type ConfigSectionSchema, type ConfigFieldSchema,
+} from "../api";
 
 interface SegmentOption<T extends string> {
   value: T;
@@ -149,11 +153,371 @@ export function SettingsPage() {
         </div>
       </div>
 
+      {/* System Configuration */}
+      <SystemConfigSection />
+
       {/* TOTP Second Factor */}
       <TotpSection />
 
       {/* Config Backup */}
       <ConfigBackupSection />
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  System Configuration Section                                       */
+/* ------------------------------------------------------------------ */
+
+const SECTION_ORDER = [
+  "general", "default_model", "budget", "memory", "proactive_memory",
+  "web", "browser", "media", "links", "tts",
+  "exec_policy", "approval", "auto_reply", "thinking",
+  "network", "a2a", "extensions", "vault", "docker",
+  "channels", "broadcast", "canvas",
+  "session", "queue", "reload", "webhook_triggers",
+  "pairing", "vertex_ai", "oauth", "external_auth",
+];
+
+function sectionLabel(key: string): string {
+  return key
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+function resolveFieldType(
+  schema: string | ConfigFieldSchema
+): { type: string; options?: (string | { id: string; name: string; provider: string })[] } {
+  if (typeof schema === "string") return { type: schema };
+  return { type: schema.type || "string", options: schema.options };
+}
+
+function getNestedValue(obj: Record<string, unknown>, section: string, field: string, rootLevel?: boolean): unknown {
+  if (rootLevel) return obj[field];
+  const sec = obj[section] as Record<string, unknown> | undefined;
+  return sec?.[field];
+}
+
+function ConfigFieldInput({
+  fieldType,
+  options,
+  value,
+  onChange,
+}: {
+  fieldType: string;
+  options?: (string | { id: string; name: string; provider: string })[];
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
+  const inputClass =
+    "w-full px-3 py-1.5 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand transition-colors";
+
+  if (fieldType === "boolean") {
+    return (
+      <button
+        onClick={() => onChange(!value)}
+        className={`relative w-10 h-5 rounded-full transition-colors ${
+          value ? "bg-brand" : "bg-border-subtle"
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+            value ? "left-5" : "left-0.5"
+          }`}
+        />
+      </button>
+    );
+  }
+
+  if (fieldType === "select" && options) {
+    const strOptions = options.map((o) =>
+      typeof o === "string" ? o : o.id
+    );
+    return (
+      <select
+        value={String(value ?? "")}
+        onChange={(e) => onChange(e.target.value)}
+        className={inputClass}
+      >
+        <option value="">—</option>
+        {strOptions.map((o) => (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
+  if (fieldType === "number") {
+    return (
+      <input
+        type="number"
+        value={value != null ? String(value) : ""}
+        onChange={(e) => {
+          const v = e.target.value;
+          onChange(v === "" ? null : Number(v));
+        }}
+        className={inputClass}
+      />
+    );
+  }
+
+  if (fieldType === "string[]" || fieldType === "array") {
+    const arr = Array.isArray(value) ? value : [];
+    return (
+      <input
+        type="text"
+        value={arr.join(", ")}
+        onChange={(e) =>
+          onChange(
+            e.target.value
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
+          )
+        }
+        placeholder="comma-separated values"
+        className={inputClass}
+      />
+    );
+  }
+
+  if (fieldType === "object") {
+    return (
+      <pre className="text-[10px] text-text-dim font-mono bg-main rounded-lg px-3 py-2 max-h-24 overflow-auto border border-border-subtle">
+        {value != null ? JSON.stringify(value, null, 2) : "—"}
+      </pre>
+    );
+  }
+
+  // Default: string input
+  return (
+    <input
+      type="text"
+      value={String(value ?? "")}
+      onChange={(e) => onChange(e.target.value || null)}
+      className={inputClass}
+    />
+  );
+}
+
+function SystemConfigSection() {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
+  const [pendingChanges, setPendingChanges] = useState<Record<string, unknown>>({});
+  const [saveStatus, setSaveStatus] = useState<{ path: string; ok: boolean; msg: string } | null>(null);
+
+  const schemaQuery = useQuery({
+    queryKey: ["config", "schema"],
+    queryFn: getConfigSchema,
+    staleTime: 300_000,
+  });
+
+  const configQuery = useQuery({
+    queryKey: ["config", "full"],
+    queryFn: getFullConfig,
+    staleTime: 30_000,
+  });
+
+  const saveMutation = useMutation({
+    mutationFn: ({ path, value }: { path: string; value: unknown }) =>
+      setConfigValue(path, value),
+    onSuccess: (_data, variables) => {
+      setSaveStatus({ path: variables.path, ok: true, msg: "Saved" });
+      setPendingChanges((p) => {
+        const next = { ...p };
+        delete next[variables.path];
+        return next;
+      });
+      queryClient.invalidateQueries({ queryKey: ["config", "full"] });
+      setTimeout(() => setSaveStatus(null), 2000);
+    },
+    onError: (err: Error, variables) => {
+      setSaveStatus({ path: variables.path, ok: false, msg: err.message });
+      setTimeout(() => setSaveStatus(null), 3000);
+    },
+  });
+
+  const reloadMutation = useMutation({
+    mutationFn: reloadConfig,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["config", "full"] });
+    },
+  });
+
+  const sections = schemaQuery.data?.sections ?? {};
+  const config = configQuery.data ?? {};
+
+  const sortedSections = useMemo(() => {
+    const keys = Object.keys(sections);
+    return keys.sort((a, b) => {
+      const ai = SECTION_ORDER.indexOf(a);
+      const bi = SECTION_ORDER.indexOf(b);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    });
+  }, [sections]);
+
+  const toggleSection = useCallback((key: string) => {
+    setExpandedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const handleFieldChange = useCallback(
+    (sectionKey: string, fieldKey: string, value: unknown, rootLevel?: boolean) => {
+      const path = rootLevel ? fieldKey : `${sectionKey}.${fieldKey}`;
+      setPendingChanges((p) => ({ ...p, [path]: value }));
+    },
+    []
+  );
+
+  const handleSave = useCallback(
+    (path: string) => {
+      if (path in pendingChanges) {
+        saveMutation.mutate({ path, value: pendingChanges[path] });
+      }
+    },
+    [pendingChanges, saveMutation]
+  );
+
+  if (schemaQuery.isLoading || configQuery.isLoading) {
+    return (
+      <div className="rounded-2xl border border-border-subtle bg-surface p-8 text-center text-text-dim text-sm">
+        {t("common.loading", "Loading configuration...")}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+            {t("settings.config_system", "System Configuration")}
+          </p>
+          <p className="text-xs text-text-dim mt-0.5">
+            {t("settings.config_system_desc", "View and edit config.toml settings. Changes are saved immediately.")}
+          </p>
+        </div>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => reloadMutation.mutate()}
+          isLoading={reloadMutation.isPending}
+        >
+          <RefreshCw className="w-3 h-3 mr-1.5" />
+          {t("settings.reload_config", "Reload")}
+        </Button>
+      </div>
+
+      {sortedSections.map((sectionKey) => {
+        const sec = sections[sectionKey];
+        const isExpanded = expandedSections.has(sectionKey);
+        const fields = Object.entries(sec.fields);
+
+        return (
+          <div
+            key={sectionKey}
+            className="rounded-2xl border border-border-subtle bg-surface overflow-hidden"
+          >
+            <button
+              onClick={() => toggleSection(sectionKey)}
+              className="w-full flex items-center justify-between px-5 py-3 hover:bg-surface-hover transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-semibold">{sectionLabel(sectionKey)}</p>
+                {sec.hot_reloadable && (
+                  <Badge variant="success">
+                    <Zap className="w-2.5 h-2.5 mr-0.5" />
+                    {t("settings.hot_reload", "Hot")}
+                  </Badge>
+                )}
+                {sec.root_level && (
+                  <Badge variant="info">
+                    {t("settings.root_level", "Root")}
+                  </Badge>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-text-dim">
+                  {fields.length} {fields.length === 1 ? "field" : "fields"}
+                </span>
+                <ChevronDown
+                  className={`w-4 h-4 text-text-dim transition-transform ${
+                    isExpanded ? "" : "-rotate-90"
+                  }`}
+                />
+              </div>
+            </button>
+
+            {isExpanded && (
+              <div className="px-5 pb-4 border-t border-border-subtle/50">
+                {fields.map(([fieldKey, fieldSchema]) => {
+                  const { type: fieldType, options } = resolveFieldType(fieldSchema);
+                  const path = sec.root_level ? fieldKey : `${sectionKey}.${fieldKey}`;
+                  const currentValue =
+                    path in pendingChanges
+                      ? pendingChanges[path]
+                      : getNestedValue(config, sectionKey, fieldKey, sec.root_level);
+                  const hasPending = path in pendingChanges;
+                  const isSaving = saveMutation.isPending && saveMutation.variables?.path === path;
+                  const statusForField = saveStatus?.path === path ? saveStatus : null;
+
+                  return (
+                    <div
+                      key={fieldKey}
+                      className="flex items-start gap-4 py-3 border-b border-border-subtle/30 last:border-0"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-semibold font-mono">{fieldKey}</p>
+                        <p className="text-[10px] text-text-dim mt-0.5">{fieldType}</p>
+                      </div>
+                      <div className="w-64 shrink-0">
+                        <ConfigFieldInput
+                          fieldType={fieldType}
+                          options={options}
+                          value={currentValue}
+                          onChange={(v) =>
+                            handleFieldChange(sectionKey, fieldKey, v, sec.root_level)
+                          }
+                        />
+                      </div>
+                      <div className="w-16 shrink-0 flex items-center justify-end">
+                        {fieldType !== "object" && hasPending && (
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            onClick={() => handleSave(path)}
+                            isLoading={isSaving}
+                            disabled={isSaving}
+                          >
+                            <Save className="w-3 h-3" />
+                          </Button>
+                        )}
+                        {statusForField && (
+                          <span
+                            className={`text-[10px] font-semibold ${
+                              statusForField.ok ? "text-success" : "text-danger"
+                            }`}
+                          >
+                            {statusForField.msg}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

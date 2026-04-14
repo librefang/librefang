@@ -1037,7 +1037,12 @@
     "totp_confirm_revoke": "确认撤销",
     "totp_no_recovery": "恢复码已用完。请重置 TOTP 以生成新恢复码。",
     "totp_low_recovery": "仅剩 {{count}} 个恢复码。",
-    "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。"
+    "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。",
+    "config_system": "系统配置",
+    "config_system_desc": "查看和编辑 config.toml 配置项。修改后立即保存。",
+    "reload_config": "重新加载",
+    "hot_reload": "热加载",
+    "root_level": "根级"
   },
   "chat": {
     "title": "对话",
