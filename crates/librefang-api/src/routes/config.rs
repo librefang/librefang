@@ -1767,45 +1767,43 @@ pub async fn config_set(
         );
     }
 
-    // Read existing config as a TOML table, or start fresh
-    let mut table: toml::value::Table = if config_path.exists() {
-        match std::fs::read_to_string(&config_path) {
-            Ok(content) => toml::from_str(&content).unwrap_or_default(),
-            Err(_) => toml::value::Table::new(),
-        }
+    // Read existing config — use toml_edit to preserve comments and formatting
+    let raw_content = if config_path.exists() {
+        std::fs::read_to_string(&config_path).unwrap_or_default()
     } else {
-        toml::value::Table::new()
+        String::new()
+    };
+    let mut doc: toml_edit::DocumentMut = match raw_content.parse() {
+        Ok(d) => d,
+        Err(_) => toml_edit::DocumentMut::new(),
     };
 
-    // Convert JSON value to TOML value
-    let toml_val = json_to_toml_value(&value);
+    // Convert JSON value to toml_edit::Value
+    let edit_val = json_to_toml_edit_value(&value);
 
     // Parse "section.key" path and set value
     let parts: Vec<&str> = path.split('.').collect();
     match parts.len() {
         1 => {
-            table.insert(parts[0].to_string(), toml_val);
+            doc[parts[0]] = toml_edit::Item::Value(edit_val);
         }
         2 => {
-            let section = table
-                .entry(parts[0].to_string())
-                .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-            if let toml::Value::Table(ref mut t) = section {
-                t.insert(parts[1].to_string(), toml_val);
+            if !doc.contains_table(parts[0]) {
+                doc[parts[0]] = toml_edit::Item::Table(toml_edit::Table::new());
             }
+            doc[parts[0]][parts[1]] = toml_edit::Item::Value(edit_val);
         }
         3 => {
-            let section = table
-                .entry(parts[0].to_string())
-                .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-            if let toml::Value::Table(ref mut t) = section {
-                let sub = t
-                    .entry(parts[1].to_string())
-                    .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-                if let toml::Value::Table(ref mut t2) = sub {
-                    t2.insert(parts[2].to_string(), toml_val);
-                }
+            if !doc.contains_table(parts[0]) {
+                doc[parts[0]] = toml_edit::Item::Table(toml_edit::Table::new());
             }
+            if doc[parts[0]]
+                .as_table()
+                .map_or(true, |t| !t.contains_table(parts[1]))
+            {
+                doc[parts[0]][parts[1]] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            doc[parts[0]][parts[1]][parts[2]] = toml_edit::Item::Value(edit_val);
         }
         _ => {
             return (
@@ -1817,19 +1815,8 @@ pub async fn config_set(
         }
     }
 
-    // Write back
-    let toml_string = match toml::to_string_pretty(&table) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"status": "error", "error": format!("serialize failed: {e}")}),
-                ),
-            );
-        }
-    };
-    if let Err(e) = std::fs::write(&config_path, &toml_string) {
+    // Write back — preserves comments, whitespace, and key ordering
+    if let Err(e) = std::fs::write(&config_path, doc.to_string()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"status": "error", "error": format!("write failed: {e}")})),
@@ -1859,6 +1846,38 @@ pub async fn config_set(
         StatusCode::OK,
         Json(serde_json::json!({"status": reload_status, "path": path})),
     )
+}
+
+/// Convert a serde_json::Value to a toml_edit::Value (format-preserving).
+fn json_to_toml_edit_value(value: &serde_json::Value) -> toml_edit::Value {
+    match value {
+        serde_json::Value::String(s) => s.as_str().into(),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.into()
+            } else if let Some(f) = n.as_f64() {
+                f.into()
+            } else {
+                n.to_string().into()
+            }
+        }
+        serde_json::Value::Bool(b) => (*b).into(),
+        serde_json::Value::Array(arr) => {
+            let mut a = toml_edit::Array::new();
+            for item in arr {
+                a.push(json_to_toml_edit_value(item));
+            }
+            toml_edit::Value::Array(a)
+        }
+        serde_json::Value::Object(map) => {
+            let mut t = toml_edit::InlineTable::new();
+            for (k, v) in map {
+                t.insert(k, json_to_toml_edit_value(v));
+            }
+            toml_edit::Value::InlineTable(t)
+        }
+        serde_json::Value::Null => "".into(),
+    }
 }
 
 /// Convert a serde_json::Value to a toml::Value.
