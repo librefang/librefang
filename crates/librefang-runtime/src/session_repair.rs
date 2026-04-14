@@ -143,11 +143,30 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
     }
 
     // Phase 3: Merge consecutive same-role messages
+    //
+    // Anthropic's API requires each `ToolUse` block to be followed by its
+    // matching `ToolResult` block in the very next message — they cannot
+    // be separated by other text/tool blocks. A naive same-role merge can
+    // break that invariant: e.g. merging
+    //   Assistant[ToolUse#1] + Assistant[Text]   →   Assistant[ToolUse#1, Text]
+    // leaves ToolUse#1 with no immediately-following ToolResult, and the
+    // next API call returns 400 with no way to recover. Issue #2353.
+    //
+    // Skip the merge whenever it would splice across a tool-call boundary:
+    //   • `last` ends with a ToolUse — the next message MUST be a
+    //     same-shape ToolResult delivery, not a merged content blob.
+    //   • `msg` is a pure tool-result delivery — keep it as its own
+    //     message so the pairing stays intact.
     let pre_merge_len = cleaned.len();
     let mut merged: Vec<Message> = Vec::with_capacity(cleaned.len());
     for msg in cleaned {
         if let Some(last) = merged.last_mut() {
-            if last.role == msg.role {
+            if last.role == msg.role
+                && !message_has_tool_use(last)
+                && !message_is_only_tool_results(&msg)
+                && !message_has_tool_use(&msg)
+                && !message_is_only_tool_results(last)
+            {
                 merge_content(&mut last.content, msg.content);
                 stats.messages_merged += 1;
                 continue;
