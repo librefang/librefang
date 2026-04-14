@@ -1722,6 +1722,7 @@ mod tests {
             messages: vec![librefang_types::message::Message {
                 role: librefang_types::message::Role::User,
                 content: librefang_types::message::MessageContent::Text("hi".to_string()),
+                pinned: false,
             }],
             tools: vec![],
             max_tokens: 256,
@@ -1746,6 +1747,7 @@ mod tests {
             messages: vec![librefang_types::message::Message {
                 role: librefang_types::message::Role::User,
                 content: librefang_types::message::MessageContent::Text("hi".to_string()),
+                pinned: false,
             }],
             tools: vec![],
             max_tokens: 256,
@@ -1770,6 +1772,7 @@ mod tests {
             messages: vec![librefang_types::message::Message {
                 role: librefang_types::message::Role::User,
                 content: librefang_types::message::MessageContent::Text("hi".to_string()),
+                pinned: false,
             }],
             tools: vec![],
             max_tokens: 256,
