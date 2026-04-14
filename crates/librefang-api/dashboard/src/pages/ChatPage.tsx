@@ -1666,10 +1666,23 @@ export function ChatPage() {
               className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-bold outline-none focus:border-brand"
             >
               <option value="">{t("chat.select_agent")}</option>
-              {agents.map(agent => (
+              {picker.standalone.map((agent) => (
                 <option key={agent.id} value={agent.id}>
                   {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })} ({agent.state || "unknown"})
                 </option>
+              ))}
+              {picker.handGroups.map((group) => (
+                <optgroup
+                  key={group.hand_id}
+                  label={`${group.hand_icon ?? ""} ${group.hand_name}`.trim()}
+                >
+                  {group.agents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.role}
+                      {agent.isCoordinator ? " (coordinator)" : ""}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
           </div>
