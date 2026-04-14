@@ -82,15 +82,18 @@ jobs:
                 }
               };
 
-              if (mergeable === false && !hasLabel) {
-                await github.rest.issues.addLabels({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  labels: [LABEL],
-                });
+              if (mergeable === false) {
+                if (!hasLabel) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    labels: [LABEL],
+                  });
+                  core.info(`#${pr.number}: +${LABEL}`);
+                }
+                // Always enforce: conflicts → no ready-for-review
                 await rmLabel('ready-for-review');
-                core.info(`#${pr.number}: +${LABEL} -ready-for-review`);
               } else if (mergeable !== false && hasLabel) {
                 await rmLabel(LABEL);
                 core.info(`#${pr.number}: -${LABEL}`);
