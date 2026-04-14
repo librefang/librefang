@@ -88,8 +88,8 @@ LibreFang implements defense-in-depth with the following security controls:
 - **CORS policy**: Restricted to localhost when no API key configured
 
 ### Audit
-- **Merkle hash chain**: Tamper-evident audit trail for all agent actions
-- **Tamper detection**: Chain integrity verification via `/api/audit/verify`
+- **Hash-linked audit log**: Each entry's hash covers its fields plus the previous entry's hash, and `/api/audit/verify` recomputes the chain from the genesis sentinel. This detects **in-place edits** (flip a byte in one entry and the chain breaks at that row) and **row deletions** (the successor's `prev_hash` no longer matches).
+- **Limitation — no external tip anchor**: the chain is only self-consistent, it is not anchored to a trust root outside the SQLite database. An attacker with write access to `~/.librefang/data/librefang.db` can delete every row, insert a fabricated history, and recompute every hash from genesis forward — `/api/audit/verify` will return `valid: true` because it has nothing to compare the tip against. Treat the audit log as tamper-*evident against casual or partial edits*, **not** as a cryptographic supply-chain proof. If you need the stronger property, mirror the tip hash to an append-only store you control (signed systemd-journald entry, transparency log, offsite append-only file) and reconcile on startup; this is not built in.
 
 ## Dependencies
 
