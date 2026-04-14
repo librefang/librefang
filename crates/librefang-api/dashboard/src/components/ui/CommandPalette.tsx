@@ -48,6 +48,13 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
     { id: "runtime", labelKey: "nav.runtime", categoryKey: "nav.system", icon: Activity, action: () => navigate({ to: "/runtime" }) },
     { id: "logs", labelKey: "nav.logs", categoryKey: "nav.system", icon: FileText, action: () => navigate({ to: "/logs" }) },
     { id: "settings", labelKey: "nav.settings", categoryKey: "nav.system", icon: Settings, action: () => navigate({ to: "/settings" }) },
+    { id: "config-general", labelKey: "config.cat_general", categoryKey: "nav.config", icon: Settings, action: () => navigate({ to: "/config/general" }) },
+    { id: "config-memory", labelKey: "config.cat_memory", categoryKey: "nav.config", icon: Database, action: () => navigate({ to: "/config/memory" }) },
+    { id: "config-tools", labelKey: "config.cat_tools", categoryKey: "nav.config", icon: Settings, action: () => navigate({ to: "/config/tools" }) },
+    { id: "config-channels", labelKey: "config.cat_channels", categoryKey: "nav.config", icon: Network, action: () => navigate({ to: "/config/channels" }) },
+    { id: "config-security", labelKey: "config.cat_security", categoryKey: "nav.config", icon: Shield, action: () => navigate({ to: "/config/security" }) },
+    { id: "config-network", labelKey: "config.cat_network", categoryKey: "nav.config", icon: Network, action: () => navigate({ to: "/config/network" }) },
+    { id: "config-infra", labelKey: "config.cat_infra", categoryKey: "nav.config", icon: Server, action: () => navigate({ to: "/config/infra" }) },
     { id: "terminal", labelKey: "nav.terminal", categoryKey: "nav.advanced", icon: Terminal, action: () => navigate({ to: "/terminal" }) },
   ], [navigate]);
 

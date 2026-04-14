@@ -2950,6 +2950,26 @@ pub struct OAuthConfig {
     pub slack_client_id: Option<String>,
 }
 
+/// Per-provider spending limits.
+///
+/// Lets you cap spend on paid providers (e.g. Moonshot, OpenAI) without
+/// throttling free local providers (e.g. litellm, ollama). All limits
+/// default to 0 which means "unlimited" — only non-zero limits are enforced.
+/// Keyed by the provider id in `BudgetConfig.providers`, which must match
+/// the `model.provider` field of the agent's `ModelConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProviderBudget {
+    /// Maximum cost in USD per hour for this provider (0.0 = unlimited).
+    pub max_cost_per_hour_usd: f64,
+    /// Maximum cost in USD per day for this provider (0.0 = unlimited).
+    pub max_cost_per_day_usd: f64,
+    /// Maximum cost in USD per month for this provider (0.0 = unlimited).
+    pub max_cost_per_month_usd: f64,
+    /// Maximum total tokens per hour for this provider (0 = unlimited).
+    pub max_tokens_per_hour: u64,
+}
+
 /// Global spending budget configuration.
 ///
 /// Set limits to 0.0 for unlimited. All limits apply across all agents.
@@ -2968,6 +2988,10 @@ pub struct BudgetConfig {
     /// will be overridden to this value. Set to 0 to keep each agent's own limit.
     /// Use this to globally raise or lower the token budget for all agents.
     pub default_max_llm_tokens_per_hour: u64,
+    /// Per-provider spending caps, keyed by provider id (e.g. `"moonshot"`,
+    /// `"openai"`, `"litellm"`). Missing providers are unlimited.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub providers: std::collections::HashMap<String, ProviderBudget>,
 }
 
 impl Default for BudgetConfig {
@@ -2978,6 +3002,7 @@ impl Default for BudgetConfig {
             max_monthly_usd: 0.0,
             alert_threshold: 0.8,
             default_max_llm_tokens_per_hour: 0,
+            providers: std::collections::HashMap::new(),
         }
     }
 }
@@ -5962,6 +5987,55 @@ type = "number"
         assert_eq!(
             toml_str, toml_str2,
             "KernelConfig default roundtrip mismatch — a field may be missing from Default impl"
+        );
+    }
+
+    /// Per-provider budget TOML roundtrip (issue #2316).
+    #[test]
+    fn test_budget_config_per_provider_roundtrip() {
+        let toml_str = r#"
+max_hourly_usd = 0.0
+max_daily_usd = 10.0
+max_monthly_usd = 0.0
+alert_threshold = 0.8
+default_max_llm_tokens_per_hour = 0
+
+[providers.moonshot]
+max_cost_per_day_usd = 2.0
+max_tokens_per_hour = 500000
+
+[providers.litellm]
+# all zeros -> unlimited
+"#;
+        let cfg: BudgetConfig = toml::from_str(toml_str).expect("parse budget TOML");
+        assert_eq!(cfg.providers.len(), 2);
+
+        let moonshot = cfg.providers.get("moonshot").expect("moonshot entry");
+        assert!((moonshot.max_cost_per_day_usd - 2.0).abs() < f64::EPSILON);
+        assert_eq!(moonshot.max_tokens_per_hour, 500_000);
+        // Unset fields default to 0 (unlimited).
+        assert_eq!(moonshot.max_cost_per_hour_usd, 0.0);
+        assert_eq!(moonshot.max_cost_per_month_usd, 0.0);
+
+        let litellm = cfg.providers.get("litellm").expect("litellm entry");
+        assert_eq!(*litellm, ProviderBudget::default());
+
+        // Round-trip: serialize then re-parse, structs should match.
+        let reserialized = toml::to_string(&cfg).expect("serialize budget");
+        let cfg2: BudgetConfig = toml::from_str(&reserialized).expect("reparse budget");
+        assert_eq!(cfg2.providers, cfg.providers);
+    }
+
+    #[test]
+    fn test_budget_config_default_has_empty_providers() {
+        let b = BudgetConfig::default();
+        assert!(b.providers.is_empty());
+        // An empty providers map must not appear in serialized output so that
+        // users who never configured per-provider caps see a clean config.
+        let s = toml::to_string(&b).expect("serialize");
+        assert!(
+            !s.contains("providers"),
+            "empty providers map should be skipped: {s}"
         );
     }
 }

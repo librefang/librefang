@@ -1458,6 +1458,25 @@ export async function getFullConfig(): Promise<Record<string, unknown>> {
   return get<Record<string, unknown>>("/api/config");
 }
 
+export interface ConfigFieldSchema {
+  type?: string;
+  options?: (string | { id: string; name: string; provider: string })[];
+}
+
+export interface ConfigSectionSchema {
+  fields: Record<string, string | ConfigFieldSchema>;
+  root_level?: boolean;
+  hot_reloadable?: boolean;
+}
+
+export async function getConfigSchema(): Promise<{ sections: Record<string, ConfigSectionSchema> }> {
+  return get<{ sections: Record<string, ConfigSectionSchema> }>("/api/config/schema");
+}
+
+export async function setConfigValue(path: string, value: unknown): Promise<{ status: string; restart_required?: boolean }> {
+  return post<{ status: string; restart_required?: boolean }>("/api/config/set", { path, value });
+}
+
 export async function listBackups(): Promise<{ backups?: BackupItem[]; total?: number }> {
   return get<{ backups?: BackupItem[]; total?: number }>("/api/backups");
 }

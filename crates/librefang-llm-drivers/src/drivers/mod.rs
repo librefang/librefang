@@ -686,11 +686,17 @@ fn create_driver_from_entry(
         ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::new(api_key, base_url))),
         ApiFormat::Anthropic => Ok(Arc::new(anthropic::AnthropicDriver::new(api_key, base_url))),
         ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::new(api_key, base_url))),
-        ApiFormat::ClaudeCode => Ok(Arc::new(claude_code::ClaudeCodeDriver::with_timeout(
-            config.base_url.clone(),
-            config.skip_permissions,
-            config.message_timeout_secs,
-        ))),
+        ApiFormat::ClaudeCode => {
+            let mut d = claude_code::ClaudeCodeDriver::with_timeout(
+                config.base_url.clone(),
+                config.skip_permissions,
+                config.message_timeout_secs,
+            );
+            if let Some(bridge) = config.mcp_bridge.clone() {
+                d = d.with_mcp_bridge(bridge);
+            }
+            Ok(Arc::new(d))
+        }
         ApiFormat::QwenCode => Ok(Arc::new(qwen_code::QwenCodeDriver::new(
             config.base_url.clone(),
             config.skip_permissions,
@@ -1008,6 +1014,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1023,6 +1030,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1144,6 +1152,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1166,6 +1175,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1188,6 +1198,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         let result = create_driver(&config);
         assert!(result.is_err());
@@ -1219,6 +1230,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1244,6 +1256,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
 
         let driver = create_driver(&config);
@@ -1281,6 +1294,7 @@ mod tests {
             },
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1299,6 +1313,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         // Clear any env var that might interfere
         std::env::remove_var("AZURE_OPENAI_ENDPOINT");
@@ -1326,6 +1341,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         let d1 = cache.get_or_create(&config).unwrap();
         let d2 = cache.get_or_create(&config).unwrap();
@@ -1344,6 +1360,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         let config_b = DriverConfig {
             provider: "ollama".to_string(),
@@ -1353,6 +1370,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         let d_a = cache.get_or_create(&config_a).unwrap();
         let d_b = cache.get_or_create(&config_b).unwrap();
@@ -1374,6 +1392,7 @@ mod tests {
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
             message_timeout_secs: 300,
+            mcp_bridge: None,
         };
         cache.get_or_create(&config).unwrap();
         assert_eq!(cache.len(), 1);

@@ -297,6 +297,30 @@ pub struct SenderContext {
     /// Divergence count threshold for `sticky_heuristic` strategy.
     #[serde(default)]
     pub auto_route_divergence_count: u32,
+    /// Group participant roster (Phase 2 §C OB-04/OB-05/GS-01).
+    ///
+    /// Populated by the WhatsApp gateway via `sock.groupMetadata(groupJid)`
+    /// (5min TTL cache) for group messages. Empty for DMs and for non-WhatsApp
+    /// channels that don't yet expose roster info. Used by the addressee guard
+    /// in `should_process_group_message` to detect when a turn is addressed
+    /// to a named participant other than the agent.
+    ///
+    /// `#[serde(default)]` ensures BC-02: stored canonical blobs that predate
+    /// this field still deserialize cleanly.
+    #[serde(default)]
+    pub group_participants: Vec<ParticipantRef>,
+}
+
+/// Reference to a participant in a group chat.
+///
+/// Minimal shape required by the §C addressee guard. Full roster persistence
+/// (with phone-number resolution, role, etc.) is deferred to Phase 5.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParticipantRef {
+    /// Platform JID (e.g. `1234567890@s.whatsapp.net` or `lid@lid`).
+    pub jid: String,
+    /// Human-readable name (push-name, contact name, or first part of JID).
+    pub display_name: String,
 }
 
 /// Agent lifecycle phase for UX indicators.
