@@ -108,6 +108,13 @@ function dbSaveMessage({ id, jid, senderJid, pushName, phone, text, direction, t
 /**
  * Mark a message as processed (1) or failed (-1).
  */
+// CS-01 iter 2: a catchup journal row with null/empty jid is orphan — cannot
+// be scoped to any WhatsApp chat. Pure predicate so tests can exercise it
+// without spinning up the full catchup loop / socket / DB.
+function shouldSkipCatchupForMissingJid(msg) {
+  return !msg || !msg.jid;
+}
+
 function dbMarkProcessed(msgId, status) {
   try {
     stmtMarkProcessed.run(status, msgId);
@@ -234,8 +241,30 @@ let qrExpired = false;
 let statusMessage = 'Not started';
 let reconnectAttempts = 0;
 let isConnecting = false;
-const MAX_RECONNECT_DELAY = 60_000;
-const MAX_RECONNECT_ATTEMPTS = 10;
+// ST-02: legacy reconnect-delay/attempt constants removed in favour of the
+// jittered backoff (computeBackoffDelay) with a 30s cap and no hard stop.
+
+// ST-01 heartbeat watchdog: if no inbound messages.upsert event arrives for
+// HEARTBEAT_MS, force-close the socket so the existing reconnect path takes
+// over. The 180s default matches the openclaw reference.
+const HEARTBEAT_MS = parseInt(process.env.WA_HEARTBEAT_MS || '180000', 10);
+const HEARTBEAT_CHECK_INTERVAL_MS = parseInt(process.env.WA_HEARTBEAT_CHECK_MS || '30000', 10);
+let lastInboundAt = Date.now();
+let heartbeatInterval = null;
+
+// Pure predicate — true when we've been silent longer than thresholdMs.
+function checkHeartbeat(now, lastInboundAt, thresholdMs) {
+  return (now - lastInboundAt) > thresholdMs;
+}
+
+// ST-02: exponential backoff with ±25% jitter, cap 30s, factor 1.8, NO hard
+// stop. `rng` is injected for deterministic tests (defaults to Math.random).
+// Matches openclaw/extensions/whatsapp/src/reconnect.ts semantics.
+function computeBackoffDelay(attempts, rng = Math.random) {
+  const base = Math.min(2000 * Math.pow(1.8, Math.max(0, attempts - 1)), 30_000);
+  const jitter = 0.75 + rng() * 0.5; // ±25%
+  return Math.round(base * jitter);
+}
 
 // Cached agent UUID — resolved from DEFAULT_AGENT name on first use
 let cachedAgentId = null;
@@ -261,6 +290,43 @@ let ownJid = null;
 //                       owner is recognised, even before any senderPn event.
 const lidToPnJid = new Map();    // '<digits>@lid' → '<digits>@s.whatsapp.net'
 const ownerLidJids = new Set();  // '<digits>@lid'
+
+// CS-02: proactive LID→PN resolution for first-seen LIDs. Races
+// sock.onWhatsApp([lid]) against a timeout; on success, populates the cache
+// so subsequent messages in the same burst find it synchronously. On
+// timeout or empty response, falls back to degraded-but-no-block behaviour
+// (the caller proceeds with the LID as-is; a later senderPn event may
+// still populate the cache naturally).
+//
+// Returns a string tag for observability: 'resolved' | 'empty' | 'timeout'
+// | 'skipped' | 'error'. Side-effect: writes to `cache` on 'resolved'.
+async function resolveLidProactively(sock, lid, cache, timeoutMs = 5000) {
+  if (!sock || !lid || !cache || typeof sock.onWhatsApp !== 'function') return 'skipped';
+  if (cache.has(lid)) return 'skipped';
+  let timer;
+  try {
+    const lookup = await Promise.race([
+      Promise.resolve(sock.onWhatsApp([lid])),
+      new Promise((_, r) => { timer = setTimeout(() => r(new Error('timeout')), timeoutMs); }),
+    ]);
+    if (Array.isArray(lookup) && lookup[0] && lookup[0].jid) {
+      cache.set(lid, lookup[0].jid);
+      console.log(`[gateway] lid_resolved lid=${lid} pn=${lookup[0].jid}`);
+      return 'resolved';
+    }
+    console.warn(`[gateway] lid_resolve_empty lid=${lid}`);
+    return 'empty';
+  } catch (e) {
+    if (e && e.message === 'timeout') {
+      console.warn(`[gateway] lid_resolve_timeout lid=${lid}`);
+      return 'timeout';
+    }
+    console.warn(`[gateway] lid_resolve_error lid=${lid} err=${e && e.message}`);
+    return 'error';
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Message store for Baileys retry mechanism
@@ -736,6 +802,12 @@ function resolveAgentId() {
 // Baileys connection
 // ---------------------------------------------------------------------------
 async function cleanupSocket() {
+  // ST-01: stop heartbeat watchdog whenever we tear down the socket — both
+  // planned reconnect and gracefulShutdown go through here.
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
   if (!sock) return;
   const previousSock = sock;
   sock = null;
@@ -830,24 +902,19 @@ async function startConnection() {
         qrDataUrl = '';
         await cleanupSocket();
       } else {
-        // All other disconnect reasons are treated as recoverable
+        // ST-02: all other disconnect reasons are recoverable. Exponential
+        // backoff 2s → 30s, factor 1.8, ±25% jitter, NO hard stop — a
+        // transient outage longer than 5 attempts (the previous cap) used
+        // to leave the gateway permanently disconnected until manual
+        // restart. We now keep retrying at the capped interval.
         reconnectAttempts += 1;
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-          console.error(`[gateway] Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`);
-          connStatus = 'disconnected';
-          statusMessage = `Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`;
-        } else {
-          const delay = Math.min(
-            2000 * Math.pow(1.5, reconnectAttempts - 1),
-            MAX_RECONNECT_DELAY,
-          );
-          console.log(
-            `[gateway] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`,
-          );
-          connStatus = 'disconnected';
-          statusMessage = `Reconnecting (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
-          setTimeout(() => startConnection(), delay);
-        }
+        const delay = computeBackoffDelay(reconnectAttempts);
+        console.log(
+          `[gateway] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts}, jittered)`,
+        );
+        connStatus = 'disconnected';
+        statusMessage = `Reconnecting (attempt ${reconnectAttempts})...`;
+        setTimeout(() => startConnection(), delay);
       }
     }
 
@@ -858,6 +925,23 @@ async function startConnection() {
       reconnectAttempts = 0;
       statusMessage = 'Connected to WhatsApp';
       console.log('[gateway] Connected to WhatsApp!');
+
+      // ST-01: (re)start heartbeat watchdog. Paused while sock is null or
+      // status is not 'connected' (initial connect + planned reconnect gap).
+      lastInboundAt = Date.now();
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      heartbeatInterval = setInterval(() => {
+        if (!sock || connStatus !== 'connected') return;
+        const now = Date.now();
+        if (checkHeartbeat(now, lastInboundAt, HEARTBEAT_MS)) {
+          console.log(JSON.stringify({
+            event: 'heartbeat_timeout',
+            last_inbound_ms: now - lastInboundAt,
+            threshold_ms: HEARTBEAT_MS,
+          }));
+          try { sock.end(undefined); } catch { /* best-effort */ }
+        }
+      }, HEARTBEAT_CHECK_INTERVAL_MS);
 
       // Capture own JID for self-chat detection
       if (sock?.user?.id) {
@@ -896,6 +980,10 @@ async function startConnection() {
 
   // Incoming messages → forward to LibreFang
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    // ST-01: any inbound activity refreshes the heartbeat timestamp, even
+    // for non-notify events (history syncs, retries) — they still prove the
+    // socket is live.
+    lastInboundAt = Date.now();
     if (type !== 'notify') return;
 
     for (const msg of messages) {
@@ -1016,6 +1104,13 @@ async function startConnection() {
       // Cache LID → phone-number JID when we see both on the same message.
       if (isLidJid && senderPnRaw) {
         lidToPnJid.set(sender, senderPnRaw);
+      }
+
+      // CS-02: first-seen LID without senderPn AND not in cache — proactively
+      // ask Baileys for the PN mapping with a 5s timeout. Populates cache so
+      // the next message in the burst resolves synchronously.
+      if (isLidJid && !senderPnRaw && !lidToPnJid.has(sender)) {
+        await resolveLidProactively(sock, sender, lidToPnJid, 5000);
       }
 
       // Resolve to a phone-number JID (or empty string if we cannot).
@@ -1693,6 +1788,16 @@ function buildRelaySystemInstruction() {
 const MAX_FORWARD_RETRIES = 1;
 
 async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false, chatJid = '' } = {}, retryCount = 0) {
+  // CS-01: fail-fast — refuse to forward with an empty chatJid. A bare
+  // `whatsapp` channel loses per-conversation session isolation; the kernel
+  // would merge unrelated chats into the same session.
+  if (!chatJid) {
+    const err = new Error(`[gateway] chatJid empty — refusing to forward to bare whatsapp channel (phone=${phone} pushName=${pushName} isGroup=${isGroup})`);
+    err.code = 'CHATJID_EMPTY';
+    console.error(err.message);
+    throw err;
+  }
+
   // Resolve agent UUID if not cached (or if invalidated on reconnect)
   if (!cachedAgentId) {
     try {
@@ -1707,7 +1812,8 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
 
   // Per-conversation session isolation: include chat JID in channel_type
   // so the kernel creates separate sessions for each WhatsApp conversation.
-  const channelType = chatJid ? `whatsapp:${chatJid}` : 'whatsapp';
+  // CS-01: chatJid has already been validated non-empty at function entry.
+  const channelType = `whatsapp:${chatJid}`;
   const payload = {
     message: fullMessage,
     channel_type: channelType,
@@ -1812,6 +1918,15 @@ const STREAMING_EDIT_INTERVAL_MS = 2000;
  * @returns {Promise<string>} complete response
  */
 async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress, chatJid = '', { isGroup = false, wasMentioned = false } = {}) {
+  // CS-01: fail-fast — refuse to forward with an empty chatJid (same
+  // rationale as `forwardToLibreFang`). Keeps streaming parity.
+  if (!chatJid) {
+    const err = new Error(`[gateway] chatJid empty — refusing to forward to bare whatsapp channel (phone=${phone} pushName=${pushName} isGroup=${isGroup})`);
+    err.code = 'CHATJID_EMPTY';
+    console.error(err.message);
+    throw err;
+  }
+
   // Resolve agent UUID if not cached
   if (!cachedAgentId) {
     try {
@@ -1824,7 +1939,8 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
 
   const fullMessage = systemPrefix ? systemPrefix + text : text;
 
-  const channelType = chatJid ? `whatsapp:${chatJid}` : 'whatsapp';
+  // CS-01: chatJid has already been validated non-empty at function entry.
+  const channelType = `whatsapp:${chatJid}`;
   const payload = {
     message: fullMessage,
     channel_type: channelType,
@@ -1988,6 +2104,17 @@ async function runCatchUpSweep() {
     // Skip messages already at max retries (they'll be marked failed by dbIncrRetryOrFail)
     if (msg.retry_count >= CATCHUP_MAX_RETRIES) {
       dbIncrRetryOrFail(msg.id, CATCHUP_MAX_RETRIES);
+      continue;
+    }
+
+    // CS-01 iter 2 guard: a journal row with null/empty jid has no meaningful
+    // chat scope to replay to (orphan from pre-scoping baseline). Mark it
+    // processed explicitly so the CS-01 throw inside forwardToLibreFang
+    // doesn't land inside our catch-block and inflate retry_count up to
+    // CATCHUP_MAX_RETRIES before eventually giving up.
+    if (shouldSkipCatchupForMissingJid(msg)) {
+      dbMarkProcessed(msg.id, 1);
+      console.log(`[gateway][catchup] catchup_skip_no_jid id=${msg.id} — journal row has null jid, cannot scope replay`);
       continue;
     }
 
@@ -2494,4 +2621,10 @@ module.exports = {
   isAllowedOrigin,
   parseBody,
   MAX_BODY_SIZE,
+  forwardToLibreFang,
+  forwardToLibreFangStreaming,
+  shouldSkipCatchupForMissingJid,
+  resolveLidProactively,
+  checkHeartbeat,
+  computeBackoffDelay,
 };
