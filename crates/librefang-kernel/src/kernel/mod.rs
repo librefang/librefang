@@ -8692,6 +8692,7 @@ system_prompt = "You are a helpful assistant."
                 azure_openai: cfg.azure_openai.clone(),
                 skip_permissions: true,
                 message_timeout_secs: cfg.default_model.message_timeout_secs,
+                mcp_bridge: Some(build_mcp_bridge_cfg(cfg)),
             };
 
             match self.driver_cache.get_or_create(&driver_config) {
@@ -8773,6 +8774,7 @@ system_prompt = "You are a helpful assistant."
                         .or_else(|| self.lookup_provider_url(&fb_provider)),
                     vertex_ai: cfg.vertex_ai.clone(),
                     azure_openai: cfg.azure_openai.clone(),
+                    mcp_bridge: Some(build_mcp_bridge_cfg(cfg)),
                     skip_permissions: true,
                     message_timeout_secs: cfg.default_model.message_timeout_secs,
                 };
