@@ -3124,6 +3124,13 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Call this before `spawn_agent` when a `SignedManifest` JSON is provided
     /// alongside the TOML. Returns the verified manifest TOML string on success.
+    ///
+    /// Rejects envelopes whose `signer_public_key` is not listed in
+    /// `KernelConfig.trusted_manifest_signers`. An empty trust list is
+    /// treated as "no manifests are trusted" and fails closed — otherwise
+    /// a self-signed attacker envelope is indistinguishable from a
+    /// legitimate one and would silently spawn with attacker-declared
+    /// capabilities.
     pub fn verify_signed_manifest(&self, signed_json: &str) -> KernelResult<String> {
         let signed: librefang_types::manifest_signing::SignedManifest =
             serde_json::from_str(signed_json).map_err(|e| {
@@ -3131,13 +3138,40 @@ system_prompt = "You are a helpful assistant."
                     "Invalid signed manifest JSON: {e}"
                 )))
             })?;
-        signed.verify().map_err(|e| {
+
+        let trusted = self.trusted_manifest_signer_keys()?;
+        signed.verify_with_trusted_keys(&trusted).map_err(|e| {
             KernelError::LibreFang(librefang_types::error::LibreFangError::Config(format!(
                 "Manifest signature verification failed: {e}"
             )))
         })?;
         info!(signer = %signed.signer_id, hash = %signed.content_hash, "Signed manifest verified");
         Ok(signed.manifest)
+    }
+
+    /// Decode `KernelConfig.trusted_manifest_signers` (hex-encoded Ed25519
+    /// public keys) into the `[u8; 32]` form expected by
+    /// `SignedManifest::verify_with_trusted_keys`. Invalid entries are
+    /// rejected — we'd rather fail closed than silently skip malformed
+    /// trust anchors.
+    fn trusted_manifest_signer_keys(&self) -> KernelResult<Vec<[u8; 32]>> {
+        let cfg = self.config.load();
+        let mut keys = Vec::with_capacity(cfg.trusted_manifest_signers.len());
+        for entry in &cfg.trusted_manifest_signers {
+            let bytes = hex::decode(entry.trim()).map_err(|e| {
+                KernelError::LibreFang(librefang_types::error::LibreFangError::Config(format!(
+                    "trusted_manifest_signers entry {entry:?} is not valid hex: {e}"
+                )))
+            })?;
+            let fixed: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+                KernelError::LibreFang(librefang_types::error::LibreFangError::Config(format!(
+                    "trusted_manifest_signers entry {entry:?} is {} bytes, expected 32",
+                    v.len()
+                )))
+            })?;
+            keys.push(fixed);
+        }
+        Ok(keys)
     }
 
     /// Send a message to an agent and get a response.
