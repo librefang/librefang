@@ -225,6 +225,14 @@ pub struct MessageResponse {
     /// requested `show_thinking = true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// §A — Optional private notice destined for the agent's owner DM,
+    /// produced when the model invoked the `notify_owner` tool during the
+    /// turn. Channel adapters (e.g. whatsapp-gateway) MUST route this to
+    /// the owner's address (e.g. OWNER_JID) and NOT to the source chat.
+    /// Adapters that don't support owner-side delivery should ignore it
+    /// (BC-01 — Telegram/Discord/Slack continue to function unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_notice: Option<String>,
 }
 
 /// Request to inject a message into a running agent's tool-execution loop (#956).

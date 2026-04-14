@@ -1187,6 +1187,11 @@ impl App {
             } => {
                 self.chat.tool_result(&name, &result_preview, is_error);
             }
+            // §A — owner notices are surfaced as a transient status line.
+            StreamEvent::OwnerNotice { text } => {
+                let preview: String = text.chars().take(80).collect();
+                self.chat.status_msg = Some(format!("[owner_notice] {preview}"));
+            }
         }
     }
 

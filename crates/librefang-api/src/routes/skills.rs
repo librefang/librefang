@@ -2501,6 +2501,7 @@ pub async fn hand_send_message(
                     memories_used: result.memories_used,
                     memory_conflicts: result.memory_conflicts,
                     thinking: None,
+                    owner_notice: result.owner_notice,
                 })),
             )
         }
