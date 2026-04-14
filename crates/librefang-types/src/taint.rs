@@ -208,13 +208,24 @@ pub fn check_outbound_text_violation(payload: &str, sink: &TaintSink) -> Option<
     // 1. `Authorization:` header literal — unambiguous.
     let mut hit = lower.contains("authorization:");
 
-    // 2. `key=value` / `key: value` / `"key":` / `'key':` shapes.
-    //    The separator gate keeps natural-language ("a token of
-    //    appreciation") from tripping the filter.
+    // 2. `key=value` / `key: value` / `"key":` / `'key':` shapes,
+    //    including variants with whitespace around the separator
+    //    (`api_key = sk-x`, `token : abc`). Pre-normalize the payload
+    //    by collapsing single spaces around `=` and `:` so that the
+    //    separator list can stay compact. The separator gate still
+    //    keeps natural-language ("a token of appreciation") from
+    //    tripping the filter.
     if !hit {
+        let normalized = lower
+            .replace(" = ", "=")
+            .replace(" =", "=")
+            .replace("= ", "=")
+            .replace(" : ", ":")
+            .replace(" :", ":")
+            .replace(": ", ":");
         for k in SECRET_KEYS {
             for sep in ["=", ":", "\":", "':"] {
-                if lower.contains(&format!("{k}{sep}")) {
+                if normalized.contains(&format!("{k}{sep}")) {
                     hit = true;
                     break;
                 }
@@ -380,6 +391,51 @@ mod tests {
         assert!(tok.len() >= 32);
         let sink = TaintSink::mcp_tool_call();
         assert!(check_outbound_text_violation(tok, &sink).is_some());
+    }
+
+    #[test]
+    fn test_check_outbound_text_blocks_spaced_separators() {
+        // Regression: the original separator list only matched
+        // `key=value` / `key:value` (no spaces), so an LLM that
+        // formatted secrets with spaces around the separator
+        // ("api_key = sk-…", "token : abc", "Authorization : Bearer …")
+        // slipped through. Each variant below MUST be blocked.
+        let sink = TaintSink::mcp_tool_call();
+        for payload in [
+            "api_key = sk-not-a-real-token",
+            "api_key  =  sk-not-a-real-token",
+            "API_KEY=sk-1234",
+            "token : abcdef-secret-value",
+            "  password  :  hunter2  ",
+            "secret =hunter2",
+            "passwd= hunter2",
+            "x-api-key : abcdef",
+        ] {
+            assert!(
+                check_outbound_text_violation(payload, &sink).is_some(),
+                "spaced-separator payload must be rejected: {payload:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_outbound_text_allows_prose_about_keys() {
+        // The whitespace-collapse normalisation must not turn benign
+        // prose into a false positive. Sentences mentioning the words
+        // "token", "secret", "password" without a key=value shape
+        // should pass.
+        let sink = TaintSink::mcp_tool_call();
+        for payload in [
+            "Could you check whether our token economy works?",
+            "The password manager rotates entries every 90 days.",
+            "It's a secret garden behind the wall.",
+            "Use the API key called PROD_TOKEN from vault — no value here.",
+        ] {
+            assert!(
+                check_outbound_text_violation(payload, &sink).is_none(),
+                "benign prose must pass: {payload:?}"
+            );
+        }
     }
 
     #[test]
