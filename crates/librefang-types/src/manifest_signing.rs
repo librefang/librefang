@@ -66,21 +66,13 @@ impl SignedManifest {
         }
     }
 
-    /// Verify the envelope's **internal consistency only** — the SHA-256
-    /// still matches the manifest text and the signature is valid for that
-    /// hash under the bundled `signer_public_key`.
-    ///
-    /// ⚠️ **This is not identity verification.** An attacker can generate
-    /// their own keypair, sign any manifest with it, and embed the matching
-    /// public key in the envelope — the envelope will still `verify()`
-    /// successfully. This method is only safe for integrity checks where
-    /// the caller already obtained `signer_public_key` out-of-band from a
-    /// trusted channel.
-    ///
-    /// For supply-chain protection use [`Self::verify_with_trusted_keys`],
-    /// which requires `signer_public_key` to match one of a caller-supplied
-    /// trust-anchor list before accepting the signature.
-    pub fn verify(&self) -> Result<(), String> {
+    /// Recompute the SHA-256 and validate the bundled signature against
+    /// the bundled `signer_public_key`. This is **not** identity
+    /// verification on its own — see the module docs — so the helper is
+    /// deliberately private. All public entry points must go through
+    /// [`Self::verify_with_trusted_keys`], which checks the signer is
+    /// in the caller's trust anchor list *before* falling through here.
+    fn check_envelope_integrity(&self) -> Result<(), String> {
         // Re-compute the hash and compare.
         let recomputed = hash_manifest(&self.manifest);
         if recomputed != self.content_hash {
@@ -147,7 +139,7 @@ impl SignedManifest {
         }
 
         // Known-good signer — run the normal integrity / signature check.
-        self.verify()
+        self.check_envelope_integrity()
     }
 }
 
@@ -179,7 +171,11 @@ network = false
         let signed = SignedManifest::sign(manifest, &signing_key, "test@librefang.ai");
         assert_eq!(signed.content_hash, hash_manifest(manifest));
         assert_eq!(signed.signer_id, "test@librefang.ai");
-        assert!(signed.verify().is_ok());
+
+        // A real caller must go through verify_with_trusted_keys — prove
+        // that round-trip works when the signer is on the allowlist.
+        let trusted: [[u8; 32]; 1] = [signing_key.verifying_key().to_bytes()];
+        assert!(signed.verify_with_trusted_keys(&trusted).is_ok());
     }
 
     #[test]
@@ -192,7 +188,8 @@ network = false
         // Tamper with the manifest content after signing.
         signed.manifest = "[agent]\nname = \"evil-agent\"\nshell = true\n".to_string();
 
-        let result = signed.verify();
+        let trusted: [[u8; 32]; 1] = [signing_key.verifying_key().to_bytes()];
+        let result = signed.verify_with_trusted_keys(&trusted);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("content hash mismatch"));
     }
@@ -205,28 +202,41 @@ network = false
         let manifest = "[agent]\nname = \"test\"\n";
         let mut signed = SignedManifest::sign(manifest, &signing_key, "signer-a");
 
-        // Replace the public key with a different key's public key.
+        // Replace the public key with a different key's public key but
+        // put the new public key on the trust list so we reach the
+        // signature check rather than the allowlist rejection.
         signed.signer_public_key = wrong_key.verifying_key().to_bytes().to_vec();
 
-        let result = signed.verify();
+        let trusted: [[u8; 32]; 1] = [wrong_key.verifying_key().to_bytes()];
+        let result = signed.verify_with_trusted_keys(&trusted);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .contains("signature verification failed"));
     }
 
-    /// Regression: the bare `verify()` method only checks envelope
-    /// self-consistency, so an attacker-generated keypair produces a
-    /// "valid" envelope. This is the vulnerability `verify_with_trusted_keys`
-    /// exists to close.
+    /// Regression: the attacker-generated envelope that used to slip
+    /// through bare `verify()` must now be rejected at the allowlist
+    /// check, because there is no longer a public path to the bare
+    /// integrity test. This locks the API shape — any future
+    /// re-introduction of a bare "verify envelope" method would need
+    /// to update this test.
     #[test]
-    fn test_plain_verify_accepts_self_signed_attacker() {
+    fn test_attacker_envelope_rejected_without_trust_anchor() {
         let attacker = test_signing_key(42);
+        let official = test_signing_key(1);
         let evil = "[agent]\nname = \"evil\"\nshell = true\n";
         let signed = SignedManifest::sign(evil, &attacker, "attacker@evil");
+
+        // Trust anchor is the official signer only; attacker envelope
+        // must fail even though it is internally consistent.
+        let trusted: [[u8; 32]; 1] = [official.verifying_key().to_bytes()];
+        let err = signed
+            .verify_with_trusted_keys(&trusted)
+            .expect_err("self-signed attacker envelope must be rejected");
         assert!(
-            signed.verify().is_ok(),
-            "plain verify() must not be relied on as supply-chain defence"
+            err.contains("not in trusted_manifest_signers"),
+            "err was {err}"
         );
     }
 
