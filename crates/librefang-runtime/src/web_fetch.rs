@@ -284,7 +284,14 @@ pub(crate) fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<SsrfReso
     match socket_addr.to_socket_addrs() {
         Ok(addrs) => {
             for addr in addrs {
-                let ip = addr.ip();
+                // Canonicalise IPv4-mapped IPv6 (::ffff:X.X.X.X) before any
+                // safety check. The OS transparently connects these to the
+                // embedded IPv4 target, so leaving them as IPv6 lets an
+                // attacker reach loopback / private / cloud-metadata IPs via
+                // the IPv6 form (e.g. [::ffff:169.254.169.254]) which the
+                // v6-only branches of is_private_ip / is_cloud_metadata_ip
+                // do not recognise.
+                let ip = canonical_ip(&addr.ip());
                 if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
                     // Before rejecting, check the allowlist — but cloud metadata
                     // ranges are unconditionally blocked regardless of allowlist.
@@ -324,7 +331,7 @@ pub(crate) fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<SsrfReso
 /// - `169.254.0.0/16` — link-local / AWS EC2 metadata
 /// - `100.64.0.0/10`  — CGNAT (also used by Alibaba Cloud IMDS at 100.100.100.200)
 fn is_cloud_metadata_ip(ip: &IpAddr) -> bool {
-    match ip {
+    match canonical_ip(ip) {
         IpAddr::V4(v4) => {
             let o = v4.octets();
             // 169.254.0.0/16
@@ -333,6 +340,19 @@ fn is_cloud_metadata_ip(ip: &IpAddr) -> bool {
             || o[0] == 100 && (o[1] & 0xC0) == 64
         }
         IpAddr::V6(_) => false,
+    }
+}
+
+/// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) to its IPv4 form. All other
+/// addresses are returned unchanged. This keeps every downstream IP check
+/// operating on the address the OS will actually connect to.
+fn canonical_ip(ip: &IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(*v6),
+        },
+        IpAddr::V4(_) => *ip,
     }
 }
 
@@ -423,7 +443,7 @@ fn cidr_contains(cidr: &str, ip: &IpAddr) -> Result<bool, ()> {
 
 /// Check if an IP address is in a private range.
 fn is_private_ip(ip: &IpAddr) -> bool {
-    match ip {
+    match canonical_ip(ip) {
         IpAddr::V4(v4) => {
             let octets = v4.octets();
             matches!(
@@ -548,6 +568,61 @@ mod tests {
     fn test_ssrf_blocks_ipv6_localhost() {
         assert!(check_ssrf("http://[::1]/admin", &[]).is_err());
         assert!(check_ssrf("http://[::1]:8080/api", &[]).is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_ipv4_mapped_ipv6_loopback() {
+        // OS transparently connects ::ffff:127.0.0.1 to 127.0.0.1.
+        // The standard is_loopback() check on IpAddr::V6 returns false, so
+        // without canonicalisation this slipped past SSRF protection.
+        assert!(check_ssrf("http://[::ffff:127.0.0.1]/", &[]).is_err());
+        assert!(check_ssrf("http://[::ffff:7f00:1]/", &[]).is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_ipv4_mapped_ipv6_metadata() {
+        // 169.254.169.254 expressed as an IPv4-mapped IPv6 address reaches
+        // the AWS EC2 instance metadata service on real hosts.
+        assert!(check_ssrf("http://[::ffff:169.254.169.254]/", &[]).is_err());
+        assert!(check_ssrf("http://[::ffff:a9fe:a9fe]/", &[]).is_err());
+        assert!(check_ssrf("http://[0:0:0:0:0:ffff:169.254.169.254]/", &[]).is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_ipv4_mapped_ipv6_private() {
+        assert!(check_ssrf("http://[::ffff:10.0.0.1]/", &[]).is_err());
+        assert!(check_ssrf("http://[::ffff:192.168.1.1]/", &[]).is_err());
+    }
+
+    #[test]
+    fn test_canonical_ip_unwraps_mapped() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        let mapped: IpAddr = IpAddr::V6("::ffff:169.254.169.254".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(
+            canonical_ip(&mapped),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))
+        );
+        // Real IPv6 is left alone.
+        let real_v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(canonical_ip(&real_v6), real_v6);
+    }
+
+    #[test]
+    fn test_is_private_ip_recognises_mapped_v6() {
+        use std::net::IpAddr;
+        let mapped_private: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        assert!(is_private_ip(&mapped_private));
+        let mapped_link_local: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert!(is_private_ip(&mapped_link_local));
+    }
+
+    #[test]
+    fn test_is_cloud_metadata_ip_recognises_mapped_v6() {
+        use std::net::IpAddr;
+        let mapped_imds: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert!(is_cloud_metadata_ip(&mapped_imds));
+        let mapped_cgnat: IpAddr = "::ffff:100.64.0.1".parse().unwrap();
+        assert!(is_cloud_metadata_ip(&mapped_cgnat));
     }
 
     #[test]
