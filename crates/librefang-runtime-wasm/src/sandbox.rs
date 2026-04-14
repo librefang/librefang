@@ -175,14 +175,64 @@ impl WasmSandbox {
                 .map_err(|e| SandboxError::Execution(e.to_string()))?;
         }
 
-        // Set epoch deadline (wall-clock metering)
+        // Set epoch deadline (wall-clock metering).
+        //
+        // The watchdog thread used to be fire-and-forget — it slept for the
+        // full timeout (30s by default) and then called `increment_epoch`
+        // whether or not the guest had already returned. That leaked a
+        // sleeping OS thread per invocation and also caused cross-store
+        // false interrupts, because `Engine::increment_epoch` is global to
+        // the Engine: every concurrently running guest observes the tick.
+        // Sustained workloads piled up thousands of sleeping threads and
+        // eventually exhausted the OS thread limit, and any fresh guest
+        // that happened to start right after a stale watchdog fired would
+        // trap on `Interrupt` even though it had used no wall-clock time.
+        //
+        // Instead, give the watchdog a `done` flag it polls on short
+        // intervals. When the main thread finishes it flips the flag and
+        // the watchdog exits without touching the engine epoch. Join the
+        // watchdog on the happy path so the thread is actually reclaimed.
+        // The legitimate timeout path is untouched: if the guest blows its
+        // wall-clock budget the flag is never flipped, the watchdog sleeps
+        // out the deadline and increments epoch as before.
         store.set_epoch_deadline(1);
         let engine_clone = engine.clone();
         let timeout = config.timeout_secs.unwrap_or(30);
-        let _watchdog = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(timeout));
+        let watchdog_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watchdog_done_for_thread = std::sync::Arc::clone(&watchdog_done);
+        let watchdog = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+            while std::time::Instant::now() < deadline {
+                if watchdog_done_for_thread.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                // Short sleep so we react to completion within ~50ms but
+                // still spend almost no CPU on the happy path.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             engine_clone.increment_epoch();
         });
+        // RAII guard so every early-return path (`?`, trap, ABI error,
+        // panic) signals the watchdog and joins the thread. Without this
+        // the `?` operators below would drop the JoinHandle silently and
+        // we'd leak a sleeping thread per error path just like the
+        // pre-fix code did on the happy path.
+        struct WatchdogGuard {
+            done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            handle: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for WatchdogGuard {
+            fn drop(&mut self) {
+                self.done.store(true, std::sync::atomic::Ordering::Release);
+                if let Some(h) = self.handle.take() {
+                    let _ = h.join();
+                }
+            }
+        }
+        let _watchdog_guard = WatchdogGuard {
+            done: watchdog_done,
+            handle: Some(watchdog),
+        };
 
         // Build linker with host function imports
         let mut linker = Linker::new(engine);
