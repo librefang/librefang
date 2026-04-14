@@ -454,6 +454,9 @@ export function ConfigPage({ category }: { category: string }) {
                       <div className="w-48 shrink-0 pt-1">
                         <p className="text-xs font-semibold">{t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey))}</p>
                         <p className="text-[10px] text-text-dim font-mono">{fieldKey}</p>
+                        {t(`config.desc_${fieldKey}`, "") && (
+                          <p className="text-[10px] text-text-dim mt-0.5">{t(`config.desc_${fieldKey}`)}</p>
+                        )}
                       </div>
                       <div className="flex-1 min-w-0">
                         <ConfigFieldInput fieldKey={fieldKey} fieldType={fieldType} options={options} value={currentValue}
