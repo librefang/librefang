@@ -175,14 +175,85 @@ impl WasmSandbox {
                 .map_err(|e| SandboxError::Execution(e.to_string()))?;
         }
 
-        // Set epoch deadline (wall-clock metering)
+        // Set epoch deadline (wall-clock metering).
+        //
+        // The watchdog thread used to be fire-and-forget — it slept for the
+        // full timeout (30s by default) and then called `increment_epoch`
+        // whether or not the guest had already returned. That leaked a
+        // sleeping OS thread per invocation and also caused cross-store
+        // false interrupts, because `Engine::increment_epoch` is global to
+        // the Engine: every concurrently running guest observes the tick.
+        // Sustained workloads piled up thousands of sleeping threads and
+        // eventually exhausted the OS thread limit, and any fresh guest
+        // that happened to start right after a stale watchdog fired would
+        // trap on `Interrupt` even though it had used no wall-clock time.
+        //
+        // Instead, the watchdog blocks in `park_timeout(deadline - now)`
+        // and is woken via `Thread::unpark` the moment the main thread
+        // finishes. It re-checks the done flag on wake-up to distinguish
+        // "guest completed, go home" from "spurious wake-up, keep waiting".
+        // On the happy path the watchdog wakes within microseconds rather
+        // than a 50 ms poll interval, so a 5 ms sandbox call stays a 5 ms
+        // sandbox call. On the timeout path it sleeps out the remaining
+        // deadline exactly as before and trips the epoch.
+        //
+        // An RAII guard signals the flag and joins the thread on every
+        // early-return path (`?`, trap, ABI error, panic) so no error-path
+        // leak slips past either.
         store.set_epoch_deadline(1);
         let engine_clone = engine.clone();
         let timeout = config.timeout_secs.unwrap_or(30);
-        let _watchdog = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(timeout));
-            engine_clone.increment_epoch();
+        let watchdog_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watchdog_done_for_thread = std::sync::Arc::clone(&watchdog_done);
+        let watchdog = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+            loop {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    // Wall-clock budget blown — trip the epoch so the
+                    // running guest traps on `Interrupt` on its next
+                    // epoch check.
+                    engine_clone.increment_epoch();
+                    return;
+                }
+                if watchdog_done_for_thread.load(std::sync::atomic::Ordering::Acquire) {
+                    // Main thread finished cleanly; leave the engine
+                    // untouched so concurrent stores aren't falsely
+                    // interrupted.
+                    return;
+                }
+                // park_timeout wakes on Thread::unpark (sent by the main
+                // thread via the RAII guard below) or when the budget
+                // expires, whichever comes first. The loop then re-checks
+                // the done flag — park/unpark is allowed to return
+                // spuriously, so the flag is the source of truth.
+                std::thread::park_timeout(deadline - now);
+            }
         });
+        struct WatchdogGuard {
+            done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            handle: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for WatchdogGuard {
+            fn drop(&mut self) {
+                // Flip the flag first (Release), then unpark so the
+                // watchdog wakes, re-reads the flag under Acquire, and
+                // observes the store-happens-before-load ordering. Finally
+                // join so the OS thread is actually reclaimed before we
+                // return to the caller — otherwise a tight invocation
+                // loop would still grow the thread table, just more
+                // slowly.
+                self.done.store(true, std::sync::atomic::Ordering::Release);
+                if let Some(h) = self.handle.take() {
+                    h.thread().unpark();
+                    let _ = h.join();
+                }
+            }
+        }
+        let _watchdog_guard = WatchdogGuard {
+            done: watchdog_done,
+            handle: Some(watchdog),
+        };
 
         // Build linker with host function imports
         let mut linker = Linker::new(engine);
