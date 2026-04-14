@@ -156,10 +156,18 @@ jobs:
               (response) => response.data.check_runs,
             );
 
-            const hasFailure = allCheckRuns.some(
+            // Exclude this workflow's own check runs so a failure in label
+            // management (e.g. rate limit) doesn't mark the PR as ci-failed.
+            const SELF_JOBS = new Set([
+              'Conflict Check', 'CI Status Check', 'PR Size',
+              'Docs/CI Check', 'Review State',
+            ]);
+            const externalRuns = allCheckRuns.filter(cr => !SELF_JOBS.has(cr.name));
+
+            const hasFailure = externalRuns.some(
               cr => cr.conclusion === 'failure' || cr.conclusion === 'timed_out'
             );
-            const allDone = allCheckRuns.every(
+            const allDone = externalRuns.every(
               cr => cr.status === 'completed'
             );
 
