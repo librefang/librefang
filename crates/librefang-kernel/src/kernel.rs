@@ -3252,8 +3252,38 @@ system_prompt = "You are a helpful assistant."
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_full(agent_id, message, handle, None, Some(sender), None)
+        self.send_message_full(agent_id, message, handle, None, Some(sender), None, None)
             .await
+    }
+
+    /// Send a message with both sender identity context and a per-call
+    /// deep-thinking override.
+    ///
+    /// Used by HTTP / channel paths that already track sender metadata but
+    /// also need to honour a per-message thinking flag (e.g. the chat UI's
+    /// deep-thinking toggle).
+    pub async fn send_message_with_sender_context_and_thinking(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+        thinking_override: Option<bool>,
+    ) -> KernelResult<AgentLoopResult> {
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+        self.send_message_full(
+            agent_id,
+            message,
+            handle,
+            None,
+            Some(sender),
+            None,
+            thinking_override,
+        )
+        .await
     }
 
     /// Send a multimodal message with sender identity context from a channel.
@@ -3269,8 +3299,16 @@ system_prompt = "You are a helpful assistant."
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_full(agent_id, message, handle, Some(blocks), Some(sender), None)
-            .await
+        self.send_message_full(
+            agent_id,
+            message,
+            handle,
+            Some(blocks),
+            Some(sender),
+            None,
+            None,
+        )
+        .await
     }
 
     /// Send a message with an optional kernel handle for inter-agent tools.
@@ -3280,8 +3318,33 @@ system_prompt = "You are a helpful assistant."
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
     ) -> KernelResult<AgentLoopResult> {
-        self.send_message_full(agent_id, message, kernel_handle, None, None, None)
+        self.send_message_full(agent_id, message, kernel_handle, None, None, None, None)
             .await
+    }
+
+    /// Send a message with a per-call deep-thinking override.
+    ///
+    /// `thinking_override`:
+    /// - `Some(true)` — force thinking on (use default budget if manifest has none)
+    /// - `Some(false)` — force thinking off (clear any manifest/global setting)
+    /// - `None` — use the manifest/global default
+    pub async fn send_message_with_thinking_override(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        thinking_override: Option<bool>,
+    ) -> KernelResult<AgentLoopResult> {
+        self.send_message_full(
+            agent_id,
+            message,
+            kernel_handle,
+            None,
+            None,
+            None,
+            thinking_override,
+        )
+        .await
     }
 
     /// Send a message with optional content blocks and an optional kernel handle.
@@ -3300,8 +3363,16 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
     ) -> KernelResult<AgentLoopResult> {
-        self.send_message_full(agent_id, message, kernel_handle, content_blocks, None, None)
-            .await
+        self.send_message_full(
+            agent_id,
+            message,
+            kernel_handle,
+            content_blocks,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Send a message with a session mode override.
@@ -3319,8 +3390,16 @@ system_prompt = "You are a helpful assistant."
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_full(agent_id, message, handle, None, None, session_mode_override)
-            .await
+        self.send_message_full(
+            agent_id,
+            message,
+            handle,
+            None,
+            None,
+            session_mode_override,
+            None,
+        )
+        .await
     }
 
     /// Send an ephemeral "side question" to an agent (`/btw` command).
@@ -3547,6 +3626,7 @@ system_prompt = "You are a helpful assistant."
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
+        thinking_override: Option<bool>,
     ) -> KernelResult<AgentLoopResult> {
         // Acquire a shared read lock on the config reload barrier.
         // This is non-blocking under normal operation (many readers proceed in
@@ -3603,6 +3683,7 @@ system_prompt = "You are a helpful assistant."
                     content_blocks,
                     sender_context,
                     session_mode_override,
+                    thinking_override,
                 )
                 .await
             }
@@ -3730,7 +3811,7 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        self.send_message_streaming_resolved(agent_id, message, kernel_handle, None)
+        self.send_message_streaming_resolved(agent_id, message, kernel_handle, None, None)
             .await
     }
 
@@ -3745,8 +3826,33 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        self.send_message_streaming_resolved(agent_id, message, kernel_handle, Some(sender))
+        self.send_message_streaming_resolved(agent_id, message, kernel_handle, Some(sender), None)
             .await
+    }
+
+    /// Streaming entry point with per-call deep-thinking override.
+    ///
+    /// Used by the WebUI chat route so users can flip deep thinking on/off
+    /// per message from the UI.
+    pub async fn send_message_streaming_with_sender_context_routing_and_thinking(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender: &SenderContext,
+        thinking_override: Option<bool>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.send_message_streaming_resolved(
+            agent_id,
+            message,
+            kernel_handle,
+            Some(sender),
+            thinking_override,
+        )
+        .await
     }
 
     /// Send a message to an agent with streaming responses.
@@ -3766,7 +3872,7 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        self.send_message_streaming_with_sender(agent_id, message, kernel_handle, None)
+        self.send_message_streaming_with_sender(agent_id, message, kernel_handle, None, None)
     }
 
     fn send_message_streaming_with_sender(
@@ -3775,6 +3881,7 @@ system_prompt = "You are a helpful assistant."
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         sender_context: Option<&SenderContext>,
+        thinking_override: Option<bool>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -3924,6 +4031,9 @@ system_prompt = "You are a helpful assistant."
         if manifest.thinking.is_none() {
             manifest.thinking = cfg.thinking.clone();
         }
+
+        // Apply per-call thinking override (from API request).
+        apply_thinking_override(&mut manifest, thinking_override);
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
@@ -4619,6 +4729,7 @@ system_prompt = "You are a helpful assistant."
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         sender_context: Option<&SenderContext>,
+        thinking_override: Option<bool>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -4631,6 +4742,7 @@ system_prompt = "You are a helpful assistant."
             message,
             kernel_handle,
             sender_context,
+            thinking_override,
         )
     }
 
@@ -4955,6 +5067,7 @@ system_prompt = "You are a helpful assistant."
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
+        thinking_override: Option<bool>,
     ) -> KernelResult<AgentLoopResult> {
         let cfg = self.config.load_full();
         // Check metering quota before starting
@@ -5043,6 +5156,9 @@ system_prompt = "You are a helpful assistant."
         if manifest.thinking.is_none() {
             manifest.thinking = cfg.thinking.clone();
         }
+
+        // Apply per-call thinking override (from API request).
+        apply_thinking_override(&mut manifest, thinking_override);
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
@@ -8357,6 +8473,7 @@ system_prompt = "You are a helpful assistant."
                                         None,
                                         Some(&cron_sender),
                                         None,
+                                        None,
                                     ),
                                 )
                                 .await
@@ -10207,6 +10324,30 @@ fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capability> {
 ///
 /// When the global budget config specifies limits and the agent still has
 /// the built-in defaults, override them so agents respect the user's config.
+/// Apply a per-call deep-thinking override to a manifest clone.
+///
+/// - `Some(true)` — ensure the manifest has a `ThinkingConfig` (inserting the
+///   default one if previously empty) so the driver enables reasoning.
+/// - `Some(false)` — clear `manifest.thinking` so the driver does not request
+///   thinking regardless of the manifest/global default.
+/// - `None` — leave the manifest untouched.
+fn apply_thinking_override(
+    manifest: &mut librefang_types::agent::AgentManifest,
+    thinking_override: Option<bool>,
+) {
+    match thinking_override {
+        Some(true) => {
+            if manifest.thinking.is_none() {
+                manifest.thinking = Some(librefang_types::config::ThinkingConfig::default());
+            }
+        }
+        Some(false) => {
+            manifest.thinking = None;
+        }
+        None => {}
+    }
+}
+
 fn apply_budget_defaults(
     budget: &librefang_types::config::BudgetConfig,
     resources: &mut ResourceQuota,
@@ -13691,5 +13832,56 @@ mod tests {
         // Without peer_id: key is unchanged
         assert_eq!(peer_scoped_key("car", None), "car");
         assert_eq!(peer_scoped_key("global_setting", None), "global_setting");
+    }
+
+    #[test]
+    fn test_apply_thinking_override_none_leaves_manifest_untouched() {
+        let mut manifest = librefang_types::agent::AgentManifest {
+            thinking: Some(librefang_types::config::ThinkingConfig {
+                budget_tokens: 4242,
+                stream_thinking: true,
+            }),
+            ..Default::default()
+        };
+        apply_thinking_override(&mut manifest, None);
+        let cfg = manifest.thinking.as_ref().expect("thinking preserved");
+        assert_eq!(cfg.budget_tokens, 4242);
+        assert!(cfg.stream_thinking);
+    }
+
+    #[test]
+    fn test_apply_thinking_override_force_off_clears_thinking() {
+        let mut manifest = librefang_types::agent::AgentManifest {
+            thinking: Some(librefang_types::config::ThinkingConfig::default()),
+            ..Default::default()
+        };
+        apply_thinking_override(&mut manifest, Some(false));
+        assert!(manifest.thinking.is_none());
+    }
+
+    #[test]
+    fn test_apply_thinking_override_force_on_inserts_default() {
+        let mut manifest = librefang_types::agent::AgentManifest::default();
+        assert!(manifest.thinking.is_none());
+        apply_thinking_override(&mut manifest, Some(true));
+        let cfg = manifest.thinking.as_ref().expect("thinking inserted");
+        assert_eq!(
+            cfg.budget_tokens,
+            librefang_types::config::ThinkingConfig::default().budget_tokens
+        );
+    }
+
+    #[test]
+    fn test_apply_thinking_override_force_on_keeps_existing_budget() {
+        let mut manifest = librefang_types::agent::AgentManifest {
+            thinking: Some(librefang_types::config::ThinkingConfig {
+                budget_tokens: 1234,
+                stream_thinking: false,
+            }),
+            ..Default::default()
+        };
+        apply_thinking_override(&mut manifest, Some(true));
+        let cfg = manifest.thinking.as_ref().expect("thinking preserved");
+        assert_eq!(cfg.budget_tokens, 1234);
     }
 }

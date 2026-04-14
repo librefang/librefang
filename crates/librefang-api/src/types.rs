@@ -180,6 +180,18 @@ pub struct MessageRequest {
     /// loading or saving session history — the real conversation is untouched.
     #[serde(default)]
     pub ephemeral: bool,
+    /// Per-call deep-thinking override.
+    ///
+    /// - `Some(true)`: force thinking on (even if the manifest has it off)
+    /// - `Some(false)`: force thinking off (even if the manifest has it on)
+    /// - `None`: use the manifest/global default
+    #[serde(default)]
+    pub thinking: Option<bool>,
+    /// Whether the response should include the model's thinking/reasoning trace.
+    ///
+    /// `None` defaults to `true` when thinking content is available.
+    #[serde(default)]
+    pub show_thinking: Option<bool>,
 }
 
 /// Response from sending a message.
@@ -209,6 +221,10 @@ pub struct MessageResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schema(value_type = Vec<serde_json::Value>)]
     pub memory_conflicts: Vec<librefang_types::memory::MemoryConflict>,
+    /// Combined thinking/reasoning trace from the model, when the caller
+    /// requested `show_thinking = true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 /// Request to inject a message into a running agent's tool-execution loop (#956).

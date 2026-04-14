@@ -9,7 +9,7 @@ import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgent
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -38,6 +38,10 @@ interface ChatMessage {
   memories_saved?: string[];
   memories_used?: string[];
   tools?: ChatToolCall[];
+  /** Accumulated reasoning trace streamed via `thinking_delta` events. */
+  thinking?: string;
+  /** Whether the thinking block is collapsed in the UI. */
+  thinkingCollapsed?: boolean;
 }
 
 // Slash commands
@@ -174,6 +178,8 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
   }, [agents]);
   const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
+  const deepThinking = useUIStore((s) => s.deepThinking);
+  const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
 
   // Track the currently-viewed agent in a ref so async handlers registered
   // during a previous render can tell whether their target is still on screen.
@@ -372,7 +378,10 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     // Helper: send via HTTP (used as primary fallback and WS drop recovery)
     const sendViaHttp = async () => {
       try {
-        const response = await sendAgentMessage(sendAgentId, trimmed);
+        const response = await sendAgentMessage(sendAgentId, trimmed, {
+          thinking: deepThinking,
+          show_thinking: showThinkingProcess,
+        });
         const fullContent = response.response || "";
         updateAgentMessages(sendAgentId, prev => prev.map(m =>
           m.id === botMsg.id
@@ -382,6 +391,8 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                 cost_usd: response.cost_usd,
                 memories_saved: response.memories_saved,
                 memories_used: response.memories_used,
+                thinking: response.thinking ?? m.thinking,
+                thinkingCollapsed: m.thinkingCollapsed ?? true,
               }
             : m
         ));
@@ -434,6 +445,17 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               const chunk = data.content || "";
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, content: m.content + chunk, error: undefined } : m
+              ));
+            } else if (data.type === "thinking_delta") {
+              const chunk = data.content || "";
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
+                m.id === botMsg.id
+                  ? {
+                      ...m,
+                      thinking: (m.thinking ?? "") + chunk,
+                      thinkingCollapsed: m.thinkingCollapsed ?? false,
+                    }
+                  : m
               ));
             } else if (data.type === "typing") {
               if (data.state === "stop") {
@@ -511,6 +533,8 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                       cost_usd: data.cost_usd,
                       memories_saved: data.memories_saved,
                       memories_used: data.memories_used,
+                      thinking: typeof data.thinking === "string" ? data.thinking : m.thinking,
+                      thinkingCollapsed: m.thinkingCollapsed ?? true,
                     }
                   : m
               ));
@@ -534,7 +558,12 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         };
 
         ws.current.addEventListener("message", handleMessage);
-        ws.current.send(JSON.stringify({ type: "message", content: trimmed }));
+        ws.current.send(JSON.stringify({
+          type: "message",
+          content: trimmed,
+          thinking: deepThinking,
+          show_thinking: showThinkingProcess,
+        }));
 
         // Start inactivity timeout — resets on every received event
         resetFallbackTimer();
@@ -547,7 +576,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [agentId, agents, wsConnected, ws]);
+  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess]);
 
   const clearHistory = useCallback(() => setMessages([]), []);
 
@@ -569,6 +598,7 @@ interface MessageBubbleProps {
 const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
+  const [thinkingExpanded, setThinkingExpanded] = useState(() => !(message.thinkingCollapsed ?? false));
 
   if (message.role === "system") {
     return (
@@ -605,6 +635,28 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             {isUser ? t("chat.you") : t("chat.bot")}
           </span>
         </div>
+
+        {/* Thinking trace — collapsible, above tools */}
+        {!isUser && message.thinking && message.thinking.trim().length > 0 && (
+          <div className="w-full mb-1.5">
+            <button
+              type="button"
+              onClick={() => setThinkingExpanded((v) => !v)}
+              className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border-subtle bg-surface text-[10px] font-medium text-text-dim hover:text-text hover:border-border transition-colors"
+            >
+              <Brain className="h-3 w-3" />
+              <span>{t("chat.thinking_label")}</span>
+              <ChevronDown
+                className={`h-3 w-3 transition-transform ${thinkingExpanded ? "rotate-180" : ""}`}
+              />
+            </button>
+            {thinkingExpanded && (
+              <div className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim whitespace-pre-wrap break-words">
+                {message.thinking}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Tool calls — rendered above text for assistant messages */}
         {!isUser && message.tools && message.tools.length > 0 && (
@@ -735,6 +787,10 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const deepThinking = useUIStore((s) => s.deepThinking);
+  const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
+  const setDeepThinking = useUIStore((s) => s.setDeepThinking);
+  const setShowThinkingProcess = useUIStore((s) => s.setShowThinkingProcess);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -778,6 +834,35 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
           ))}
         </div>
       )}
+      {/* Thinking mode toggles */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          type="button"
+          onClick={() => setDeepThinking(!deepThinking)}
+          title={t("chat.deep_thinking_hint")}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-medium transition-colors ${
+            deepThinking
+              ? "border-brand/40 bg-brand/10 text-brand"
+              : "border-border-subtle bg-surface text-text-dim hover:text-text hover:border-border"
+          }`}
+        >
+          <Brain className="h-3 w-3" />
+          <span>{t("chat.deep_thinking")}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowThinkingProcess(!showThinkingProcess)}
+          title={t("chat.show_thinking_hint")}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-medium transition-colors ${
+            showThinkingProcess
+              ? "border-brand/40 bg-brand/10 text-brand"
+              : "border-border-subtle bg-surface text-text-dim hover:text-text hover:border-border"
+          }`}
+        >
+          {showThinkingProcess ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
+          <span>{t("chat.show_thinking")}</span>
+        </button>
+      </div>
       <div className="flex gap-2 sm:gap-3 items-end">
         <div className="flex-1">
           <textarea

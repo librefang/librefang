@@ -1176,6 +1176,9 @@ pub async fn send_message(
         (req.message.clone(), false)
     };
 
+    let thinking_override = req.thinking;
+    let show_thinking = req.show_thinking.unwrap_or(true);
+
     let result = if is_ephemeral {
         // Ephemeral "side question" — use a temp session, no persistence
         state
@@ -1187,14 +1190,24 @@ pub async fn send_message(
         if let Some(sender) = sender_context.as_ref() {
             state
                 .kernel
-                .send_message_with_sender_context(agent_id, &effective_message, sender)
+                .send_message_with_sender_context_and_thinking(
+                    agent_id,
+                    &effective_message,
+                    sender,
+                    thinking_override,
+                )
                 .await
         } else {
             let kernel_handle: Arc<dyn KernelHandle> =
                 state.kernel.clone() as Arc<dyn KernelHandle>;
             state
                 .kernel
-                .send_message_with_handle(agent_id, &effective_message, Some(kernel_handle))
+                .send_message_with_thinking_override(
+                    agent_id,
+                    &effective_message,
+                    Some(kernel_handle),
+                    thinking_override,
+                )
                 .await
         }
     };
@@ -1218,7 +1231,13 @@ pub async fn send_message(
                 );
             }
 
-            // Strip <think>...</think> blocks from model output
+            // Extract reasoning trace (optional) and strip <think>...</think>
+            // blocks from the final model output.
+            let thinking_trace = if show_thinking {
+                crate::ws::extract_think_content(&result.response)
+            } else {
+                None
+            };
             let cleaned = crate::ws::strip_think_tags(&result.response);
 
             // Guard: ensure we never return an empty response to the client
@@ -1244,6 +1263,7 @@ pub async fn send_message(
                     memories_saved: result.memories_saved,
                     memories_used: result.memories_used,
                     memory_conflicts: result.memory_conflicts,
+                    thinking: thinking_trace,
                 })),
             )
         }
@@ -4700,6 +4720,8 @@ mod tests {
             is_group: false,
             was_mentioned: false,
             ephemeral: false,
+            thinking: None,
+            show_thinking: None,
         };
         assert!(request_sender_context(&req).is_none());
     }
@@ -4715,6 +4737,8 @@ mod tests {
             is_group: false,
             was_mentioned: false,
             ephemeral: false,
+            thinking: None,
+            show_thinking: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.user_id, "u-123");
@@ -4733,6 +4757,8 @@ mod tests {
             is_group: true,
             was_mentioned: true,
             ephemeral: false,
+            thinking: None,
+            show_thinking: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert!(sender.is_group);
