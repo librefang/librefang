@@ -32,7 +32,7 @@ export function SchedulerPage() {
   const [message, setMessage] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<{ type: "schedule" | "trigger"; id: string } | null>(null);
 
-  const agentsQuery = useQuery({ queryKey: ["agents", "list", "scheduler"], queryFn: listAgents });
+  const agentsQuery = useQuery({ queryKey: ["agents", "list", "scheduler"], queryFn: () => listAgents() });
   const schedulesQuery = useQuery({ queryKey: ["schedules", "list"], queryFn: listSchedules, refetchInterval: REFRESH_MS });
   const triggersQuery = useQuery({ queryKey: ["triggers", "list"], queryFn: listTriggers });
   const workflowsQuery = useQuery({ queryKey: ["workflows", "list", "scheduler"], queryFn: listWorkflows });
