@@ -13809,11 +13809,13 @@ mod tests {
 
     #[test]
     fn test_apply_thinking_override_none_leaves_manifest_untouched() {
-        let mut manifest = librefang_types::agent::AgentManifest::default();
-        manifest.thinking = Some(librefang_types::config::ThinkingConfig {
-            budget_tokens: 4242,
-            stream_thinking: true,
-        });
+        let mut manifest = librefang_types::agent::AgentManifest {
+            thinking: Some(librefang_types::config::ThinkingConfig {
+                budget_tokens: 4242,
+                stream_thinking: true,
+            }),
+            ..Default::default()
+        };
         apply_thinking_override(&mut manifest, None);
         let cfg = manifest.thinking.as_ref().expect("thinking preserved");
         assert_eq!(cfg.budget_tokens, 4242);
@@ -13822,8 +13824,10 @@ mod tests {
 
     #[test]
     fn test_apply_thinking_override_force_off_clears_thinking() {
-        let mut manifest = librefang_types::agent::AgentManifest::default();
-        manifest.thinking = Some(librefang_types::config::ThinkingConfig::default());
+        let mut manifest = librefang_types::agent::AgentManifest {
+            thinking: Some(librefang_types::config::ThinkingConfig::default()),
+            ..Default::default()
+        };
         apply_thinking_override(&mut manifest, Some(false));
         assert!(manifest.thinking.is_none());
     }
@@ -13842,11 +13846,13 @@ mod tests {
 
     #[test]
     fn test_apply_thinking_override_force_on_keeps_existing_budget() {
-        let mut manifest = librefang_types::agent::AgentManifest::default();
-        manifest.thinking = Some(librefang_types::config::ThinkingConfig {
-            budget_tokens: 1234,
-            stream_thinking: false,
-        });
+        let mut manifest = librefang_types::agent::AgentManifest {
+            thinking: Some(librefang_types::config::ThinkingConfig {
+                budget_tokens: 1234,
+                stream_thinking: false,
+            }),
+            ..Default::default()
+        };
         apply_thinking_override(&mut manifest, Some(true));
         let cfg = manifest.thinking.as_ref().expect("thinking preserved");
         assert_eq!(cfg.budget_tokens, 1234);
