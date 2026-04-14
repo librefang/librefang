@@ -1390,10 +1390,17 @@ impl LibreFangKernel {
                 config.default_model.provider = provider.to_string();
                 config.default_model.model = model;
                 config.default_model.api_key_env = env_var.to_string();
-            } else {
-                warn!("No API keys detected in environment — defaulting to ollama (local)");
+            } else if is_ollama_reachable() {
+                // Ollama is running locally — use the catalog's default model, not a hardcoded one.
+                let model = librefang_runtime::model_catalog::ModelCatalog::default()
+                    .default_model_for_provider("ollama")
+                    .unwrap_or_else(|| "llama3.2".to_string());
+                info!(
+                    model = %model,
+                    "No API keys detected — Ollama is running locally, using as default"
+                );
                 config.default_model.provider = "ollama".to_string();
-                config.default_model.model = "llama3.2".to_string();
+                config.default_model.model = model;
                 config.default_model.api_key_env = String::new();
                 if !config.provider_urls.contains_key("ollama") {
                     config.provider_urls.insert(
@@ -1401,6 +1408,11 @@ impl LibreFangKernel {
                         "http://localhost:11434/v1".to_string(),
                     );
                 }
+            } else {
+                warn!(
+                    "No API keys detected and Ollama is not running. \
+                     Set an API key or start Ollama to enable LLM features."
+                );
             }
         }
 

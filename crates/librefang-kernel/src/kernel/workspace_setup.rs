@@ -11,6 +11,15 @@ use librefang_types::error::LibreFangError;
 use std::path::{Component, Path, PathBuf};
 use tracing::info;
 
+/// Check if Ollama is reachable on localhost:11434 (TCP probe with 500ms timeout).
+pub(super) fn is_ollama_reachable() -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], 11434)),
+        std::time::Duration::from_millis(500),
+    )
+    .is_ok()
+}
+
 /// Ensure workspaces directory structure exists.
 pub(super) fn ensure_workspaces_layout(home_dir: &Path) -> KernelResult<()> {
     let workspaces_dir = home_dir.join("workspaces");
