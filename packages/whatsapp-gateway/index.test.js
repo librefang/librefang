@@ -29,6 +29,10 @@ const {
   resolveLidProactively,
   checkHeartbeat,
   computeBackoffDelay,
+  isSilentResponse,
+  stripNoReply,
+  createHoldbackAccumulator,
+  SILENT_HOLDBACK_MIN_CHARS,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -656,4 +660,164 @@ after(() => {
   } catch {}
   // Force exit — SQLite and setInterval timers keep the event loop alive
   setTimeout(() => process.exit(0), 100);
+});
+
+// ---------------------------------------------------------------------------
+// silent_response — gateway-side canonical detector (Phase 2 §B, OB-02/03/07)
+// ---------------------------------------------------------------------------
+describe('isSilentResponse', () => {
+  it('matches the canonical NO_REPLY token', () => {
+    assert.equal(isSilentResponse('NO_REPLY'), true);
+    assert.equal(isSilentResponse('no_reply'), true);
+    assert.equal(isSilentResponse('  NO_REPLY  '), true);
+    assert.equal(isSilentResponse('NO_REPLY.'), true);
+    assert.equal(isSilentResponse('NO_REPLY\n'), true);
+  });
+
+  it('matches the bracketed [no reply needed] form', () => {
+    assert.equal(isSilentResponse('[no reply needed]'), true);
+    assert.equal(isSilentResponse('[NO REPLY NEEDED]'), true);
+    assert.equal(isSilentResponse('[no reply needed].'), true);
+    assert.equal(isSilentResponse('no reply needed'), true);
+  });
+
+  it('matches sentinels glued to emojis', () => {
+    assert.equal(isSilentResponse('NO_REPLY🎩'), true);
+    assert.equal(isSilentResponse('NO_REPLY 😐'), true);
+  });
+
+  it('matches sentinels at the trailing position after context', () => {
+    assert.equal(isSilentResponse('Tutto bene, Signore.\nNO_REPLY'), true);
+    assert.equal(isSilentResponse('Some context. [no reply needed]'), true);
+    assert.equal(isSilentResponse('...a Sua disposizione. 🎩NO_REPLY'), true);
+  });
+
+  it('does not match empty / whitespace-only / normal text', () => {
+    assert.equal(isSilentResponse(''), false);
+    assert.equal(isSilentResponse('   '), false);
+    assert.equal(isSilentResponse('Ok'), false);
+    assert.equal(isSilentResponse('Confermato, rispondo dopo'), false);
+  });
+
+  it('respects word boundaries', () => {
+    assert.equal(isSilentResponse('NO_REPLYING'), false);
+    assert.equal(isSilentResponse('noreply@example.com'), false);
+  });
+
+  it('does not flag embedded substrings inside real replies', () => {
+    assert.equal(isSilentResponse('the NO_REPLY sentinel is documented'), false);
+    assert.equal(isSilentResponse('Ok NO_REPLY received but here is your real answer'), false);
+  });
+
+  it('rejects non-string inputs gracefully', () => {
+    assert.equal(isSilentResponse(null), false);
+    assert.equal(isSilentResponse(undefined), false);
+    assert.equal(isSilentResponse(42), false);
+  });
+});
+
+describe('stripNoReply', () => {
+  it('returns empty string for a whole-message sentinel', () => {
+    assert.equal(stripNoReply('NO_REPLY'), '');
+    assert.equal(stripNoReply('  NO_REPLY  '), '');
+    assert.equal(stripNoReply('[no reply needed]'), '');
+  });
+
+  it('returns the text unchanged when not silent', () => {
+    assert.equal(stripNoReply('Hello world'), 'Hello world');
+    assert.equal(stripNoReply(''), '');
+  });
+
+  it('returns trailing-sentinel text as empty (legacy contract)', () => {
+    // Trailing sentinel collapses the whole message to silent under V2.
+    assert.equal(stripNoReply('Tutto bene. NO_REPLY'), '');
+  });
+});
+
+describe('createHoldbackAccumulator (OB-07 streaming hold-back)', () => {
+  it('NEVER flushes when stream produces only NO_REPLY', async () => {
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    await acc.push('NO_REPLY');
+    const result = await acc.end();
+    assert.equal(flushes.length, 0, 'sock.sendMessage must not be called');
+    assert.equal(result.silent, true);
+    assert.equal(result.flushed, false);
+  });
+
+  it('NEVER flushes for the canonical OB-07 case ["Ok ", "[no reply", " needed]"]', async () => {
+    // This is the user-directive critical case: a streaming source emits
+    // three deltas that, only when concatenated, reveal a sentinel. The
+    // hold-back must keep deferring until end() and then classify silent.
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    await acc.push('Ok ');
+    await acc.push('[no reply');
+    await acc.push(' needed]');
+    const result = await acc.end();
+    assert.equal(flushes.length, 0, 'sock.sendMessage must NEVER be called');
+    assert.equal(result.silent, true);
+  });
+
+  it('flushes legitimate streaming responses once threshold is crossed', async () => {
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    await acc.push('Hello ');
+    await acc.push('world, how are you doing today?');
+    const result = await acc.end();
+    assert.ok(flushes.length >= 1, 'expected at least one flush for non-silent text');
+    assert.equal(result.flushed, true);
+    assert.equal(result.silent, false);
+    // First flush should contain the cumulative buffer at the moment the
+    // threshold was crossed (everything seen so far).
+    assert.ok(flushes[0].includes('Hello'));
+    assert.ok(flushes[0].includes('world'));
+  });
+
+  it('forwards subsequent deltas immediately after the first flush', async () => {
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    await acc.push('This is a long enough chunk to immediately flush past the threshold.');
+    await acc.push(' more');
+    await acc.push(' deltas');
+    await acc.end();
+    assert.equal(flushes.length, 3);
+    assert.equal(flushes[1], ' more');
+    assert.equal(flushes[2], ' deltas');
+  });
+
+  it('handles many empty deltas followed by a real message', async () => {
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    for (let i = 0; i < 10; i++) await acc.push('');
+    await acc.push('Ok sure, here is a sufficiently long real reply.');
+    const result = await acc.end();
+    assert.equal(result.silent, false);
+    assert.ok(flushes.length >= 1);
+  });
+
+  it('treats a short non-sentinel response as silent at end (held forever)', async () => {
+    // Edge case: a 2-char real response like "Ok" never crosses the
+    // threshold, so the hold-back classifier falls through to end(),
+    // which checks isSilentResponse — "Ok" is NOT silent, so end()
+    // flushes the held buffer.
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    await acc.push('Ok');
+    const result = await acc.end();
+    assert.equal(result.silent, false);
+    assert.equal(flushes.length, 1);
+    assert.equal(flushes[0], 'Ok');
+  });
+
+  it('throws when onFlush is missing', () => {
+    assert.throws(() => createHoldbackAccumulator({}), /onFlush/);
+  });
+
+  it('exposes buffered + hasFlushed introspection helpers', async () => {
+    const acc = createHoldbackAccumulator({ onFlush: () => {} });
+    await acc.push('partial');
+    assert.equal(acc.buffered, 'partial');
+    assert.equal(acc.hasFlushed, false);
+  });
 });
