@@ -16,6 +16,13 @@
   --color-surface-hover: var(--bg-surface-hover);
   --color-border-subtle: var(--border-color);
   --color-text-dim: var(--text-muted);
+
+  /* Custom breakpoints for wide displays.
+     Tailwind v4 defaults stop at 2xl (1536px), which leaves 2K / 4K monitors
+     stuck at the same density as a 1536px laptop. These let card grids go
+     5-wide on QHD (1920+) and 6-wide on UHD / 4K (2560+). */
+  --breakpoint-3xl: 1920px;
+  --breakpoint-4xl: 2560px;
 }
 
 :root {

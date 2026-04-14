@@ -623,7 +623,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 
   return (
     <div className={`flex animate-message-in ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className={`flex flex-col w-fit max-w-[90%] sm:max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
           <div className={`h-7 w-7 rounded-lg flex items-center justify-center ${
@@ -669,7 +669,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 
         {/* Message content */}
         {(displayContent || isUser || message.isStreaming || message.error) && (
-        <div className={`relative px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm ${
+        <div className={`relative px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm min-w-0 [overflow-wrap:anywhere] ${
           isUser
             ? "bg-brand text-white rounded-tr-md"
             : message.error
@@ -1612,7 +1612,8 @@ export function ChatPage() {
           )}
 
           {/* Message area */}
-          <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-4 sm:space-y-6 scrollbar-thin">
+          <div className="flex-1 overflow-y-auto p-3 sm:p-6 scrollbar-thin">
+            <div className="w-full space-y-4 sm:space-y-6">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
                 <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-main/50" />
@@ -1655,6 +1656,7 @@ export function ChatPage() {
                 <div ref={messagesEndRef} />
               </div>
             )}
+            </div>
           </div>
 
           {/* Input area */}

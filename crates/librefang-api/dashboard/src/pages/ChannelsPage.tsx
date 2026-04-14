@@ -796,7 +796,7 @@ export function ChannelsPage() {
       </div>
 
       {channelsQuery.isLoading ? (
-        <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-2"}>
+        <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
           {[1, 2, 3].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : channels.length === 0 ? (
@@ -819,7 +819,7 @@ export function ChannelsPage() {
             )}
           </div>
 
-          <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-2"}>
+          <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
             {paginatedChannels.map((c) => (
               <ChannelCard
                 key={c.name}
