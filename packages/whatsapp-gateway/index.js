@@ -108,6 +108,13 @@ function dbSaveMessage({ id, jid, senderJid, pushName, phone, text, direction, t
 /**
  * Mark a message as processed (1) or failed (-1).
  */
+// CS-01 iter 2: a catchup journal row with null/empty jid is orphan — cannot
+// be scoped to any WhatsApp chat. Pure predicate so tests can exercise it
+// without spinning up the full catchup loop / socket / DB.
+function shouldSkipCatchupForMissingJid(msg) {
+  return !msg || !msg.jid;
+}
+
 function dbMarkProcessed(msgId, status) {
   try {
     stmtMarkProcessed.run(status, msgId);
@@ -1693,6 +1700,16 @@ function buildRelaySystemInstruction() {
 const MAX_FORWARD_RETRIES = 1;
 
 async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false, chatJid = '' } = {}, retryCount = 0) {
+  // CS-01: fail-fast — refuse to forward with an empty chatJid. A bare
+  // `whatsapp` channel loses per-conversation session isolation; the kernel
+  // would merge unrelated chats into the same session.
+  if (!chatJid) {
+    const err = new Error(`[gateway] chatJid empty — refusing to forward to bare whatsapp channel (phone=${phone} pushName=${pushName} isGroup=${isGroup})`);
+    err.code = 'CHATJID_EMPTY';
+    console.error(err.message);
+    throw err;
+  }
+
   // Resolve agent UUID if not cached (or if invalidated on reconnect)
   if (!cachedAgentId) {
     try {
@@ -1707,7 +1724,8 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
 
   // Per-conversation session isolation: include chat JID in channel_type
   // so the kernel creates separate sessions for each WhatsApp conversation.
-  const channelType = chatJid ? `whatsapp:${chatJid}` : 'whatsapp';
+  // CS-01: chatJid has already been validated non-empty at function entry.
+  const channelType = `whatsapp:${chatJid}`;
   const payload = {
     message: fullMessage,
     channel_type: channelType,
@@ -1812,6 +1830,15 @@ const STREAMING_EDIT_INTERVAL_MS = 2000;
  * @returns {Promise<string>} complete response
  */
 async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress, chatJid = '', { isGroup = false, wasMentioned = false } = {}) {
+  // CS-01: fail-fast — refuse to forward with an empty chatJid (same
+  // rationale as `forwardToLibreFang`). Keeps streaming parity.
+  if (!chatJid) {
+    const err = new Error(`[gateway] chatJid empty — refusing to forward to bare whatsapp channel (phone=${phone} pushName=${pushName} isGroup=${isGroup})`);
+    err.code = 'CHATJID_EMPTY';
+    console.error(err.message);
+    throw err;
+  }
+
   // Resolve agent UUID if not cached
   if (!cachedAgentId) {
     try {
@@ -1824,7 +1851,8 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
 
   const fullMessage = systemPrefix ? systemPrefix + text : text;
 
-  const channelType = chatJid ? `whatsapp:${chatJid}` : 'whatsapp';
+  // CS-01: chatJid has already been validated non-empty at function entry.
+  const channelType = `whatsapp:${chatJid}`;
   const payload = {
     message: fullMessage,
     channel_type: channelType,
@@ -1988,6 +2016,17 @@ async function runCatchUpSweep() {
     // Skip messages already at max retries (they'll be marked failed by dbIncrRetryOrFail)
     if (msg.retry_count >= CATCHUP_MAX_RETRIES) {
       dbIncrRetryOrFail(msg.id, CATCHUP_MAX_RETRIES);
+      continue;
+    }
+
+    // CS-01 iter 2 guard: a journal row with null/empty jid has no meaningful
+    // chat scope to replay to (orphan from pre-scoping baseline). Mark it
+    // processed explicitly so the CS-01 throw inside forwardToLibreFang
+    // doesn't land inside our catch-block and inflate retry_count up to
+    // CATCHUP_MAX_RETRIES before eventually giving up.
+    if (shouldSkipCatchupForMissingJid(msg)) {
+      dbMarkProcessed(msg.id, 1);
+      console.log(`[gateway][catchup] catchup_skip_no_jid id=${msg.id} — journal row has null jid, cannot scope replay`);
       continue;
     }
 
@@ -2494,4 +2533,7 @@ module.exports = {
   isAllowedOrigin,
   parseBody,
   MAX_BODY_SIZE,
+  forwardToLibreFang,
+  forwardToLibreFangStreaming,
+  shouldSkipCatchupForMissingJid,
 };
