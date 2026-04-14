@@ -29,7 +29,7 @@ function sectionLabelFallback(key: string): string {
   return key.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
-function fieldLabel(key: string): string {
+function fieldLabelFallback(key: string): string {
   return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
     .replace(/\bApi\b/g, "API").replace(/\bUrl\b/g, "URL")
     .replace(/\bSql\b/g, "SQL").replace(/\bSsl\b/g, "SSL")
@@ -332,7 +332,7 @@ export function ConfigPage({ category }: { category: string }) {
         if (!sec) return null;
         const sectionMatches = t(`config.sec_${sKey}`, sectionLabelFallback(sKey)).toLowerCase().includes(q) || sKey.includes(q);
         const matchedFields = Object.keys(sec.fields).filter((fKey) =>
-          sectionMatches || fKey.includes(q) || fieldLabel(fKey).toLowerCase().includes(q)
+          sectionMatches || fKey.includes(q) || t(`config.fld_${fKey}`, fieldLabelFallback(fKey)).toLowerCase().includes(q)
         );
         return matchedFields.length > 0 ? { sKey, fields: matchedFields } : null;
       })
@@ -452,7 +452,7 @@ export function ConfigPage({ category }: { category: string }) {
                   return (
                     <div key={fieldKey} className="flex items-start gap-4 py-3 border-b border-border-subtle/30 last:border-0">
                       <div className="w-48 shrink-0 pt-1">
-                        <p className="text-xs font-semibold">{fieldLabel(fieldKey)}</p>
+                        <p className="text-xs font-semibold">{t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey))}</p>
                         <p className="text-[10px] text-text-dim font-mono">{fieldKey}</p>
                       </div>
                       <div className="flex-1 min-w-0">
