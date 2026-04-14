@@ -8,6 +8,8 @@ on:
     types: [created, labeled]
   discussion_comment:
     types: [created]
+  schedule:
+    - cron: '17 4 * * *' # daily 04:17 UTC — catch missed discussions
   workflow_dispatch:
     inputs:
       backfill:
@@ -198,23 +200,35 @@ jobs:
             --silent
 
   # ── Backfill: create issues for existing discussions ─────────────
+  # Runs on: schedule (daily, all categories), workflow_dispatch (chosen category)
   backfill:
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.backfill == 'true'
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.backfill == 'true')
     steps:
       - uses: actions/checkout@v4
       - name: Backfill existing discussions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          CATEGORY: ${{ github.event.inputs.category }}
+          CATEGORY: ${{ github.event.inputs.category || '' }}
         run: |
           set -euo pipefail
 
-          echo "Backfilling discussions in category: ${CATEGORY}"
+          # On schedule: scan all promotable categories
+          # On dispatch: scan only the chosen category
+          if [ -z "$CATEGORY" ]; then
+            CATEGORIES="Ideas General Q&A"
+          else
+            CATEGORIES="$CATEGORY"
+          fi
+
+          for CAT in $CATEGORIES; do
+          echo "=== Scanning category: ${CAT} ==="
 
           gh api repos/${REPO}/discussions --paginate --jq \
-            ".[] | select(.category.name == \"${CATEGORY}\") | @base64" \
+            ".[] | select(.category.name == \"${CAT}\") | @base64" \
           | while IFS= read -r row; do
               decoded=$(printf '%s' "$row" | base64 -d)
               DISC_NUMBER=$(printf '%s' "$decoded" | jq -r '.number')
@@ -232,7 +246,7 @@ jobs:
               DISC_BODY=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" --jq '.body // ""')
               CLEAN_TITLE=$(printf '%s' "$DISC_TITLE" | sed 's/^[^a-zA-Z0-9[({]*//')
 
-              case "${CATEGORY}" in
+              case "${CAT}" in
                 Ideas)    LABELS="enhancement" ;;
                 "Q&A")    LABELS="question" ;;
                 General)  LABELS="" ;;
@@ -249,7 +263,7 @@ jobs:
               fi
 
               ISSUE_BODY="$(cat <<EOF
-          _Auto-created from discussion #${DISC_NUMBER} by @${DISC_AUTHOR} (${CATEGORY})_
+          _Auto-created from discussion #${DISC_NUMBER} by @${DISC_AUTHOR} (${CAT})_
 
           ---
 
@@ -274,3 +288,4 @@ jobs:
 
               sleep 2
             done
+          done # end category loop
