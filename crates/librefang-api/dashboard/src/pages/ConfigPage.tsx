@@ -126,11 +126,12 @@ function SectionCard({
 
   const saveMutation = useMutation({
     mutationFn: ({ path, value }: { path: string; value: unknown }) => setConfigValue(path, value),
-    onSuccess: (_data, variables) => {
-      setSaveStatus({ path: variables.path, ok: true, msg: t("common.saved", "Saved") });
+    onSuccess: (data, variables) => {
+      const msg = data.restart_required ? t("config.saved_restart", "Saved (restart required)") : t("common.saved", "Saved");
+      setSaveStatus({ path: variables.path, ok: true, msg });
       setPendingChanges((p) => { const next = { ...p }; delete next[variables.path]; return next; });
       queryClient.invalidateQueries({ queryKey: ["config", "full"] });
-      setTimeout(() => setSaveStatus(null), 2000);
+      setTimeout(() => setSaveStatus(null), data.restart_required ? 5000 : 2000);
     },
     onError: (err: Error, variables) => {
       setSaveStatus({ path: variables.path, ok: false, msg: err.message });

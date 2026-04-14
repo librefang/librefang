@@ -223,6 +223,11 @@ const mcpServersRoute = createRoute({
   component: () => <L><McpServersPage /></L>
 });
 
+const configIndexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/config",
+  component: () => <Navigate to="/config/general" />
+});
 const configGeneralRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/general",
@@ -289,6 +294,7 @@ const routeTree = rootRoute.addChildren([
   telemetryRoute,
   terminalRoute,
   mcpServersRoute,
+  configIndexRoute,
   configGeneralRoute,
   configMemoryRoute,
   configToolsRoute,

@@ -1053,7 +1053,8 @@
     "cat_channels": "频道",
     "cat_security": "安全",
     "cat_network": "网络",
-    "cat_infra": "基础设施"
+    "cat_infra": "基础设施",
+    "saved_restart": "已保存（需要重启）"
   },
   "chat": {
     "title": "对话",

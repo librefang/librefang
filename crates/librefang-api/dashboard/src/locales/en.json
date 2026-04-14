@@ -1078,7 +1078,8 @@
     "cat_channels": "Channels",
     "cat_security": "Security",
     "cat_network": "Network",
-    "cat_infra": "Infrastructure"
+    "cat_infra": "Infrastructure",
+    "saved_restart": "Saved (restart required)"
   },
   "chat": {
     "title": "Chat",
