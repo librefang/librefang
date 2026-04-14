@@ -37,6 +37,33 @@ use axum::response::IntoResponse;
 use axum::Json;
 use std::sync::Arc;
 
+/// Return `true` when the caller presents a bearer token that matches the
+/// running daemon's configured `api_key`, or when auth is disabled (empty
+/// key). Used by public-but-redacted endpoints (`/api/status`,
+/// `/api/health/detail`) to decide whether the response may include
+/// agent identifiers, filesystem paths, and runtime diagnostics.
+async fn caller_is_authenticated(state: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    let configured = state.api_key_lock.read().await.clone();
+    let configured = configured.trim().to_string();
+    // Auth disabled entirely (local dev mode): everyone is trusted.
+    if configured.is_empty() {
+        return true;
+    }
+    let Some(header) = headers.get(axum::http::header::AUTHORIZATION) else {
+        return false;
+    };
+    let Ok(header_str) = header.to_str() else {
+        return false;
+    };
+    let Some(token) = header_str.strip_prefix("Bearer ") else {
+        return false;
+    };
+    // Constant-time compare to avoid leaking prefix length.
+    let a = configured.as_bytes();
+    let b = token.as_bytes();
+    a.len() == b.len() && subtle::ConstantTimeEq::ct_eq(a, b).into()
+}
+
 #[utoipa::path(
     get,
     path = "/api/status",
@@ -45,7 +72,23 @@ use std::sync::Arc;
         (status = 200, description = "Daemon status", body = serde_json::Value)
     )
 )]
-pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn status(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    // Public summary: only leaks "the daemon is up and serving". The
+    // authenticated response below still contains agent IDs, configured
+    // listener, home directory, and process memory — none of which should
+    // be readable without a bearer token, per SECURITY.md's "Health
+    // redaction: Public endpoint returns minimal info; full diagnostics
+    // require auth" promise.
+    if !caller_is_authenticated(&state, &headers).await {
+        return Json(serde_json::json!({
+            "status": "running",
+            "version": env!("CARGO_PKG_VERSION"),
+        }));
+    }
+
     let agents: Vec<serde_json::Value> = state
         .kernel
         .agent_registry()
@@ -323,7 +366,29 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         (status = 200, description = "Detailed health diagnostics", body = serde_json::Value)
     )
 )]
-pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn health_detail(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    // Match the doc comment + SECURITY.md: full diagnostics require auth.
+    // Unauthenticated callers get the same minimal payload as /api/health
+    // so orchestrators can still liveness-probe without a token, but
+    // cannot read panic counts, agent counts, or memory/embedding details.
+    if !caller_is_authenticated(&state, &headers).await {
+        let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ]));
+        let db_ok = state
+            .kernel
+            .memory_substrate()
+            .structured_get(shared_id, "__health_check__")
+            .is_ok();
+        return Json(serde_json::json!({
+            "status": if db_ok { "ok" } else { "degraded" },
+            "version": env!("CARGO_PKG_VERSION"),
+        }));
+    }
+
     let health = state.kernel.supervisor_ref().health();
 
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
