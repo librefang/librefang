@@ -75,7 +75,16 @@ jobs:
                   issue_number: pr.number,
                   labels: [LABEL],
                 });
-                core.info(`#${pr.number}: added "${LABEL}"`);
+                // Conflicting PR is not ready for review
+                if (labels.includes('ready-for-review')) {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    name: 'ready-for-review',
+                  }).catch(() => {});
+                }
+                core.info(`#${pr.number}: added "${LABEL}", removed ready-for-review`);
               } else if (mergeable !== false && hasLabel) {
                 await github.rest.issues.removeLabel({
                   owner: context.repo.owner,
@@ -139,7 +148,16 @@ jobs:
                   issue_number: pr.number,
                   labels: [LABEL],
                 });
-                core.info(`#${pr.number}: added "${LABEL}"`);
+                // CI failed → not ready for review
+                if (labels.includes('ready-for-review')) {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    name: 'ready-for-review',
+                  }).catch(() => {});
+                }
+                core.info(`#${pr.number}: added "${LABEL}", removed ready-for-review`);
               } else if (!hasFailure && hasLabel) {
                 await github.rest.issues.removeLabel({
                   owner: context.repo.owner,
