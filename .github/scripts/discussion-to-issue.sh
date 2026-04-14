@@ -77,6 +77,14 @@ ISSUE_URL=$(gh issue create \
 ISSUE_NUMBER=$(printf '%s' "$ISSUE_URL" | grep -oE '[0-9]+$')
 echo "#${DISC_NUMBER} → issue #${ISSUE_NUMBER}"
 
-# Comment on the discussion
-gh api "repos/${REPO}/discussions/${DISC_NUMBER}/comments" \
-  -f body="Tracked as issue #${ISSUE_NUMBER}" --silent
+# Comment on the discussion via GraphQL (REST endpoint doesn't support Discussions)
+DISC_NODE_ID=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" --jq '.node_id' 2>/dev/null || true)
+if [ -n "$DISC_NODE_ID" ]; then
+  gh api graphql -f query='
+    mutation($discussionId: ID!, $body: String!) {
+      addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
+        comment { id }
+      }
+    }
+  ' -f discussionId="$DISC_NODE_ID" -f body="Tracked as issue #${ISSUE_NUMBER}" --silent 2>/dev/null || true
+fi
