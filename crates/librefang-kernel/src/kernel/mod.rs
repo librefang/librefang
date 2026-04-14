@@ -4165,6 +4165,7 @@ system_prompt = "You are a helpful assistant."
             latency_ms: 0,
             // WASM agents don't mutate the session; N/A.
             new_messages_start: 0,
+            owner_notice: None,
         })
     }
 
@@ -4235,6 +4236,7 @@ system_prompt = "You are a helpful assistant."
             latency_ms: 0,
             // Python agents don't mutate the session; N/A.
             new_messages_start: 0,
+            owner_notice: None,
         })
     }
 

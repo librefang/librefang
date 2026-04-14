@@ -19,11 +19,50 @@ use librefang_types::config::{
 };
 use librefang_types::message::ContentBlock;
 use regex::RegexSet;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
+
+/// Two-channel reply envelope returned by the bridge. The `public` field is
+/// what should reach the source chat (DM or group). The `owner_notice` field
+/// is a structured private message intended for the operator's DM only —
+/// e.g. produced by the `notify_owner` LLM tool. Adapters that don't support
+/// owner-side delivery should ignore `owner_notice` and forward only `public`.
+///
+/// Both fields are `Option` so legacy/silent paths can carry "no public reply"
+/// (`public = None`) without losing an `owner_notice`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplyEnvelope {
+    #[serde(default)]
+    pub public: Option<String>,
+    #[serde(default)]
+    pub owner_notice: Option<String>,
+}
+
+impl ReplyEnvelope {
+    /// Build an envelope carrying only a public reply (no owner notice).
+    pub fn from_public(s: impl Into<String>) -> Self {
+        Self {
+            public: Some(s.into()),
+            owner_notice: None,
+        }
+    }
+
+    /// Build an envelope with no public reply and no owner notice (silent turn).
+    pub fn silent() -> Self {
+        Self::default()
+    }
+
+    /// Convenience: extract the public text or empty string. Used by adapters
+    /// that don't yet route the owner_notice channel — they still get the
+    /// behaviour of the previous `Result<String, String>` API.
+    pub fn public_or_empty(&self) -> String {
+        self.public.clone().unwrap_or_default()
+    }
+}
 
 /// Kernel operations needed by channel adapters.
 ///
@@ -4422,5 +4461,61 @@ mod tests {
             let (drained_msg, _) = result.unwrap();
             assert_content_eq(&drained_msg.content, "1\n2");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ReplyEnvelope (§A — owner-notify channel)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reply_envelope_default_has_no_fields() {
+        let env = ReplyEnvelope::default();
+        assert!(env.public.is_none());
+        assert!(env.owner_notice.is_none());
+    }
+
+    #[test]
+    fn reply_envelope_from_public_sets_only_public() {
+        let env = ReplyEnvelope::from_public("hi");
+        assert_eq!(env.public.as_deref(), Some("hi"));
+        assert!(env.owner_notice.is_none());
+    }
+
+    #[test]
+    fn reply_envelope_silent_is_default() {
+        let env = ReplyEnvelope::silent();
+        assert_eq!(env, ReplyEnvelope::default());
+    }
+
+    #[test]
+    fn reply_envelope_serde_roundtrip_full() {
+        let env = ReplyEnvelope {
+            public: Some("yes Sir".into()),
+            owner_notice: Some("Caterina asked something".into()),
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        let decoded: ReplyEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, env);
+    }
+
+    #[test]
+    fn reply_envelope_deserializes_legacy_missing_fields() {
+        // BC-02: stored blobs may not contain these fields yet.
+        let decoded: ReplyEnvelope = serde_json::from_str("{}").unwrap();
+        assert!(decoded.public.is_none());
+        assert!(decoded.owner_notice.is_none());
+
+        let decoded2: ReplyEnvelope = serde_json::from_str(r#"{"public":"x"}"#).unwrap();
+        assert_eq!(decoded2.public.as_deref(), Some("x"));
+        assert!(decoded2.owner_notice.is_none());
+    }
+
+    #[test]
+    fn reply_envelope_public_or_empty_helper() {
+        assert_eq!(ReplyEnvelope::default().public_or_empty(), "");
+        assert_eq!(
+            ReplyEnvelope::from_public("hello").public_or_empty(),
+            "hello"
+        );
     }
 }

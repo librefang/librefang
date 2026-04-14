@@ -1007,6 +1007,12 @@ pub struct AgentLoopResult {
     /// own index — which would go stale if the loop trims session history.
     /// Always in range [0, session.messages.len()] after the loop returns.
     pub new_messages_start: usize,
+    /// Optional private message destined for the agent's owner (operator DM),
+    /// produced when the LLM invokes the `notify_owner` tool during the turn.
+    /// `None` means the model did not request an owner-side notification.
+    /// Multiple notify_owner calls in the same turn are concatenated with
+    /// "\n\n" by the tool handler before being placed here.
+    pub owner_notice: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1747,6 +1753,7 @@ fn build_silent_agent_loop_result(
         experiment_context,
         latency_ms: 0,
         new_messages_start,
+        owner_notice: None,
     }
 }
 
@@ -1936,6 +1943,8 @@ async fn finalize_successful_end_turn(
         experiment_context: end_turn.experiment_context,
         latency_ms: 0,
         new_messages_start: end_turn.new_messages_start,
+        // Task 2 will populate this from notify_owner tool invocations.
+        owner_notice: None,
     })
 }
 
@@ -2594,6 +2603,7 @@ pub async fn run_agent_loop(
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                         new_messages_start,
+                        owner_notice: None,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -3580,6 +3590,7 @@ pub async fn run_agent_loop_streaming(
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                         new_messages_start,
+                        owner_notice: None,
                     });
                 }
                 let text = response.text();
@@ -7542,5 +7553,25 @@ mod tests {
             }
             other => panic!("Expected RepeatedToolFailures, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // AgentLoopResult.owner_notice (§A — owner-notify channel)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn agent_loop_result_owner_notice_defaults_none() {
+        let r = AgentLoopResult::default();
+        assert!(r.owner_notice.is_none());
+    }
+
+    #[test]
+    fn agent_loop_result_owner_notice_can_be_set() {
+        let mut r = AgentLoopResult::default();
+        r.owner_notice = Some("Sir, the appointment is at 3pm.".into());
+        assert_eq!(
+            r.owner_notice.as_deref(),
+            Some("Sir, the appointment is at 3pm.")
+        );
     }
 }
