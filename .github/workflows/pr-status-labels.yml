@@ -165,7 +165,7 @@ jobs:
             const pr = context.payload.pull_request;
 
             // Fetch file list to count changed lines (additions + deletions)
-            const { data: files } = await github.rest.pulls.listFiles({
+            const files = await github.paginate(github.rest.pulls.listFiles, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: pr.number,
@@ -220,7 +220,7 @@ jobs:
             const LABEL = 'no-rust-required';
             const pr = context.payload.pull_request;
 
-            const { data: files } = await github.rest.pulls.listFiles({
+            const files = await github.paginate(github.rest.pulls.listFiles, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: pr.number,
@@ -228,7 +228,8 @@ jobs:
             });
 
             // Patterns that don't require Rust knowledge
-            const NO_RUST = /^(\.github\/|docs\/|.*\.md$|.*\.mdx$|.*\.json$|.*\.ya?ml$|.*\.toml$|.*\.css$|.*\.tsx?$|.*\.jsx?$|LICENSE|\.gitignore)/;
+            // Note: Cargo.toml excluded — dependency/feature changes need Rust context
+            const NO_RUST = /^(\.github\/|docs\/|.*\.md$|.*\.mdx$|.*\.json$|.*\.ya?ml$|.*\.css$|.*\.tsx?$|.*\.jsx?$|LICENSE|\.gitignore)/;
             const allNoRust = files.every(f => NO_RUST.test(f.filename));
 
             const labels = pr.labels.map(l => l.name);

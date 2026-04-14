@@ -45,11 +45,9 @@ if [ -n "$AREA_LABELS" ] && [ "$AREA_LABELS" != "needs-triage" ]; then
   fi
 fi
 
-# Duplicate check — use word-boundary-safe pattern
-# Match "discussion #<number>" followed by non-digit or end
-EXISTING=$(gh issue list --repo "$REPO" --state all --limit 500 --json number,body \
-  --jq "[.[] | select(.body | test(\"discussion #${DISC_NUMBER}[^0-9]\") or test(\"discussion #${DISC_NUMBER}$\"))] | length" \
-  2>/dev/null || echo "0")
+# Duplicate check — use gh search which handles pagination internally
+EXISTING=$(gh search issues --repo "$REPO" --match body "discussion #${DISC_NUMBER}" \
+  --json number --jq 'length' 2>/dev/null || echo "0")
 
 if [ "${EXISTING:-0}" -gt 0 ]; then
   echo "Issue already exists for discussion #${DISC_NUMBER}, skipping"
