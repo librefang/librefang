@@ -72,6 +72,7 @@ async fn start_test_server() -> TestServer {
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
         provider_test_cache: dashmap::DashMap::new(),
+        config_write_lock: tokio::sync::Mutex::new(()),
     });
 
     let app = Router::new()
