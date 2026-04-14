@@ -308,11 +308,14 @@ pub async fn auth(
     // surface `require_auth_for_reads` exists to close. It lives in the
     // `dashboard_read_*` group below so it gets locked down with the flag.
     //
-    // `/api/health/detail` is also excluded — its own doc comment says it
-    // "requires auth", and it returns `panic_count`, `restart_count`,
-    // `agent_count`, the embedding/extraction model IDs, `config_warnings`
-    // from `KernelConfig::validate()`, and the event-bus drop count. All of
-    // that is operational data that should not be reachable without a token.
+    // `/api/health/detail` is **not** in any public set — its own doc comment
+    // at routes/config.rs:317 says it "requires auth", and it returns
+    // `panic_count`, `restart_count`, `agent_count`, embedding/extraction
+    // model IDs, `config_warnings` from `KernelConfig::validate()`, and the
+    // event-bus drop count. All operational data that should not be reachable
+    // from a cold probe. Unlike the dashboard read group, this endpoint
+    // requires auth unconditionally regardless of `require_auth_for_reads`,
+    // so the middleware contract finally matches the handler's own docs.
     // `/api/health` stays public because its payload is genuinely minimal
     // (status + version + a two-item checks array) and load balancers /
     // orchestrators need it for probing.
@@ -348,7 +351,6 @@ pub async fn auth(
             | "/api/profiles"
             | "/api/config"
             | "/api/status"
-            | "/api/health/detail"
             | "/api/models"
             | "/api/models/aliases"
             | "/api/providers"
@@ -1051,27 +1053,31 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// `/api/health/detail`'s own doc comment says "requires auth", and its
+    /// `/api/health/detail`'s own doc comment says "requires auth" and its
     /// payload includes panic counts, agent counts, model IDs, and
-    /// `config_warnings` from `KernelConfig::validate()`. It used to be
-    /// incorrectly exposed by the always-public set; the flag must lock
-    /// it down while `/api/health` stays public for load balancers.
+    /// `config_warnings` from `KernelConfig::validate()`. Unlike the
+    /// dashboard-read group, this endpoint requires auth **unconditionally**
+    /// — even when `require_auth_for_reads` is off — because its handler
+    /// doc contract said so all along and the middleware was just wrong.
+    /// `/api/health` stays public either way for load balancers.
     #[tokio::test]
-    async fn test_require_auth_for_reads_blocks_api_health_detail() {
-        let auth_state = AuthState {
+    async fn test_api_health_detail_always_requires_auth() {
+        // Flag OFF: /api/health is still public, /api/health/detail still
+        // requires auth. This is the contract fix — it used to be in the
+        // always-public set.
+        let auth_state_off = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(Vec::new()),
-            require_auth_for_reads: true,
+            require_auth_for_reads: false,
         };
-        let app = Router::new()
+        let app_off = Router::new()
             .route("/api/health", get(|| async { "ok" }))
             .route("/api/health/detail", get(|| async { "detail" }))
-            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+            .layer(axum::middleware::from_fn_with_state(auth_state_off, auth));
 
-        // /api/health stays public (minimal liveness for probes).
-        let health = app
+        let health = app_off
             .clone()
             .oneshot(
                 Request::builder()
@@ -1081,10 +1087,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(
+            health.status(),
+            StatusCode::OK,
+            "/api/health must stay public regardless of the flag"
+        );
 
-        // /api/health/detail is gated by the flag.
-        let detail = app
+        let detail = app_off
             .oneshot(
                 Request::builder()
                     .uri("/api/health/detail")
@@ -1096,9 +1105,32 @@ mod tests {
         assert_eq!(
             detail.status(),
             StatusCode::UNAUTHORIZED,
-            "/api/health/detail leaks config warnings + operational metrics; must \
-             require auth when the flag is on"
+            "/api/health/detail must require auth even when the flag is off — \
+             its doc comment has always said so"
         );
+
+        // Flag ON: contract unchanged.
+        let auth_state_on = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(Vec::new()),
+            require_auth_for_reads: true,
+        };
+        let app_on = Router::new()
+            .route("/api/health/detail", get(|| async { "detail" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state_on, auth));
+
+        let detail = app_on
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health/detail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// `/api/status` used to be in the always-public set, but its handler
