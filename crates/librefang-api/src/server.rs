@@ -650,6 +650,7 @@ pub async fn build_router(
             kernel.config_ref().provider_urls.clone(),
         ),
         webhook_router,
+        config_write_lock: tokio::sync::Mutex::new(()),
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });
