@@ -70,7 +70,10 @@ fn build_mcp_bridge_cfg(cfg: &KernelConfig) -> librefang_llm_driver::McpBridgeCo
     } else {
         Some(cfg.api_key.clone())
     };
-    librefang_llm_driver::McpBridgeConfig { base_url: base, api_key }
+    librefang_llm_driver::McpBridgeConfig {
+        base_url: base,
+        api_key,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1418,34 +1421,7 @@ impl LibreFangKernel {
                 .get(&config.default_model.provider)
                 .cloned()
         });
-        // MCP bridge config for CLI-based drivers (Claude Code #2314) — lets
-        // the spawned subprocess call LibreFang tools via the daemon's own
-        // `/mcp` endpoint. Only populated for providers that can consume it;
-        // harmless `Some` for others since they ignore the field.
-        let mcp_bridge_cfg = {
-            let listen = config.api_listen.trim();
-            let base = if listen.starts_with("0.0.0.0")
-                || listen.starts_with("[::]")
-                || listen.starts_with("::")
-            {
-                // Replace wildcard bind with loopback for the subprocess to dial.
-                let port = listen.rsplit(':').next().unwrap_or("4545");
-                format!("http://127.0.0.1:{port}")
-            } else if listen.is_empty() {
-                "http://127.0.0.1:4545".to_string()
-            } else {
-                format!("http://{listen}")
-            };
-            let key = if config.api_key.is_empty() {
-                None
-            } else {
-                Some(config.api_key.clone())
-            };
-            librefang_llm_driver::McpBridgeConfig {
-                base_url: base,
-                api_key: key,
-            }
-        };
+        let mcp_bridge_cfg = build_mcp_bridge_cfg(&config);
         let driver_config = DriverConfig {
             provider: config.default_model.provider.clone(),
             api_key: default_api_key.clone(),

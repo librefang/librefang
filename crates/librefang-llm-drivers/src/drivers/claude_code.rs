@@ -8,10 +8,8 @@
 //! Tracks active subprocess PIDs and enforces message timeouts to prevent
 //! hung CLI processes from blocking agents indefinitely.
 
-use crate::llm_driver::{
-    CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent,
-};
 pub use crate::llm_driver::McpBridgeConfig;
+use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
 use base64::Engine;
 use dashmap::DashMap;
@@ -280,8 +278,8 @@ impl ClaudeCodeDriver {
     /// daemon's existing `/mcp` endpoint (see
     /// `librefang-api/src/routes/network.rs::mcp_http`).
     fn write_mcp_config(bridge: &McpBridgeConfig) -> std::io::Result<PathBuf> {
-        let path = std::env::temp_dir()
-            .join(format!("librefang-mcp-{}.json", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("librefang-mcp-{}.json", uuid::Uuid::new_v4()));
         let base = bridge.base_url.trim_end_matches('/');
         let url = format!("{base}/mcp");
 
