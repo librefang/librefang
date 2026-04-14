@@ -1320,17 +1320,47 @@ pub async fn list_hands(
         (status = 200, description = "List active hand instances", body = serde_json::Value)
     )
 )]
-pub async fn list_active_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_active_hands(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let lang = headers
+        .get("accept-language")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(&[',', ';', '-'][..]).next())
+        .unwrap_or("en")
+        .to_string();
+
     let instances = state.kernel.hands().list_instances();
     let items: Vec<serde_json::Value> = instances
         .iter()
         .map(|i| {
+            let def = state.kernel.hands().get_definition(&i.hand_id);
+            let hand_name = def.as_ref().map(|d| {
+                d.i18n
+                    .get(&lang)
+                    .and_then(|l| l.name.as_deref())
+                    .unwrap_or(&d.name)
+                    .to_string()
+            });
+            let hand_icon = def.as_ref().map(|d| d.icon.clone());
+
+            let agent_ids: std::collections::BTreeMap<String, String> = i
+                .agent_ids
+                .iter()
+                .map(|(role, id)| (role.clone(), id.to_string()))
+                .collect();
+
             serde_json::json!({
                 "instance_id": i.instance_id,
                 "hand_id": i.hand_id,
+                "hand_name": hand_name,
+                "hand_icon": hand_icon,
                 "status": format!("{}", i.status),
                 "agent_id": i.agent_id().map(|a: librefang_types::agent::AgentId| a.to_string()),
                 "agent_name": i.agent_name(),
+                "agent_ids": agent_ids,
+                "coordinator_role": i.coordinator_role(),
                 "activated_at": i.activated_at.to_rfc3339(),
                 "updated_at": i.updated_at.to_rfc3339(),
             })
