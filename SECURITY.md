@@ -58,7 +58,12 @@ LibreFang implements defense-in-depth with the following security controls:
 ### Input Validation
 - **Path traversal protection**: `safe_resolve_path()` / `safe_resolve_parent()` on all file operations
 - **SSRF protection**: Private IP blocking, DNS resolution checks, cloud metadata endpoint filtering
-- **Image validation**: Media type whitelist (png/jpeg/gif/webp), 5MB size limit
+- **Image upload validation**: exact-match MIME allowlist on
+  `/api/agents/{id}/upload` covers `image/png`, `image/jpeg`, `image/gif`,
+  `image/webp`; scriptable formats like `image/svg+xml` are rejected.
+  Upload size is capped by `KernelConfig.max_upload_size_bytes` (default
+  10 MiB — tighten it in `config.toml` if your threat model demands a
+  smaller limit).
 - **Prompt injection heuristics** *(best-effort, not a security boundary)*: Skill content is
   scanned for a short hard-coded list of English override phrases and exfiltration keywords
   (`ignore previous instructions`, `exfiltrate`, `post to https`, …) via case-insensitive

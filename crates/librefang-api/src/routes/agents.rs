@@ -4085,13 +4085,52 @@ pub(crate) static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> =
 #[allow(dead_code)]
 const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
 
-/// Allowed content type prefixes for upload.
-const ALLOWED_CONTENT_TYPES: &[&str] = &["image/", "text/", "application/pdf", "audio/"];
+/// Explicit MIME allowlist for `/api/agents/{id}/upload`.
+///
+/// Historically this was `["image/", "text/", "application/pdf", "audio/"]`,
+/// which is a **prefix match**: any `image/*` subtype passed, including
+/// `image/svg+xml` (scriptable → XSS / SSRF via `<use xlink:href>`),
+/// `image/x-icon`, `image/tiff`, `image/heic`, and anything else. That
+/// contradicts the SECURITY.md promise of *"Media type whitelist
+/// (png/jpeg/gif/webp)"*. The new list is exact-match, mirrors
+/// `librefang_types::media::ALLOWED_IMAGE_TYPES`, and covers only the
+/// formats the agent loop actually consumes, so a crafted SVG posted via
+/// browser drag-drop or API can no longer land in uploads/.
+const ALLOWED_UPLOAD_CONTENT_TYPES: &[&str] = &[
+    // Images — matches ALLOWED_IMAGE_TYPES exactly
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    // Audio — used by transcribe/STT paths
+    "audio/mpeg",
+    "audio/wav",
+    "audio/ogg",
+    "audio/mp4",
+    "audio/webm",
+    "audio/x-wav",
+    "audio/flac",
+    // Text + PDF passthrough
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+    "application/pdf",
+];
+
+/// Strip MIME parameters (`; charset=utf-8`) and lowercase before matching.
+fn normalise_upload_mime(ct: &str) -> String {
+    ct.split(';')
+        .next()
+        .unwrap_or(ct)
+        .trim()
+        .to_ascii_lowercase()
+}
 
 fn is_allowed_content_type(ct: &str) -> bool {
-    ALLOWED_CONTENT_TYPES
+    let base = normalise_upload_mime(ct);
+    ALLOWED_UPLOAD_CONTENT_TYPES
         .iter()
-        .any(|prefix| ct.starts_with(prefix))
+        .any(|allowed| *allowed == base)
 }
 
 /// POST /api/agents/{id}/upload — Upload a file attachment.
@@ -4516,6 +4555,60 @@ pub async fn push_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-fix prefix-match (`"image/"`) let SVG, BMP, TIFF, HEIC and
+    /// friends through. Post-fix the allowlist is exact-match over the
+    /// same four formats SECURITY.md advertises.
+    #[test]
+    fn test_upload_mime_allowlist_rejects_previously_accepted_types() {
+        // Previously accepted via prefix match, now explicitly rejected.
+        for bad in [
+            "image/svg+xml",
+            "image/svg+xml; charset=utf-8",
+            "image/bmp",
+            "image/tiff",
+            "image/x-icon",
+            "image/heic",
+            "image/heif",
+            "image/avif",
+            "image/vnd.microsoft.icon",
+            "text/html", // text/ prefix used to let this through
+            "text/xml",
+            "audio/vnd.rn-realaudio",
+            "application/octet-stream",
+            "application/javascript",
+        ] {
+            assert!(
+                !is_allowed_content_type(bad),
+                "{bad} must be rejected by the upload allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn test_upload_mime_allowlist_accepts_expected_formats() {
+        for good in [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp",
+            "image/PNG",                 // case-insensitive
+            "image/png; charset=binary", // MIME params stripped
+            "audio/mpeg",
+            "audio/wav",
+            "audio/ogg",
+            "audio/flac",
+            "text/plain",
+            "text/markdown",
+            "text/csv",
+            "application/pdf",
+        ] {
+            assert!(
+                is_allowed_content_type(good),
+                "{good} must be accepted by the upload allowlist"
+            );
+        }
+    }
 
     #[test]
     fn test_clone_request_defaults() {
