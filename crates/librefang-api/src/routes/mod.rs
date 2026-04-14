@@ -127,6 +127,9 @@ pub struct AppState {
     /// Dynamic webhook router for channel webhook endpoints.
     /// Mounted under `/channels` on the main server. Updated on hot-reload.
     pub webhook_router: Arc<tokio::sync::RwLock<Arc<axum::Router>>>,
+    /// Mutex for serializing config file writes — prevents concurrent config_set
+    /// calls from reading the same file and overwriting each other's changes.
+    pub config_write_lock: tokio::sync::Mutex<()>,
     /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).
     #[cfg(feature = "telemetry")]
     pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,

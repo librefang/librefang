@@ -1767,6 +1767,9 @@ pub async fn config_set(
         );
     }
 
+    // Serialize concurrent writes to prevent read-modify-write races
+    let _config_guard = state.config_write_lock.lock().await;
+
     // Read existing config — use toml_edit to preserve comments and formatting
     let raw_content = if config_path.exists() {
         std::fs::read_to_string(&config_path).unwrap_or_default()

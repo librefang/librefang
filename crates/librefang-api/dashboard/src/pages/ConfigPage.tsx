@@ -1,10 +1,11 @@
 import { useTranslation } from "react-i18next";
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "@tanstack/react-router";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
-import { RefreshCw, Save, Zap, Settings } from "lucide-react";
+import { RefreshCw, Save, Zap, Settings, Search, RotateCcw, AlertTriangle } from "lucide-react";
 import {
   getConfigSchema, getFullConfig, setConfigValue, reloadConfig,
   type ConfigSectionSchema, type ConfigFieldSchema,
@@ -59,11 +60,9 @@ function JsonEditor({ value, onChange }: { value: unknown; onChange: (v: unknown
   const [text, setText] = useState(() => value != null ? JSON.stringify(value, null, 2) : "");
   const [error, setError] = useState<string | null>(null);
 
-  // Sync from external value changes (e.g. after save + refetch)
   useEffect(() => {
     const incoming = value != null ? JSON.stringify(value, null, 2) : "";
     setText((prev) => {
-      // Don't overwrite if user is editing and the parsed value matches
       try { if (JSON.stringify(JSON.parse(prev), null, 2) === incoming) return prev; } catch {}
       return incoming;
     });
@@ -81,7 +80,7 @@ function JsonEditor({ value, onChange }: { value: unknown; onChange: (v: unknown
       const parsed = JSON.parse(raw);
       setError(null);
       onChange(parsed);
-    } catch (err) {
+    } catch {
       setError("Invalid JSON");
     }
   }, [onChange]);
@@ -129,12 +128,10 @@ function ConfigFieldInput({
 
   if (fieldType === "select" && options) {
     const strOptions = options.map((o) => (typeof o === "string" ? o : o.id));
-    // Backend may return enum values in different casing (e.g. "Stable" vs "stable")
     const rawValue = String(value ?? "");
     const matched = strOptions.find((o) => o.toLowerCase() === rawValue.toLowerCase()) ?? rawValue;
     return (
       <select value={matched} onChange={(e) => onChange(e.target.value)} className={inputClass}>
-        {/* Show current value as option if it doesn't match any schema option */}
         {matched && !strOptions.includes(matched) && <option value={matched}>{matched}</option>}
         {strOptions.map((o) => <option key={o} value={o}>{o}</option>)}
       </select>
@@ -177,131 +174,13 @@ function ConfigFieldInput({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Section card                                                       */
-/* ------------------------------------------------------------------ */
-
-function SectionCard({
-  sectionKey, sectionSchema, config,
-}: {
-  sectionKey: string;
-  sectionSchema: ConfigSectionSchema;
-  config: Record<string, unknown>;
-}) {
-  const { t } = useTranslation();
-  const queryClient = useQueryClient();
-  const [pendingChanges, setPendingChanges] = useState<Record<string, unknown>>({});
-  const [saveStatus, setSaveStatus] = useState<{ path: string; ok: boolean; msg: string } | null>(null);
-
-  const saveMutation = useMutation({
-    mutationFn: ({ path, value }: { path: string; value: unknown }) => setConfigValue(path, value),
-    onSuccess: (data, variables) => {
-      // Check for reload failure (backend returns 200 with non-"ok" status)
-      const reloadFailed = data.status !== "ok" && data.status !== "saved";
-      if (reloadFailed) {
-        setSaveStatus({ path: variables.path, ok: false, msg: t("config.saved_reload_failed", "Saved but reload failed") });
-        // Value is persisted to disk even though reload failed — clear pending
-        setPendingChanges((p) => { const next = { ...p }; delete next[variables.path]; return next; });
-        queryClient.invalidateQueries({ queryKey: ["config", "full"] });
-        setTimeout(() => setSaveStatus(null), 5000);
-        return;
-      }
-      const msg = data.restart_required ? t("config.saved_restart", "Saved (restart required)") : t("common.saved", "Saved");
-      setSaveStatus({ path: variables.path, ok: true, msg });
-      // Only clear pending if user hasn't made a newer edit while save was in-flight
-      setPendingChanges((p) => {
-        if (!(variables.path in p) || JSON.stringify(p[variables.path]) === JSON.stringify(variables.value)) {
-          const next = { ...p }; delete next[variables.path]; return next;
-        }
-        return p; // newer edit exists, keep it
-      });
-      queryClient.invalidateQueries({ queryKey: ["config", "full"] });
-      setTimeout(() => setSaveStatus(null), data.restart_required ? 5000 : 2000);
-    },
-    onError: (err: Error, variables) => {
-      setSaveStatus({ path: variables.path, ok: false, msg: err.message });
-      setTimeout(() => setSaveStatus(null), 3000);
-    },
-  });
-
-  const fields = Object.entries(sectionSchema.fields);
-
-  const handleFieldChange = useCallback(
-    (fieldKey: string, value: unknown) => {
-      const path = sectionSchema.root_level ? fieldKey : `${sectionKey}.${fieldKey}`;
-      setPendingChanges((p) => ({ ...p, [path]: value }));
-    },
-    [sectionKey, sectionSchema.root_level]
-  );
-
-  const handleSave = useCallback(
-    (path: string) => {
-      if (path in pendingChanges) saveMutation.mutate({ path, value: pendingChanges[path] });
-    },
-    [pendingChanges, saveMutation]
-  );
-
-  return (
-    <div className="rounded-2xl border border-border-subtle bg-surface overflow-hidden">
-      <div className="flex items-center gap-3 px-5 py-4 border-b border-border-subtle/50">
-        <h3 className="text-sm font-bold">{sectionLabel(sectionKey)}</h3>
-        {sectionSchema.hot_reloadable && (
-          <Badge variant="success"><Zap className="w-2.5 h-2.5 mr-0.5" />{t("config.hot_reload", "Hot Reload")}</Badge>
-        )}
-        {sectionSchema.root_level && (
-          <Badge variant="info">{t("config.root_level", "Root Level")}</Badge>
-        )}
-        <span className="text-[10px] text-text-dim ml-auto">
-          {fields.length} {fields.length === 1 ? "field" : "fields"}
-        </span>
-      </div>
-      <div className="px-5 py-2">
-        {fields.map(([fieldKey, fieldSchema]) => {
-          const { type: fieldType, options } = resolveFieldType(fieldSchema);
-          const path = sectionSchema.root_level ? fieldKey : `${sectionKey}.${fieldKey}`;
-          const currentValue = path in pendingChanges
-            ? pendingChanges[path]
-            : getNestedValue(config, sectionKey, fieldKey, sectionSchema.root_level);
-          const hasPending = path in pendingChanges;
-          const isSaving = saveMutation.isPending && saveMutation.variables?.path === path;
-          const statusForField = saveStatus?.path === path ? saveStatus : null;
-
-          return (
-            <div key={fieldKey} className="flex items-center gap-4 py-3 border-b border-border-subtle/30 last:border-0">
-              <div className="w-48 shrink-0">
-                <p className="text-xs font-semibold">{fieldLabel(fieldKey)}</p>
-                <p className="text-[10px] text-text-dim font-mono">{fieldKey}</p>
-              </div>
-              <div className="flex-1 min-w-0">
-                <ConfigFieldInput fieldKey={fieldKey} fieldType={fieldType} options={options} value={currentValue}
-                  onChange={(v) => handleFieldChange(fieldKey, v)} />
-              </div>
-              <div className="w-20 shrink-0 flex items-center justify-end gap-1">
-                {hasPending && (
-                  <Button variant="primary" size="sm" onClick={() => handleSave(path)} isLoading={isSaving} disabled={isSaving}>
-                    <Save className="w-3 h-3" />
-                  </Button>
-                )}
-                {statusForField && (
-                  <span className={`text-[10px] font-semibold ${statusForField.ok ? "text-success" : "text-danger"}`}>
-                    {statusForField.msg}
-                  </span>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
 /*  Page component — one per category                                  */
 /* ------------------------------------------------------------------ */
 
 export function ConfigPage({ category }: { category: string }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const router = useRouter();
 
   const schemaQuery = useQuery({
     queryKey: ["config", "schema"],
@@ -315,8 +194,110 @@ export function ConfigPage({ category }: { category: string }) {
     staleTime: 30_000,
   });
 
+  // ── Shared pending state (lifted from SectionCard) ─────────────────
+  const [pendingChanges, setPendingChanges] = useState<Record<string, unknown>>({});
+  const [saveStatus, setSaveStatus] = useState<Record<string, { ok: boolean; msg: string }>>({});
+  const [searchQuery, setSearchQuery] = useState("");
   const [reloadStatus, setReloadStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
+  const hasPendingChanges = Object.keys(pendingChanges).length > 0;
+
+  // ── Unsaved changes warning ────────────────────────────────────────
+  useEffect(() => {
+    if (!hasPendingChanges) return;
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [hasPendingChanges]);
+
+  // Block route navigation with pending changes
+  useEffect(() => {
+    if (!hasPendingChanges) return;
+    const unsub = router.subscribe("onBeforeNavigate", () => {
+      if (Object.keys(pendingChanges).length > 0) {
+        if (!window.confirm(t("config.unsaved_warning", "You have unsaved changes. Discard them?"))) {
+          throw new Error("Navigation cancelled");
+        }
+        setPendingChanges({});
+      }
+    });
+    return unsub;
+  }, [hasPendingChanges, pendingChanges, router, t]);
+
+  const handleFieldChange = useCallback(
+    (sectionKey: string, fieldKey: string, value: unknown, rootLevel?: boolean) => {
+      const path = rootLevel ? fieldKey : `${sectionKey}.${fieldKey}`;
+      setPendingChanges((p) => ({ ...p, [path]: value }));
+    },
+    []
+  );
+
+  // ── Single field save ──────────────────────────────────────────────
+  const saveMutation = useMutation({
+    mutationFn: ({ path, value }: { path: string; value: unknown }) => setConfigValue(path, value),
+    onSuccess: (data, variables) => {
+      const reloadFailed = data.status !== "ok" && data.status !== "saved";
+      if (reloadFailed) {
+        setSaveStatus((s) => ({ ...s, [variables.path]: { ok: false, msg: t("config.saved_reload_failed", "Saved but reload failed") } }));
+      } else {
+        const msg = data.restart_required ? t("config.saved_restart", "Saved (restart required)") : t("common.saved", "Saved");
+        setSaveStatus((s) => ({ ...s, [variables.path]: { ok: true, msg } }));
+      }
+      setPendingChanges((p) => {
+        if (!(variables.path in p) || JSON.stringify(p[variables.path]) === JSON.stringify(variables.value)) {
+          const next = { ...p }; delete next[variables.path]; return next;
+        }
+        return p;
+      });
+      queryClient.invalidateQueries({ queryKey: ["config", "full"] });
+      setTimeout(() => setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; }), 3000);
+    },
+    onError: (err: Error, variables) => {
+      setSaveStatus((s) => ({ ...s, [variables.path]: { ok: false, msg: err.message } }));
+      setTimeout(() => setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; }), 3000);
+    },
+  });
+
+  // ── Batch save all pending ─────────────────────────────────────────
+  const [batchSaving, setBatchSaving] = useState(false);
+  const handleBatchSave = useCallback(async () => {
+    const entries = Object.entries(pendingChanges);
+    if (entries.length === 0) return;
+    setBatchSaving(true);
+    let errors = 0;
+    for (const [path, value] of entries) {
+      try {
+        const data = await setConfigValue(path, value);
+        const reloadFailed = data.status !== "ok" && data.status !== "saved";
+        const msg = reloadFailed
+          ? t("config.saved_reload_failed", "Saved but reload failed")
+          : data.restart_required
+            ? t("config.saved_restart", "Saved (restart required)")
+            : t("common.saved", "Saved");
+        setSaveStatus((s) => ({ ...s, [path]: { ok: !reloadFailed, msg } }));
+      } catch (err: any) {
+        setSaveStatus((s) => ({ ...s, [path]: { ok: false, msg: err.message || "Save failed" } }));
+        errors++;
+      }
+    }
+    setPendingChanges({});
+    queryClient.invalidateQueries({ queryKey: ["config", "full"] });
+    setBatchSaving(false);
+    setTimeout(() => setSaveStatus({}), errors > 0 ? 5000 : 3000);
+  }, [pendingChanges, queryClient, t]);
+
+  // ── Reset field to default ─────────────────────────────────────────
+  const handleResetField = useCallback(
+    (sectionKey: string, fieldKey: string, rootLevel?: boolean) => {
+      const path = rootLevel ? fieldKey : `${sectionKey}.${fieldKey}`;
+      // Setting null removes the key → KernelConfig uses Default impl value
+      setPendingChanges((p) => ({ ...p, [path]: null }));
+    },
+    []
+  );
+
+  // ── Reload config ──────────────────────────────────────────────────
   const reloadMutation = useMutation({
     mutationFn: reloadConfig,
     onSuccess: () => {
@@ -335,12 +316,30 @@ export function ConfigPage({ category }: { category: string }) {
     }
   }, [reloadStatus]);
 
+  // ── Derived data ───────────────────────────────────────────────────
   const allSections = schemaQuery.data?.sections ?? {};
   const config = configQuery.data ?? {};
   const sectionKeys = (CATEGORY_SECTIONS[category] ?? []).filter((s) => s in allSections);
-
   const categoryTitle = t(`config.cat_${category}`, sectionLabel(category));
+  const q = searchQuery.toLowerCase();
 
+  // Filter sections & fields by search
+  const filteredSections = useMemo(() => {
+    if (!q) return sectionKeys.map((sKey) => ({ sKey, fields: Object.keys(allSections[sKey]?.fields ?? {}) }));
+    return sectionKeys
+      .map((sKey) => {
+        const sec = allSections[sKey];
+        if (!sec) return null;
+        const sectionMatches = sectionLabel(sKey).toLowerCase().includes(q) || sKey.includes(q);
+        const matchedFields = Object.keys(sec.fields).filter((fKey) =>
+          sectionMatches || fKey.includes(q) || fieldLabel(fKey).toLowerCase().includes(q)
+        );
+        return matchedFields.length > 0 ? { sKey, fields: matchedFields } : null;
+      })
+      .filter((x): x is { sKey: string; fields: string[] } => x !== null);
+  }, [sectionKeys, allSections, q]);
+
+  // ── Loading / error states ─────────────────────────────────────────
   if (schemaQuery.isLoading || configQuery.isLoading) {
     return (
       <div className="flex flex-col gap-6 p-6">
@@ -363,6 +362,7 @@ export function ConfigPage({ category }: { category: string }) {
     );
   }
 
+  // ── Render ─────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-6 p-6">
       <div className="flex items-center justify-between">
@@ -380,10 +380,115 @@ export function ConfigPage({ category }: { category: string }) {
         </div>
       </div>
 
+      {/* Search + batch save bar */}
+      <div className="flex items-center gap-3">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-dim" />
+          <input
+            ref={searchRef}
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={t("config.search_placeholder", "Search fields...")}
+            className="w-full pl-9 pr-3 py-2 rounded-xl border border-border-subtle bg-surface text-xs outline-none focus:border-brand transition-colors"
+          />
+        </div>
+        {hasPendingChanges && (
+          <div className="flex items-center gap-2">
+            <Badge variant="warning">
+              <AlertTriangle className="w-2.5 h-2.5 mr-1" />
+              {Object.keys(pendingChanges).length} {t("config.unsaved", "unsaved")}
+            </Badge>
+            <Button variant="ghost" size="sm" onClick={() => setPendingChanges({})}>
+              {t("config.discard", "Discard")}
+            </Button>
+            <Button variant="primary" size="sm" onClick={handleBatchSave} isLoading={batchSaving} disabled={batchSaving}>
+              <Save className="w-3 h-3 mr-1" />
+              {t("config.save_all", "Save All")}
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Sections */}
       <div className="flex flex-col gap-4">
-        {sectionKeys.map((sKey) => (
-          <SectionCard key={sKey} sectionKey={sKey} sectionSchema={allSections[sKey]} config={config} />
-        ))}
+        {filteredSections.length === 0 && (
+          <div className="rounded-2xl border border-border-subtle bg-surface p-8 text-center text-text-dim text-sm">
+            {t("config.no_results", "No fields match your search")}
+          </div>
+        )}
+        {filteredSections.map(({ sKey, fields: visibleFields }) => {
+          const sec = allSections[sKey];
+          const allFields = Object.entries(sec.fields);
+          const fieldsToShow = q
+            ? allFields.filter(([fKey]) => visibleFields.includes(fKey))
+            : allFields;
+
+          return (
+            <div key={sKey} className="rounded-2xl border border-border-subtle bg-surface overflow-hidden">
+              <div className="flex items-center gap-3 px-5 py-4 border-b border-border-subtle/50">
+                <h3 className="text-sm font-bold">{sectionLabel(sKey)}</h3>
+                {sec.hot_reloadable && (
+                  <Badge variant="success"><Zap className="w-2.5 h-2.5 mr-0.5" />{t("config.hot_reload", "Hot Reload")}</Badge>
+                )}
+                {sec.root_level && (
+                  <Badge variant="info">{t("config.root_level", "Root Level")}</Badge>
+                )}
+                <span className="text-[10px] text-text-dim ml-auto">
+                  {fieldsToShow.length}{q ? `/${allFields.length}` : ""} {fieldsToShow.length === 1 ? "field" : "fields"}
+                </span>
+              </div>
+              <div className="px-5 py-2">
+                {fieldsToShow.map(([fieldKey, fieldSchema]) => {
+                  const { type: fieldType, options } = resolveFieldType(fieldSchema);
+                  const path = sec.root_level ? fieldKey : `${sKey}.${fieldKey}`;
+                  const currentValue = path in pendingChanges
+                    ? pendingChanges[path]
+                    : getNestedValue(config, sKey, fieldKey, sec.root_level);
+                  const hasPending = path in pendingChanges;
+                  const isSaving = saveMutation.isPending && saveMutation.variables?.path === path;
+                  const statusForField = saveStatus[path] ?? null;
+
+                  return (
+                    <div key={fieldKey} className="flex items-start gap-4 py-3 border-b border-border-subtle/30 last:border-0">
+                      <div className="w-48 shrink-0 pt-1">
+                        <p className="text-xs font-semibold">{fieldLabel(fieldKey)}</p>
+                        <p className="text-[10px] text-text-dim font-mono">{fieldKey}</p>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <ConfigFieldInput fieldKey={fieldKey} fieldType={fieldType} options={options} value={currentValue}
+                          onChange={(v) => handleFieldChange(sKey, fieldKey, v, sec.root_level)} />
+                      </div>
+                      <div className="w-24 shrink-0 flex items-center justify-end gap-1 pt-1">
+                        {hasPending && (
+                          <>
+                            <button
+                              onClick={() => handleResetField(sKey, fieldKey, sec.root_level)}
+                              className="p-1 rounded-md text-text-dim hover:text-warning hover:bg-surface-hover transition-colors"
+                              title={t("config.reset_default", "Reset to default")}
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                            </button>
+                            <Button variant="primary" size="sm" onClick={() => {
+                              if (path in pendingChanges) saveMutation.mutate({ path, value: pendingChanges[path] });
+                            }} isLoading={isSaving} disabled={isSaving}>
+                              <Save className="w-3 h-3" />
+                            </Button>
+                          </>
+                        )}
+                        {statusForField && (
+                          <span className={`text-[10px] font-semibold ${statusForField.ok ? "text-success" : "text-danger"}`}>
+                            {statusForField.msg}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

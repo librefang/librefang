@@ -1057,7 +1057,14 @@
     "saved_restart": "已保存（需要重启）",
     "saved_reload_failed": "已保存但重载失败",
     "load_error": "无法加载配置",
-    "reload_success": "配置已重新加载"
+    "reload_success": "配置已重新加载",
+    "search_placeholder": "搜索字段...",
+    "unsaved": "未保存",
+    "discard": "丢弃",
+    "save_all": "全部保存",
+    "no_results": "没有匹配的字段",
+    "reset_default": "恢复默认值",
+    "unsaved_warning": "有未保存的修改，确定要丢弃吗？"
   },
   "chat": {
     "title": "对话",
