@@ -1317,6 +1317,12 @@ pub struct AgentLoopResult {
     /// is recommended. The kernel checks this to trigger background skill
     /// creation/improvement suggestions. Threshold: 5+ tool calls.
     pub skill_evolution_suggested: bool,
+    /// Optional private message destined for the agent's owner (operator DM),
+    /// produced when the LLM invokes the `notify_owner` tool during the turn.
+    /// `None` means the model did not request an owner-side notification.
+    /// Multiple notify_owner calls in the same turn are concatenated with
+    /// "\n\n" by the tool handler before being placed here.
+    pub owner_notice: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2272,6 +2278,7 @@ fn build_silent_agent_loop_result(
         latency_ms: 0,
         new_messages_start,
         skill_evolution_suggested: false,
+        owner_notice: None,
     }
 }
 
@@ -2487,6 +2494,8 @@ async fn finalize_successful_end_turn(
         // Suggest skill evolution when the agent used 5+ tool calls,
         // indicating a non-trivial task that might be worth saving as a skill.
         skill_evolution_suggested: tool_call_count >= 5,
+        // Task 2 will populate this from notify_owner tool invocations.
+        owner_notice: None,
     })
 }
 
@@ -3461,6 +3470,7 @@ pub async fn run_agent_loop(
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                         new_messages_start,
+                        owner_notice: None,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -4760,6 +4770,7 @@ pub async fn run_agent_loop_streaming(
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                         new_messages_start,
+                        owner_notice: None,
                     });
                 }
                 let text = response.text();
@@ -9565,6 +9576,23 @@ mod tests {
         assert_eq!(
             manifest.web_search_augmentation,
             librefang_types::agent::WebSearchAugmentationMode::Auto,
+    // -----------------------------------------------------------------------
+    // AgentLoopResult.owner_notice (§A — owner-notify channel)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn agent_loop_result_owner_notice_defaults_none() {
+        let r = AgentLoopResult::default();
+        assert!(r.owner_notice.is_none());
+    }
+
+    #[test]
+    fn agent_loop_result_owner_notice_can_be_set() {
+        let mut r = AgentLoopResult::default();
+        r.owner_notice = Some("Sir, the appointment is at 3pm.".into());
+        assert_eq!(
+            r.owner_notice.as_deref(),
+            Some("Sir, the appointment is at 3pm.")
         );
     }
 }
