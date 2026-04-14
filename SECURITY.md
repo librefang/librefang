@@ -100,7 +100,26 @@ LibreFang implements defense-in-depth with the following security controls:
 ### Runtime Isolation
 - **WASM dual metering**: Fuel limits + epoch interruption with watchdog thread
 - **Subprocess sandbox**: Environment isolation (`env_clear()`), restricted PATH
-- **Taint tracking**: Information flow labels prevent untrusted data in privileged operations
+- **Tool-sink heuristics** *(pattern match, not full information-flow tracking)*:
+  `crates/librefang-types/src/taint.rs` defines `TaintLabel`, `TaintedValue`,
+  and `TaintSink`, and the LLM tool runner checks two sinks before
+  executing risky tool calls:
+  `check_taint_shell_exec` refuses commands matching `curl `, `wget `,
+  `| sh`, `| bash`, `base64 -d`, `eval ` (plus the shell-metacharacter
+  denylist), and `check_taint_net_fetch` refuses URLs whose query string
+  or percent-decoded parameter names contain `api_key`, `apikey`,
+  `token`, `secret`, `password`, or an `authorization:` header fragment.
+  Values that hit a pattern are wrapped in `TaintedValue` and run
+  through `check_sink`, which is where the refusal originates.
+
+  This is **not** a general information-flow control system: labels are
+  attached at the call site the moment a pattern matches, they do not
+  propagate across function boundaries, LLM tool outputs are not
+  automatically labelled, and there is no compiler/type-level
+  enforcement — code that never constructs a `TaintedValue` is
+  entirely outside the check. Treat it as a targeted denylist for two
+  specific exfiltration / injection shapes in the tool runner, not as
+  a lattice that covers all untrusted data in the process.
 
 ### Network Security
 - **GCRA rate limiter**: Cost-aware token buckets per IP
