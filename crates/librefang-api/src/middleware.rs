@@ -337,7 +337,9 @@ pub async fn auth(
         || (path.starts_with("/api/auth/login") && is_get)
         || path == "/api/auth/callback"
         || path == "/api/auth/dashboard-login"
-        || path == "/api/auth/dashboard-check";
+        || path == "/api/auth/dashboard-check"
+        // MCP OAuth callback — browser redirect from OAuth provider, no API key
+        || (path.starts_with("/api/mcp/servers/") && path.ends_with("/auth/callback") && is_get);
 
     if is_public {
         return next.run(request).await;
