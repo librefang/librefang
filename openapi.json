@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "2026.4.11-beta18"
+    "version": "2026.4.13-beta19"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -7385,6 +7385,20 @@
             ],
             "description": "Optional sender display name."
           },
+          "show_thinking": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the response should include the model's thinking/reasoning trace.\n\n`None` defaults to `true` when thinking content is available."
+          },
+          "thinking": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Per-call deep-thinking override.\n\n- `Some(true)`: force thinking on (even if the manifest has it off)\n- `Some(false)`: force thinking off (even if the manifest has it on)\n- `None`: use the manifest/global default"
+          },
           "was_mentioned": {
             "type": "boolean",
             "description": "Whether the bot was @mentioned in a group message."
@@ -7449,6 +7463,13 @@
           },
           "response": {
             "type": "string"
+          },
+          "thinking": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Combined thinking/reasoning trace from the model, when the caller\nrequested `show_thinking = true`."
           }
         }
       },

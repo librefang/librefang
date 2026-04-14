@@ -1,6 +1,5 @@
 import { lazy, Suspense } from "react";
 import { Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
-import { createHashHistory } from "@tanstack/history";
 import { App } from "./App";
 
 // Lazy-loaded pages — each becomes a separate chunk
@@ -32,6 +31,7 @@ const A2APage = lazy(() => import("./pages/A2APage").then(m => ({ default: m.A2A
 const TelemetryPage = lazy(() => import("./pages/TelemetryPage").then(m => ({ default: m.TelemetryPage })));
 const TerminalPage = lazy(() => import("./pages/TerminalPage").then(m => ({ default: m.TerminalPage })));
 const McpServersPage = lazy(() => import("./pages/McpServersPage").then(m => ({ default: m.McpServersPage })));
+const ConfigPage = lazy(() => import("./pages/ConfigPage").then(m => ({ default: m.ConfigPage })));
 
 // Suspense wrapper — shows nothing briefly while chunk loads (page transition animation covers it)
 function L({ children }: { children: React.ReactNode }) {
@@ -222,6 +222,47 @@ const mcpServersRoute = createRoute({
   component: () => <L><McpServersPage /></L>
 });
 
+const configIndexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/config",
+  component: () => <Navigate to="/config/general" />
+});
+const configGeneralRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/config/general",
+  component: () => <L><ConfigPage category="general" /></L>
+});
+const configMemoryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/config/memory",
+  component: () => <L><ConfigPage category="memory" /></L>
+});
+const configToolsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/config/tools",
+  component: () => <L><ConfigPage category="tools" /></L>
+});
+const configChannelsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/config/channels",
+  component: () => <L><ConfigPage category="channels" /></L>
+});
+const configSecurityRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/config/security",
+  component: () => <L><ConfigPage category="security" /></L>
+});
+const configNetworkRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/config/network",
+  component: () => <L><ConfigPage category="network" /></L>
+});
+const configInfraRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/config/infra",
+  component: () => <L><ConfigPage category="infra" /></L>
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   overviewRoute,
@@ -252,11 +293,19 @@ const routeTree = rootRoute.addChildren([
   telemetryRoute,
   terminalRoute,
   mcpServersRoute,
+  configIndexRoute,
+  configGeneralRoute,
+  configMemoryRoute,
+  configToolsRoute,
+  configChannelsRoute,
+  configSecurityRoute,
+  configNetworkRoute,
+  configInfraRoute,
 ]);
 
 export const router = createRouter({
   routeTree,
-  history: createHashHistory(),
+  basepath: "/dashboard",
   defaultPreload: "intent",
 });
 

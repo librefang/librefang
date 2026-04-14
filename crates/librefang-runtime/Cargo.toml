@@ -11,7 +11,7 @@ librefang-http = { path = "../librefang-http" }
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-runtime-mcp = { path = "../librefang-runtime-mcp" }
 librefang-runtime-oauth = { path = "../librefang-runtime-oauth" }
-librefang-runtime-drivers = { path = "../librefang-runtime-drivers" }
+librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-runtime-wasm = { path = "../librefang-runtime-wasm" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
 librefang-channels = { path = "../librefang-channels" }
@@ -58,6 +58,9 @@ dirs = { workspace = true }
 tempfile = { workspace = true }
 landlock = { version = "0.4", optional = true }
 seccompiler = { version = "0.4", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 landlock-sandbox = ["dep:landlock"]

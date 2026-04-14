@@ -336,13 +336,22 @@ async fn transcode_oga_to_ogg_opus(input_bytes: &[u8]) -> Result<Vec<u8>, String
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "ffmpeg not available ({e}) — install it (brew install ffmpeg / apt install ffmpeg) to process .oga voice notes"
+            )
+        })?;
 
     // Feed stdin concurrently; hanging the write inside the main task
     // would deadlock once ffmpeg's stdout pipe buffer fills.
     if let Some(mut stdin) = child.stdin.take() {
         let bytes = input_bytes.to_vec();
         tokio::spawn(async move {
+            // Writer errors are intentionally ignored: if the pipe breaks
+            // (ffmpeg rejected the input or exited early), the real reason
+            // surfaces on stderr and the non-zero exit code, which the
+            // caller already reports. Swallowing the write error here is
+            // strictly less noisy than double-reporting.
             let _ = stdin.write_all(&bytes).await;
             let _ = stdin.shutdown().await;
         });
@@ -532,10 +541,27 @@ mod tests {
             eprintln!("ffmpeg not on PATH — skipping");
             return;
         }
+        // With zero bytes ffmpeg produces no output on stdout and we reject it.
         let err = transcode_oga_to_ogg_opus(&[]).await.unwrap_err();
         assert!(
-            err.contains("ffmpeg exited") || err.contains("empty output"),
-            "unexpected error: {err}"
+            err.contains("empty output"),
+            "expected empty-output rejection, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transcode_non_ogg_input_errors() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping");
+            return;
+        }
+        // 256 bytes of non-Ogg junk — ffmpeg rejects the container and exits
+        // non-zero before producing any stdout bytes.
+        let garbage: Vec<u8> = (0..=255u8).collect();
+        let err = transcode_oga_to_ogg_opus(&garbage).await.unwrap_err();
+        assert!(
+            err.contains("ffmpeg exited"),
+            "expected ffmpeg-exit rejection, got: {err}"
         );
     }
 

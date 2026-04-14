@@ -1,0 +1,114 @@
+name: Discussion to Issue
+
+# Automatically create issues from new Discussions in Ideas/General/Q&A.
+# Also supports manual "/to-issue" command and daily backfill.
+
+on:
+  discussion:
+    types: [created]
+  discussion_comment:
+    types: [created]
+  schedule:
+    - cron: '17 4 * * *' # daily 04:17 UTC — catch missed discussions
+  workflow_dispatch:
+    inputs:
+      category:
+        description: 'Category to backfill (Ideas, General, Q&A, or all)'
+        required: false
+        type: string
+        default: 'all'
+
+permissions:
+  issues: write
+  discussions: write
+
+jobs:
+  # ── Auto-promote new discussions ─────────────────────────────────
+  auto-promote:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'discussion' &&
+      (
+        github.event.discussion.category.name == 'Ideas' ||
+        github.event.discussion.category.name == 'General' ||
+        github.event.discussion.category.name == 'Q&A'
+      )
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create issue from discussion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          bash .github/scripts/discussion-to-issue.sh \
+            "${{ github.event.discussion.number }}" \
+            "${{ github.event.discussion.title }}" \
+            "${{ github.event.discussion.html_url }}" \
+            "${{ github.event.discussion.user.login }}" \
+            "${{ github.event.discussion.category.name }}"
+
+  # ── Manual /to-issue command from maintainers ────────────────────
+  manual-promote:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'discussion_comment' &&
+      contains(github.event.comment.body, '/to-issue') &&
+      (
+        github.event.comment.author_association == 'OWNER' ||
+        github.event.comment.author_association == 'MEMBER' ||
+        github.event.comment.author_association == 'COLLABORATOR'
+      )
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create issue from discussion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          bash .github/scripts/discussion-to-issue.sh \
+            "${{ github.event.discussion.number }}" \
+            "${{ github.event.discussion.title }}" \
+            "${{ github.event.discussion.html_url }}" \
+            "${{ github.event.discussion.user.login }}" \
+            "${{ github.event.discussion.category.name }}"
+
+  # ── Backfill: scheduled + manual ─────────────────────────────────
+  backfill:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Backfill existing discussions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          INPUT_CATEGORY: ${{ github.event.inputs.category }}
+        run: |
+          set -euo pipefail
+
+          # Build category list — iterate one at a time to avoid Q&A word-split
+          if [ -z "${INPUT_CATEGORY:-}" ] || [ "$INPUT_CATEGORY" = "all" ]; then
+            cats=("Ideas" "General" "Q&A")
+          else
+            cats=("$INPUT_CATEGORY")
+          fi
+
+          for CAT in "${cats[@]}"; do
+            echo "=== Scanning category: ${CAT} ==="
+
+            gh api "repos/${REPO}/discussions" --paginate --jq \
+              ".[] | select(.category.name == \"${CAT}\") | @base64" \
+            | while IFS= read -r row; do
+                decoded=$(printf '%s' "$row" | base64 -d)
+                num=$(printf '%s' "$decoded" | jq -r '.number')
+                title=$(printf '%s' "$decoded" | jq -r '.title')
+                url=$(printf '%s' "$decoded" | jq -r '.html_url')
+                author=$(printf '%s' "$decoded" | jq -r '.user.login')
+
+                bash .github/scripts/discussion-to-issue.sh \
+                  "$num" "$title" "$url" "$author" "$CAT" \
+                  || echo "  (skipped or failed)"
+
+                sleep 2
+              done
+          done

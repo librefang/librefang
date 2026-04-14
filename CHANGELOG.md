@@ -5,6 +5,109 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.14] - 2026-04-14
+
+### Added
+
+- Pass image blocks to CLI via @path references (#2331) (@f-liva)
+- MCP OAuth discovery for Streamable HTTP transport (#2346) (@neo-wanderer)
+- Add require_auth_for_reads to lock down dashboard reads (#2398) (@houko)
+- Per-call deep-thinking toggle and reasoning display (#2423) (@houko)
+- Add audit.anchor_path to redirect the tip-anchor file (#2442) (@houko)
+- Enrich registry cards with manifest metadata (#2452) (@houko)
+- Channel scoping enforcement, proactive LID, heartbeat watchdog, jittered backoff (#2462) (@f-liva)
+- PR review state and issue response tracking labels (#2471) (@houko)
+- Multi-page configuration editor under Configuration nav group (#2473) (@houko)
+- Group addressee detection — stop responding when not actually spoken to (#2480) (@f-liva)
+- Per-provider cost/token limits (#2316) (#2482) (@houko)
+- Add qwen3.6-plus from coding plan (#2494) (@joshuachong)
+- Add echo tracker to drop our own messages reflected back (#2498) (@f-liva)
+
+### Fixed
+
+- Transcode .oga to .ogg before Whisper transcription (#2386) (@f-liva)
+- Relax brittle alibaba-coding-plan model count assertion (#2388) (@houko)
+- Block SSRF via IPv4-mapped IPv6 addresses (#2396) (@houko)
+- Reject path traversal in agent template name param (#2397) (@houko)
+- Require trusted_manifest_signers for signed manifests (#2407) (@houko)
+- Make NonceTracker check_and_record atomic and bounded (#2408) (@houko)
+- Block SSRF via NAT64 well-known prefix (64:ff9b::/96) (#2409) (@houko)
+- Stop leaking sandbox watchdog threads (#2410) (@houko)
+- Extend IPv4-mapped IPv6 SSRF guard to remaining call sites (#2411) (@houko)
+- Clippy regressions from refactor splits (#2404, #2406) (#2412) (@houko)
+- GCRA rate limiter never honoured per-key token exhaustion (#2413) (@houko)
+- Strip parent env before host_shell_exec spawns child (#2417) (@houko)
+- Tighten upload MIME allowlist to match SECURITY.md (#2419) (@houko)
+- Split_message panic on multi-byte UTF-8 at boundary (#2285) (#2420) (@houko)
+- Add default connect/read timeouts to shared HTTP client (#2340) (#2421) (@houko)
+- Lock Owner-only writes away from Admin-role API keys (#2422) (@houko)
+- Copy button silently failing in non-secure contexts (#2424) (@houko)
+- At schedules in the past no longer fire forever (#2337) (#2425) (@houko)
+- Task_claim accepts agent name in addition to UUID (#2330) (#2427) (@houko)
+- Emit stub tool_results when batch is interrupted (#2381) (#2428) (@houko)
+- Actually extract WWW-Authenticate from rmcp AuthRequired (#2429) (@houko)
+- Hot-reload of agent.toml updates ResourceQuota immediately (#2317) (#2430) (@houko)
+- Add external tip anchor to audit log to detect full rewrites (#2431) (@houko)
+- Default delivery to LastChannel instead of None (#2338) (#2432) (@houko)
+- Session_repair phase 3 preserves tool-call boundaries (#2353) (#2433) (@houko)
+- Claude_code fails fast when agent has tools (#2314) (#2434) (@houko)
+- Wire audit log through with_db_anchored by default (#2436) (@houko)
+- Use full viewport width for page content (#2439) (@houko)
+- Enforce capability inheritance at spawn_agent_inner (#2440) (@houko)
+- Terminal WebSocket rejected local-dev daemons with no api_key (#2441) (@houko)
+- Break Feishu bot self-echo loop (#2435) (#2443) (@houko)
+- Extend taint-sink checks to agent_send and web_fetch body/headers (#2444) (@houko)
+- Terminal WebSocket froze after ~10 keystrokes from per-message cap (#2445) (@houko)
+- Cap chat message bubble width for readability (#2446) (@houko)
+- Taint-scan MCP tool-call arguments before send (#2447) (@houko)
+- Derive require_auth_for_reads from api_key when unset (#2448) (@houko)
+- Make overview stats cards responsive at md breakpoint (#2449) (@houko)
+- Tighten recent agents grid and widen running hand chips (#2450) (@houko)
+- Repair mobile layout breakage across pages (#2451) (@houko)
+- Tighten card grid breakpoints across pages (#2453) (@houko)
+- Revert issue auto-label body scan, keep keyword expansion (#2457) (@houko)
+- Match camelCase/snake_case keywords in issue auto-label (#2461) (@houko)
+- Scope canonical context injection per session to stop cross-chat leak (#2464) (@f-liva)
+- Stop killing unrelated process groups in tree-kill path (#2472) (@houko)
+- Bridge LibreFang tools to claude_code driver via MCP config (#2314) (#2478) (@houko)
+- Scope canonical context injection per session to stop cross-chat leak (#2464) (#2490) (@houko)
+- Wire MCP bridge end-to-end for claude_code (#2314) (#2495) (@houko)
+- Use direct libc::kill syscall to prevent Ubuntu CI SIGTERM (#2497) (@houko)
+
+### Changed
+
+- Extract http_client into librefang-http shared crate (#2389) (@houko)
+- Extract metering into librefang-kernel-metering subcrate (#2395) (@houko)
+- Extract oauth flows into librefang-runtime-oauth subcrate (#2400) (@houko)
+- Extract mcp into librefang-runtime-mcp subcrate (#2403) (@houko)
+- Extract drivers and llm_driver trait into subcrates (#2404) (@houko)
+- Extract wasm sandbox and kernel-handle trait into subcrates (#2405) (@houko)
+- Extract hand/template router into librefang-kernel-router subcrate (#2406) (@houko)
+- Remove bare SignedManifest::verify() and inline it as private (#2437) (@houko)
+- Rename librefang-runtime-drivers to librefang-llm-drivers (#2467) (@houko)
+- Extract pure helpers and tests out of kernel.rs (#2469) (@houko)
+
+### Documentation
+
+- Describe prompt-injection scanner as a heuristic (#2399) (@houko)
+- Audit chain is tamper-evident only against partial edits (#2415) (@houko)
+- Narrow the secret-zeroization claim to its actual scope (#2416) (@houko)
+- Describe taint tracking as a two-sink pattern match (#2426) (@houko)
+- Document additive penalty assumption in fallback recover (#2465) (@f-liva)
+
+### Maintenance
+
+- Stabilize load_endpoint_latency against shared-runner jitter (#2418) (@houko)
+- Remove stray empty .codex marker file (#2454) (@houko)
+- Broaden issue auto-label coverage and add backfill (#2455) (@houko)
+- Refresh dashboard screenshot and drop unused images (#2456) (@houko)
+- Address houko follow-ups on oga transcode (#2459) (@f-liva)
+- Tidy repo metadata and remove stale api-docs (#2466) (@houko)
+- PR conflict/CI-failure detection and issue status labels (#2481) (@houko)
+- Sync Cargo.lock with librefang-api toml_edit dep (#2500) (@houko)
+- Sync Cargo.lock after librefang-llm-driver dep addition (#2501) (@houko)
+
+
 ## [2026.4.13] - 2026-04-13
 
 ### Added

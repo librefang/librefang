@@ -1,9 +1,9 @@
 [package]
-name = "librefang-runtime-drivers"
+name = "librefang-llm-drivers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "LLM driver implementations for LibreFang runtime"
+description = "Concrete LLM provider drivers (anthropic, openai, gemini, …) implementing the librefang-llm-driver trait"
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }

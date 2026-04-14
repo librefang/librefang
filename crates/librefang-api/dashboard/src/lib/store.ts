@@ -27,6 +27,7 @@ interface UIState {
   toasts: Toast[];
   skillOutputs: SkillOutput[];
   hiddenModelKeys: string[];
+  terminalEnabled: boolean | null;
   deepThinking: boolean;
   showThinkingProcess: boolean;
   setDeepThinking: (value: boolean) => void;
@@ -45,6 +46,7 @@ interface UIState {
   hideModel: (key: string) => void;
   unhideModel: (key: string) => void;
   pruneHiddenKeys: (validKeys: Set<string>) => void;
+  setTerminalEnabled: (enabled: boolean) => void;
 }
 
 export const useUIStore = create<UIState>()(
@@ -59,6 +61,7 @@ export const useUIStore = create<UIState>()(
       toasts: [],
       skillOutputs: [],
       hiddenModelKeys: [],
+      terminalEnabled: null,
       deepThinking: false,
       showThinkingProcess: true,
       setDeepThinking: (value) => set({ deepThinking: value }),
@@ -107,6 +110,7 @@ export const useUIStore = create<UIState>()(
         set((state) => ({
           hiddenModelKeys: state.hiddenModelKeys.filter((k) => validKeys.has(k)),
         })),
+      setTerminalEnabled: (enabled) => set({ terminalEnabled: enabled }),
     }),
     {
       name: "librefang-ui-storage",

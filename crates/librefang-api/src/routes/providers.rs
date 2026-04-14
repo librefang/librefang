@@ -127,6 +127,7 @@ pub async fn list_models(
                 "supports_tools": m.supports_tools,
                 "supports_vision": m.supports_vision,
                 "supports_streaming": m.supports_streaming,
+                "supports_thinking": m.supports_thinking,
                 "available": available,
             })
         })
@@ -655,6 +656,10 @@ pub async fn add_custom_model(
             .get("supports_streaming")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
+        supports_thinking: body
+            .get("supports_thinking")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         aliases: vec![],
     };
 

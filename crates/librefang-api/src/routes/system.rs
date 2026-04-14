@@ -2069,7 +2069,8 @@ pub async fn totp_status(State(state): State<Arc<AppState>>) -> impl IntoRespons
         .is_some_and(|s| !s.is_empty());
     let confirmed = state.kernel.vault_get("totp_confirmed").as_deref() == Some("true");
     let policy = state.kernel.approvals().policy();
-    let enforced = policy.second_factor == librefang_types::approval::SecondFactor::Totp;
+    let sf = policy.second_factor;
+    let enforced = sf != librefang_types::approval::SecondFactor::None;
 
     let remaining_recovery = state
         .kernel
@@ -2082,6 +2083,7 @@ pub async fn totp_status(State(state): State<Arc<AppState>>) -> impl IntoRespons
         "enrolled": has_secret,
         "confirmed": confirmed,
         "enforced": enforced,
+        "scope": serde_json::to_value(sf).unwrap_or(serde_json::json!("none")),
         "remaining_recovery_codes": remaining_recovery,
     }))
 }

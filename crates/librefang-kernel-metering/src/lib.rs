@@ -313,7 +313,14 @@ impl MeteringEngine {
         quota: &ResourceQuota,
         budget: &librefang_types::config::BudgetConfig,
     ) -> LibreFangResult<()> {
-        self.store.check_all_and_record(
+        // Resolve the per-provider budget for the record's provider (if any).
+        let provider_budget = if record.provider.is_empty() {
+            None
+        } else {
+            budget.providers.get(&record.provider)
+        };
+
+        self.store.check_all_with_provider_and_record(
             record,
             quota.max_cost_per_hour_usd,
             quota.max_cost_per_day_usd,
@@ -321,7 +328,73 @@ impl MeteringEngine {
             budget.max_hourly_usd,
             budget.max_daily_usd,
             budget.max_monthly_usd,
+            provider_budget
+                .map(|p| p.max_cost_per_hour_usd)
+                .unwrap_or(0.0),
+            provider_budget
+                .map(|p| p.max_cost_per_day_usd)
+                .unwrap_or(0.0),
+            provider_budget
+                .map(|p| p.max_cost_per_month_usd)
+                .unwrap_or(0.0),
+            provider_budget.map(|p| p.max_tokens_per_hour).unwrap_or(0),
         )
+    }
+
+    /// Check a per-provider budget in isolation (non-atomic, for pre-dispatch
+    /// gating or dashboards).
+    ///
+    /// Zero limits are treated as "unlimited" and are skipped.
+    pub fn check_provider_budget(
+        &self,
+        provider: &str,
+        budget: &librefang_types::config::ProviderBudget,
+    ) -> LibreFangResult<()> {
+        if provider.is_empty() {
+            return Ok(());
+        }
+
+        if budget.max_cost_per_hour_usd > 0.0 {
+            let cost = self.store.query_provider_hourly(provider)?;
+            if cost >= budget.max_cost_per_hour_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Provider '{}' exceeded hourly cost budget: ${:.4} / ${:.4}",
+                    provider, cost, budget.max_cost_per_hour_usd
+                )));
+            }
+        }
+
+        if budget.max_cost_per_day_usd > 0.0 {
+            let cost = self.store.query_provider_daily(provider)?;
+            if cost >= budget.max_cost_per_day_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Provider '{}' exceeded daily cost budget: ${:.4} / ${:.4}",
+                    provider, cost, budget.max_cost_per_day_usd
+                )));
+            }
+        }
+
+        if budget.max_cost_per_month_usd > 0.0 {
+            let cost = self.store.query_provider_monthly(provider)?;
+            if cost >= budget.max_cost_per_month_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Provider '{}' exceeded monthly cost budget: ${:.4} / ${:.4}",
+                    provider, cost, budget.max_cost_per_month_usd
+                )));
+            }
+        }
+
+        if budget.max_tokens_per_hour > 0 {
+            let tokens = self.store.query_provider_tokens_hourly(provider)?;
+            if tokens >= budget.max_tokens_per_hour {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Provider '{}' exceeded hourly token budget: {} / {}",
+                    provider, tokens, budget.max_tokens_per_hour
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     /// Clean up old usage records.
@@ -403,6 +476,7 @@ mod tests {
         engine
             .record(&UsageRecord {
                 agent_id,
+                provider: String::new(),
                 model: "claude-haiku".to_string(),
                 input_tokens: 100,
                 output_tokens: 50,
@@ -427,6 +501,7 @@ mod tests {
         engine
             .record(&UsageRecord {
                 agent_id,
+                provider: String::new(),
                 model: "claude-sonnet".to_string(),
                 input_tokens: 10000,
                 output_tokens: 5000,
@@ -455,6 +530,7 @@ mod tests {
         engine
             .record(&UsageRecord {
                 agent_id,
+                provider: String::new(),
                 model: "claude-opus".to_string(),
                 input_tokens: 100000,
                 output_tokens: 50000,
@@ -535,6 +611,7 @@ mod tests {
                 supports_tools: true,
                 supports_vision: false,
                 supports_streaming: true,
+                supports_thinking: false,
                 aliases: vec![],
             }],
         });
@@ -631,6 +708,7 @@ mod tests {
         engine
             .record(&UsageRecord {
                 agent_id,
+                provider: String::new(),
                 model: "haiku".to_string(),
                 input_tokens: 500,
                 output_tokens: 200,
@@ -643,5 +721,169 @@ mod tests {
         let summary = engine.get_summary(Some(agent_id)).unwrap();
         assert_eq!(summary.call_count, 1);
         assert_eq!(summary.total_input_tokens, 500);
+    }
+
+    // ── Per-provider budget tests (issue #2316) ────────────────────
+
+    fn record_for_provider(engine: &MeteringEngine, provider: &str, cost: f64, tokens: u64) {
+        engine
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                provider: provider.to_string(),
+                model: "test-model".to_string(),
+                input_tokens: tokens,
+                output_tokens: 0,
+                cost_usd: cost,
+                tool_calls: 0,
+                latency_ms: 50,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_check_provider_budget_under_limit() {
+        let engine = setup();
+        record_for_provider(&engine, "moonshot", 0.50, 1_000);
+
+        let budget = librefang_types::config::ProviderBudget {
+            max_cost_per_hour_usd: 0.0,
+            max_cost_per_day_usd: 2.0,
+            max_cost_per_month_usd: 0.0,
+            max_tokens_per_hour: 0,
+        };
+        assert!(engine.check_provider_budget("moonshot", &budget).is_ok());
+    }
+
+    #[test]
+    fn test_check_provider_budget_over_limit() {
+        let engine = setup();
+        record_for_provider(&engine, "moonshot", 2.50, 1_000);
+
+        let budget = librefang_types::config::ProviderBudget {
+            max_cost_per_day_usd: 2.0,
+            ..Default::default()
+        };
+        let err = engine
+            .check_provider_budget("moonshot", &budget)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("moonshot"), "err: {err}");
+        assert!(err.contains("daily cost budget"), "err: {err}");
+    }
+
+    #[test]
+    fn test_check_provider_budget_zero_limit_skipped() {
+        let engine = setup();
+        record_for_provider(&engine, "litellm", 999.0, 10_000_000);
+
+        // All zeros => unlimited, should pass despite huge usage.
+        let budget = librefang_types::config::ProviderBudget::default();
+        assert!(engine.check_provider_budget("litellm", &budget).is_ok());
+    }
+
+    #[test]
+    fn test_check_provider_budget_separate_providers_isolated() {
+        let engine = setup();
+        // Burn budget on moonshot only.
+        record_for_provider(&engine, "moonshot", 5.0, 1_000);
+
+        let tight = librefang_types::config::ProviderBudget {
+            max_cost_per_day_usd: 1.0,
+            ..Default::default()
+        };
+        // moonshot is over.
+        assert!(engine.check_provider_budget("moonshot", &tight).is_err());
+        // litellm has no usage — must not be affected.
+        assert!(engine.check_provider_budget("litellm", &tight).is_ok());
+    }
+
+    #[test]
+    fn test_check_provider_budget_tokens_per_hour() {
+        let engine = setup();
+        record_for_provider(&engine, "moonshot", 0.01, 600_000);
+
+        let budget = librefang_types::config::ProviderBudget {
+            max_tokens_per_hour: 500_000,
+            ..Default::default()
+        };
+        let err = engine
+            .check_provider_budget("moonshot", &budget)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("token budget"), "err: {err}");
+    }
+
+    #[test]
+    fn test_check_all_and_record_enforces_provider_budget() {
+        let engine = setup();
+        let agent_id = AgentId::new();
+
+        // Pre-seed moonshot usage so any new record trips the daily cap.
+        record_for_provider(&engine, "moonshot", 1.95, 0);
+
+        let quota = ResourceQuota::default();
+        let mut budget = librefang_types::config::BudgetConfig::default();
+        budget.providers.insert(
+            "moonshot".to_string(),
+            librefang_types::config::ProviderBudget {
+                max_cost_per_day_usd: 2.0,
+                ..Default::default()
+            },
+        );
+
+        // This record + existing spend would exceed the cap.
+        let record = UsageRecord {
+            agent_id,
+            provider: "moonshot".to_string(),
+            model: "kimi".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cost_usd: 0.10,
+            tool_calls: 0,
+            latency_ms: 10,
+        };
+        let err = engine
+            .check_all_and_record(&record, &quota, &budget)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("moonshot"), "err: {err}");
+
+        // The atomic check must NOT insert the record on failure.
+        let summary = engine.get_summary(Some(agent_id)).unwrap();
+        assert_eq!(summary.call_count, 0);
+    }
+
+    #[test]
+    fn test_check_all_and_record_free_provider_unaffected() {
+        let engine = setup();
+        let agent_id = AgentId::new();
+
+        // Huge existing spend on moonshot should not affect litellm.
+        record_for_provider(&engine, "moonshot", 100.0, 0);
+
+        let quota = ResourceQuota::default();
+        let mut budget = librefang_types::config::BudgetConfig::default();
+        budget.providers.insert(
+            "moonshot".to_string(),
+            librefang_types::config::ProviderBudget {
+                max_cost_per_day_usd: 2.0,
+                ..Default::default()
+            },
+        );
+        // litellm deliberately has no provider budget configured.
+
+        let record = UsageRecord {
+            agent_id,
+            provider: "litellm".to_string(),
+            model: "llama".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cost_usd: 0.0,
+            tool_calls: 0,
+            latency_ms: 10,
+        };
+        assert!(engine
+            .check_all_and_record(&record, &quota, &budget)
+            .is_ok());
     }
 }

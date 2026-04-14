@@ -47,18 +47,36 @@ const MAX_CHANNEL_RULE_TOOLS: usize = 50;
 // SecondFactor
 // ---------------------------------------------------------------------------
 
-/// Second-factor verification method for critical tool approvals.
+/// Second-factor verification scope.
 ///
-/// When set to `Totp`, approvals require a valid TOTP code from an
-/// authenticator app in addition to the normal approve action.
+/// Controls where TOTP verification is enforced:
+/// - `Totp` = approvals only (backward-compatible default when TOTP is enabled)
+/// - `Login` = dashboard login only
+/// - `Both` = approvals + dashboard login
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SecondFactor {
     /// No second factor required (default).
     #[default]
     None,
-    /// TOTP (RFC 6238) verification via authenticator app.
+    /// TOTP required for tool approvals only.
     Totp,
+    /// TOTP required for dashboard login only.
+    Login,
+    /// TOTP required for both approvals and dashboard login.
+    Both,
+}
+
+impl SecondFactor {
+    /// Whether TOTP is required for dashboard login.
+    pub fn requires_login_totp(self) -> bool {
+        matches!(self, SecondFactor::Login | SecondFactor::Both)
+    }
+
+    /// Whether TOTP is required for tool approvals.
+    pub fn requires_approval_totp(self) -> bool {
+        matches!(self, SecondFactor::Totp | SecondFactor::Both)
+    }
 }
 
 /// Maximum TOTP grace period in seconds (1 hour).
@@ -676,7 +694,7 @@ impl ApprovalPolicy {
     /// Returns `true` if `second_factor` is `Totp` AND (totp_tools is empty
     /// OR the tool matches a pattern in totp_tools).
     pub fn tool_requires_totp(&self, tool_name: &str) -> bool {
-        if self.second_factor != SecondFactor::Totp {
+        if !self.second_factor.requires_approval_totp() {
             return false;
         }
         if self.totp_tools.is_empty() {
@@ -768,8 +786,8 @@ impl ApprovalPolicy {
         }
 
         // -- totp_issuer --
-        if self.second_factor == SecondFactor::Totp && self.totp_issuer.is_empty() {
-            return Err("totp_issuer must not be empty when second_factor is totp".into());
+        if self.second_factor != SecondFactor::None && self.totp_issuer.is_empty() {
+            return Err("totp_issuer must not be empty when second_factor is enabled".into());
         }
 
         Ok(())

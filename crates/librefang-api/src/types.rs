@@ -143,6 +143,21 @@ pub struct SpawnResponse {
     pub name: String,
 }
 
+/// OpenAPI schema stand-in for `librefang_channels::types::ParticipantRef`.
+///
+/// The real type lives in `librefang-channels`, which does not depend on
+/// utoipa. This mirror struct exists only so `#[schema(value_type = ...)]`
+/// on `MessageRequest.group_participants` can expose the shape to the
+/// generated OpenAPI document.
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[allow(dead_code)]
+pub struct ParticipantRefSchema {
+    /// Platform JID (e.g. `1234567890@s.whatsapp.net`).
+    pub jid: String,
+    /// Human-readable name (push-name, contact name, or first part of JID).
+    pub display_name: String,
+}
+
 /// A file attachment reference (from a prior upload).
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct AttachmentRef {
@@ -175,6 +190,17 @@ pub struct MessageRequest {
     /// Whether the bot was @mentioned in a group message.
     #[serde(default)]
     pub was_mentioned: bool,
+    /// Optional group participant roster (Phase 2 §C addressee guard).
+    ///
+    /// Forwarded by the WhatsApp gateway for group messages so the kernel's
+    /// addressee guard (`is_addressed_to_other_participant`) can detect when
+    /// a turn is addressed to a named participant other than the agent.
+    ///
+    /// `#[serde(default)]` ensures backward compatibility for callers (Telegram,
+    /// direct API) that don't populate this field.
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<ParticipantRefSchema>>)]
+    pub group_participants: Option<Vec<librefang_channels::types::ParticipantRef>>,
     /// If true, this is an ephemeral "side question" (`/btw`).
     /// The message is answered using the agent's system prompt but WITHOUT
     /// loading or saving session history — the real conversation is untouched.

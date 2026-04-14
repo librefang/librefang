@@ -114,6 +114,7 @@ async fn start_test_server_with_provider(
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
         provider_test_cache: dashmap::DashMap::new(),
+        config_write_lock: tokio::sync::Mutex::new(()),
     });
 
     let app = Router::new()
@@ -1369,6 +1370,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
+        config_write_lock: tokio::sync::Mutex::new(()),
     });
 
     let api_key_state = middleware::AuthState {

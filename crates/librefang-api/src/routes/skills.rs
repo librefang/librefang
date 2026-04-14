@@ -296,12 +296,7 @@ pub async fn install_skill(
     // Copy the skill directory from registry to skills
     match copy_dir_recursive(&registry_src, &dest) {
         Ok(()) => {
-            // Read version from manifest
-            let version = std::fs::read_to_string(dest.join("skill.toml"))
-                .ok()
-                .and_then(|s| toml::from_str::<librefang_skills::SkillManifest>(&s).ok())
-                .map(|m| m.skill.version)
-                .unwrap_or_else(|| "unknown".to_string());
+            let version = "latest".to_string();
 
             // Hot-reload so agents see the new skill immediately
             state.kernel.reload_skills();
@@ -407,33 +402,28 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
             if !path.is_dir() {
                 continue;
             }
-            let manifest_path = path.join("skill.toml");
-            if !manifest_path.exists() {
+            let dir_name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let skill_md_path = path.join("SKILL.md");
+            if !skill_md_path.exists() {
                 continue;
             }
-            match std::fs::read_to_string(&manifest_path) {
-                Ok(content) => {
-                    if let Ok(manifest) =
-                        toml::from_str::<librefang_skills::SkillManifest>(&content)
-                    {
-                        let name = manifest.skill.name.clone();
-                        let installed_dir = state.kernel.home_dir().join("skills").join(&name);
-                        let is_installed = installed_dir.exists();
-                        skills.push(serde_json::json!({
-                            "name": name,
-                            "description": manifest.skill.description,
-                            "version": manifest.skill.version,
-                            "author": manifest.skill.author,
-                            "tags": manifest.skill.tags,
-                            "is_installed": is_installed,
-                        }));
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to read registry skill manifest {:?}: {e}",
-                        manifest_path
-                    );
+            if let Ok(content) = std::fs::read_to_string(&skill_md_path) {
+                if let Some((name, description)) = parse_skill_md_frontmatter(&content) {
+                    let skill_name = if name.is_empty() { &dir_name } else { &name };
+                    let installed_dir = state.kernel.home_dir().join("skills").join(skill_name);
+                    let is_installed = installed_dir.exists();
+                    skills.push(serde_json::json!({
+                        "name": skill_name,
+                        "description": description,
+                        "version": null,
+                        "author": null,
+                        "tags": [],
+                        "is_installed": is_installed,
+                    }));
                 }
             }
         }
@@ -441,6 +431,31 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
 
     let total = skills.len();
     Json(serde_json::json!({ "skills": skills, "total": total }))
+}
+
+/// Parse YAML frontmatter from a SKILL.md file. Returns `(name, description)`.
+fn parse_skill_md_frontmatter(content: &str) -> Option<(String, String)> {
+    let trimmed = content.trim();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    let after_open = &trimmed[3..];
+    let close = after_open.find("---")?;
+    let frontmatter = &after_open[..close];
+    let mut name = String::new();
+    let mut description = String::new();
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("name:") {
+            name = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("description:") {
+            description = val.trim().to_string();
+        }
+    }
+    if name.is_empty() && description.is_empty() {
+        return None;
+    }
+    Some((name, description))
 }
 
 /// GET /api/marketplace/search — Search the FangHub marketplace.
@@ -3809,6 +3824,17 @@ pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> 
         .iter()
         .map(|t| {
             let installed = registry.is_installed(&t.id);
+            let transport = match &t.transport {
+                librefang_extensions::McpTransportTemplate::Stdio { command, args } => {
+                    serde_json::json!({ "type": "stdio", "command": command, "args": args })
+                }
+                librefang_extensions::McpTransportTemplate::Sse { url } => {
+                    serde_json::json!({ "type": "sse", "url": url })
+                }
+                librefang_extensions::McpTransportTemplate::Http { url } => {
+                    serde_json::json!({ "type": "http", "url": url })
+                }
+            };
             serde_json::json!({
                 "id": t.id,
                 "name": t.name,
@@ -3817,6 +3843,7 @@ pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> 
                 "category": t.category.to_string(),
                 "installed": installed,
                 "tags": t.tags,
+                "transport": transport,
                 "required_env": t.required_env.iter().map(|e| serde_json::json!({
                     "name": e.name,
                     "label": e.label,

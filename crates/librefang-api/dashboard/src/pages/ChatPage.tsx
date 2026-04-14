@@ -45,25 +45,25 @@ interface ChatMessage {
   thinkingCollapsed?: boolean;
 }
 
-// Slash commands
+// Slash commands — desc is an i18n key under "chat.cmd_*"
 const SLASH_COMMANDS = [
-  { cmd: "/help", desc: "Show available commands" },
-  { cmd: "/clear", desc: "Clear chat history" },
-  { cmd: "/agents", desc: "List available agents" },
-  { cmd: "/info", desc: "Show current agent info" },
-  { cmd: "/new", desc: "Reset session (clear history)" },
-  { cmd: "/compact", desc: "Compress context to save space" },
-  { cmd: "/reset", desc: "Reset session (clear history)" },
-  { cmd: "/reboot", desc: "Reboot session (clear context)" },
-  { cmd: "/stop", desc: "Cancel current run" },
-  { cmd: "/model", desc: "Show or switch model" },
-  { cmd: "/usage", desc: "Show session token usage" },
-  { cmd: "/context", desc: "Show context pressure" },
-  { cmd: "/verbose", desc: "Toggle verbose level" },
-  { cmd: "/budget", desc: "Show budget status" },
-  { cmd: "/peers", desc: "Show connected peers" },
-  { cmd: "/a2a", desc: "Show A2A agents" },
-  { cmd: "/queue", desc: "Show agent queue status" },
+  { cmd: "/help", descKey: "cmd_help" },
+  { cmd: "/clear", descKey: "cmd_clear" },
+  { cmd: "/agents", descKey: "cmd_agents" },
+  { cmd: "/info", descKey: "cmd_info" },
+  { cmd: "/new", descKey: "cmd_new" },
+  { cmd: "/compact", descKey: "cmd_compact" },
+  { cmd: "/reset", descKey: "cmd_reset" },
+  { cmd: "/reboot", descKey: "cmd_reboot" },
+  { cmd: "/stop", descKey: "cmd_stop" },
+  { cmd: "/model", descKey: "cmd_model" },
+  { cmd: "/usage", descKey: "cmd_usage" },
+  { cmd: "/context", descKey: "cmd_context" },
+  { cmd: "/verbose", descKey: "cmd_verbose" },
+  { cmd: "/budget", descKey: "cmd_budget" },
+  { cmd: "/peers", descKey: "cmd_peers" },
+  { cmd: "/a2a", descKey: "cmd_a2a" },
+  { cmd: "/queue", descKey: "cmd_queue" },
 ];
 
 // Commands that require backend processing via WebSocket command protocol
@@ -299,18 +299,18 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         ]);
       };
       if (trimmed === "/help") {
-        sysMsg(SLASH_COMMANDS.map(c => `**${c.cmd}** — ${c.desc}`).join("\n"));
+        sysMsg(SLASH_COMMANDS.map(c => `**${c.cmd}** — ${t(`chat.${c.descKey}`)}`).join("\n"));
         return;
       }
       if (trimmed === "/clear") { setMessages([]); return; }
       if (trimmed === "/agents") {
         const names = agents.map(a => `- **${a.name}** (${a.state || "unknown"})`).join("\n");
-        sysMsg(names || "No agents available.");
+        sysMsg(names || t("chat.no_agents_available"));
         return;
       }
       if (trimmed === "/info") {
         const a = agents.find(a => a.id === agentId);
-        sysMsg(a ? `**${a.name}**\nModel: ${a.model_name || "-"}\nProvider: ${a.model_provider || "-"}\nState: ${a.state}` : "No agent selected.");
+        sysMsg(a ? `**${a.name}**\n${t("chat.info_model")}: ${a.model_name || "-"}\n${t("chat.info_provider")}: ${a.model_provider || "-"}\n${t("chat.info_state")}: ${a.state}` : t("chat.no_agent_selected"));
         return;
       }
 
@@ -345,7 +345,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
           ws.current.addEventListener("message", handleCmdResponse);
           ws.current.send(JSON.stringify({ type: "command", command: cmd, args: cmdArgs }));
         } else {
-          sysMsg("WebSocket not connected. Please refresh the page.");
+          sysMsg(t("chat.ws_not_connected"));
         }
         return;
       }
@@ -784,7 +784,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 });
 
 // Input box - with shortcut hints
-function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string }) {
+function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, supportsThinking }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string; supportsThinking?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -830,12 +830,13 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
               onClick={() => { setMessage(c.cmd); onSend(c.cmd); setMessage(""); }}
               className="w-full flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-main text-left transition-colors">
               <span className="text-xs font-mono font-bold text-brand">{c.cmd}</span>
-              <span className="text-[10px] text-text-dim">{c.desc}</span>
+              <span className="text-[10px] text-text-dim">{t(`chat.${c.descKey}`)}</span>
             </button>
           ))}
         </div>
       )}
-      {/* Thinking mode toggles */}
+      {/* Thinking mode toggles — only shown when the model supports thinking */}
+      {supportsThinking && (
       <div className="flex items-center gap-2 flex-wrap">
         <button
           type="button"
@@ -864,6 +865,7 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
           <span>{t("chat.show_thinking")}</span>
         </button>
       </div>
+      )}
       <div className="flex gap-2 sm:gap-3 items-end">
         <div className="flex-1">
           <textarea
@@ -1014,7 +1016,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
           <button
             onClick={() => setModelOpen(v => !v)}
             className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono text-text-dim/50 hover:text-text hover:bg-surface-hover transition-colors truncate max-w-[200px]"
-            title="Switch model"
+            title={t("chat.switch_model")}
           >
             <span className="truncate">{optimisticModel ?? modelName ?? t("chat.no_model")}</span>
             <ChevronDown className={`h-2.5 w-2.5 shrink-0 transition-transform ${modelOpen ? "rotate-180" : ""}`} />
@@ -1786,6 +1788,7 @@ export function ChatPage() {
               placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
               authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
               providerName={selectedAgent?.model_provider}
+              supportsThinking={selectedAgent?.supports_thinking}
             />
           </div>
         </main>

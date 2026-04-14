@@ -20,6 +20,7 @@ export interface StatusResponse {
   home_dir?: string;
   log_level?: string;
   network_enabled?: boolean;
+  terminal_enabled?: boolean;
   session_count?: number;
   config_exists?: boolean;
 }
@@ -191,6 +192,7 @@ export interface AgentItem {
   model_name?: string;
   model_tier?: string;
   auth_status?: string;
+  supports_thinking?: boolean;
   ready?: boolean;
   profile?: string;
   identity?: AgentIdentity;
@@ -879,6 +881,7 @@ export interface ModelItem {
   supports_tools?: boolean;
   supports_vision?: boolean;
   supports_streaming?: boolean;
+  supports_thinking?: boolean;
   available?: boolean;
 }
 
@@ -1353,6 +1356,10 @@ export async function getVersionInfo(): Promise<VersionResponse> {
   return get<VersionResponse>("/api/version");
 }
 
+export async function getStatus(): Promise<StatusResponse> {
+  return get<StatusResponse>("/api/status");
+}
+
 export async function getQueueStatus(): Promise<QueueStatusResponse> {
   return get<QueueStatusResponse>("/api/queue/status");
 }
@@ -1470,6 +1477,25 @@ export async function getSecurityStatus(): Promise<SecurityStatusResponse> {
 
 export async function getFullConfig(): Promise<Record<string, unknown>> {
   return get<Record<string, unknown>>("/api/config");
+}
+
+export interface ConfigFieldSchema {
+  type?: string;
+  options?: (string | { id: string; name: string; provider: string })[];
+}
+
+export interface ConfigSectionSchema {
+  fields: Record<string, string | ConfigFieldSchema>;
+  root_level?: boolean;
+  hot_reloadable?: boolean;
+}
+
+export async function getConfigSchema(): Promise<{ sections: Record<string, ConfigSectionSchema> }> {
+  return get<{ sections: Record<string, ConfigSectionSchema> }>("/api/config/schema");
+}
+
+export async function setConfigValue(path: string, value: unknown): Promise<{ status: string; restart_required?: boolean }> {
+  return post<{ status: string; restart_required?: boolean }>("/api/config/set", { path, value });
 }
 
 export async function listBackups(): Promise<{ backups?: BackupItem[]; total?: number }> {
@@ -2140,12 +2166,14 @@ export async function getDashboardUsername(): Promise<string> {
   }
 }
 
-export async function dashboardLogin(username: string, password: string): Promise<{ ok: boolean; token?: string; error?: string }> {
+export async function dashboardLogin(username: string, password: string, totpCode?: string): Promise<{ ok: boolean; token?: string; error?: string; requires_totp?: boolean }> {
   try {
+    const body: Record<string, string> = { username, password };
+    if (totpCode) body.totp_code = totpCode;
     const resp = await fetch("/api/auth/dashboard-login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(body),
     });
     const data = await resp.json();
     if (data.ok && data.token) {
@@ -2431,6 +2459,46 @@ export interface McpServersResponse {
 
 export async function listMcpServers(): Promise<McpServersResponse> {
   return get<McpServersResponse>("/api/mcp/servers");
+}
+
+// ── Registry Integrations (available MCP server templates) ────────
+
+export interface IntegrationRequiredEnv {
+  name: string;
+  label: string;
+  help?: string;
+  is_secret?: boolean;
+  get_url?: string;
+}
+
+export interface IntegrationTransport {
+  type: "stdio" | "sse" | "http";
+  command?: string;
+  args?: string[];
+  url?: string;
+}
+
+export interface IntegrationTemplate {
+  id: string;
+  name: string;
+  description: string;
+  icon?: string;
+  category?: string;
+  installed: boolean;
+  tags?: string[];
+  transport?: IntegrationTransport;
+  required_env?: IntegrationRequiredEnv[];
+  has_oauth?: boolean;
+  setup_instructions?: string;
+}
+
+export interface AvailableIntegrationsResponse {
+  integrations: IntegrationTemplate[];
+  count: number;
+}
+
+export async function listAvailableIntegrations(): Promise<AvailableIntegrationsResponse> {
+  return get<AvailableIntegrationsResponse>("/api/integrations/available");
 }
 
 export async function addMcpServer(server: Omit<McpServerConfigured, "name"> & { name: string }): Promise<ApiActionResponse> {

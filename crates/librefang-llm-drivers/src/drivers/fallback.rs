@@ -136,6 +136,12 @@ impl FallbackDriver {
             .is_ok()
         {
             let cur = entry.ewma_latency_ms.load(Ordering::Relaxed);
+            // Strip the accumulated error penalty. This subtraction is only
+            // correct as long as `ERROR_PENALTY_MS` is added once per error
+            // *additively* on the failure path (see line ~205). If the
+            // penalty formula ever becomes multiplicative, exponential, or
+            // otherwise non-linear in `errors`, this restore math will
+            // silently under- or over-correct — change both sites together.
             let restored = cur.saturating_sub(ERROR_PENALTY_MS.saturating_mul(errors));
             entry.ewma_latency_ms.store(restored, Ordering::Relaxed);
             info!(
