@@ -84,7 +84,7 @@ fn scan_mcp_arguments_for_taint(value: &serde_json::Value) -> Option<String> {
                 // JSON path of the offending leaf.
                 if check_outbound_text_violation(s, sink).is_some() {
                     Some(format!(
-                        "taint violation: credential-shaped value in MCP argument '{}' (blocked by sink '{}')",
+                        "taint violation: sensitive value in MCP argument '{}' (blocked by sink '{}')",
                         path, sink.name
                     ))
                 } else {
@@ -1508,6 +1508,22 @@ mod tests {
             "tags": ["rust", "security"],
         });
         assert!(scan_mcp_arguments_for_taint(&args).is_none());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_rejects_json_authorization_string_leaf() {
+        let args = serde_json::json!({
+            "body": r#"{"authorization": "Bearer sk-live-secret"}"#,
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_some());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_rejects_pii_string_leaf() {
+        let args = serde_json::json!({
+            "email": "john@example.com",
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_some());
     }
 
     #[test]

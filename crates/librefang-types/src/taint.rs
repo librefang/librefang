@@ -5,9 +5,11 @@
 //! This guards against prompt injection, data exfiltration, and other
 //! confused-deputy attacks.
 
+use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
+use std::sync::OnceLock;
 
 /// A classification label applied to data flowing through the system.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -195,6 +197,10 @@ pub fn check_outbound_text_violation(payload: &str, sink: &TaintSink) -> Option<
         "api_key",
         "apikey",
         "api-key",
+        "authorization",
+        "proxy-authorization",
+        "access_token",
+        "refresh_token",
         "token",
         "secret",
         "password",
@@ -278,15 +284,78 @@ pub fn check_outbound_text_violation(payload: &str, sink: &TaintSink) -> Option<
         }
     }
 
+    let mut labels = HashSet::new();
     if hit {
-        let mut labels = HashSet::new();
         labels.insert(TaintLabel::Secret);
-        let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
-        if let Err(violation) = tainted.check_sink(sink) {
-            return Some(violation.to_string());
-        }
+    }
+    if sink.blocked_labels.contains(&TaintLabel::Pii) && payload_contains_pii(payload) {
+        labels.insert(TaintLabel::Pii);
+    }
+    if labels.is_empty() {
+        return None;
+    }
+    let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
+    if let Err(violation) = tainted.check_sink(sink) {
+        return Some(violation.to_string());
     }
     None
+}
+
+fn payload_contains_pii(payload: &str) -> bool {
+    let trimmed = payload.trim();
+    let tokenish_mixed = !trimmed.is_empty()
+        && !trimmed.contains('@')
+        && !trimmed.chars().any(char::is_whitespace)
+        && trimmed.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || c == '-'
+                || c == '_'
+                || c == '.'
+                || c == '/'
+                || c == '+'
+                || c == '='
+        })
+        && trimmed.chars().any(|c| c.is_ascii_alphabetic());
+    if tokenish_mixed {
+        return false;
+    }
+    email_regex().is_match(payload)
+        || phone_regex().is_match(payload)
+        || credit_card_regex().is_match(payload)
+        || ssn_regex().is_match(payload)
+}
+
+fn email_regex() -> &'static Regex {
+    static EMAIL: OnceLock<Regex> = OnceLock::new();
+    EMAIL.get_or_init(|| {
+        Regex::new(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+            .expect("built-in email regex must compile")
+    })
+}
+
+fn phone_regex() -> &'static Regex {
+    static PHONE: OnceLock<Regex> = OnceLock::new();
+    PHONE.get_or_init(|| {
+        Regex::new(r"(?:\+\d{1,3}[\s\-]?)?\(?\d{2,4}\)?[\s.\-]?\d{3,4}[\s.\-]?\d{3,4}")
+            .expect("built-in phone regex must compile")
+    })
+}
+
+fn credit_card_regex() -> &'static Regex {
+    static CREDIT_CARD: OnceLock<Regex> = OnceLock::new();
+    CREDIT_CARD.get_or_init(|| {
+        Regex::new(
+            r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}(?:\d{3})?\b",
+        )
+        .expect("built-in credit-card regex must compile")
+    })
+}
+
+fn ssn_regex() -> &'static Regex {
+    static SSN: OnceLock<Regex> = OnceLock::new();
+    SSN.get_or_init(|| {
+        Regex::new(r"\b\d{3}[\-\s]?\d{2}[\-\s]?\d{4}\b").expect("built-in ssn regex must compile")
+    })
 }
 
 /// Describes a taint policy violation: a labelled value tried to reach a
@@ -436,6 +505,26 @@ mod tests {
                 "benign prose must pass: {payload:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_check_outbound_text_blocks_json_authorization_shape() {
+        let sink = TaintSink::mcp_tool_call();
+        let payload = r#"{"authorization": "Bearer sk-live-secret"}"#;
+        assert!(check_outbound_text_violation(payload, &sink).is_some());
+    }
+
+    #[test]
+    fn test_check_outbound_text_blocks_pii_for_mcp_sink() {
+        let sink = TaintSink::mcp_tool_call();
+        assert!(check_outbound_text_violation("john@example.com", &sink).is_some());
+        assert!(check_outbound_text_violation("+1-555-123-4567", &sink).is_some());
+    }
+
+    #[test]
+    fn test_check_outbound_text_does_not_block_pii_for_agent_message_sink() {
+        let sink = TaintSink::agent_message();
+        assert!(check_outbound_text_violation("john@example.com", &sink).is_none());
     }
 
     #[test]
