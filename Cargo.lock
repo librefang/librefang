@@ -4124,6 +4124,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "librefang-http"
+version = "2026.4.13-beta19"
+dependencies = [
+ "librefang-types",
+ "reqwest 0.13.2",
+ "rustls",
+ "rustls-native-certs",
+ "tracing",
+ "webpki-roots",
+]
+
+[[package]]
 name = "librefang-kernel"
 version = "2026.4.13-beta19"
 dependencies = [
@@ -4141,6 +4153,7 @@ dependencies = [
  "librefang-channels",
  "librefang-extensions",
  "librefang-hands",
+ "librefang-kernel-metering",
  "librefang-memory",
  "librefang-runtime",
  "librefang-skills",
@@ -4164,6 +4177,16 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "librefang-kernel-metering"
+version = "2026.4.13-beta19"
+dependencies = [
+ "librefang-memory",
+ "librefang-runtime",
+ "librefang-types",
+ "serde",
 ]
 
 [[package]]
@@ -4225,6 +4248,7 @@ dependencies = [
  "http",
  "landlock",
  "librefang-channels",
+ "librefang-http",
  "librefang-memory",
  "librefang-skills",
  "librefang-types",
