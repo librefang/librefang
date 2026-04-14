@@ -2478,16 +2478,21 @@ impl LibreFangKernel {
         let workflow_home_dir = config.home_dir.clone();
         let oauth_home_dir = config.home_dir.clone();
         let trigger_config = config.triggers.clone();
-        // Default audit anchor lives next to the SQLite file so operators
-        // who do nothing still get a tip-anchored log that detects full
-        // `audit_entries` rewrites. The anchor file path is intentionally
-        // derived from `data_dir` rather than a new config knob — if an
-        // operator needs to put the anchor somewhere the daemon can write
-        // to but unprivileged code cannot (chmod-0400 file, systemd
-        // ReadOnlyPaths mount, syslog pipe) they can symlink it. A first-
-        // class `audit.anchor_path` config field can land in a follow-up
-        // once the shape of the hardening story is settled.
-        let audit_anchor_path = config.data_dir.join("audit.anchor");
+        // Resolve the audit anchor path from `[audit].anchor_path`. When
+        // unset, the default is `data_dir/audit.anchor` — good enough to
+        // catch most casual tampering since it sits next to the SQLite
+        // file. When the operator points it somewhere the daemon can
+        // write to but unprivileged code cannot (chmod-0400 file, systemd
+        // `ReadOnlyPaths=` mount, NFS share, pipe to `logger`), the same
+        // rewrite check becomes a real supply-chain boundary. Relative
+        // paths resolve against `data_dir` so operators can write
+        // `anchor_path = "audit/tip.anchor"` without hard-coding an
+        // absolute path in config.toml.
+        let audit_anchor_path = match config.audit.anchor_path.as_ref() {
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => config.data_dir.join(path),
+            None => config.data_dir.join("audit.anchor"),
+        };
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
             data_dir_boot: config.data_dir.clone(),
@@ -2998,6 +3003,51 @@ system_prompt = "You are a helpful assistant."
         let agent_id = predetermined_id.unwrap_or_default();
         let session_id = SessionId::new();
         let name = manifest.name.clone();
+
+        // SECURITY: If this spawn is linked to a running parent agent,
+        // enforce that the child's capabilities are a subset of the
+        // parent's. The `spawn_agent` tool runner and WASM host-call
+        // paths already call `spawn_agent_checked` which runs the same
+        // check, but pushing it down here closes every future code path
+        // that routes through `spawn_agent_with_parent` (channel
+        // handlers, LLM routing, workflow engines, bulk spawn, …) by
+        // default instead of relying on each caller to remember the
+        // wrapper. Top-level spawns (HTTP API, boot-time assistant,
+        // channel bootstrap) pass `parent = None` and are unaffected —
+        // they're an owner action, not a privilege inheritance.
+        if let Some(parent_id) = parent {
+            if let Some(parent_entry) = self.registry.get(parent_id) {
+                let parent_caps = manifest_to_capabilities(&parent_entry.manifest);
+                let child_caps = manifest_to_capabilities(&manifest);
+                if let Err(violation) = librefang_types::capability::validate_capability_inheritance(
+                    &parent_caps,
+                    &child_caps,
+                ) {
+                    warn!(
+                        agent = %name,
+                        parent = %parent_id,
+                        %violation,
+                        "Rejecting child spawn — requested capabilities exceed parent"
+                    );
+                    return Err(KernelError::LibreFang(
+                        librefang_types::error::LibreFangError::Internal(format!(
+                            "Privilege escalation denied: {violation}"
+                        )),
+                    ));
+                }
+            } else {
+                warn!(
+                    agent = %name,
+                    parent = %parent_id,
+                    "Parent agent is not registered — rejecting child spawn to fail closed"
+                );
+                return Err(KernelError::LibreFang(
+                    librefang_types::error::LibreFangError::Internal(format!(
+                        "Privilege escalation denied: parent agent {parent_id} is not registered"
+                    )),
+                ));
+            }
+        }
 
         info!(agent = %name, id = %agent_id, parent = ?parent, "Spawning agent");
 
@@ -13229,6 +13279,186 @@ mod tests {
         assert_eq!(entry.manifest.model.model, "default");
         assert!(entry.manifest.model.base_url.is_none());
         assert!(entry.manifest.model.api_key_env.is_none());
+
+        kernel.shutdown();
+    }
+
+    /// Regression: `spawn_agent_inner` must refuse to spawn a child whose
+    /// declared capabilities exceed its parent's. Before this check was
+    /// pushed down, only `spawn_agent_checked` (tool-runner / WASM host
+    /// path) enforced it, and any future caller routing through
+    /// `spawn_agent_with_parent` directly (channel handlers, workflow
+    /// engines, LLM routing, bulk spawn) would silently bypass the
+    /// subset rule and let a restricted parent promote its own
+    /// offspring to full privileges.
+    #[test]
+    fn test_spawn_child_exceeding_parent_is_rejected() {
+        use librefang_types::agent::ManifestCapabilities;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-lineage-reject-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        // Restricted parent: only allowed to invoke `file_read`, no network, no shell.
+        let parent = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "restricted-parent".to_string(),
+                    description: "can only read".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    capabilities: ManifestCapabilities {
+                        tools: vec!["file_read".to_string()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("parent should spawn as a top-level agent");
+
+        // Malicious child manifest: asks for the wildcard tool +
+        // shell + network — a superset of the parent's single read
+        // capability.
+        let escalation = kernel.spawn_agent_inner(
+            AgentManifest {
+                name: "escalated-child".to_string(),
+                description: "requests full privileges".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                capabilities: ManifestCapabilities {
+                    tools: vec!["*".to_string()],
+                    shell: vec!["*".to_string()],
+                    network: vec!["*".to_string()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Some(parent),
+            None,
+            None,
+        );
+        let err = escalation.expect_err("child must be rejected");
+        assert!(
+            format!("{err}").contains("Privilege escalation denied"),
+            "error should mention privilege escalation; got {err}"
+        );
+
+        // Nothing called "escalated-child" should be registered —
+        // the check ran before `register()`.
+        assert!(kernel
+            .registry
+            .list()
+            .iter()
+            .all(|e| e.name != "escalated-child"));
+
+        kernel.shutdown();
+    }
+
+    /// A child whose capabilities are a strict subset of its parent
+    /// still spawns successfully — the check must not refuse legitimate
+    /// inheritance. This is the positive counterpart of
+    /// `test_spawn_child_exceeding_parent_is_rejected`.
+    #[test]
+    fn test_spawn_child_with_subset_capabilities_is_allowed() {
+        use librefang_types::agent::ManifestCapabilities;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-lineage-allow-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        let parent = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "parent-with-file-tools".to_string(),
+                    description: "file-reading parent".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    capabilities: ManifestCapabilities {
+                        tools: vec!["file_read".to_string(), "file_write".to_string()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("parent should spawn");
+
+        let child_id = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "subset-child".to_string(),
+                    description: "narrower read-only child".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    capabilities: ManifestCapabilities {
+                        tools: vec!["file_read".to_string()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Some(parent),
+                None,
+                None,
+            )
+            .expect("subset child should be allowed");
+
+        let entry = kernel.registry.get(child_id).expect("child registered");
+        assert_eq!(entry.parent, Some(parent));
+
+        kernel.shutdown();
+    }
+
+    /// A child whose `parent` argument points at a registry entry that
+    /// doesn't exist must fail closed. This protects against a stale
+    /// `AgentId` slipping through (e.g. after a parent is killed mid-
+    /// spawn) and silently landing on the non-parent code path.
+    #[test]
+    fn test_spawn_with_unknown_parent_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-lineage-unknown-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        let ghost_parent = AgentId::new();
+        let result = kernel.spawn_agent_inner(
+            AgentManifest {
+                name: "orphan".to_string(),
+                description: "parent does not exist".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            Some(ghost_parent),
+            None,
+            None,
+        );
+        let err = result.expect_err("unknown parent must fail closed");
+        assert!(
+            format!("{err}").contains("not registered"),
+            "error should indicate parent is not registered; got {err}"
+        );
 
         kernel.shutdown();
     }
