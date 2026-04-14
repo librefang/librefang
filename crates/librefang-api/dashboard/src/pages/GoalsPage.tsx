@@ -190,7 +190,7 @@ export function GoalsPage() {
             <h3 className="text-lg font-black tracking-tight mb-1">{t("goals.pick_template")}</h3>
             <p className="text-sm text-text-dim">{t("goals.pick_template_desc")}</p>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 stagger-children">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 stagger-children">
             {templates.map((tpl) => {
               const Icon = TEMPLATE_ICONS[tpl.icon] ?? Target;
               const isApplying = applyingTemplate === tpl.id;
@@ -231,7 +231,7 @@ export function GoalsPage() {
       ) : (
         <>
           {/* KPI row */}
-          <div className="grid grid-cols-2 gap-2 sm:gap-4 xl:grid-cols-4 stagger-children">
+          <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
             {[
               { label: t("goals.total"), value: stats.total, color: "text-brand", bg: "bg-brand/10", icon: Target },
               { label: t("goals.pending"), value: stats.pending, color: "text-text-dim", bg: "bg-main", icon: Clock },

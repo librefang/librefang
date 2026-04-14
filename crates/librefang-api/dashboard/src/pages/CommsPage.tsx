@@ -274,13 +274,13 @@ export function CommsPage() {
 
           {/* Channels Grid */}
           {isLoading ? (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6">
+            <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
               {[1, 2, 3, 4, 5, 6].map(i => <CardSkeleton key={i} />)}
             </div>
           ) : filteredChannels.length === 0 ? (
             <EmptyState title={t("common.no_data")} icon={<Radio className="h-6 w-6" />} />
           ) : (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6">
+            <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
               {filteredChannels.map((c) => (
                 <Card key={c.name} hover padding="md">
                   <div className="flex items-center justify-between mb-3">
