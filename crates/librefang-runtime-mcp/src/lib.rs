@@ -6,6 +6,8 @@
 //!
 //! All MCP tools are namespaced with `mcp_{server}_{tool}` to prevent collisions.
 
+pub mod mcp_oauth;
+
 use http::{HeaderName, HeaderValue};
 use librefang_types::config::{
     HttpCompatHeaderConfig, HttpCompatMethod, HttpCompatRequestMode, HttpCompatResponseMode,
@@ -438,7 +440,7 @@ impl McpConnection {
     async fn connect_sse(url: &str) -> Result<(McpInner, Option<Vec<rmcp::model::Tool>>), String> {
         Self::check_ssrf(url, "SSE")?;
 
-        let client = crate::http_client::proxied_client_builder()
+        let client = librefang_http::proxied_client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
@@ -785,7 +787,7 @@ impl McpConnection {
     ) -> Result<(McpInner, Option<Vec<rmcp::model::Tool>>), String> {
         Self::check_ssrf(base_url, "HTTP compatibility backend")?;
 
-        let client = crate::http_client::proxied_client_builder()
+        let client = librefang_http::proxied_client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
@@ -1628,7 +1630,7 @@ mod tests {
             tools: Vec::new(),
             original_names: HashMap::new(),
             inner: McpInner::HttpCompat {
-                client: crate::http_client::proxied_client(),
+                client: librefang_http::proxied_client(),
             },
             auth_state: crate::mcp_oauth::McpAuthState::NotRequired,
         };

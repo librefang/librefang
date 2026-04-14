@@ -4,6 +4,7 @@ members = [
     "crates/librefang-types",
     "crates/librefang-memory",
     "crates/librefang-runtime",
+    "crates/librefang-runtime-mcp",
     "crates/librefang-runtime-oauth",
     "crates/librefang-runtime-drivers",
     "crates/librefang-runtime-wasm",
