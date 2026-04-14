@@ -1190,7 +1190,12 @@ pub async fn send_message(
         if let Some(sender) = sender_context.as_ref() {
             state
                 .kernel
-                .send_message_with_sender_context(agent_id, &effective_message, sender)
+                .send_message_with_sender_context_and_thinking(
+                    agent_id,
+                    &effective_message,
+                    sender,
+                    thinking_override,
+                )
                 .await
         } else {
             let kernel_handle: Arc<dyn KernelHandle> =
@@ -4715,6 +4720,8 @@ mod tests {
             is_group: false,
             was_mentioned: false,
             ephemeral: false,
+            thinking: None,
+            show_thinking: None,
         };
         assert!(request_sender_context(&req).is_none());
     }
@@ -4730,6 +4737,8 @@ mod tests {
             is_group: false,
             was_mentioned: false,
             ephemeral: false,
+            thinking: None,
+            show_thinking: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.user_id, "u-123");
@@ -4748,6 +4757,8 @@ mod tests {
             is_group: true,
             was_mentioned: true,
             ephemeral: false,
+            thinking: None,
+            show_thinking: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert!(sender.is_group);

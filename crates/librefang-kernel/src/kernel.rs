@@ -3255,6 +3255,36 @@ system_prompt = "You are a helpful assistant."
             .await
     }
 
+    /// Send a message with both sender identity context and a per-call
+    /// deep-thinking override.
+    ///
+    /// Used by HTTP / channel paths that already track sender metadata but
+    /// also need to honour a per-message thinking flag (e.g. the chat UI's
+    /// deep-thinking toggle).
+    pub async fn send_message_with_sender_context_and_thinking(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+        thinking_override: Option<bool>,
+    ) -> KernelResult<AgentLoopResult> {
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+        self.send_message_full(
+            agent_id,
+            message,
+            handle,
+            None,
+            Some(sender),
+            None,
+            thinking_override,
+        )
+        .await
+    }
+
     /// Send a multimodal message with sender identity context from a channel.
     pub async fn send_message_with_blocks_and_sender(
         &self,
