@@ -111,7 +111,8 @@
       "hours_short": "时",
       "minutes_short": "分",
       "seconds_short": "秒"
-    }
+    },
+    "copy": "复制"
   },
   "status": {
     "running": "运行中",
@@ -417,7 +418,9 @@
     "test_success": "通道测试通过",
     "test_failed": "通道测试失败",
     "reload": "重新加载",
-    "reload_success": "通道已重新加载"
+    "reload_success": "通道已重新加载",
+    "qr_failed": "获取二维码失败",
+    "login_success": "登录成功！正在保存配置..."
   },
   "skills": {
     "title": "技能",
@@ -453,7 +456,17 @@
     "builtin": "FangHub",
     "official": "官方",
     "install_to": "安装到",
-    "global": "全局（所有 Agent）"
+    "global": "全局（所有 Agent）",
+    "cat_coding": "编程",
+    "cat_git": "Git",
+    "cat_web": "Web",
+    "cat_devops": "DevOps",
+    "cat_browser": "浏览器",
+    "cat_ai": "AI",
+    "cat_data": "数据",
+    "cat_productivity": "效率",
+    "cat_security": "安全",
+    "cat_cli": "CLI"
   },
   "hands": {
     "title": "Hands",
@@ -535,7 +548,12 @@
     "no_trend_data": "暂无趋势数据",
     "cost_per_call": "单次调用成本",
     "cheapest_call": "最低单次成本",
-    "help": "查看使用统计和成本分析。监控 API 调用次数、Token 消耗量，设置预算限额控制支出。"
+    "help": "查看使用统计和成本分析。监控 API 调用次数、Token 消耗量，设置预算限额控制支出。",
+    "cost": "费用",
+    "avg": "平均",
+    "min": "最小",
+    "max": "最大",
+    "cost_per_call_label": "每次调用费用"
   },
   "memory": {
     "title": "记忆",
@@ -722,7 +740,19 @@
       "respond_desc": "发送响应",
       "agent": "智能体",
       "agent_desc": "运行智能体任务"
-    }
+    },
+    "ungroup": "取消分组",
+    "delete_group": "删除分组及子节点",
+    "group": "分组",
+    "fit_view": "适应视图 (Cmd+1)",
+    "export": "导出 (Cmd+E)",
+    "import": "导入 (Cmd+I)",
+    "shortcuts": "快捷键 (?)",
+    "dry_run_hint": "Dry Run — 验证但不调用 LLM",
+    "dry_run": "Dry Run",
+    "dry_run_desc": "验证 Agent 并预览解析后的提示词，不调用任何 LLM。",
+    "fullscreen": "全屏",
+    "exit_fullscreen": "退出全屏"
   },
   "workflows": {
     "title": "工作流",
@@ -793,7 +823,11 @@
       "organizer_desc": "分类和结构化",
       "report_writer": "周报撰写",
       "report_writer_desc": "生成专业周报"
-    }
+    },
+    "dry_run": "Dry Run",
+    "dry_run_hint": "Dry Run — 验证但不调用 LLM",
+    "dry_run_valid": "验证通过 — 所有 Agent 已解析",
+    "dry_run_warning": "警告 — 部分 Agent 未找到"
   },
   "scheduler": {
     "title": "调度器",
@@ -1350,7 +1384,8 @@
     "save_all": "全部保存",
     "no_results": "没有匹配的字段",
     "reset_default": "恢复默认值",
-    "unsaved_warning": "有未保存的修改，确定要丢弃吗？"
+    "unsaved_warning": "有未保存的修改，确定要丢弃吗？",
+    "save_failed": "保存失败"
   },
   "chat": {
     "title": "对话",
@@ -1393,7 +1428,30 @@
     "tts_unavailable": "未配置 TTS 供应商",
     "tts_generating": "正在生成语音...",
     "tts_error": "语音生成失败",
-    "tts_empty": "没有可朗读的文本"
+    "tts_empty": "没有可朗读的文本",
+    "cmd_help": "显示可用命令",
+    "cmd_clear": "清除聊天记录",
+    "cmd_agents": "列出可用 Agent",
+    "cmd_info": "显示当前 Agent 信息",
+    "cmd_new": "重置会话（清除历史）",
+    "cmd_compact": "压缩上下文以节省空间",
+    "cmd_reset": "重置会话（清除历史）",
+    "cmd_reboot": "重启会话（清除上下文）",
+    "cmd_stop": "取消当前运行",
+    "cmd_model": "显示或切换模型",
+    "cmd_usage": "显示会话 Token 使用量",
+    "cmd_context": "显示上下文压力",
+    "cmd_verbose": "切换详细日志级别",
+    "cmd_budget": "显示预算状态",
+    "cmd_peers": "显示已连接节点",
+    "cmd_a2a": "显示 A2A Agent",
+    "cmd_queue": "显示 Agent 队列状态",
+    "no_agents_available": "没有可用的 Agent。",
+    "no_agent_selected": "未选择 Agent。",
+    "info_model": "模型",
+    "info_provider": "提供商",
+    "info_state": "状态",
+    "ws_not_connected": "WebSocket 未连接，请刷新页面。"
   },
   "goals": {
     "title": "目标",
@@ -1477,7 +1535,8 @@
       "noEntries": "暂无审计记录。",
       "showing": "显示第 {{from}}-{{to}} 条，共 {{total}} 条"
     },
-    "loadError": "加载审批列表失败，请检查网络连接。"
+    "loadError": "加载审批列表失败，请检查网络连接。",
+    "batch_disabled_totp": "TOTP 强制启用时不可批量审批"
   },
   "wizard": {
     "welcome": "欢迎",
@@ -1798,6 +1857,9 @@
     "auth_revoke": "撤销",
     "auth_started": "授权已开始 — 请在新标签页中完成",
     "auth_revoked": "授权已撤销",
+    "auth_failed": "认证失败",
+    "auth_start_failed": "启动认证失败",
+    "auth_revoke_failed": "撤销认证失败",
     "tab_my_servers": "我的服务器",
     "tab_registry": "Registry",
     "registry_subtitle": "来自 Registry 的预配置 MCP 服务器模板",

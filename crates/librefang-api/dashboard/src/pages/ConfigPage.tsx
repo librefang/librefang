@@ -277,7 +277,7 @@ export function ConfigPage({ category }: { category: string }) {
             : t("common.saved", "Saved");
         setSaveStatus((s) => ({ ...s, [path]: { ok: !reloadFailed, msg } }));
       } catch (err: any) {
-        setSaveStatus((s) => ({ ...s, [path]: { ok: false, msg: err.message || "Save failed" } }));
+        setSaveStatus((s) => ({ ...s, [path]: { ok: false, msg: err.message || t("config.save_failed") } }));
         errors++;
       }
     }

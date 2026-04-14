@@ -111,7 +111,8 @@
       "hours_short": "h",
       "minutes_short": "m",
       "seconds_short": "s"
-    }
+    },
+    "copy": "Copy"
   },
   "status": {
     "running": "Running",
@@ -417,7 +418,9 @@
     "test_success": "Channel test passed",
     "test_failed": "Channel test failed",
     "reload": "Reload",
-    "reload_success": "Channels reloaded"
+    "reload_success": "Channels reloaded",
+    "qr_failed": "Failed to get QR code",
+    "login_success": "Login successful! Saving configuration..."
   },
   "skills": {
     "title": "Skills",
@@ -453,7 +456,17 @@
     "builtin": "FangHub",
     "official": "Official",
     "install_to": "Install to",
-    "global": "Global (all agents)"
+    "global": "Global (all agents)",
+    "cat_coding": "Coding",
+    "cat_git": "Git",
+    "cat_web": "Web",
+    "cat_devops": "DevOps",
+    "cat_browser": "Browser",
+    "cat_ai": "AI",
+    "cat_data": "Data",
+    "cat_productivity": "Productivity",
+    "cat_security": "Security",
+    "cat_cli": "CLI"
   },
   "hands": {
     "title": "Hands",
@@ -535,7 +548,12 @@
     "no_trend_data": "No trend data available yet",
     "cost_per_call": "Cost per Call",
     "cheapest_call": "Cheapest/Call",
-    "help": "View usage statistics and cost analytics. Monitor API calls, token consumption, and set budget limits to control spending."
+    "help": "View usage statistics and cost analytics. Monitor API calls, token consumption, and set budget limits to control spending.",
+    "cost": "Cost",
+    "avg": "Avg",
+    "min": "Min",
+    "max": "Max",
+    "cost_per_call_label": "Cost/Call"
   },
   "memory": {
     "title": "Memory",
@@ -719,7 +737,19 @@
       "respond_desc": "Send response",
       "agent": "Agent",
       "agent_desc": "Run agent task"
-    }
+    },
+    "ungroup": "Ungroup",
+    "delete_group": "Delete group and children",
+    "group": "Group",
+    "fit_view": "Fit View (Cmd+1)",
+    "export": "Export (Cmd+E)",
+    "import": "Import (Cmd+I)",
+    "shortcuts": "Shortcuts (?)",
+    "dry_run_hint": "Dry Run — validate without calling LLMs",
+    "dry_run": "Dry Run",
+    "dry_run_desc": "Validate agents and preview resolved prompts without calling any LLMs.",
+    "fullscreen": "Fullscreen",
+    "exit_fullscreen": "Exit fullscreen"
   },
   "workflows": {
     "title": "Workflows",
@@ -789,7 +819,11 @@
       "organizer_desc": "Categorize and structure",
       "report_writer": "Report Writer",
       "report_writer_desc": "Generate polished report"
-    }
+    },
+    "dry_run": "Dry Run",
+    "dry_run_hint": "Dry Run — validate without calling LLMs",
+    "dry_run_valid": "Valid — all agents resolved",
+    "dry_run_warning": "Warning — some agents not found"
   },
   "scheduler": {
     "title": "Scheduler",
@@ -1375,7 +1409,8 @@
     "save_all": "Save All",
     "no_results": "No fields match your search",
     "reset_default": "Reset to default",
-    "unsaved_warning": "You have unsaved changes. Discard them?"
+    "unsaved_warning": "You have unsaved changes. Discard them?",
+    "save_failed": "Save failed"
   },
   "chat": {
     "title": "Chat",
@@ -1418,7 +1453,30 @@
     "tts_unavailable": "No TTS provider configured",
     "tts_generating": "Generating speech...",
     "tts_error": "Speech generation failed",
-    "tts_empty": "No readable text"
+    "tts_empty": "No readable text",
+    "cmd_help": "Show available commands",
+    "cmd_clear": "Clear chat history",
+    "cmd_agents": "List available agents",
+    "cmd_info": "Show current agent info",
+    "cmd_new": "Reset session (clear history)",
+    "cmd_compact": "Compress context to save space",
+    "cmd_reset": "Reset session (clear history)",
+    "cmd_reboot": "Reboot session (clear context)",
+    "cmd_stop": "Cancel current run",
+    "cmd_model": "Show or switch model",
+    "cmd_usage": "Show session token usage",
+    "cmd_context": "Show context pressure",
+    "cmd_verbose": "Toggle verbose level",
+    "cmd_budget": "Show budget status",
+    "cmd_peers": "Show connected peers",
+    "cmd_a2a": "Show A2A agents",
+    "cmd_queue": "Show agent queue status",
+    "no_agents_available": "No agents available.",
+    "no_agent_selected": "No agent selected.",
+    "info_model": "Model",
+    "info_provider": "Provider",
+    "info_state": "State",
+    "ws_not_connected": "WebSocket not connected. Please refresh the page."
   },
   "goals": {
     "title": "Goals",
@@ -1502,7 +1560,8 @@
       "noEntries": "No audit entries found.",
       "showing": "Showing {{from}}-{{to}} of {{total}}"
     },
-    "loadError": "Failed to load approvals. Check your connection."
+    "loadError": "Failed to load approvals. Check your connection.",
+    "batch_disabled_totp": "Batch approve disabled when TOTP is enforced"
   },
   "wizard": {
     "welcome": "Welcome",
@@ -1791,6 +1850,9 @@
     "auth_revoke": "Revoke",
     "auth_started": "Authorization started — complete in the new tab",
     "auth_revoked": "Authorization revoked",
+    "auth_failed": "Auth failed",
+    "auth_start_failed": "Failed to start auth",
+    "auth_revoke_failed": "Failed to revoke auth",
     "tab_my_servers": "My Servers",
     "tab_registry": "Registry",
     "registry_subtitle": "Pre-configured MCP server templates from the registry",

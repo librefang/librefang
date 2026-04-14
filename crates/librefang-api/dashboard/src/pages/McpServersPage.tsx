@@ -136,7 +136,7 @@ function AuthBadge({
             onAuthSuccess();
           } else if (status.auth.state === "error") {
             setPolling(false);
-            addToast(status.auth.message || "Auth failed", "error");
+            addToast(status.auth.message || t("mcp.auth_failed"), "error");
           }
         } catch {
           // ignore transient errors during polling
@@ -168,7 +168,7 @@ function AuthBadge({
       if (authWindow && !authWindow.closed) {
         authWindow.close();
       }
-      addToast(e?.message || "Failed to start auth", "error");
+      addToast(e?.message || t("mcp.auth_start_failed"), "error");
     }
   }, [server.name, addToast, t]);
 
@@ -178,7 +178,7 @@ function AuthBadge({
       onAuthSuccess(); // refresh
       addToast(t("mcp.auth_revoked"), "success");
     } catch (e: any) {
-      addToast(e?.message || "Failed to revoke auth", "error");
+      addToast(e?.message || t("mcp.auth_revoke_failed"), "error");
     }
   }, [server.name, onAuthSuccess, addToast, t]);
 

@@ -148,7 +148,7 @@ export function AnalyticsPage() {
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={100} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [formatCost(v), "Cost"]} />
+                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [formatCost(v), t("analytics.cost")]} />
                     <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#3b82f6" />
                   </BarChart>
                 </ResponsiveContainer>
@@ -167,7 +167,7 @@ export function AnalyticsPage() {
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [formatCost(v), "Cost"]} />
+                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [formatCost(v), t("analytics.cost")]} />
                     <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#a855f7" />
                   </BarChart>
                 </ResponsiveContainer>
@@ -234,7 +234,7 @@ export function AnalyticsPage() {
                   </h2>
                   <ResponsiveContainer width="100%" height={Math.max(modelPerformance.slice(0, 8).length * 40, 120)}>
                     <BarChart data={modelPerformance.slice(0, 8).map(m => ({ 
-                      name: m.model?.slice(0, 18) ?? "Unknown", 
+                      name: m.model?.slice(0, 18) ?? t("common.unknown"), 
                       avg: m.avg_latency_ms ?? 0,
                       min: m.min_latency_ms ?? 0,
                       max: m.max_latency_ms ?? 0,
@@ -244,9 +244,9 @@ export function AnalyticsPage() {
                       <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
                       <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any, name: any) => [`${v}ms`, name]} />
                       <Legend />
-                      <Bar dataKey="avg" name="Avg" radius={[0, 4, 4, 0]} fill="#3b82f6" />
-                      <Bar dataKey="min" name="Min" radius={[0, 4, 4, 0]} fill="#22c55e" />
-                      <Bar dataKey="max" name="Max" radius={[0, 4, 4, 0]} fill="#ef4444" />
+                      <Bar dataKey="avg" name={t("analytics.avg")} radius={[0, 4, 4, 0]} fill="#3b82f6" />
+                      <Bar dataKey="min" name={t("analytics.min")} radius={[0, 4, 4, 0]} fill="#22c55e" />
+                      <Bar dataKey="max" name={t("analytics.max")} radius={[0, 4, 4, 0]} fill="#ef4444" />
                     </BarChart>
                   </ResponsiveContainer>
                 </Card>
@@ -257,14 +257,14 @@ export function AnalyticsPage() {
                   </h2>
                   <ResponsiveContainer width="100%" height={Math.max(modelPerformance.slice(0, 8).length * 40, 120)}>
                     <BarChart data={modelPerformance.slice(0, 8).map(m => ({ 
-                      name: m.model?.slice(0, 18) ?? "Unknown", 
+                      name: m.model?.slice(0, 18) ?? t("common.unknown"), 
                       costPerCall: m.cost_per_call ?? 0,
                     }))} layout="vertical" margin={{ left: 0, right: 20 }}>
                       <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                       <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v.toFixed(4)}`} axisLine={false} tickLine={false} />
                       <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [`$${v.toFixed(4)}`, "Cost/Call"]} />
-                      <Bar dataKey="costPerCall" name="Cost/Call" radius={[0, 4, 4, 0]} fill="#a855f7" />
+                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [`$${v.toFixed(4)}`, t("analytics.cost_per_call_label")]} />
+                      <Bar dataKey="costPerCall" name={t("analytics.cost_per_call_label")} radius={[0, 4, 4, 0]} fill="#a855f7" />
                     </BarChart>
                   </ResponsiveContainer>
                 </Card>
