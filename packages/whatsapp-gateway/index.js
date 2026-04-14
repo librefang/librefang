@@ -1168,47 +1168,55 @@ async function startConnection() {
       //   4. `sender` itself when it's already an `@s.whatsapp.net` JID
       // If none of the above yields a phone-number JID, `phone` is left as
       // a placeholder and we flag the sender as unresolved.
-      const isGroup = sender.endsWith('@g.us');
-      const isLidJid = sender.endsWith('@lid');
+      const isGroup = isGroupJid(sender);
+      const isLid = isLidJid(sender);
       const senderPnRaw = msg.key.senderPn || '';
 
       // Cache LID → phone-number JID when we see both on the same message.
-      if (isLidJid && senderPnRaw) {
+      // Side effect lives OUTSIDE resolvePeerId — Plan 01 §Concerns #1.
+      if (isLid && senderPnRaw) {
         lidToPnJid.set(sender, senderPnRaw);
       }
 
       // CS-02: first-seen LID without senderPn AND not in cache — proactively
       // ask Baileys for the PN mapping with a 5s timeout. Populates cache so
       // the next message in the burst resolves synchronously.
-      if (isLidJid && !senderPnRaw && !lidToPnJid.has(sender)) {
+      // Side effect lives OUTSIDE resolvePeerId — Plan 01 §Concerns #1.
+      if (isLid && !senderPnRaw && !lidToPnJid.has(sender)) {
         await resolveLidProactively(sock, sender, lidToPnJid, 5000);
       }
 
-      // Resolve to a phone-number JID (or empty string if we cannot).
-      let senderPnJid = '';
-      if (senderPnRaw) {
-        senderPnJid = senderPnRaw;
-      } else if (isLidJid && lidToPnJid.has(sender)) {
-        senderPnJid = lidToPnJid.get(sender);
-      } else if (!isLidJid && !isGroup) {
-        senderPnJid = sender;
-      } else if (msg.key.participant && !msg.key.participant.endsWith('@lid')) {
-        senderPnJid = msg.key.participant;
-      }
+      // Centralized resolution — Phase 4 §A (ID-01).
+      const { peer: senderPnJid, confidence } = resolvePeerId(sender, {
+        lidToPnCache: lidToPnJid,
+        senderPn: senderPnRaw,
+        participant: msg.key.participant || '',
+      });
 
-      const phone = senderPnJid ? '+' + senderPnJid.replace(/@.*$/, '') : '';
+      const phone = extractE164(senderPnJid);
       const phoneResolved = phone !== '';
       const pushName = msg.pushName || phone || sender;
 
       if (!phoneResolved) {
-        console.warn(`[gateway] Could not resolve phone for sender=${sender} senderPn=${senderPnRaw || '∅'} participant=${msg.key.participant || '∅'} — treating as unknown`);
+        // ID-03 structured log — every lid_unresolved outcome.
+        const reason = senderPnRaw ? 'senderPn_present_but_unextractable'
+          : (isLid && lidToPnJid.has(sender)) ? 'cache_hit_but_unextractable'
+          : msg.key.participant ? 'participant_was_lid'
+          : 'no_mapping_available';
+        console.warn(JSON.stringify({
+          event: 'identity_unresolved',
+          jid: sender,
+          reason,
+          lid_cache_size: lidToPnJid.size,
+          confidence,
+        }));
       }
 
       // Determine sender type. Owner check accepts either the resolved
       // phone-number JID or a LID previously bound to an owner number.
       const isOwner = OWNER_JIDS.size > 0 && (
         (senderPnJid && OWNER_JIDS.has(senderPnJid)) ||
-        (isLidJid && ownerLidJids.has(sender))
+        (isLid && ownerLidJids.has(sender))
       );
       const isStranger = !isGroup && OWNER_JIDS.size > 0 && !isOwner;
 
