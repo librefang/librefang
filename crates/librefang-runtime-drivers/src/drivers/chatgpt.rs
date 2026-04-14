@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
-use crate::chatgpt_oauth::CHATGPT_BASE_URL;
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmError, StreamEvent};
 use futures::StreamExt;
+use librefang_runtime_oauth::chatgpt_oauth::CHATGPT_BASE_URL;
 use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
@@ -183,7 +183,7 @@ impl ChatGptDriver {
                 base_url
             },
             token_cache: ChatGptTokenCache::new(),
-            client: crate::http_client::proxied_client(),
+            client: librefang_http::proxied_client(),
         }
     }
 
@@ -235,7 +235,7 @@ impl ChatGptDriver {
         debug!("ChatGPT session token rejected; attempting OAuth refresh");
         let auth = tokio::time::timeout(
             Duration::from_secs(TOKEN_REFRESH_TIMEOUT_SECS),
-            crate::chatgpt_oauth::refresh_access_token(&refresh_tok),
+            librefang_runtime_oauth::chatgpt_oauth::refresh_access_token(&refresh_tok),
         )
         .await
         .map_err(|_| {

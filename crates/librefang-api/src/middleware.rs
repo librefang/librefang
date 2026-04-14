@@ -330,6 +330,10 @@ pub async fn auth(
             | "/api/auth/dashboard-login"
             | "/api/auth/dashboard-check"
     ) || path.starts_with("/api/providers/github-copilot/oauth/");
+    // MCP OAuth callback — browser redirect from OAuth provider, no API key.
+    // Pattern: /api/mcp/servers/{name}/auth/callback — GET only.
+    let is_mcp_oauth_callback =
+        is_get && path.starts_with("/api/mcp/servers/") && path.ends_with("/auth/callback");
     let always_public_get_only = is_get
         && (matches!(
             path,
@@ -338,7 +342,8 @@ pub async fn auth(
             || path.starts_with("/a2a/")
             || path.starts_with("/api/uploads/")
             || path.starts_with("/api/auth/login"));
-    let always_public = always_public_method_free || always_public_get_only;
+    let always_public =
+        always_public_method_free || always_public_get_only || is_mcp_oauth_callback;
 
     // "Dashboard reads" — the legacy public allowlist that lets the SPA
     // render before the user enters credentials. Downgraded to authenticated

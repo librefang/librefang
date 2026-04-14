@@ -2375,6 +2375,7 @@ export interface McpServerConfigured {
   timeout_secs?: number;
   env?: string[];
   headers?: string[];
+  auth_state?: { state: string; auth_url?: string; message?: string };
 }
 
 export interface McpServerConnected {
@@ -2405,6 +2406,29 @@ export async function updateMcpServer(name: string, server: Partial<McpServerCon
 
 export async function deleteMcpServer(name: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`);
+}
+
+// MCP OAuth Auth
+export interface McpAuthStatusResponse {
+  server: string;
+  auth: { state: string; auth_url?: string; message?: string };
+}
+
+export interface McpAuthStartResponse {
+  auth_url: string;
+  server: string;
+}
+
+export async function getMcpAuthStatus(name: string): Promise<McpAuthStatusResponse> {
+  return get<McpAuthStatusResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/status`);
+}
+
+export async function startMcpAuth(name: string): Promise<McpAuthStartResponse> {
+  return post<McpAuthStartResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/start`, {});
+}
+
+export async function revokeMcpAuth(name: string): Promise<{ server: string; state: string }> {
+  return del<{ server: string; state: string }>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/revoke`);
 }
 
 // ---------------------------------------------------------------------------

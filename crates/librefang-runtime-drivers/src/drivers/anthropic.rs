@@ -28,7 +28,7 @@ impl AnthropicDriver {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
-            client: crate::http_client::proxied_client(),
+            client: librefang_http::proxied_client(),
         }
     }
 }
