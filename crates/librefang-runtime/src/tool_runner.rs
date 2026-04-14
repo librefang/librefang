@@ -114,19 +114,96 @@ fn check_taint_net_fetch(url: &str) -> Option<String> {
 /// tracker, and copy-pasted obfuscation will still bypass it. The goal
 /// is to catch the obvious "the LLM is stuffing OPENAI_API_KEY into an
 /// agent_send" shape on the way out, not to prove a data-flow theorem.
-fn check_taint_outbound_text(payload: &str, sink: &TaintSink) -> Option<String> {
-    const SECRET_KEYS: &[&str] = &[
-        "api_key",
-        "apikey",
-        "api-key",
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "bearer",
-        "x-api-key",
-    ];
+const SECRET_KEYS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "api-key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "bearer",
+    "x-api-key",
+];
 
+/// Header names whose mere presence implies the value is a credential,
+/// regardless of what the value looks like. `Authorization: Bearer sk-…`
+/// has a space between the scheme and the token, which would otherwise
+/// defeat the contiguous-token heuristic in `check_taint_outbound_text`.
+const SECRET_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "api-key",
+    "apikey",
+    "x-auth-token",
+    "cookie",
+    "set-cookie",
+];
+
+/// Check if an HTTP header (name + value) should be blocked. Headers
+/// whose name identifies them as credential carriers are rejected
+/// unconditionally; everything else falls through to the text-level
+/// scanner used for bodies.
+fn check_taint_outbound_header(name: &str, value: &str, sink: &TaintSink) -> Option<String> {
+    let name_lower = name.to_ascii_lowercase();
+    if SECRET_HEADER_NAMES.iter().any(|h| *h == name_lower)
+        || SECRET_KEYS.iter().any(|k| *k == name_lower)
+    {
+        let mut labels = HashSet::new();
+        labels.insert(TaintLabel::Secret);
+        let tainted = TaintedValue::new(value, labels, "llm_tool_call");
+        if let Err(violation) = tainted.check_sink(sink) {
+            warn!(
+                sink = %sink.name,
+                header = %name_lower,
+                value_len = value.len(),
+                %violation,
+                "Outbound taint check failed (credential header)"
+            );
+            return Some(violation.to_string());
+        }
+    }
+    // Fall through to the regular body-level scan so e.g. a custom
+    // `X-Forwarded-Debug: api_key=sk-…` still gets caught.
+    check_taint_outbound_text(value, sink)
+}
+
+/// Decide whether a contiguous string "smells like" a raw secret token.
+/// Returns false for pure-hex / pure-decimal / single-case alnum blobs
+/// so that git commit SHAs, UUIDs-without-dashes, and sha256 digests —
+/// which agents legitimately exchange — don't trip the filter. Genuine
+/// API tokens tend to include mixed case and/or punctuation
+/// (`sk-…`, `ghp_…`, base64 with `+/=`).
+fn looks_like_opaque_token(trimmed: &str) -> bool {
+    if trimmed.len() < 32 || trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let charset_ok = trimmed.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || c == '-'
+            || c == '_'
+            || c == '.'
+            || c == '/'
+            || c == '+'
+            || c == '='
+    });
+    if !charset_ok {
+        return false;
+    }
+    // Require mixed character classes: either (a) at least one
+    // uppercase AND one lowercase letter, or (b) at least one of the
+    // token-ish punctuation characters. Pure hex (git SHAs, sha256),
+    // pure decimal, and pure single-case alphanumeric all fail this.
+    let has_upper = trimmed.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = trimmed.chars().any(|c| c.is_ascii_lowercase());
+    let has_punct = trimmed
+        .chars()
+        .any(|c| matches!(c, '-' | '_' | '.' | '/' | '+' | '='));
+    (has_upper && has_lower) || has_punct
+}
+
+fn check_taint_outbound_text(payload: &str, sink: &TaintSink) -> Option<String> {
     let lower = payload.to_lowercase();
 
     // Fast path 1: `Authorization:` header literal — unambiguous
@@ -160,17 +237,6 @@ fn check_taint_outbound_text(payload: &str, sink: &TaintSink) -> Option<String> 
     // of length.
     if !hit {
         let trimmed = payload.trim();
-        let looks_token = trimmed.len() >= 32
-            && !trimmed.chars().any(char::is_whitespace)
-            && trimmed.chars().all(|c| {
-                c.is_ascii_alphanumeric()
-                    || c == '-'
-                    || c == '_'
-                    || c == '.'
-                    || c == '/'
-                    || c == '+'
-                    || c == '='
-            });
         let well_known_prefix = trimmed.starts_with("sk-")
             || trimmed.starts_with("ghp_")
             || trimmed.starts_with("github_pat_")
@@ -178,7 +244,7 @@ fn check_taint_outbound_text(payload: &str, sink: &TaintSink) -> Option<String> 
             || trimmed.starts_with("xoxb-")
             || trimmed.starts_with("AKIA")
             || trimmed.starts_with("AIza");
-        if looks_token || well_known_prefix {
+        if looks_like_opaque_token(trimmed) || well_known_prefix {
             hit = true;
         }
     }
@@ -188,9 +254,11 @@ fn check_taint_outbound_text(payload: &str, sink: &TaintSink) -> Option<String> 
         labels.insert(TaintLabel::Secret);
         let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
         if let Err(violation) = tainted.check_sink(sink) {
+            // Never log the payload itself: if the heuristic fired, the
+            // payload IS the secret we are trying to contain.
             warn!(
                 sink = %sink.name,
-                snippet = %crate::str_utils::safe_truncate_str(payload, 80),
+                payload_len = payload.len(),
                 %violation,
                 "Outbound taint check failed"
             );
@@ -315,10 +383,10 @@ pub async fn execute_tool_raw(
                 // blocks `body` might fall back to stuffing the token
                 // into `Authorization:` via `headers`.
                 if let Some(headers_map) = headers {
-                    for (_name, value) in headers_map {
+                    for (name, value) in headers_map {
                         if let Some(vs) = value.as_str() {
                             if let Some(violation) =
-                                check_taint_outbound_text(vs, &TaintSink::net_fetch())
+                                check_taint_outbound_header(name, vs, &TaintSink::net_fetch())
                             {
                                 return ToolResult {
                                     tool_use_id: tool_use_id.to_string(),
@@ -4655,12 +4723,90 @@ mod tests {
     #[test]
     fn test_taint_outbound_text_blocks_long_opaque_tokens() {
         let sink = TaintSink::agent_message();
-        // 40-char contiguous base64-ish payload with no whitespace or
+        // 40-char mixed-case base64-ish payload with no whitespace or
         // prose: smells like a raw bearer token.
-        let payload = "abcdef0123456789abcdef0123456789abcdef01";
+        let payload = "AbCdEf0123456789AbCdEf0123456789AbCdEf01";
         assert!(
             check_taint_outbound_text(payload, &sink).is_some(),
             "outbound taint check must reject long opaque token"
+        );
+        // Same length but with punctuation — also looks tokenish.
+        let payload_punct = "abcdef0123456789-abcdef0123456789-abcdef";
+        assert!(
+            check_taint_outbound_text(payload_punct, &sink).is_some(),
+            "outbound taint check must reject punctuated token"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_text_allows_git_sha() {
+        // 40-char lowercase hex commit SHA — legitimate inter-agent
+        // payload, must not be blocked.
+        let sink = TaintSink::agent_message();
+        let sha = "18060f6401234567890abcdef0123456789abcde";
+        assert!(
+            check_taint_outbound_text(sha, &sink).is_none(),
+            "git commit SHA must not be treated as a secret"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_text_allows_sha256_hex() {
+        // 64-char lowercase hex sha256 digest — also legitimate.
+        let sink = TaintSink::agent_message();
+        let digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert!(
+            check_taint_outbound_text(digest, &sink).is_none(),
+            "sha256 hex digest must not be treated as a secret"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_text_allows_uuid_hex() {
+        // 32-char UUID-without-dashes (hex) — allowed.
+        let sink = TaintSink::agent_message();
+        let uuid = "550e8400e29b41d4a716446655440000";
+        assert!(
+            check_taint_outbound_text(uuid, &sink).is_none(),
+            "undashed UUID must not be treated as a secret"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_header_blocks_authorization_bearer() {
+        // Regression for the header-name-bypass bug: a Bearer token
+        // with a space between scheme and value defeats every
+        // content-based heuristic, so we must trip on the header name.
+        let sink = TaintSink::net_fetch();
+        assert!(
+            check_taint_outbound_header("Authorization", "Bearer sk-x", &sink).is_some(),
+            "Authorization: Bearer <anything> must be blocked"
+        );
+        assert!(
+            check_taint_outbound_header("authorization", "Token abc", &sink).is_some(),
+            "lowercased authorization header must also be blocked"
+        );
+        assert!(
+            check_taint_outbound_header("Proxy-Authorization", "Basic Zm9vOmJhcg==", &sink)
+                .is_some(),
+            "Proxy-Authorization header must be blocked"
+        );
+        assert!(
+            check_taint_outbound_header("X-Api-Key", "hunter2", &sink).is_some(),
+            "X-Api-Key header must be blocked"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_header_allows_benign_headers() {
+        let sink = TaintSink::net_fetch();
+        assert!(
+            check_taint_outbound_header("Accept", "application/json", &sink).is_none(),
+            "benign Accept header must pass"
+        );
+        assert!(
+            check_taint_outbound_header("User-Agent", "librefang/1.0", &sink).is_none(),
+            "benign User-Agent header must pass"
         );
     }
 
