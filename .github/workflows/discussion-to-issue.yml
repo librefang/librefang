@@ -1,0 +1,185 @@
+name: Discussion to Issue
+
+# Automatically create issues from new Discussions in Ideas and Q&A categories.
+# Also supports manual "/to-issue" command from maintainers in any category.
+
+on:
+  discussion:
+    types: [created, labeled]
+  discussion_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  discussions: write
+
+jobs:
+  # ── Auto-promote new Ideas/Q&A discussions ───────────────────────
+  auto-promote:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'discussion' &&
+      github.event.action == 'created' &&
+      (
+        github.event.discussion.category.name == 'Ideas' ||
+        github.event.discussion.category.name == 'Q&A'
+      )
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create issue from discussion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          DISC_NUMBER="${{ github.event.discussion.number }}"
+          DISC_TITLE="${{ github.event.discussion.title }}"
+          DISC_URL="${{ github.event.discussion.html_url }}"
+          DISC_AUTHOR="${{ github.event.discussion.user.login }}"
+          DISC_CATEGORY="${{ github.event.discussion.category.name }}"
+
+          # Extract discussion body via API
+          DISC_BODY=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" --jq '.body // ""')
+
+          # Strip emoji prefixes common in discussion titles
+          CLEAN_TITLE=$(printf '%s' "$DISC_TITLE" | sed 's/^[^a-zA-Z0-9[({]*//')
+
+          # Map discussion category to labels
+          case "$DISC_CATEGORY" in
+            Ideas)   LABELS="enhancement" ;;
+            "Q&A")   LABELS="question" ;;
+            *)       LABELS="" ;;
+          esac
+
+          # Run auto-label script for area labels
+          body_file=$(mktemp)
+          printf '%s' "$DISC_BODY" > "$body_file"
+          AREA_LABELS=$(bash .github/scripts/auto-label-issue.sh "0" "$CLEAN_TITLE" "$body_file" 2>/dev/null || true)
+          rm -f "$body_file"
+
+          if [ -n "$AREA_LABELS" ] && [ "$AREA_LABELS" != "needs-triage" ]; then
+            if [ -n "$LABELS" ]; then
+              LABELS="${LABELS},${AREA_LABELS}"
+            else
+              LABELS="$AREA_LABELS"
+            fi
+          fi
+
+          # Build issue body
+          ISSUE_BODY="$(cat <<EOF
+          _Auto-created from discussion #${DISC_NUMBER} by @${DISC_AUTHOR} (${DISC_CATEGORY})_
+
+          ---
+
+          ${DISC_BODY}
+
+          ---
+          > Source: ${DISC_URL}
+          EOF
+          )"
+
+          # Check for duplicate — skip if an issue already references this discussion
+          EXISTING=$(gh issue list --repo "$REPO" --state all --limit 200 --json number,body \
+            --jq "[.[] | select(.body | test(\"discussion #${DISC_NUMBER}\"))] | length")
+          if [ "${EXISTING:-0}" -gt 0 ]; then
+            echo "Issue already exists for discussion #${DISC_NUMBER}, skipping"
+            exit 0
+          fi
+
+          # Create the issue
+          ISSUE_URL=$(gh issue create \
+            --repo "$REPO" \
+            --title "$CLEAN_TITLE" \
+            --body "$ISSUE_BODY" \
+            ${LABELS:+--label "$LABELS"})
+
+          ISSUE_NUMBER=$(printf '%s' "$ISSUE_URL" | grep -oE '[0-9]+$')
+          echo "Created issue #${ISSUE_NUMBER}"
+
+          # Comment on the discussion
+          gh api "repos/${REPO}/discussions/${DISC_NUMBER}/comments" \
+            -f body="Tracked as issue #${ISSUE_NUMBER}" \
+            --silent
+
+  # ── Manual /to-issue command from maintainers ────────────────────
+  manual-promote:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'discussion_comment' &&
+      contains(github.event.comment.body, '/to-issue') &&
+      (
+        github.event.comment.author_association == 'OWNER' ||
+        github.event.comment.author_association == 'MEMBER' ||
+        github.event.comment.author_association == 'COLLABORATOR'
+      )
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create issue from discussion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          DISC_NUMBER="${{ github.event.discussion.number }}"
+          DISC_TITLE="${{ github.event.discussion.title }}"
+          DISC_URL="${{ github.event.discussion.html_url }}"
+          DISC_AUTHOR="${{ github.event.discussion.user.login }}"
+          DISC_CATEGORY="${{ github.event.discussion.category.name }}"
+
+          DISC_BODY=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" --jq '.body // ""')
+          CLEAN_TITLE=$(printf '%s' "$DISC_TITLE" | sed 's/^[^a-zA-Z0-9[({]*//')
+
+          case "$DISC_CATEGORY" in
+            Ideas)   LABELS="enhancement" ;;
+            "Q&A")   LABELS="question" ;;
+            *)       LABELS="" ;;
+          esac
+
+          body_file=$(mktemp)
+          printf '%s' "$DISC_BODY" > "$body_file"
+          AREA_LABELS=$(bash .github/scripts/auto-label-issue.sh "0" "$CLEAN_TITLE" "$body_file" 2>/dev/null || true)
+          rm -f "$body_file"
+
+          if [ -n "$AREA_LABELS" ] && [ "$AREA_LABELS" != "needs-triage" ]; then
+            if [ -n "$LABELS" ]; then
+              LABELS="${LABELS},${AREA_LABELS}"
+            else
+              LABELS="$AREA_LABELS"
+            fi
+          fi
+
+          ISSUE_BODY="$(cat <<EOF
+          _Promoted from discussion #${DISC_NUMBER} by @${DISC_AUTHOR} (${DISC_CATEGORY})_
+
+          ---
+
+          ${DISC_BODY}
+
+          ---
+          > Source: ${DISC_URL}
+          EOF
+          )"
+
+          EXISTING=$(gh issue list --repo "$REPO" --state all --limit 200 --json number,body \
+            --jq "[.[] | select(.body | test(\"discussion #${DISC_NUMBER}\"))] | length")
+          if [ "${EXISTING:-0}" -gt 0 ]; then
+            echo "Issue already exists for discussion #${DISC_NUMBER}, skipping"
+            gh api "repos/${REPO}/discussions/${DISC_NUMBER}/comments" \
+              -f body="An issue already exists for this discussion." --silent
+            exit 0
+          fi
+
+          ISSUE_URL=$(gh issue create \
+            --repo "$REPO" \
+            --title "$CLEAN_TITLE" \
+            --body "$ISSUE_BODY" \
+            ${LABELS:+--label "$LABELS"})
+
+          ISSUE_NUMBER=$(printf '%s' "$ISSUE_URL" | grep -oE '[0-9]+$')
+          echo "Created issue #${ISSUE_NUMBER}"
+
+          gh api "repos/${REPO}/discussions/${DISC_NUMBER}/comments" \
+            -f body="Tracked as issue #${ISSUE_NUMBER}" \
+            --silent
