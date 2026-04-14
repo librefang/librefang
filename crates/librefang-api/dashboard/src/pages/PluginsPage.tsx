@@ -228,33 +228,90 @@ export function PluginsPage() {
             <div className="space-y-8">
               {registries.map(reg => (
                 <div key={reg.name}>
-                  <div className="flex items-center gap-2 mb-3">
+                  <div className="flex items-center gap-2 mb-3 flex-wrap">
                     <h3 className="text-sm font-bold">{reg.name}</h3>
-                    <span className="text-[10px] text-text-dim font-mono">{reg.github_repo}</span>
+                    <a
+                      href={`https://github.com/${reg.github_repo}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[10px] text-text-dim font-mono hover:text-brand transition-colors"
+                    >
+                      {reg.github_repo}
+                    </a>
+                    {reg.plugins.length > 0 && (
+                      <Badge variant="default">{reg.plugins.length}</Badge>
+                    )}
                     {reg.error && <Badge variant="error">{reg.error}</Badge>}
                   </div>
                   {reg.plugins.length === 0 ? (
                     <p className="text-xs text-text-dim italic">{t("plugins.no_available")}</p>
                   ) : (
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 stagger-children">
                       {reg.plugins.map(rp => (
-                        <Card key={rp.name} padding="sm" className="flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center">
+                        <Card
+                          key={rp.name}
+                          padding="md"
+                          className="flex flex-col gap-3 hover:border-brand/30 transition-colors"
+                        >
+                          <div className="flex items-start gap-3">
+                            <div className="w-9 h-9 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
                               <Puzzle className="w-4 h-4 text-brand" />
                             </div>
-                            <span className="text-sm font-bold">{rp.name}</span>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <h4 className="text-sm font-bold truncate">{rp.name}</h4>
+                                {rp.version && (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">
+                                    {rp.version}
+                                  </span>
+                                )}
+                              </div>
+                              {rp.author && (
+                                <p className="text-[10px] text-text-dim/70 mt-0.5 truncate">
+                                  {rp.author}
+                                </p>
+                              )}
+                            </div>
                           </div>
-                          {rp.installed ? (
-                            <Badge variant="success"><Check className="w-3 h-3 mr-1" />{t("plugins.installed")}</Badge>
-                          ) : (
-                            <Button variant="primary" size="sm"
-                              onClick={() => handleRegistryInstall(rp.name, reg.github_repo)}
-                              disabled={installingName === rp.name}>
-                              {installingName === rp.name ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5 mr-1" />}
-                              {t("plugins.install")}
-                            </Button>
-                          )}
+                          <p
+                            className="text-xs text-text-dim leading-relaxed overflow-hidden"
+                            style={{
+                              display: "-webkit-box",
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: "vertical",
+                              minHeight: "2.25rem",
+                            }}
+                          >
+                            {rp.description || t("plugins.no_description", { defaultValue: "No description provided." })}
+                          </p>
+                          <div className="flex items-center justify-between gap-2 mt-auto">
+                            <div className="flex items-center gap-1 flex-wrap min-w-0">
+                              {(rp.hooks ?? []).slice(0, 3).map(h => (
+                                <Badge key={h} variant="brand">{h}</Badge>
+                              ))}
+                              {(rp.hooks?.length ?? 0) > 3 && (
+                                <span className="text-[9px] text-text-dim">+{(rp.hooks?.length ?? 0) - 3}</span>
+                              )}
+                            </div>
+                            {rp.installed ? (
+                              <Badge variant="success">
+                                <Check className="w-3 h-3 mr-1" />
+                                {t("plugins.installed")}
+                              </Badge>
+                            ) : (
+                              <Button
+                                variant="primary"
+                                size="sm"
+                                onClick={() => handleRegistryInstall(rp.name, reg.github_repo)}
+                                disabled={installingName === rp.name}
+                              >
+                                {installingName === rp.name
+                                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  : <Download className="w-3.5 h-3.5 mr-1" />}
+                                {t("plugins.install")}
+                              </Button>
+                            )}
+                          </div>
                         </Card>
                       ))}
                     </div>
