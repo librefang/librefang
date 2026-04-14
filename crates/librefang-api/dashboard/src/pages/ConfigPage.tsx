@@ -45,9 +45,12 @@ function getNestedValue(obj: Record<string, unknown>, section: string, field: st
 /*  Field input                                                        */
 /* ------------------------------------------------------------------ */
 
+const SENSITIVE_PATTERNS = /api_key|secret|password|token_env|client_secret|credentials/i;
+
 function ConfigFieldInput({
-  fieldType, options, value, onChange,
+  fieldKey, fieldType, options, value, onChange,
 }: {
+  fieldKey: string;
   fieldType: string;
   options?: (string | { id: string; name: string; provider: string })[];
   value: unknown;
@@ -102,9 +105,12 @@ function ConfigFieldInput({
     );
   }
 
+  const isSensitive = fieldType === "string" && SENSITIVE_PATTERNS.test(fieldKey);
+
   return (
-    <input type="text" value={String(value ?? "")}
-      onChange={(e) => onChange(e.target.value || null)} className={inputClass} />
+    <input type={isSensitive ? "password" : "text"} value={String(value ?? "")}
+      onChange={(e) => onChange(e.target.value || null)} className={inputClass}
+      autoComplete={isSensitive ? "off" : undefined} />
   );
 }
 
@@ -188,7 +194,7 @@ function SectionCard({
                 <p className="text-[10px] text-text-dim">{fieldType}</p>
               </div>
               <div className="flex-1 min-w-0">
-                <ConfigFieldInput fieldType={fieldType} options={options} value={currentValue}
+                <ConfigFieldInput fieldKey={fieldKey} fieldType={fieldType} options={options} value={currentValue}
                   onChange={(v) => handleFieldChange(fieldKey, v)} />
               </div>
               <div className="w-20 shrink-0 flex items-center justify-end gap-1">
