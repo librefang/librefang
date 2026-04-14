@@ -344,7 +344,7 @@ export function ModelsPage() {
       {/* Add Model Modal */}
       <Modal isOpen={showAdd} onClose={resetForm} title={t("models.add_custom_model")} size="lg">
         <form onSubmit={handleAdd} className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="col-span-2">
                   <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.model_id")} *</label>
                   <input value={formId} onChange={e => setFormId(e.target.value)} placeholder={t("models.model_id_placeholder")} className={inputClass} required />

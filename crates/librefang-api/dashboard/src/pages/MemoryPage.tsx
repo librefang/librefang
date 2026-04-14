@@ -49,7 +49,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="text-xs font-bold text-text-dim mb-1 block">{t("memory.level")}</label>
               <select
@@ -227,7 +227,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
             {/* Embedding */}
             <div>
               <h4 className="text-xs font-bold mb-3">Embedding</h4>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <span className={labelCls}>Provider</span>
                   <select value={form.embedding_provider ?? ""} onChange={e => setForm({ ...form, embedding_provider: e.target.value })} className={inputCls}>
@@ -269,7 +269,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                   </label>
                 ))}
               </div>
-              <div className="grid grid-cols-2 gap-3 mt-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
                 <div>
                   <span className={labelCls}>Extraction Model</span>
                   <input value={form.pm_extraction_model ?? ""} onChange={e => setForm({ ...form, pm_extraction_model: e.target.value })}
