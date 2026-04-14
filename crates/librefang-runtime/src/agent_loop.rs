@@ -9623,8 +9623,10 @@ mod tests {
 
     #[test]
     fn agent_loop_result_owner_notice_can_be_set() {
-        let mut r = AgentLoopResult::default();
-        r.owner_notice = Some("Sir, the appointment is at 3pm.".into());
+        let r = AgentLoopResult {
+            owner_notice: Some("Sir, the appointment is at 3pm.".into()),
+            ..AgentLoopResult::default()
+        };
         assert_eq!(
             r.owner_notice.as_deref(),
             Some("Sir, the appointment is at 3pm.")
