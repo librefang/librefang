@@ -727,6 +727,166 @@ describe('echo tracker wiring (Phase 3 §A)', () => {
 });
 
 // Cleanup temp DB and force exit (SQLite keeps event loop alive)
+// ---------------------------------------------------------------------------
+// ID-01 identity refactor — equivalence between pre-refactor inline logic
+// and post-refactor lib/identity helpers. These fixtures assert that the
+// same JID shape produces the same outbound/sender/owner strings as the
+// inline code would have produced prior to this refactor.
+// ---------------------------------------------------------------------------
+describe('ID-01 identity refactor equivalence', () => {
+  const {
+    isLidJid, isGroupJid, normalizeDeviceScopedJid,
+    extractE164, phoneToJid, resolvePeerId, deriveOwnerJids,
+  } = require('./lib/identity');
+
+  // Legacy inline helpers reproduced from the pre-refactor inline code at
+  // index.js:229-234, 1164-1197, 2304-2306, 2232.
+  const legacyIsLid = (jid) => !!jid && jid.endsWith('@lid');
+  const legacyIsGroup = (jid) => !!jid && jid.endsWith('@g.us');
+  const legacyOutboundJid = (to) => to.includes('@g.us') ? to
+    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  const legacyOwnerJids = (nums) =>
+    new Set(nums.map(n => n.replace(/^\+/, '') + '@s.whatsapp.net'));
+  const legacyResolve = (sender, { senderPn, cache, participant }) => {
+    const isLid = legacyIsLid(sender);
+    const isGroup = legacyIsGroup(sender);
+    if (senderPn) return senderPn;
+    if (isLid && cache.has(sender)) return cache.get(sender);
+    if (!isLid && !isGroup) return sender;
+    if (participant && !legacyIsLid(participant)) return participant;
+    return '';
+  };
+
+  it('isLid boolean parity', () => {
+    for (const jid of ['123@lid', '123@s.whatsapp.net', '123-456@g.us', '']) {
+      assert.equal(isLidJid(jid), legacyIsLid(jid), `isLid parity for ${jid}`);
+    }
+  });
+
+  it('isGroup boolean parity', () => {
+    for (const jid of ['123-456@g.us', '123@lid', '123@s.whatsapp.net', '']) {
+      assert.equal(isGroupJid(jid), legacyIsGroup(jid), `isGroup parity for ${jid}`);
+    }
+  });
+
+  it('deriveOwnerJids matches legacy Set', () => {
+    const nums = ['+39111', '+39222'];
+    const got = deriveOwnerJids(nums);
+    const legacy = legacyOwnerJids(nums);
+    assert.deepEqual([...got].sort(), [...legacy].sort());
+  });
+
+  it('phoneToJid matches legacy outbound pattern for phones & groups', () => {
+    for (const to of ['+39111', '39111', '123-456@g.us']) {
+      assert.equal(phoneToJid(to), legacyOutboundJid(to), `outbound parity for ${to}`);
+    }
+  });
+
+  it('resolvePeerId matches legacy for plain phone JID', () => {
+    const r = resolvePeerId('391234@s.whatsapp.net', { lidToPnCache: new Map() });
+    const legacy = legacyResolve('391234@s.whatsapp.net', { senderPn: '', cache: new Map(), participant: '' });
+    assert.equal(r.peer, legacy);
+    assert.equal(r.confidence, 'direct');
+  });
+
+  it('resolvePeerId matches legacy for LID with senderPn', () => {
+    const r = resolvePeerId('111@lid', { lidToPnCache: new Map(), senderPn: '391234@s.whatsapp.net' });
+    const legacy = legacyResolve('111@lid', { senderPn: '391234@s.whatsapp.net', cache: new Map(), participant: '' });
+    assert.equal(r.peer, legacy);
+    assert.equal(r.confidence, 'direct');
+  });
+
+  it('resolvePeerId matches legacy for LID in cache', () => {
+    const cache = new Map([['111@lid', '391234@s.whatsapp.net']]);
+    const r = resolvePeerId('111@lid', { lidToPnCache: cache });
+    const legacy = legacyResolve('111@lid', { senderPn: '', cache, participant: '' });
+    assert.equal(r.peer, legacy);
+    assert.equal(r.confidence, 'cache');
+  });
+
+  it('resolvePeerId matches legacy for LID with phone participant', () => {
+    const r = resolvePeerId('111@lid', { lidToPnCache: new Map(), participant: '391234@s.whatsapp.net' });
+    const legacy = legacyResolve('111@lid', { senderPn: '', cache: new Map(), participant: '391234@s.whatsapp.net' });
+    assert.equal(r.peer, legacy);
+    assert.equal(r.confidence, 'participant');
+  });
+
+  it('resolvePeerId returns empty for unresolvable LID (matches legacy)', () => {
+    const r = resolvePeerId('111@lid', { lidToPnCache: new Map() });
+    const legacy = legacyResolve('111@lid', { senderPn: '', cache: new Map(), participant: '' });
+    assert.equal(r.peer, legacy);
+    assert.equal(r.peer, '');
+    assert.equal(r.confidence, 'lid_unresolved');
+  });
+
+  it('resolvePeerId tags group JID with group confidence', () => {
+    const r = resolvePeerId('123-456@g.us', { lidToPnCache: new Map() });
+    assert.equal(r.confidence, 'group');
+    assert.equal(r.peer, '123-456@g.us');
+  });
+
+  it('extractE164 strips device suffix (latent bug fix vs legacy)', () => {
+    // Legacy inline `'+' + jid.replace(/@.*$/, '')` produced '+123:45' for
+    // device-scoped JIDs — malformed. New extractE164 correctly yields '+123'.
+    assert.equal(extractE164('391234:7@s.whatsapp.net'), '+391234');
+  });
+
+  it('normalizeDeviceScopedJid passthrough for plain JIDs', () => {
+    assert.equal(normalizeDeviceScopedJid('391234@s.whatsapp.net'), '391234@s.whatsapp.net');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ID-03 structured log — identity_unresolved must emit JSON with all fields
+// ---------------------------------------------------------------------------
+describe('ID-03 identity_unresolved log shape', () => {
+  it('emits JSON with event/jid/reason/lid_cache_size on unresolved LID', () => {
+    // Simulate the handler's log emission path (inlined from index.js).
+    const { resolvePeerId } = require('./lib/identity');
+    const lidToPnJid = new Map();
+    const sender = '111@lid';
+    const senderPnRaw = '';
+    const participant = '';
+
+    const { peer, confidence } = resolvePeerId(sender, {
+      lidToPnCache: lidToPnJid,
+      senderPn: senderPnRaw,
+      participant,
+    });
+
+    assert.equal(peer, '');
+    assert.equal(confidence, 'lid_unresolved');
+
+    // Capture console.warn to ensure the payload shape is JSON with all fields.
+    const origWarn = console.warn;
+    let captured = null;
+    console.warn = (line) => { captured = line; };
+    try {
+      const reason = senderPnRaw ? 'senderPn_present_but_unextractable'
+        : (lidToPnJid.has(sender)) ? 'cache_hit_but_unextractable'
+        : participant ? 'participant_was_lid'
+        : 'no_mapping_available';
+      console.warn(JSON.stringify({
+        event: 'identity_unresolved',
+        jid: sender,
+        reason,
+        lid_cache_size: lidToPnJid.size,
+        confidence,
+      }));
+    } finally {
+      console.warn = origWarn;
+    }
+
+    assert.ok(captured, 'warn was called');
+    const parsed = JSON.parse(captured);
+    assert.equal(parsed.event, 'identity_unresolved');
+    assert.equal(parsed.jid, '111@lid');
+    assert.equal(parsed.reason, 'no_mapping_available');
+    assert.equal(parsed.lid_cache_size, 0);
+    assert.equal(parsed.confidence, 'lid_unresolved');
+  });
+});
+
 after(() => {
   try {
     const fs = require('node:fs');

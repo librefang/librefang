@@ -8,6 +8,15 @@ const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const toml = require('toml');
 const { EchoTracker } = require('./lib/echo-tracker');
+const {
+  isLidJid,
+  isGroupJid,
+  normalizeDeviceScopedJid,
+  extractE164,
+  phoneToJid,
+  resolvePeerId,
+  deriveOwnerJids,
+} = require('./lib/identity');
 
 // ---------------------------------------------------------------------------
 // Echo tracker (EB-01, Phase 3 §A)
@@ -218,9 +227,7 @@ const AGENT_NAME = DEFAULT_AGENT;
 // Owner routing: build OWNER_JIDs set from config.toml owner_numbers
 const ownerNumbersFromEnv = process.env.WHATSAPP_OWNER_JID ? [process.env.WHATSAPP_OWNER_JID] : [];
 const OWNER_NUMBERS = ownerNumbersFromEnv.length > 0 ? ownerNumbersFromEnv : tomlConfig.owner_numbers;
-const OWNER_JIDS = new Set(
-  OWNER_NUMBERS.map(n => n.replace(/^\+/, '') + '@s.whatsapp.net')
-);
+const OWNER_JIDS = deriveOwnerJids(OWNER_NUMBERS);
 // Primary owner JID for unsolicited/scheduled messages only
 const OWNER_JID = OWNER_JIDS.size > 0 ? [...OWNER_JIDS][0] : '';
 
@@ -319,7 +326,7 @@ const GROUP_METADATA_TTL_MS = 5 * 60 * 1000;
 const groupMetadataCache = new Map(); // groupJid -> { participants: [...], fetchedAt }
 
 async function getGroupParticipants(sock, groupJid) {
-  if (!groupJid || !groupJid.endsWith('@g.us')) return [];
+  if (!isGroupJid(groupJid)) return [];
   const cached = groupMetadataCache.get(groupJid);
   if (cached && (Date.now() - cached.fetchedAt) < GROUP_METADATA_TTL_MS) {
     console.log(JSON.stringify({ event: 'group_roster_cache_hit', groupJid, size: cached.participants.length }));
@@ -1161,47 +1168,55 @@ async function startConnection() {
       //   4. `sender` itself when it's already an `@s.whatsapp.net` JID
       // If none of the above yields a phone-number JID, `phone` is left as
       // a placeholder and we flag the sender as unresolved.
-      const isGroup = sender.endsWith('@g.us');
-      const isLidJid = sender.endsWith('@lid');
+      const isGroup = isGroupJid(sender);
+      const isLid = isLidJid(sender);
       const senderPnRaw = msg.key.senderPn || '';
 
       // Cache LID → phone-number JID when we see both on the same message.
-      if (isLidJid && senderPnRaw) {
+      // Side effect lives OUTSIDE resolvePeerId — Plan 01 §Concerns #1.
+      if (isLid && senderPnRaw) {
         lidToPnJid.set(sender, senderPnRaw);
       }
 
       // CS-02: first-seen LID without senderPn AND not in cache — proactively
       // ask Baileys for the PN mapping with a 5s timeout. Populates cache so
       // the next message in the burst resolves synchronously.
-      if (isLidJid && !senderPnRaw && !lidToPnJid.has(sender)) {
+      // Side effect lives OUTSIDE resolvePeerId — Plan 01 §Concerns #1.
+      if (isLid && !senderPnRaw && !lidToPnJid.has(sender)) {
         await resolveLidProactively(sock, sender, lidToPnJid, 5000);
       }
 
-      // Resolve to a phone-number JID (or empty string if we cannot).
-      let senderPnJid = '';
-      if (senderPnRaw) {
-        senderPnJid = senderPnRaw;
-      } else if (isLidJid && lidToPnJid.has(sender)) {
-        senderPnJid = lidToPnJid.get(sender);
-      } else if (!isLidJid && !isGroup) {
-        senderPnJid = sender;
-      } else if (msg.key.participant && !msg.key.participant.endsWith('@lid')) {
-        senderPnJid = msg.key.participant;
-      }
+      // Centralized resolution — Phase 4 §A (ID-01).
+      const { peer: senderPnJid, confidence } = resolvePeerId(sender, {
+        lidToPnCache: lidToPnJid,
+        senderPn: senderPnRaw,
+        participant: msg.key.participant || '',
+      });
 
-      const phone = senderPnJid ? '+' + senderPnJid.replace(/@.*$/, '') : '';
+      const phone = extractE164(senderPnJid);
       const phoneResolved = phone !== '';
       const pushName = msg.pushName || phone || sender;
 
       if (!phoneResolved) {
-        console.warn(`[gateway] Could not resolve phone for sender=${sender} senderPn=${senderPnRaw || '∅'} participant=${msg.key.participant || '∅'} — treating as unknown`);
+        // ID-03 structured log — every lid_unresolved outcome.
+        const reason = senderPnRaw ? 'senderPn_present_but_unextractable'
+          : (isLid && lidToPnJid.has(sender)) ? 'cache_hit_but_unextractable'
+          : msg.key.participant ? 'participant_was_lid'
+          : 'no_mapping_available';
+        console.warn(JSON.stringify({
+          event: 'identity_unresolved',
+          jid: sender,
+          reason,
+          lid_cache_size: lidToPnJid.size,
+          confidence,
+        }));
       }
 
       // Determine sender type. Owner check accepts either the resolved
       // phone-number JID or a LID previously bound to an owner number.
       const isOwner = OWNER_JIDS.size > 0 && (
         (senderPnJid && OWNER_JIDS.has(senderPnJid)) ||
-        (isLidJid && ownerLidJids.has(sender))
+        (isLid && ownerLidJids.has(sender))
       );
       const isStranger = !isGroup && OWNER_JIDS.size > 0 && !isOwner;
 
@@ -2229,8 +2244,8 @@ async function runCatchUpSweep() {
       // Determine if sender is owner or stranger. Mirror the logic used in
       // `messages.upsert`: a LID JID is not a phone number, so accept either
       // a resolved phone-number JID or a known owner LID.
-      const isLidMsgJid = msg.jid && msg.jid.endsWith('@lid');
-      const senderPnJid = msg.phone ? msg.phone.replace(/^\+/, '') + '@s.whatsapp.net' : '';
+      const isLidMsgJid = isLidJid(msg.jid);
+      const senderPnJid = msg.phone ? phoneToJid(msg.phone) : '';
       const isOwner = OWNER_JIDS.size > 0 && (
         (!isLidMsgJid && msg.jid && OWNER_JIDS.has(msg.jid)) ||
         (senderPnJid && OWNER_JIDS.has(senderPnJid)) ||
@@ -2240,7 +2255,7 @@ async function runCatchUpSweep() {
       // Never re-forward group messages — we cannot tell if the bot was
       // mentioned, so replaying them violates group_policy and can leak
       // internal text (rate-limit errors, recovery prefixes) into groups.
-      const isCatchupGroup = msg.jid && msg.jid.endsWith('@g.us');
+      const isCatchupGroup = isGroupJid(msg.jid);
       if (isCatchupGroup) {
         dbMarkProcessed(msg.id, 1);
         console.log(`[gateway][catchup] Skipping group message ${msg.id} (${msg.jid}) — group catchup disabled`);
@@ -2302,8 +2317,7 @@ async function sendMessage(to, text) {
   }
 
   // Preserve group JIDs (@g.us) as-is; normalize phone → JID for individuals
-  const jid = to.includes('@g.us') ? to
-    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  const jid = phoneToJid(to);
 
   const formatted = markdownToWhatsApp(text);
   const sent = await sock.sendMessage(jid, { text: formatted });
@@ -2329,8 +2343,7 @@ async function sendImage(to, imageUrl, caption) {
   }
 
   // Preserve group JIDs (@g.us) as-is; normalize phone → JID for individuals
-  const jid = to.includes('@g.us') ? to
-    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  const jid = phoneToJid(to);
 
   // Fetch image into buffer (Baileys needs buffer or local file)
   const buffer = await new Promise((resolve, reject) => {
@@ -2380,8 +2393,7 @@ async function sendAudio(to, audioUrl, ptt = true) {
   }
 
   // Preserve group JIDs (@g.us) as-is; normalize phone → JID for individuals
-  const jid = to.includes('@g.us') ? to
-    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  const jid = phoneToJid(to);
 
   // Fetch audio into buffer (Baileys needs buffer or local file)
   const buffer = await new Promise((resolve, reject) => {
