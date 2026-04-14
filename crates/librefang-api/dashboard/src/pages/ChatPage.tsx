@@ -678,11 +678,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             {!message.isStreaming && !message.error && message.role === "assistant" && ttsAvailable && onSpeak && (
               <button
                 onClick={() => onSpeak(message.id, message.content)}
-                className={`h-6 w-6 rounded-md flex items-center justify-center transition-colors ${
-                  isUser
-                    ? "bg-gradient-to-br from-brand to-accent text-white shadow-sm hover:shadow-md"
-                    : "bg-surface border border-border-subtle text-brand hover:bg-surface-hover"
-                }`}
+                className="h-6 w-6 rounded-md flex items-center justify-center text-text-dim/60 hover:text-brand hover:bg-surface-hover transition-colors"
                 title={
                   ttsStatus === "loading" ? t("chat.tts_generating") :
                   isSpeaking && ttsStatus === "playing" ? t("chat.pause") :
@@ -704,9 +700,9 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               <button
                 onClick={() => onCopy(message.id, message.content)}
                 className={`h-6 w-6 rounded-md flex items-center justify-center transition-colors ${
-                  isUser
-                    ? "bg-gradient-to-br from-brand to-accent text-white shadow-sm hover:shadow-md"
-                    : "bg-surface border border-border-subtle text-brand hover:bg-surface-hover"
+                  copied
+                    ? "text-success"
+                    : "text-text-dim/60 hover:text-brand hover:bg-surface-hover"
                 }`}
                 title={copied ? t("chat.copied") : t("chat.copy")}
               >
