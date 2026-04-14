@@ -74,7 +74,23 @@ LibreFang implements defense-in-depth with the following security controls:
 ### Cryptographic Security
 - **Ed25519 signed manifests**: Agent identity verification
 - **HMAC-SHA256 wire protocol**: Mutual authentication with nonce-based replay protection
-- **Secret zeroization**: `Zeroizing<String>` on all API key fields, wiped on drop
+- **Secret zeroization** *(scoped to the credential vault)*: the encrypted
+  credential vault in `librefang-extensions/src/vault.rs` stores every
+  entry as `Zeroizing<String>`, so individual vault reads drop plaintext
+  immediately after use and the vault master key is also held in
+  `Zeroizing<[u8; 32]>`. The embedding driver re-wraps its API key with
+  `Zeroizing::new` after reading it from config. Other secret-carrying
+  fields on `KernelConfig` (`api_key`, `dashboard_pass`,
+  `dashboard_pass_hash`) are still plain `String`: adding a destructor to
+  `KernelConfig` breaks partial-move patterns across ~700 call sites,
+  and switching every field to `Zeroizing<String>` requires a
+  serde-compatible newtype rollout that is not yet in place. The
+  in-process copy of these fields therefore persists in heap memory
+  until the owning `Arc<KernelConfig>` is dropped, which is
+  good-enough against post-exit forensics on most platforms but is
+  **not** the "wiped on every drop" guarantee the previous bullet
+  implied. If you need stronger memory hygiene, run the daemon inside
+  a memory-encrypted VM or disable core dumps for the process.
 
 ### Runtime Isolation
 - **WASM dual metering**: Fuel limits + epoch interruption with watchdog thread
