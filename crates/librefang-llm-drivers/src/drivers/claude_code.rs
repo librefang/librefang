@@ -8,7 +8,10 @@
 //! Tracks active subprocess PIDs and enforces message timeouts to prevent
 //! hung CLI processes from blocking agents indefinitely.
 
-use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
+use crate::llm_driver::{
+    CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent,
+};
+pub use crate::llm_driver::McpBridgeConfig;
 use async_trait::async_trait;
 use base64::Engine;
 use dashmap::DashMap;
@@ -53,24 +56,6 @@ const SENSITIVE_SUFFIXES: &[&str] = &["_SECRET", "_TOKEN", "_PASSWORD"];
 
 /// Default subprocess timeout in seconds (5 minutes).
 const DEFAULT_MESSAGE_TIMEOUT_SECS: u64 = 300;
-
-/// MCP bridge configuration for the `librefang` tool server.
-///
-/// When set, the driver writes a temp `mcp_config.json` on every tool-enabled
-/// request and passes `--mcp-config` to the Claude CLI so the spawned
-/// subprocess discovers LibreFang tools via MCP (streamable HTTP transport
-/// against the daemon's existing `/mcp` endpoint). This bridges #2314 without
-/// any stream parsing — Claude CLI handles the entire tool_use/tool_result
-/// round-trip natively through its own MCP client.
-#[derive(Debug, Clone)]
-pub struct McpBridgeConfig {
-    /// Daemon base URL (e.g. `http://127.0.0.1:4545`). The MCP endpoint lives
-    /// at `{base_url}/mcp`.
-    pub base_url: String,
-    /// Optional API key for the `X-API-Key` header. Empty disables the header
-    /// (matches daemon "no auth configured" mode).
-    pub api_key: Option<String>,
-}
 
 /// LLM driver that delegates to the Claude Code CLI.
 pub struct ClaudeCodeDriver {

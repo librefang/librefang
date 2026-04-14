@@ -686,11 +686,17 @@ fn create_driver_from_entry(
         ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::new(api_key, base_url))),
         ApiFormat::Anthropic => Ok(Arc::new(anthropic::AnthropicDriver::new(api_key, base_url))),
         ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::new(api_key, base_url))),
-        ApiFormat::ClaudeCode => Ok(Arc::new(claude_code::ClaudeCodeDriver::with_timeout(
-            config.base_url.clone(),
-            config.skip_permissions,
-            config.message_timeout_secs,
-        ))),
+        ApiFormat::ClaudeCode => {
+            let mut d = claude_code::ClaudeCodeDriver::with_timeout(
+                config.base_url.clone(),
+                config.skip_permissions,
+                config.message_timeout_secs,
+            );
+            if let Some(bridge) = config.mcp_bridge.clone() {
+                d = d.with_mcp_bridge(bridge);
+            }
+            Ok(Arc::new(d))
+        }
         ApiFormat::QwenCode => Ok(Arc::new(qwen_code::QwenCodeDriver::new(
             config.base_url.clone(),
             config.skip_permissions,
