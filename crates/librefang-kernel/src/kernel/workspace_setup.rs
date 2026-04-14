@@ -9,7 +9,7 @@ use crate::error::{KernelError, KernelResult};
 use librefang_types::agent::{AgentId, AgentManifest};
 use librefang_types::error::LibreFangError;
 use std::path::{Component, Path, PathBuf};
-use tracing::{info, warn};
+use tracing::info;
 
 /// Ensure workspaces directory structure exists.
 pub(super) fn ensure_workspaces_layout(home_dir: &Path) -> KernelResult<()> {

@@ -43,7 +43,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use librefang_channels::types::SenderContext;
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
