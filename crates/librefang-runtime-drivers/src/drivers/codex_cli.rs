@@ -126,15 +126,17 @@ impl CodexCliDriver {
         parts.join("\n\n")
     }
 
-    /// Map a model ID like "codex-cli/o4-mini" to CLI --model flag value.
+    /// Map a model ID like "codex-cli/gpt-5" to CLI --model flag value.
+    ///
+    /// Strips the `codex-cli/` prefix and passes the remainder through to
+    /// `codex exec --model`. The authoritative list of accepted names is
+    /// seeded into the model catalog in `librefang-runtime`'s
+    /// `ModelCatalog::seed_cli_provider_fallback_models`; any name the CLI
+    /// doesn't recognize will surface as a codex-side error rather than a
+    /// silent fallback here.
     fn model_flag(model: &str) -> Option<String> {
         let stripped = model.strip_prefix("codex-cli/").unwrap_or(model);
-        match stripped {
-            "o4-mini" => Some("o4-mini".to_string()),
-            "o3" => Some("o3".to_string()),
-            "gpt-4.1" => Some("gpt-4.1".to_string()),
-            _ => Some(stripped.to_string()),
-        }
+        Some(stripped.to_string())
     }
 
     /// Apply security env filtering to a command.

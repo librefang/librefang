@@ -93,7 +93,140 @@ impl ModelCatalog {
         let aliases_source = providers_dir
             .parent()
             .and_then(|p| std::fs::read_to_string(p.join("aliases.toml")).ok());
-        Self::from_sources(&sources, aliases_source.as_deref())
+        let mut catalog = Self::from_sources(&sources, aliases_source.as_deref());
+        catalog.seed_cli_provider_fallback_models();
+        catalog
+    }
+
+    /// Backfill CLI-provider models that the external registry sometimes
+    /// ships with a stale or incomplete list.
+    ///
+    /// The dashboard model-picker is sourced entirely from this catalog, so
+    /// any model the bundled CLI understands but the registry omits would
+    /// force users to hand-edit `agent.toml` (issue #2347). Seeding here
+    /// keeps the dropdown truthful without waiting on a registry release.
+    ///
+    /// Only entries with the same `id` + `provider` as something already
+    /// in the catalog are skipped — pre-existing models (from the registry
+    /// or user overrides) always win.
+    fn seed_cli_provider_fallback_models(&mut self) {
+        // codex-cli — @openai/codex exec --model accepts these today.
+        // Order matches the upstream CLI's own help output.
+        const CODEX_CLI_FALLBACK: &[(&str, &str, ModelTier, u64, u64)] = &[
+            (
+                "codex-cli/gpt-5",
+                "GPT-5 (Codex CLI)",
+                ModelTier::Frontier,
+                400_000,
+                128_000,
+            ),
+            (
+                "codex-cli/gpt-5-codex",
+                "GPT-5 Codex (Codex CLI)",
+                ModelTier::Frontier,
+                400_000,
+                128_000,
+            ),
+            (
+                "codex-cli/gpt-4.1",
+                "GPT-4.1 (Codex CLI)",
+                ModelTier::Smart,
+                1_000_000,
+                32_768,
+            ),
+            (
+                "codex-cli/o3",
+                "o3 (Codex CLI)",
+                ModelTier::Frontier,
+                200_000,
+                100_000,
+            ),
+            (
+                "codex-cli/o3-mini",
+                "o3-mini (Codex CLI)",
+                ModelTier::Smart,
+                200_000,
+                100_000,
+            ),
+            (
+                "codex-cli/o4-mini",
+                "o4-mini (Codex CLI)",
+                ModelTier::Smart,
+                200_000,
+                100_000,
+            ),
+        ];
+        self.ensure_cli_provider("codex-cli", "Codex CLI");
+        self.seed_provider_models("codex-cli", CODEX_CLI_FALLBACK);
+    }
+
+    /// Ensure a CLI provider entry exists so seeded models aren't orphaned
+    /// when the registry doesn't yet ship a TOML for it.
+    fn ensure_cli_provider(&mut self, id: &str, display_name: &str) {
+        if self.providers.iter().any(|p| p.id == id) {
+            return;
+        }
+        self.providers.push(ProviderInfo {
+            id: id.to_string(),
+            display_name: display_name.to_string(),
+            api_key_env: String::new(),
+            base_url: String::new(),
+            key_required: false,
+            auth_status: AuthStatus::default(),
+            model_count: 0,
+            signup_url: None,
+            regions: HashMap::new(),
+            media_capabilities: Vec::new(),
+            available_models: Vec::new(),
+            is_custom: false,
+        });
+    }
+
+    /// Insert `(id, display, tier, ctx, max_out)` tuples for a CLI provider,
+    /// skipping any model/provider pair that already exists.
+    fn seed_provider_models(
+        &mut self,
+        provider: &str,
+        entries: &[(&str, &str, ModelTier, u64, u64)],
+    ) {
+        let existing: std::collections::HashSet<String> = self
+            .models
+            .iter()
+            .filter(|m| m.provider == provider)
+            .map(|m| m.id.to_lowercase())
+            .collect();
+
+        let mut added = 0usize;
+        for (id, display, tier, ctx, max_out) in entries {
+            if existing.contains(&id.to_lowercase()) {
+                continue;
+            }
+            self.models.push(ModelCatalogEntry {
+                id: (*id).to_string(),
+                display_name: (*display).to_string(),
+                provider: provider.to_string(),
+                tier: *tier,
+                context_window: *ctx,
+                max_output_tokens: *max_out,
+                input_cost_per_m: 0.0,
+                output_cost_per_m: 0.0,
+                supports_tools: true,
+                supports_vision: false,
+                supports_streaming: true,
+                aliases: Vec::new(),
+            });
+            added += 1;
+        }
+
+        if added > 0 {
+            if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider) {
+                p.model_count = self
+                    .models
+                    .iter()
+                    .filter(|m| m.provider == provider)
+                    .count();
+            }
+        }
     }
 
     /// Build a catalog from pre-loaded TOML source strings.
@@ -1624,6 +1757,33 @@ supports_streaming = false
         let catalog = test_catalog();
         let entry = catalog.find_model("codex").unwrap();
         assert_eq!(entry.id, "codex/gpt-4.1");
+    }
+
+    /// Regression for #2347: the dashboard's `codex-cli` model dropdown
+    /// used to ship only three models (o4-mini, o3, gpt-4.1) because that
+    /// was the hardcoded list in `CodexCliDriver::model_flag`. The
+    /// catalog now seeds the full set of models the upstream `codex` CLI
+    /// accepts so users don't have to hand-edit `agent.toml`.
+    #[test]
+    fn test_codex_cli_provider_fallback_models() {
+        let catalog = test_catalog();
+        let models = catalog.models_by_provider("codex-cli");
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        for expected in [
+            "codex-cli/gpt-5",
+            "codex-cli/gpt-5-codex",
+            "codex-cli/gpt-4.1",
+            "codex-cli/o3",
+            "codex-cli/o3-mini",
+            "codex-cli/o4-mini",
+        ] {
+            assert!(
+                ids.contains(&expected),
+                "codex-cli dropdown should expose {expected}, got {ids:?}"
+            );
+        }
+        // The provider entry must also exist so `/api/providers` surfaces it.
+        assert!(catalog.get_provider("codex-cli").is_some());
     }
 
     #[test]
