@@ -1774,6 +1774,17 @@ pub struct KernelConfig {
     /// require a `Authorization: Bearer <key>` header.
     /// If empty, the API is unauthenticated (local development only).
     pub api_key: String,
+    /// When `true` AND `api_key` is configured, the dashboard read-endpoint
+    /// allowlist is collapsed to just static assets, OAuth entry points, and
+    /// `/api/health*`. Every other GET (agents, config, budget, sessions,
+    /// approvals, hands, skills, workflows, …) requires a valid bearer token.
+    ///
+    /// Default is `false` to preserve the pre-flag behaviour where the
+    /// unauthenticated dashboard SPA could render before the user supplied
+    /// credentials. Operators exposing the daemon beyond loopback should
+    /// enable this to stop remote enumeration of agents, config, and spend.
+    #[serde(default)]
+    pub require_auth_for_reads: bool,
     /// Dashboard login username. When both dashboard_user and dashboard_pass
     /// are set, the dashboard requires username/password login.
     /// Can also be set via `LIBREFANG_DASHBOARD_USER` env var.
@@ -3327,6 +3338,7 @@ impl Default for KernelConfig {
             network: NetworkConfig::default(),
             channels: ChannelsConfig::default(),
             api_key: String::new(),
+            require_auth_for_reads: false,
             dashboard_user: String::new(),
             dashboard_pass: String::new(),
             dashboard_pass_hash: String::new(),

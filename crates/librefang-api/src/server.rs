@@ -688,6 +688,7 @@ pub async fn build_router(
         active_sessions: active_sessions.clone(),
         dashboard_auth_enabled: has_dashboard_credentials(state.kernel.as_ref()),
         user_api_keys: Arc::new(configured_user_api_keys(state.kernel.as_ref())),
+        require_auth_for_reads: state.kernel.config_ref().require_auth_for_reads,
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     let gcra_limiter = rate_limiter::GcraState {

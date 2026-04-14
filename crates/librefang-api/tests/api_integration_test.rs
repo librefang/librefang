@@ -1376,6 +1376,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
         user_api_keys: Arc::new(Vec::new()),
+        require_auth_for_reads: false,
     };
 
     let app = Router::new()

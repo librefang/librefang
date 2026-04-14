@@ -35,6 +35,12 @@ pub struct AuthState {
     pub dashboard_auth_enabled: bool,
     /// Optional per-user API-key hashes used for role-based API access.
     pub user_api_keys: Arc<Vec<ApiUserAuth>>,
+    /// When `true` and an `api_key` is configured, GET endpoints that are
+    /// otherwise on the dashboard public-read allowlist (agents, config,
+    /// budget, sessions, approvals, hands, skills, workflows, …) are forced
+    /// through bearer authentication. Static assets, OAuth entry points, and
+    /// `/api/health*` remain public so the daemon stays probeable.
+    pub require_auth_for_reads: bool,
 }
 
 #[derive(Clone)]
@@ -290,54 +296,73 @@ pub async fn auth(
     // POST/PUT/DELETE to any endpoint ALWAYS requires auth to prevent
     // unauthenticated writes (cron job creation, skill install, etc.).
     let is_get = method == axum::http::Method::GET;
-    let is_public = path == "/"
-        || path == "/logo.png"
-        || path == "/favicon.ico"
-        || (path.starts_with("/dashboard/") && is_get)
-        || (path == "/.well-known/agent.json" && is_get)
-        || (path.starts_with("/a2a/") && is_get)
-        || path == "/api/versions"
-        || path == "/api/health"
-        || path == "/api/health/detail"
-        || path == "/api/status"
-        || path == "/api/version"
-        || (path == "/api/agents" && is_get)
-        || (path == "/api/profiles" && is_get)
-        || (path == "/api/config" && is_get)
-        || (path == "/api/config/schema" && is_get)
-        || (path.starts_with("/api/uploads/") && is_get)
-        // Dashboard read endpoints — allow unauthenticated so the SPA can
-        // render before the user enters their API key.
-        || (path == "/api/models" && is_get)
-        || (path == "/api/models/aliases" && is_get)
-        || (path == "/api/providers" && is_get)
-        || (path == "/api/budget" && is_get)
-        || (path == "/api/budget/agents" && is_get)
-        || (path.starts_with("/api/budget/agents/") && is_get)
-        || (path == "/api/network/status" && is_get)
-        || (path == "/api/a2a/agents" && is_get)
-        || (path == "/api/approvals" && is_get)
-        || (path.starts_with("/api/approvals/") && is_get)
-        || (path == "/api/channels" && is_get)
-        || (path == "/api/hands" && is_get)
-        || (path == "/api/hands/active" && is_get)
-        || (path.starts_with("/api/hands/") && is_get)
-        || (path == "/api/skills" && is_get)
-        || (path == "/api/sessions" && is_get)
-        || (path == "/api/integrations" && is_get)
-        || (path == "/api/integrations/available" && is_get)
-        || (path == "/api/integrations/health" && is_get)
-        || (path == "/api/workflows" && is_get)
-        || path == "/api/logs/stream"  // SSE stream, read-only
-        || (path.starts_with("/api/cron/") && is_get)
-        || path.starts_with("/api/providers/github-copilot/oauth/")
-        // OAuth/OIDC auth flow endpoints must be accessible without API key
-        // (they are the authentication entry points themselves).
-        || (path == "/api/auth/providers" && is_get)
-        || (path.starts_with("/api/auth/login") && is_get)
-        || path == "/api/auth/callback"
-        || path == "/api/auth/dashboard-login"
-        || path == "/api/auth/dashboard-check";
+
+    // "Always public" endpoints stay reachable with no token even when
+    // `require_auth_for_reads` is on. These are either (a) static assets
+    // needed to render the login screen, (b) auth flow entry points, or
+    // (c) minimal liveness probes that leak nothing sensitive.
+    let always_public_method_free = matches!(
+        path,
+        "/" | "/logo.png"
+            | "/favicon.ico"
+            | "/api/versions"
+            | "/api/health"
+            | "/api/health/detail"
+            | "/api/status"
+            | "/api/version"
+            | "/api/auth/callback"
+            | "/api/auth/dashboard-login"
+            | "/api/auth/dashboard-check"
+    ) || path.starts_with("/api/providers/github-copilot/oauth/");
+    let always_public_get_only = is_get
+        && (matches!(
+            path,
+            "/.well-known/agent.json" | "/api/config/schema" | "/api/auth/providers"
+        ) || path.starts_with("/dashboard/")
+            || path.starts_with("/a2a/")
+            || path.starts_with("/api/uploads/")
+            || path.starts_with("/api/auth/login"));
+    let always_public = always_public_method_free || always_public_get_only;
+
+    // "Dashboard reads" — the legacy public allowlist that lets the SPA
+    // render before the user enters credentials. Downgraded to authenticated
+    // when `require_auth_for_reads` is enabled AND an `api_key` is configured,
+    // so a remote attacker can no longer enumerate agents, config, budget,
+    // sessions, approvals, hands, skills, or workflows.
+    let dashboard_read_exact = matches!(
+        path,
+        "/api/agents"
+            | "/api/profiles"
+            | "/api/config"
+            | "/api/models"
+            | "/api/models/aliases"
+            | "/api/providers"
+            | "/api/budget"
+            | "/api/budget/agents"
+            | "/api/network/status"
+            | "/api/a2a/agents"
+            | "/api/approvals"
+            | "/api/channels"
+            | "/api/hands"
+            | "/api/hands/active"
+            | "/api/skills"
+            | "/api/sessions"
+            | "/api/integrations"
+            | "/api/integrations/available"
+            | "/api/integrations/health"
+            | "/api/workflows"
+    );
+    let dashboard_read_prefix = path.starts_with("/api/budget/agents/")
+        || path.starts_with("/api/approvals/")
+        || path.starts_with("/api/hands/")
+        || path.starts_with("/api/cron/");
+    let dashboard_read_public =
+        (is_get && (dashboard_read_exact || dashboard_read_prefix)) || path == "/api/logs/stream"; // SSE stream, read-only
+
+    let api_key_present = !api_key.trim().is_empty();
+    let enforce_auth_on_reads = auth_state.require_auth_for_reads && api_key_present;
+
+    let is_public = always_public || (dashboard_read_public && !enforce_auth_on_reads);
 
     if is_public {
         return next.run(request).await;
@@ -610,6 +635,7 @@ mod tests {
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(Vec::new()),
+            require_auth_for_reads: false,
         };
         let app = Router::new()
             .route("/api/private", get(|| async { "ok" }))
@@ -641,6 +667,7 @@ mod tests {
                 role: UserRole::User,
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
             }]),
+            require_auth_for_reads: false,
         };
         let app = Router::new()
             .route(
@@ -675,6 +702,7 @@ mod tests {
                 role: UserRole::User,
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
             }]),
+            require_auth_for_reads: false,
         };
         let app = Router::new()
             .route(
@@ -709,6 +737,7 @@ mod tests {
                 role: UserRole::Viewer,
                 api_key_hash: crate::password_hash::hash_password("viewer-key").unwrap(),
             }]),
+            require_auth_for_reads: false,
         };
         let app = Router::new()
             .route(
@@ -743,6 +772,7 @@ mod tests {
                 role: UserRole::Viewer,
                 api_key_hash: crate::password_hash::hash_password("viewer-key").unwrap(),
             }]),
+            require_auth_for_reads: false,
         };
         let app = Router::new()
             .route("/api/budget", get(|| async { "ok" }))
@@ -776,6 +806,7 @@ mod tests {
                 role: UserRole::User,
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
             }]),
+            require_auth_for_reads: false,
         };
         let app = Router::new()
             .route(
@@ -816,6 +847,7 @@ mod tests {
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(vec![]),
+            require_auth_for_reads: false,
         };
         let app = Router::new()
             .route("/", get(|| async { "dashboard html" }))
@@ -850,6 +882,7 @@ mod tests {
                 role: UserRole::User,
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
             }]),
+            require_auth_for_reads: false,
         };
         let app = Router::new()
             .route(
@@ -872,5 +905,126 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(response.headers()["content-type"], "application/json");
+    }
+
+    /// With an api_key configured and `require_auth_for_reads = true`,
+    /// GET /api/agents must stop being public — otherwise a remote caller
+    /// on a 0.0.0.0 listener can enumerate agents without a token.
+    #[tokio::test]
+    async fn test_require_auth_for_reads_blocks_unauthenticated_get() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(Vec::new()),
+            require_auth_for_reads: true,
+        };
+        let app = Router::new()
+            .route("/api/agents", get(|| async { "agents listing" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "require_auth_for_reads=true must make dashboard read endpoints \
+             require a bearer token"
+        );
+    }
+
+    /// With `require_auth_for_reads = true` the correct bearer still goes
+    /// through, so legitimate dashboard clients keep working.
+    #[tokio::test]
+    async fn test_require_auth_for_reads_allows_authenticated_get() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(Vec::new()),
+            require_auth_for_reads: true,
+        };
+        let app = Router::new()
+            .route("/api/agents", get(|| async { "agents listing" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// `/api/health` must stay reachable without a token even when
+    /// `require_auth_for_reads = true` so probes, load balancers, and
+    /// orchestrators can keep working.
+    #[tokio::test]
+    async fn test_require_auth_for_reads_keeps_health_public() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(Vec::new()),
+            require_auth_for_reads: true,
+        };
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Default (flag off) behaviour must be preserved bit-for-bit: an
+    /// unauthenticated GET /api/agents still succeeds so existing
+    /// dashboards keep rendering.
+    #[tokio::test]
+    async fn test_require_auth_for_reads_off_preserves_public_get() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(Vec::new()),
+            require_auth_for_reads: false,
+        };
+        let app = Router::new()
+            .route("/api/agents", get(|| async { "agents listing" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
