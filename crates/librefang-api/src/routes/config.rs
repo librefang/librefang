@@ -1817,9 +1817,9 @@ pub async fn config_set(
                 if !doc.contains_table(parts[0]) {
                     doc[parts[0]] = toml_edit::Item::Table(toml_edit::Table::new());
                 }
-                if doc[parts[0]]
+                if !doc[parts[0]]
                     .as_table()
-                    .map_or(true, |t| !t.contains_table(parts[1]))
+                    .is_some_and(|t| t.contains_table(parts[1]))
                 {
                     doc[parts[0]][parts[1]] = toml_edit::Item::Table(toml_edit::Table::new());
                 }
