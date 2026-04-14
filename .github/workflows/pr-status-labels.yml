@@ -55,7 +55,12 @@ jobs:
               });
 
               let mergeable = full.mergeable;
-              if (mergeable === null) {
+              // On synchronize (new push), GitHub may not have recomputed
+              // mergeability yet — the API can return a stale `false` or `null`.
+              // Retry in both cases so a conflict-fixing push removes the label.
+              const isSynchronize = context.eventName === 'pull_request_target' &&
+                context.payload.action === 'synchronize';
+              if (mergeable === null || (isSynchronize && mergeable === false)) {
                 await new Promise(r => setTimeout(r, 5000));
                 const { data: retry } = await github.rest.pulls.get({
                   owner: context.repo.owner,
