@@ -56,9 +56,37 @@ pub struct AuthenticatedApiUser {
     pub role: UserRole,
 }
 
+/// Endpoints that mutate kernel-wide configuration, user accounts, or
+/// daemon lifecycle. `librefang_kernel::auth::Action::{ModifyConfig,
+/// ManageUsers}` requires `UserRole::Owner` at the kernel layer; the
+/// HTTP surface must agree, otherwise an Admin API key can change
+/// configuration / rotate the bearer token / reload the daemon that a
+/// Owner is responsible for.
+fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
+    // Only non-GET methods are candidates — reads are handled separately.
+    if *method == axum::http::Method::GET {
+        return false;
+    }
+    // Exact-match list. These are the only routes the current codebase
+    // exposes that cross the "Owner action" line; add here rather than
+    // matching a prefix so a new Admin-write endpoint doesn't silently
+    // get locked to Owner by accident.
+    matches!(
+        path,
+        "/api/config"
+            | "/api/config/set"
+            | "/api/config/reload"
+            | "/api/auth/change-password"
+            | "/api/shutdown"
+    )
+}
+
 /// Whitelist check for per-user API-key access.
 ///
-/// - `Admin` and above: full access to all methods and paths.
+/// - `Owner`: full access.
+/// - `Admin`: full access **except** Owner-only writes (see
+///   [`is_owner_only_write`]) — kernel-wide config, user management,
+///   daemon lifecycle, and the bearer-token change endpoint.
 /// - `User`: GET everything + POST to a limited set of endpoints
 ///   (agent messages, clone, approval actions).
 /// - `Viewer`: GET only.
@@ -67,6 +95,11 @@ pub struct AuthenticatedApiUser {
 /// The `path` must already be normalized (no trailing slash, version prefix
 /// stripped) before calling this function.
 fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &str) -> bool {
+    // Owner-only writes: even Admin cannot touch these.
+    if is_owner_only_write(method, path) {
+        return role >= UserRole::Owner;
+    }
+
     if role >= UserRole::Admin || *method == axum::http::Method::GET {
         return true;
     }
@@ -573,6 +606,85 @@ mod tests {
     #[test]
     fn test_request_id_header_constant() {
         assert_eq!(REQUEST_ID_HEADER, "x-request-id");
+    }
+
+    #[test]
+    fn test_user_role_admin_cannot_modify_config() {
+        // Admin must be blocked from kernel-wide config mutations.
+        let post = axum::http::Method::POST;
+        for path in [
+            "/api/config",
+            "/api/config/set",
+            "/api/config/reload",
+            "/api/auth/change-password",
+            "/api/shutdown",
+        ] {
+            assert!(
+                !user_role_allows_request(UserRole::Admin, &post, path),
+                "Admin must NOT be allowed to POST {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_role_owner_still_allowed_on_config_writes() {
+        let post = axum::http::Method::POST;
+        for path in [
+            "/api/config",
+            "/api/config/set",
+            "/api/config/reload",
+            "/api/auth/change-password",
+            "/api/shutdown",
+        ] {
+            assert!(
+                user_role_allows_request(UserRole::Owner, &post, path),
+                "Owner must be allowed to POST {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_role_admin_can_still_spawn_agents_and_install_skills() {
+        let post = axum::http::Method::POST;
+        for path in ["/api/agents", "/api/skills/install"] {
+            assert!(
+                user_role_allows_request(UserRole::Admin, &post, path),
+                "Admin must still be allowed to POST {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_role_user_still_limited_to_message_endpoints() {
+        let post = axum::http::Method::POST;
+        assert!(user_role_allows_request(
+            UserRole::User,
+            &post,
+            "/api/agents/123/message"
+        ));
+        // Users still can't touch spawn, skill install, or config.
+        for path in ["/api/agents", "/api/skills/install", "/api/config/set"] {
+            assert!(
+                !user_role_allows_request(UserRole::User, &post, path),
+                "User must NOT be allowed to POST {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_role_viewer_still_get_only() {
+        let get = axum::http::Method::GET;
+        let post = axum::http::Method::POST;
+        assert!(user_role_allows_request(
+            UserRole::Viewer,
+            &get,
+            "/api/agents"
+        ));
+        assert!(!user_role_allows_request(
+            UserRole::Viewer,
+            &post,
+            "/api/agents/123/message"
+        ));
     }
 
     #[tokio::test]
