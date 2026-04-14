@@ -322,9 +322,15 @@ async fn dashboard_auth_check(
         "none"
     };
 
+    // Intentionally do NOT echo the configured dashboard username here: the
+    // endpoint is unauthenticated (the SPA calls it before the user has
+    // logged in) and returning the username would hand an anonymous remote
+    // caller one half of the credential pair, enabling targeted credential
+    // stuffing. The `mode` field is enough for the SPA to pick the right
+    // login form; the user already knows their own username.
     axum::response::Json(serde_json::json!({
         "mode": mode,
-        "username": if has_credentials { du.trim().to_string() } else { String::new() },
+        "username": "",
     }))
 }
 

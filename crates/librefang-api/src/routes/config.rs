@@ -260,6 +260,12 @@ pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 )]
 pub async fn version() -> impl IntoResponse {
+    // Deliberately omitted from the unauthenticated version response:
+    // - `hostname` — a per-machine identifier that helps a remote probe
+    //   correlate a daemon to a specific deployment target. Operators who
+    //   need the hostname should read it from the daemon's shell
+    //   environment rather than pulling it over an unauthenticated HTTP
+    //   endpoint.
     Json(serde_json::json!({
         "name": "librefang",
         "version": env!("CARGO_PKG_VERSION"),
@@ -268,7 +274,6 @@ pub async fn version() -> impl IntoResponse {
         "rust_version": option_env!("RUSTC_VERSION").unwrap_or("unknown"),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
-        "hostname": super::system::hostname_string(),
         "api": {
             "current": crate::versioning::CURRENT_VERSION,
             "supported": crate::versioning::SUPPORTED_VERSIONS,
