@@ -55,6 +55,53 @@ function getNestedValue(obj: Record<string, unknown>, section: string, field: st
 /*  Field input                                                        */
 /* ------------------------------------------------------------------ */
 
+function JsonEditor({ value, onChange }: { value: unknown; onChange: (v: unknown) => void }) {
+  const [text, setText] = useState(() => value != null ? JSON.stringify(value, null, 2) : "");
+  const [error, setError] = useState<string | null>(null);
+
+  // Sync from external value changes (e.g. after save + refetch)
+  useEffect(() => {
+    const incoming = value != null ? JSON.stringify(value, null, 2) : "";
+    setText((prev) => {
+      // Don't overwrite if user is editing and the parsed value matches
+      try { if (JSON.stringify(JSON.parse(prev), null, 2) === incoming) return prev; } catch {}
+      return incoming;
+    });
+  }, [value]);
+
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const raw = e.target.value;
+    setText(raw);
+    if (raw.trim() === "" || raw.trim() === "{}" || raw.trim() === "[]") {
+      setError(null);
+      onChange(raw.trim() === "" ? null : JSON.parse(raw.trim()));
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      setError(null);
+      onChange(parsed);
+    } catch (err) {
+      setError("Invalid JSON");
+    }
+  }, [onChange]);
+
+  return (
+    <div className="flex flex-col gap-1">
+      <textarea
+        value={text}
+        onChange={handleChange}
+        rows={Math.min(Math.max(text.split("\n").length, 3), 12)}
+        spellCheck={false}
+        className={`w-full px-3 py-2 rounded-xl border bg-main text-[11px] font-mono outline-none transition-colors resize-y ${
+          error ? "border-danger" : "border-border-subtle focus:border-brand"
+        }`}
+      />
+      {error && <p className="text-[10px] text-danger">{error}</p>}
+    </div>
+  );
+}
+
 const SENSITIVE_PATTERNS = /api_key|secret|password|token_env|client_secret|credentials/i;
 
 function ConfigFieldInput({
@@ -117,11 +164,7 @@ function ConfigFieldInput({
   }
 
   if (fieldType === "object") {
-    return (
-      <pre className="text-[10px] text-text-dim font-mono bg-main rounded-lg px-3 py-2 max-h-24 overflow-auto border border-border-subtle">
-        {value != null ? JSON.stringify(value, null, 2) : "—"}
-      </pre>
-    );
+    return <JsonEditor value={value} onChange={onChange} />;
   }
 
   const isSensitive = fieldType === "string" && SENSITIVE_PATTERNS.test(fieldKey);
@@ -233,7 +276,7 @@ function SectionCard({
                   onChange={(v) => handleFieldChange(fieldKey, v)} />
               </div>
               <div className="w-20 shrink-0 flex items-center justify-end gap-1">
-                {fieldType !== "object" && hasPending && (
+                {hasPending && (
                   <Button variant="primary" size="sm" onClick={() => handleSave(path)} isLoading={isSaving} disabled={isSaving}>
                     <Save className="w-3 h-3" />
                   </Button>
