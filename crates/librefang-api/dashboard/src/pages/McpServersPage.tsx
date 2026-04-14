@@ -278,6 +278,7 @@ export function McpServersPage() {
     mutationFn: (server: McpServerConfigured) => addMcpServer(server),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["integrations-available"] });
       setShowAddModal(false);
       setForm(defaultForm);
       addToast(t("mcp.add_success"), "success");
@@ -300,6 +301,7 @@ export function McpServersPage() {
     mutationFn: (name: string) => deleteMcpServer(name),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["integrations-available"] });
       setDeletingServer(null);
       addToast(t("mcp.delete_success"), "success");
     },
