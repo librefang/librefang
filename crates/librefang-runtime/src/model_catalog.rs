@@ -1978,13 +1978,15 @@ supports_streaming = true
     }
 
     #[test]
-    fn test_alibaba_coding_plan_models_count() {
+    fn test_alibaba_coding_plan_has_models() {
+        // Smoke check only — the exact model set is owned by the upstream
+        // librefang-registry repo and changes over time. Specific model
+        // coverage is asserted by name in the sibling tests below.
         let catalog = test_catalog();
         let models = catalog.models_by_provider("alibaba-coding-plan");
-        assert_eq!(
-            models.len(),
-            8,
-            "alibaba-coding-plan should have exactly 8 models"
+        assert!(
+            !models.is_empty(),
+            "alibaba-coding-plan should expose at least one model"
         );
     }
 
