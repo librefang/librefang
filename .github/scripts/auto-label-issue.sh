@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 #
-# Compute area / type labels for a librefang issue based on its title and
-# body. Used by .github/workflows/issue-auto-label.yml — both the
-# event-driven path (single new/edited issue) and the workflow_dispatch
-# backfill path (re-label all unlabeled open issues).
+# Compute area / type labels for a librefang issue based on its title.
+# Used by .github/workflows/issue-auto-label.yml — both the event-driven
+# path (single new/edited issue) and the workflow_dispatch backfill path
+# (re-label all unlabeled open issues).
 #
 # Usage:
-#   auto-label-issue.sh <issue_number> <title> <body_file>
+#   auto-label-issue.sh <issue_number> <title> [body_file]
 #
 # Output (stdout): a comma-separated list of label names, no leading
 # comma, no trailing newline. Empty output means "no labels to apply".
 #
 # Design notes
-# - Both title and body are scanned. Body is read from a file so newlines
-#   and shell metacharacters survive the env -> arg boundary.
+# - Title-only scan. Scanning the body too proved disastrous on the
+#   first backfill pass: bug reports include code blocks, file paths
+#   (`crates/librefang-api/...`, `crates/librefang-runtime/...`), and
+#   stack traces, so every body grep tagged half a dozen unrelated
+#   `area/*` labels. The body_file argument is accepted for backward
+#   compatibility but ignored.
 # - Each rule sets a `matched` flag. If nothing matched after every rule
 #   has run, the script falls back to `needs-triage` so maintainers can
 #   spot orphaned issues in the list view.
@@ -28,16 +32,15 @@ set -euo pipefail
 
 issue_number="${1:-}"
 title="${2:-}"
-body_file="${3:-/dev/null}"
+# body_file argument intentionally ignored — see header notes
+_=${3:-}
 
 if [ -z "$issue_number" ] || [ -z "$title" ]; then
-  echo "usage: $0 <issue_number> <title> <body_file>" >&2
+  echo "usage: $0 <issue_number> <title> [body_file]" >&2
   exit 2
 fi
 
 title_lower=$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]')
-body_lower=$(tr '[:upper:]' '[:lower:]' < "$body_file" 2>/dev/null || true)
-combined=$(printf '%s\n%s' "$title_lower" "$body_lower")
 
 labels=""
 matched=0
@@ -58,11 +61,11 @@ case "$title_lower" in
     matched=1 ;;
 esac
 
-# ── Keyword → area label (title + body) ──────────────────────────────
+# ── Keyword → area label (title only) ────────────────────────────────
 add_label_if_match() {
   local pattern="$1"
   local label="$2"
-  if printf '%s' "$combined" | grep -qiE -- "$pattern"; then
+  if printf '%s' "$title_lower" | grep -qiE -- "$pattern"; then
     labels="$labels,$label"
     matched=1
   fi
