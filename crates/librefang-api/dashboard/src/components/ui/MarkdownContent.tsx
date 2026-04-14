@@ -19,7 +19,11 @@ const defaultComponents: Record<string, ComponentType<any>> = {
       : <code className="px-1 py-0.5 rounded bg-main font-mono text-[11px]" {...props}>{children}</code>;
   },
   pre: ({ children }: { children: ReactNode }) => <>{children}</>,
-  table: ({ children }: { children: ReactNode }) => <table className="w-full text-xs border-collapse mb-1.5">{children}</table>,
+  table: ({ children }: { children: ReactNode }) => (
+    <div className="overflow-x-auto mb-1.5">
+      <table className="w-full text-xs border-collapse">{children}</table>
+    </div>
+  ),
   th: ({ children }: { children: ReactNode }) => <th className="border border-border-subtle px-2 py-1 bg-main font-bold text-left">{children}</th>,
   td: ({ children }: { children: ReactNode }) => <td className="border border-border-subtle px-2 py-1">{children}</td>,
   blockquote: ({ children }: { children: ReactNode }) => <blockquote className="border-l-2 border-brand pl-3 italic text-text-dim mb-1.5">{children}</blockquote>,
