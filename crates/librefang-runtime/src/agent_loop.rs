@@ -645,6 +645,30 @@ fn append_tool_result_block(
     });
 }
 
+/// Emit stub `ToolResult` blocks for any tool calls in `remaining` that
+/// were not actually executed (e.g. because we hit a hard error and broke
+/// out of the per-call loop). OpenAI/Anthropic both require **every**
+/// `tool_call_id` in an assistant message to be answered by a matching
+/// tool_result on the next turn — without these stubs the next API call
+/// fails with `tool_call_ids ... did not have response messages` and
+/// the agent gets bricked. Issue #2381.
+fn append_skipped_tool_results(
+    tool_result_blocks: &mut Vec<ContentBlock>,
+    remaining: &[ToolCall],
+    reason: &str,
+) {
+    for tc in remaining {
+        tool_result_blocks.push(ContentBlock::ToolResult {
+            tool_use_id: tc.id.clone(),
+            tool_name: tc.name.clone(),
+            content: format!("Skipped: {reason}"),
+            is_error: true,
+            status: librefang_types::tool::ToolExecutionStatus::Skipped,
+            approval_request_id: None,
+        });
+    }
+}
+
 fn handle_mid_turn_signal(
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
     manifest_name: &str,
@@ -2369,7 +2393,8 @@ pub async fn run_agent_loop(
                 // Execute each tool call with loop guard, timeout, and truncation
                 let mut tool_result_blocks = Vec::new();
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
-                for tool_call in &response.tool_calls {
+                let total_tool_calls = response.tool_calls.len();
+                for (call_idx, tool_call) in response.tool_calls.iter().enumerate() {
                     let mut tool_exec_ctx = ToolExecutionContext {
                         manifest,
                         loop_guard: &mut loop_guard,
@@ -2422,6 +2447,17 @@ pub async fn run_agent_loop(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls"
                         );
+                        // Issue #2381: emit stub tool_results for the
+                        // remaining unexecuted calls so OpenAI / Anthropic
+                        // see a response for every tool_call_id. Without
+                        // this the next API request returns 400 with
+                        // "tool_call_ids ... did not have response
+                        // messages" and the agent gets bricked.
+                        append_skipped_tool_results(
+                            &mut tool_result_blocks,
+                            &response.tool_calls[call_idx + 1..],
+                            "previous tool call in the same batch failed with a hard error",
+                        );
                         break;
                     }
 
@@ -2436,6 +2472,18 @@ pub async fn run_agent_loop(
                         &mut messages,
                         &mut tool_result_blocks,
                     ) {
+                        // Same #2381 invariant: even when the batch is
+                        // interrupted by a mid-turn signal, every tool_call
+                        // must end up with a tool_result. The flushed
+                        // outcomes already covered the executed prefix;
+                        // stub the rest before breaking.
+                        if call_idx + 1 < total_tool_calls {
+                            append_skipped_tool_results(
+                                &mut tool_result_blocks,
+                                &response.tool_calls[call_idx + 1..],
+                                "tool batch interrupted by a mid-turn user message",
+                            );
+                        }
                         iteration_outcomes.accumulate(flushed_outcomes);
                         break;
                     }
@@ -3333,7 +3381,8 @@ pub async fn run_agent_loop_streaming(
                 // Execute each tool call with loop guard, timeout, and truncation
                 let mut tool_result_blocks = Vec::new();
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
-                for tool_call in &response.tool_calls {
+                let total_tool_calls = response.tool_calls.len();
+                for (call_idx, tool_call) in response.tool_calls.iter().enumerate() {
                     let mut tool_exec_ctx = ToolExecutionContext {
                         manifest,
                         loop_guard: &mut loop_guard,
@@ -3400,6 +3449,15 @@ pub async fn run_agent_loop_streaming(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls (streaming)"
                         );
+                        // Issue #2381: stub the remaining tool_calls so
+                        // every tool_call_id has a matching tool_result.
+                        // See the non-streaming branch above for the full
+                        // explanation of why this matters.
+                        append_skipped_tool_results(
+                            &mut tool_result_blocks,
+                            &response.tool_calls[call_idx + 1..],
+                            "previous tool call in the same batch failed with a hard error",
+                        );
                         break;
                     }
 
@@ -3412,6 +3470,13 @@ pub async fn run_agent_loop_streaming(
                         &mut messages,
                         &mut tool_result_blocks,
                     ) {
+                        if call_idx + 1 < total_tool_calls {
+                            append_skipped_tool_results(
+                                &mut tool_result_blocks,
+                                &response.tool_calls[call_idx + 1..],
+                                "tool batch interrupted by a mid-turn user message",
+                            );
+                        }
                         iteration_outcomes.accumulate(flushed_outcomes);
                         break;
                     }
