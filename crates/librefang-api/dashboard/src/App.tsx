@@ -707,7 +707,7 @@ export function App() {
 
         {/* Main Content */}
         <main id="main-content" className="flex-1 overflow-y-auto overflow-x-hidden bg-main" tabIndex={-1}>
-          <div className="mx-auto max-w-7xl p-3 sm:p-4 lg:p-8">
+          <div className="w-full p-3 sm:p-4 lg:p-8">
             <Outlet />
           </div>
         </main>

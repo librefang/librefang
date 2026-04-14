@@ -147,7 +147,7 @@ pub const ALLOWED_VIDEO_TYPES: &[&str] = &["video/mp4", "video/quicktime", "vide
 
 /// Extract the bare `type/subtype` from a MIME string, discarding parameters
 /// and whitespace (RFC 2045). E.g. `"audio/ogg; codecs=opus"` → `"audio/ogg"`.
-fn mime_base(mime: &str) -> String {
+pub fn mime_base(mime: &str) -> String {
     mime.split(';')
         .next()
         .unwrap_or(mime)

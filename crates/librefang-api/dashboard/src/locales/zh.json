@@ -44,6 +44,8 @@
     "skip_to_content": "跳转到内容"
   },
   "common": {
+    "copied": "已复制",
+    "copy_failed": "复制失败",
     "refresh": "刷新",
     "status": "状态",
     "daemon_online": "守护进程在线",
@@ -1052,6 +1054,11 @@
     "generating": "生成中...",
     "clear_chat": "清空对话",
     "send_hint": "Enter 发送 · ⌘+↵ 换行",
+    "deep_thinking": "深度思考",
+    "deep_thinking_hint": "启用后请求模型进行深度推理（仅支持 reasoning 模型）",
+    "show_thinking": "显示思考过程",
+    "show_thinking_hint": "在回复中展示模型的思考过程",
+    "thinking_label": "思考过程",
     "you": "你",
     "bot": "Bot",
     "ws_connected": "WS",
@@ -1469,6 +1476,13 @@
     "delete_failed": "删除 MCP 服务器失败",
     "show_tools": "显示工具",
     "hide_tools": "隐藏工具",
-    "help": "MCP（模型上下文协议）服务器通过外部工具和能力扩展您的智能体。\n\n支持的传输方式：\n- stdio：运行本地命令（如 npx、python）\n- SSE：通过 Server-Sent Events 连接\n- HTTP：通过 HTTP Streamable 连接"
+    "help": "MCP（模型上下文协议）服务器通过外部工具和能力扩展您的智能体。\n\n支持的传输方式：\n- stdio：运行本地命令（如 npx、python）\n- SSE：通过 Server-Sent Events 连接\n- HTTP：通过 HTTP Streamable 连接",
+    "auth_authorized": "已授权",
+    "auth_pending": "授权中...",
+    "auth_authorize": "授权",
+    "auth_reauthorize": "重新授权",
+    "auth_revoke": "撤销",
+    "auth_started": "授权已开始 — 请在新标签页中完成",
+    "auth_revoked": "授权已撤销"
   }
 }

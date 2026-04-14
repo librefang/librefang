@@ -44,6 +44,8 @@
     "skip_to_content": "Skip to content"
   },
   "common": {
+    "copied": "Copied",
+    "copy_failed": "Copy failed",
     "refresh": "Refresh",
     "status": "Status",
     "daemon_online": "Daemon Online",
@@ -1077,6 +1079,11 @@
     "generating": "Generating...",
     "clear_chat": "Clear Chat",
     "send_hint": "Enter to send, Cmd+Enter for newline",
+    "deep_thinking": "Deep Thinking",
+    "deep_thinking_hint": "Ask the model to reason step-by-step (reasoning models only)",
+    "show_thinking": "Show Thinking",
+    "show_thinking_hint": "Display the model's reasoning process in replies",
+    "thinking_label": "Thinking",
     "you": "You",
     "bot": "Bot",
     "ws_connected": "WS",
@@ -1462,6 +1469,13 @@
     "delete_failed": "Failed to delete MCP server",
     "show_tools": "Show tools",
     "hide_tools": "Hide tools",
-    "help": "MCP (Model Context Protocol) servers extend your agents with external tools and capabilities.\n\nSupported transports:\n- stdio: Run a local command (e.g. npx, python)\n- SSE: Connect via Server-Sent Events\n- HTTP: Connect via HTTP Streamable"
+    "help": "MCP (Model Context Protocol) servers extend your agents with external tools and capabilities.\n\nSupported transports:\n- stdio: Run a local command (e.g. npx, python)\n- SSE: Connect via Server-Sent Events\n- HTTP: Connect via HTTP Streamable",
+    "auth_authorized": "Authorized",
+    "auth_pending": "Authorizing...",
+    "auth_authorize": "Authorize",
+    "auth_reauthorize": "Re-authorize",
+    "auth_revoke": "Revoke",
+    "auth_started": "Authorization started — complete in the new tab",
+    "auth_revoked": "Authorization revoked"
   }
 }

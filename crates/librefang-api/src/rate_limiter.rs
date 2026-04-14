@@ -72,7 +72,27 @@ pub async fn gcra_rate_limit(
     let path = request.uri().path().to_string();
     let cost = operation_cost(&method, &path);
 
-    if state.limiter.check_key_n(&ip, cost).is_err() {
+    // `check_key_n` returns a nested `Result<Result<(), NotUntil>, InsufficientCapacity>`:
+    //   * outer `Err(InsufficientCapacity)` — the cost exceeds the configured
+    //     burst size; this request can never be served.
+    //   * outer `Ok(Err(NotUntil))`         — the key is out of tokens right
+    //     now; this is the **normal rate-limit trigger** we need to honour.
+    //   * outer `Ok(Ok(()))`                — a token was consumed, pass
+    //     through.
+    //
+    // The previous check — `state.limiter.check_key_n(&ip, cost).is_err()` —
+    // only caught `InsufficientCapacity`, so `NotUntil` (the normal "you've
+    // exhausted your quota" signal) was treated as OK and every request
+    // slid straight through. A burst of 200 `/api/health` calls (cost=1,
+    // quota=500/min) never returned 429 in practice, and heavier endpoints
+    // (POST /api/agents at cost=50) were equally unthrottled until the
+    // per-call cost itself grew larger than the burst size.
+    let rate_limited = match state.limiter.check_key_n(&ip, cost) {
+        Ok(Ok(())) => false,
+        Ok(Err(_not_until)) => true,
+        Err(_insufficient_capacity) => true,
+    };
+    if rate_limited {
         tracing::warn!(ip = %ip, cost = cost.get(), path = %path, "GCRA rate limit exceeded");
         let retry_after = state.retry_after_secs.to_string();
         return Response::builder()
@@ -91,6 +111,35 @@ pub async fn gcra_rate_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: a small-quota limiter must actually start rejecting
+    /// after the burst is drained. Before this fix the nested-Result
+    /// destructuring only caught `InsufficientCapacity`, so the inner
+    /// `NotUntil` (the normal "out of tokens") path was treated as OK
+    /// and `check_key_n` silently passed everything.
+    #[test]
+    fn test_rate_limit_trips_after_quota_drained() {
+        let limiter = create_rate_limiter(5); // 5 tokens / minute
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let cost = NonZeroU32::new(1).unwrap();
+        // Drain the burst (5 tokens) — these must all pass.
+        for i in 0..5 {
+            let r = limiter.check_key_n(&ip, cost);
+            assert!(
+                matches!(r, Ok(Ok(()))),
+                "token {i} should pass but got {r:?}"
+            );
+        }
+        // The next call must hit the inner NotUntil arm that the old
+        // .is_err() missed. This is the precise shape the middleware
+        // now pattern-matches on.
+        let r = limiter.check_key_n(&ip, cost);
+        assert!(
+            matches!(r, Ok(Err(_))),
+            "post-burst call must surface the NotUntil variant, got {r:?}"
+        );
+    }
+
     #[test]
     fn test_costs() {
         assert_eq!(operation_cost("GET", "/api/health").get(), 1);

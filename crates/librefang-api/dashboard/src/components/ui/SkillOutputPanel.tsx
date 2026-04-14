@@ -16,7 +16,7 @@ export function SkillOutputPanel() {
 
   return (
     <div className={`fixed bottom-0 left-0 right-0 pointer-events-none ${isMobileMenuOpen ? "z-[30]" : "z-[90]"} ${isSidebarCollapsed ? "lg:left-[72px]" : "lg:left-[280px]"}`}>
-      <div className="mx-auto max-w-7xl px-3 sm:px-4 lg:px-8 pb-[env(safe-area-inset-bottom,8px)]">
+      <div className="w-full px-3 sm:px-4 lg:px-8 pb-[env(safe-area-inset-bottom,8px)]">
         <div className="pointer-events-auto rounded-t-xl border border-b-0 border-border-subtle bg-surface shadow-2xl">
           {/* Header */}
           <div className="flex items-center justify-between px-3 sm:px-4 py-2 border-b border-border-subtle/50">

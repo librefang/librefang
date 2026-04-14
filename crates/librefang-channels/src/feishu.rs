@@ -1215,8 +1215,23 @@ fn parse_feishu_event(event: &serde_json::Value, region: FeishuRegion) -> Option
         .to_string();
     let sender_type = sender["sender_type"].as_str().unwrap_or("user");
 
-    // Skip bot messages
-    if sender_type == "bot" {
+    // Skip messages the bot sent itself.
+    //
+    // Feishu broadcasts the bot's own `im/v1/messages` replies back to the
+    // app as a fresh `im.message.receive_v1` event, so without this guard
+    // the agent's own response loops back into the agent loop as "user
+    // input" and the bot keeps replying to itself until an external kill
+    // — this was #2435's symptom (observed on Android/Termux, feishu CN).
+    //
+    // The Feishu Open Platform documents `sender_type` values as
+    // `"user"`, `"app"`, and `"anonymous"` — `"app"` is the value used
+    // for any bot/app-originated message. The pre-existing check
+    // compared against `"bot"`, which is not a value Feishu emits; the
+    // guard never fired in production and the regression test that
+    // claimed to cover it was itself using the bogus `"bot"` fixture.
+    // Accept both strings so we're robust to any future Feishu schema
+    // changes or third-party proxies that may normalise to `"bot"`.
+    if sender_type == "app" || sender_type == "bot" {
         return None;
     }
 
@@ -1795,18 +1810,24 @@ mod tests {
         }
     }
 
+    /// Regression for #2435: Feishu re-broadcasts the bot's own
+    /// `im/v1/messages` replies as `im.message.receive_v1` events with
+    /// `sender_type: "app"`. The pre-fix code compared against `"bot"`,
+    /// which is not a value Feishu ever emits, so the guard never
+    /// fired and the agent kept replying to itself.
     #[test]
-    fn test_parse_feishu_event_skips_bot() {
-        let event = serde_json::json!({
+    fn test_parse_feishu_event_skips_bot_self_echo() {
+        // The value Feishu actually sends for bot-originated messages.
+        let event_app = serde_json::json!({
             "schema": "2.0",
             "header": {
-                "event_id": "evt-004",
+                "event_id": "evt-004-app",
                 "event_type": "im.message.receive_v1"
             },
             "event": {
                 "sender": {
                     "sender_id": { "open_id": "ou_bot" },
-                    "sender_type": "bot"
+                    "sender_type": "app"
                 },
                 "message": {
                     "message_id": "om_bot1",
@@ -1817,8 +1838,66 @@ mod tests {
                 }
             }
         });
+        assert!(
+            parse_feishu_event(&event_app, FeishuRegion::Cn).is_none(),
+            "sender_type=\"app\" is Feishu's real bot-origin marker and must be \
+             dropped to break the self-echo loop documented in #2435"
+        );
 
-        assert!(parse_feishu_event(&event, FeishuRegion::Cn).is_none());
+        // Defensive: also drop `"bot"` so we don't regress if a proxy or
+        // future Feishu schema change normalises to that string.
+        let event_bot = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-004-bot",
+                "event_type": "im.message.receive_v1"
+            },
+            "event": {
+                "sender": {
+                    "sender_id": { "open_id": "ou_bot" },
+                    "sender_type": "bot"
+                },
+                "message": {
+                    "message_id": "om_bot2",
+                    "chat_id": "oc_chat1",
+                    "chat_type": "p2p",
+                    "message_type": "text",
+                    "content": "{\"text\":\"Bot message\"}"
+                }
+            }
+        });
+        assert!(parse_feishu_event(&event_bot, FeishuRegion::Cn).is_none());
+    }
+
+    /// Sanity: a normal human message must still parse — the fix must
+    /// not over-reject and swallow legitimate user input.
+    #[test]
+    fn test_parse_feishu_event_still_accepts_user_sender() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-004-user",
+                "event_type": "im.message.receive_v1"
+            },
+            "event": {
+                "sender": {
+                    "sender_id": { "open_id": "ou_human" },
+                    "sender_type": "user"
+                },
+                "message": {
+                    "message_id": "om_user1",
+                    "chat_id": "oc_chat1",
+                    "chat_type": "p2p",
+                    "message_type": "text",
+                    "content": "{\"text\":\"hello\"}"
+                }
+            }
+        });
+        let parsed = parse_feishu_event(&event, FeishuRegion::Cn);
+        assert!(
+            parsed.is_some(),
+            "real user messages must still pass through"
+        );
     }
 
     #[test]
