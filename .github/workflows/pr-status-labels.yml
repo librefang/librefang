@@ -1,0 +1,161 @@
+name: PR Status Labels
+
+# Keep PR labels in sync with merge conflicts and CI status.
+# - Adds/removes "has-conflicts" based on mergeable state.
+# - Adds/removes "ci-failed" when required checks complete.
+
+on:
+  # Conflict detection: runs when PRs are opened/synced and when
+  # the base branch (main) changes (push can cause new conflicts).
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+  # CI status detection: runs when check suites finish.
+  check_suite:
+    types: [completed]
+
+  # Also allow manual trigger for bulk-fixing stale labels.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ── Conflict detection ────────────────────────────────────────────
+  conflicts:
+    name: Conflict Check
+    runs-on: ubuntu-latest
+    # Skip on check_suite events (handled by ci-status job)
+    if: github.event_name != 'check_suite'
+    steps:
+      - name: Label conflicting PRs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LABEL = 'has-conflicts';
+
+            // On push to main, check all open PRs.
+            // On pull_request_target, check only the triggering PR.
+            let prs;
+            if (context.eventName === 'push' || context.eventName === 'workflow_dispatch') {
+              const resp = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                per_page: 100,
+              });
+              prs = resp.data;
+            } else {
+              prs = [{ number: context.payload.pull_request.number }];
+            }
+
+            for (const pr of prs) {
+              // Fetch full PR data to get mergeable state
+              const { data: full } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+              });
+
+              // GitHub may need time to compute mergeable — retry once
+              let mergeable = full.mergeable;
+              if (mergeable === null) {
+                await new Promise(r => setTimeout(r, 5000));
+                const { data: retry } = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                });
+                mergeable = retry.mergeable;
+              }
+
+              const labels = full.labels.map(l => l.name);
+              const hasLabel = labels.includes(LABEL);
+
+              if (mergeable === false && !hasLabel) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  labels: [LABEL],
+                });
+                core.info(`#${pr.number}: added "${LABEL}"`);
+              } else if (mergeable !== false && hasLabel) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  name: LABEL,
+                }).catch(() => {}); // ignore if already removed
+                core.info(`#${pr.number}: removed "${LABEL}"`);
+              }
+            }
+
+  # ── CI status detection ───────────────────────────────────────────
+  ci-status:
+    name: CI Status Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'check_suite'
+    steps:
+      - name: Label PRs with failed CI
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LABEL = 'ci-failed';
+            const suite = context.payload.check_suite;
+
+            // Only care about our CI workflow checks
+            if (!suite.pull_requests || suite.pull_requests.length === 0) {
+              core.info('No PRs associated with this check suite');
+              return;
+            }
+
+            for (const pr of suite.pull_requests) {
+              // Get all check runs for this PR's head SHA
+              const { data: checks } = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: suite.head_sha,
+              });
+
+              const hasFailure = checks.check_runs.some(
+                cr => cr.conclusion === 'failure' || cr.conclusion === 'timed_out'
+              );
+              const allDone = checks.check_runs.every(
+                cr => cr.status === 'completed'
+              );
+
+              if (!allDone) {
+                core.info(`#${pr.number}: checks still running, skipping`);
+                continue;
+              }
+
+              const { data: fullPr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+              });
+              const labels = fullPr.labels.map(l => l.name);
+              const hasLabel = labels.includes(LABEL);
+
+              if (hasFailure && !hasLabel) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  labels: [LABEL],
+                });
+                core.info(`#${pr.number}: added "${LABEL}"`);
+              } else if (!hasFailure && hasLabel) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  name: LABEL,
+                }).catch(() => {});
+                core.info(`#${pr.number}: removed "${LABEL}"`);
+              }
+            }
