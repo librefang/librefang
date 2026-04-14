@@ -25,7 +25,7 @@ const CATEGORY_SECTIONS: Record<string, string[]> = {
   infra: ["docker", "extensions", "session", "queue", "webhook_triggers", "vertex_ai"],
 };
 
-function sectionLabel(key: string): string {
+function sectionLabelFallback(key: string): string {
   return key.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
@@ -320,7 +320,7 @@ export function ConfigPage({ category }: { category: string }) {
   const allSections = schemaQuery.data?.sections ?? {};
   const config = configQuery.data ?? {};
   const sectionKeys = (CATEGORY_SECTIONS[category] ?? []).filter((s) => s in allSections);
-  const categoryTitle = t(`config.cat_${category}`, sectionLabel(category));
+  const categoryTitle = t(`config.cat_${category}`, sectionLabelFallback(category));
   const q = searchQuery.toLowerCase();
 
   // Filter sections & fields by search
@@ -330,7 +330,7 @@ export function ConfigPage({ category }: { category: string }) {
       .map((sKey) => {
         const sec = allSections[sKey];
         if (!sec) return null;
-        const sectionMatches = sectionLabel(sKey).toLowerCase().includes(q) || sKey.includes(q);
+        const sectionMatches = t(`config.sec_${sKey}`, sectionLabelFallback(sKey)).toLowerCase().includes(q) || sKey.includes(q);
         const matchedFields = Object.keys(sec.fields).filter((fKey) =>
           sectionMatches || fKey.includes(q) || fieldLabel(fKey).toLowerCase().includes(q)
         );
@@ -427,7 +427,7 @@ export function ConfigPage({ category }: { category: string }) {
           return (
             <div key={sKey} className="rounded-2xl border border-border-subtle bg-surface overflow-hidden">
               <div className="flex items-center gap-3 px-5 py-4 border-b border-border-subtle/50">
-                <h3 className="text-sm font-bold">{sectionLabel(sKey)}</h3>
+                <h3 className="text-sm font-bold">{t(`config.sec_${sKey}`, sectionLabelFallback(sKey))}</h3>
                 {sec.hot_reloadable && (
                   <Badge variant="success"><Zap className="w-2.5 h-2.5 mr-0.5" />{t("config.hot_reload", "Hot Reload")}</Badge>
                 )}
@@ -435,7 +435,7 @@ export function ConfigPage({ category }: { category: string }) {
                   <Badge variant="info">{t("config.root_level", "Root Level")}</Badge>
                 )}
                 <span className="text-[10px] text-text-dim ml-auto">
-                  {fieldsToShow.length}{q ? `/${allFields.length}` : ""} {fieldsToShow.length === 1 ? "field" : "fields"}
+                  {fieldsToShow.length}{q ? `/${allFields.length}` : ""} {t("config.fields_unit")}
                 </span>
               </div>
               <div className="px-5 py-2">
