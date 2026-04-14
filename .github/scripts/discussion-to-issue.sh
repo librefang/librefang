@@ -18,7 +18,28 @@ DISC_URL="$3"
 DISC_AUTHOR="$4"
 DISC_CATEGORY="$5"
 
-DISC_BODY=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" --jq '.body // ""')
+DISC_JSON=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" 2>/dev/null || true)
+if [ -z "$DISC_JSON" ]; then
+  echo "#${DISC_NUMBER}: could not fetch discussion, skipping"
+  exit 0
+fi
+DISC_BODY=$(printf '%s' "$DISC_JSON" | jq -r '.body // ""')
+DISC_LOCKED=$(printf '%s' "$DISC_JSON" | jq -r '.locked // false')
+DISC_UPVOTES=$(printf '%s' "$DISC_JSON" | jq -r '.reactions.total_count // 0')
+DISC_AUTHOR_ASSOC=$(printf '%s' "$DISC_JSON" | jq -r '.author_association // "NONE"')
+
+# Skip locked discussions (likely spam that was locked by moderators)
+if [ "$DISC_LOCKED" = "true" ]; then
+  echo "#${DISC_NUMBER}: locked, skipping (likely spam)"
+  exit 0
+fi
+
+# Skip discussions with very short body from non-members (likely spam)
+body_char_count=$(printf '%s' "$DISC_BODY" | wc -c | tr -d ' ')
+if [ "$body_char_count" -lt 30 ] && [ "$DISC_AUTHOR_ASSOC" = "NONE" ]; then
+  echo "#${DISC_NUMBER}: short body from non-member, skipping"
+  exit 0
+fi
 
 # Strip emoji prefixes
 CLEAN_TITLE=$(printf '%s' "$DISC_TITLE" | sed 's/^[^a-zA-Z0-9[({]*//')
@@ -77,6 +98,14 @@ ISSUE_URL=$(gh issue create \
 ISSUE_NUMBER=$(printf '%s' "$ISSUE_URL" | grep -oE '[0-9]+$')
 echo "#${DISC_NUMBER} → issue #${ISSUE_NUMBER}"
 
-# Comment on the discussion
-gh api "repos/${REPO}/discussions/${DISC_NUMBER}/comments" \
-  -f body="Tracked as issue #${ISSUE_NUMBER}" --silent
+# Comment on the discussion via GraphQL (REST endpoint doesn't support Discussions)
+DISC_NODE_ID=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" --jq '.node_id' 2>/dev/null || true)
+if [ -n "$DISC_NODE_ID" ]; then
+  gh api graphql -f query='
+    mutation($discussionId: ID!, $body: String!) {
+      addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
+        comment { id }
+      }
+    }
+  ' -f discussionId="$DISC_NODE_ID" -f body="Tracked as issue #${ISSUE_NUMBER}" --silent 2>/dev/null || true
+fi
