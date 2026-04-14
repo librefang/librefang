@@ -539,9 +539,13 @@ export interface HandDefinitionItem {
 export interface HandInstanceItem {
   instance_id: string;
   hand_id?: string;
+  hand_name?: string;
+  hand_icon?: string;
   status?: string;
   agent_id?: string;
   agent_name?: string;
+  agent_ids?: Record<string, string>;
+  coordinator_role?: string;
   activated_at?: string;
   updated_at?: string;
 }
