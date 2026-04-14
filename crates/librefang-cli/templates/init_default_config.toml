@@ -126,6 +126,18 @@ debounce_ms = 500
 # max_daily_usd = 0.0
 # max_monthly_usd = 0.0
 # alert_threshold = 0.8        # Alert at 80% of limit
+#
+# Per-provider caps: keyed by ModelConfig.provider (e.g. "moonshot",
+# "openai", "litellm", "ollama"). 0 = unlimited. Unlisted providers
+# inherit no provider-level cap. Use this to throttle paid providers
+# while leaving local ones (litellm, ollama) free.
+# [budget.providers.moonshot]
+# max_cost_per_day_usd = 2.0
+# max_tokens_per_hour = 500000
+#
+# [budget.providers.openai]
+# max_cost_per_hour_usd = 1.0
+# max_cost_per_month_usd = 50.0
 
 # ── Extended Thinking (Claude models) ────────────────────────
 # [thinking]

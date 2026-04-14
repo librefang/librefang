@@ -378,6 +378,32 @@ default_max_llm_tokens_per_hour = 0
 | `alert_threshold` | f64 | `0.8` | 各限额的告警阈值（0.0-1.0 的比例）。设为 0.8 时，达到限额 80% 即记录告警日志。 |
 | `default_max_llm_tokens_per_hour` | u64 | `0` | 全局覆盖每个 Agent 的每小时 Token 预算。大于 `0` 时覆盖所有 Agent 自身的 Token 限制。`0` = 保持各 Agent 自身的限制。 |
 
+#### 按提供商限额 (`[budget.providers.<id>]`)
+
+当你同时使用免费的本地提供商（如 `litellm`、`ollama`）与付费提供商（如 `moonshot`、`openai`）时，可以只给付费方设置花销上限，而不影响免费方。提供商 ID 必须与 Agent `[model]` 中的 `provider` 字段一致。字段缺省或为 0 表示无限制。
+
+```toml
+[budget.providers.moonshot]
+max_cost_per_day_usd = 2.0
+max_tokens_per_hour = 500000
+
+[budget.providers.openai]
+max_cost_per_hour_usd = 1.0
+max_cost_per_month_usd = 50.0
+
+[budget.providers.litellm]
+# 省略或全部为 0 = 无限制
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_cost_per_hour_usd` | f64 | `0.0` | 该提供商每小时费用上限。`0.0` = 无限制。 |
+| `max_cost_per_day_usd` | f64 | `0.0` | 该提供商每天费用上限。`0.0` = 无限制。 |
+| `max_cost_per_month_usd` | f64 | `0.0` | 该提供商每月费用上限。`0.0` = 无限制。 |
+| `max_tokens_per_hour` | u64 | `0` | 该提供商每小时 Token 上限（输入+输出）。`0` = 无限制。 |
+
+命中按提供商的上限时，调用将以 `QuotaExceeded` 错误返回，错误信息中包含提供商名；其他提供商的用量不受影响。
+
 ---
 
 ### `[thinking]`
