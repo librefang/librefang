@@ -425,6 +425,34 @@ fn detect_cli_error_in_text(text: &str) -> Option<LlmError> {
 #[async_trait]
 impl LlmDriver for ClaudeCodeDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        // Issue #2314: this driver does not (yet) bridge LibreFang tools
+        // through to the Claude Code CLI. Earlier code silently dropped
+        // `request.tools`, so users who configured tools on a Claude
+        // Code agent saw the agent ignore every tool call without any
+        // log line — the LLM ran but never executed anything.
+        //
+        // Fail fast with a clear, actionable error instead of silently
+        // dropping the tools. Users can either:
+        //   - remove tools from the agent manifest, or
+        //   - switch to a driver that supports tool calls (anthropic,
+        //     openai, gemini, ...).
+        //
+        // A real fix (bridging LibreFang tools via Claude Code's
+        // `--mcp-config` MCP-client support) is tracked separately;
+        // it requires a local MCP server implementation that exposes
+        // LibreFang tools as MCP tools.
+        if !request.tools.is_empty() {
+            return Err(LlmError::Api {
+                status: 400,
+                message: format!(
+                    "claude_code driver does not support tool calls yet \
+                     (agent has {} tools configured). Remove `tools` from \
+                     the agent manifest or use a different driver \
+                     (anthropic / openai / gemini). Tracking issue: #2314",
+                    request.tools.len()
+                ),
+            });
+        }
         let prepared = Self::build_prompt(&request);
         let model_flag = Self::model_flag(&request.model);
 
