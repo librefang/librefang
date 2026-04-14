@@ -386,7 +386,7 @@ export function McpServersPage() {
 
       {/* Server cards */}
       {configured.length > 0 && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
           {configured.map((server) => {
             const conn = connectedMap.get(server.name);
             const isConnected = conn?.connected ?? false;

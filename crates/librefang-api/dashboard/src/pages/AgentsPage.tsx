@@ -400,7 +400,7 @@ export function AgentsPage() {
       </div>
 
       {agentsQuery.isLoading ? (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : filteredAgents.length === 0 ? (
@@ -431,7 +431,7 @@ export function AgentsPage() {
           />
         )
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 stagger-children">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 stagger-children">
           {coreAgents.map(agent => renderAgentCard(agent))}
         </div>
       )}

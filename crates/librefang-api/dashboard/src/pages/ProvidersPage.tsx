@@ -896,7 +896,7 @@ export function ProvidersPage() {
       </div>
 
       {providersQuery.isLoading ? (
-        <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-2"}>
+        <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4" : "flex flex-col gap-2"}>
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : providers.length === 0 ? (
@@ -924,7 +924,7 @@ export function ProvidersPage() {
             )}
           </div>
 
-          <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-2"}>
+          <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4" : "flex flex-col gap-2"}>
             {paginatedProviders.map((p) => (
               <ProviderCard
                 key={p.id}

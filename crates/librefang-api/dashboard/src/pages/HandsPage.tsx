@@ -1158,7 +1158,7 @@ function ActiveHandChip({
 
 function HandCardGridSkeleton() {
   return (
-    <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
+    <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
       {Array.from({ length: 6 }).map((_, i) => (
         <div key={i} className="flex flex-col rounded-2xl border border-border-subtle bg-surface">
           <div className="flex items-start gap-3 p-4 pb-3">
@@ -1692,7 +1692,7 @@ export function HandsPage() {
           }
         />
       ) : (
-        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 stagger-children">
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 stagger-children">
           {filtered.map((h) => {
             const isActive = activeHandIds.has(h.id);
             const instance = instanceByHandId.get(h.id);
