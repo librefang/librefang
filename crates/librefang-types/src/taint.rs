@@ -226,10 +226,17 @@ pub fn check_outbound_text_violation(payload: &str, sink: &TaintSink) -> Option<
     }
 
     // 3. Long opaque token OR well-known credential prefix.
+    //
+    // The opaque-token heuristic requires *mixed character classes*
+    // so that legitimate identifiers that happen to be long don't
+    // trip the filter. Specifically: pure-hex blobs (git SHAs,
+    // sha256 digests, UUIDs without dashes) and pure-decimal runs
+    // carry essentially no entropy as credentials relative to how
+    // often they show up as plain arguments, so they are NOT
+    // flagged. Real opaque tokens mix letters and digits.
     if !hit {
         let trimmed = payload.trim();
-        let looks_opaque = trimmed.len() >= 32
-            && !trimmed.chars().any(char::is_whitespace)
+        let charset_ok = !trimmed.chars().any(char::is_whitespace)
             && trimmed.chars().all(|c| {
                 c.is_ascii_alphanumeric()
                     || c == '-'
@@ -239,6 +246,15 @@ pub fn check_outbound_text_violation(payload: &str, sink: &TaintSink) -> Option<
                     || c == '+'
                     || c == '='
             });
+        let has_letter = trimmed.chars().any(|c| c.is_ascii_alphabetic());
+        let has_digit = trimmed.chars().any(|c| c.is_ascii_digit());
+        let is_hex_only = trimmed.chars().all(|c| c.is_ascii_hexdigit());
+        // Require letters + digits AND reject pure-hex runs. This
+        // excludes git SHAs (40-hex), sha256 (64-hex), UUIDs without
+        // dashes (32-hex), and bare decimal runs — all common in
+        // legitimate tool arguments.
+        let mixed_enough = has_letter && has_digit && !is_hex_only;
+        let looks_opaque = trimmed.len() >= 32 && charset_ok && mixed_enough;
         let well_known = trimmed.starts_with("sk-")
             || trimmed.starts_with("ghp_")
             || trimmed.starts_with("github_pat_")
@@ -326,6 +342,44 @@ mod tests {
         assert!(clean.check_sink(&TaintSink::shell_exec()).is_ok());
         assert!(clean.check_sink(&TaintSink::net_fetch()).is_ok());
         assert!(clean.check_sink(&TaintSink::agent_message()).is_ok());
+    }
+
+    #[test]
+    fn test_check_outbound_text_allows_git_sha() {
+        // 40-char lowercase hex — a git commit SHA. Must NOT trip the
+        // opaque-token heuristic.
+        let sha = "18060f6412ab34cd56ef7890abcdef1234567890";
+        assert_eq!(sha.len(), 40);
+        let sink = TaintSink::mcp_tool_call();
+        assert!(check_outbound_text_violation(sha, &sink).is_none());
+    }
+
+    #[test]
+    fn test_check_outbound_text_allows_sha256_hex() {
+        // 64-char lowercase hex — a sha256 digest. Must NOT trip.
+        let digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert_eq!(digest.len(), 64);
+        let sink = TaintSink::mcp_tool_call();
+        assert!(check_outbound_text_violation(digest, &sink).is_none());
+    }
+
+    #[test]
+    fn test_check_outbound_text_allows_uuid_no_dashes() {
+        // 32-char hex — a UUID without dashes. Must NOT trip.
+        let uuid = "550e8400e29b41d4a716446655440000";
+        assert_eq!(uuid.len(), 32);
+        let sink = TaintSink::mcp_tool_call();
+        assert!(check_outbound_text_violation(uuid, &sink).is_none());
+    }
+
+    #[test]
+    fn test_check_outbound_text_still_flags_opaque_token() {
+        // 40-char mixed alnum with non-hex letters (o, p, r, s, …) —
+        // this IS the shape of an opaque API token.
+        let tok = "0p3nai_sk_proj_abcXYZ1234567890qwertZXCV";
+        assert!(tok.len() >= 32);
+        let sink = TaintSink::mcp_tool_call();
+        assert!(check_outbound_text_violation(tok, &sink).is_some());
     }
 
     #[test]
