@@ -4209,10 +4209,12 @@ version = "2026.4.13-beta19"
 dependencies = [
  "dirs 6.0.0",
  "librefang-hands",
+ "librefang-runtime",
  "librefang-types",
  "regex-lite",
  "serde",
  "serde_json",
+ "tempfile",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
 ]
