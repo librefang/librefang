@@ -222,7 +222,7 @@ pub async fn react_asset(
             let has_ext = asset_path
                 .rsplit('/')
                 .next()
-                .map_or(false, |s| s.contains('.'));
+                .is_some_and(|s| s.contains('.'));
             if !has_ext {
                 if let Some(index) = resolve_dashboard_file(home_dir.as_deref(), "index.html") {
                     return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], index)
