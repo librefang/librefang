@@ -318,7 +318,7 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
     state.tokio_handle.block_on(async {
         // Build a DNS-pinned client so the HTTP request connects to the
         // same IPs we already validated (prevents DNS-rebinding TOCTOU).
-        let mut builder = crate::http_client::proxied_client_builder();
+        let mut builder = librefang_http::proxied_client_builder();
         for addr in &ssrf_result.resolved {
             builder = builder.resolve(&ssrf_result.hostname, *addr);
         }
