@@ -307,13 +307,21 @@ pub async fn auth(
     // `api_listen`, and session count, which is exactly the enumeration
     // surface `require_auth_for_reads` exists to close. It lives in the
     // `dashboard_read_*` group below so it gets locked down with the flag.
+    //
+    // `/api/health/detail` is also excluded — its own doc comment says it
+    // "requires auth", and it returns `panic_count`, `restart_count`,
+    // `agent_count`, the embedding/extraction model IDs, `config_warnings`
+    // from `KernelConfig::validate()`, and the event-bus drop count. All of
+    // that is operational data that should not be reachable without a token.
+    // `/api/health` stays public because its payload is genuinely minimal
+    // (status + version + a two-item checks array) and load balancers /
+    // orchestrators need it for probing.
     let always_public_method_free = matches!(
         path,
         "/" | "/logo.png"
             | "/favicon.ico"
             | "/api/versions"
             | "/api/health"
-            | "/api/health/detail"
             | "/api/version"
             | "/api/auth/callback"
             | "/api/auth/dashboard-login"
@@ -340,6 +348,7 @@ pub async fn auth(
             | "/api/profiles"
             | "/api/config"
             | "/api/status"
+            | "/api/health/detail"
             | "/api/models"
             | "/api/models/aliases"
             | "/api/providers"
@@ -1040,6 +1049,56 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// `/api/health/detail`'s own doc comment says "requires auth", and its
+    /// payload includes panic counts, agent counts, model IDs, and
+    /// `config_warnings` from `KernelConfig::validate()`. It used to be
+    /// incorrectly exposed by the always-public set; the flag must lock
+    /// it down while `/api/health` stays public for load balancers.
+    #[tokio::test]
+    async fn test_require_auth_for_reads_blocks_api_health_detail() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(Vec::new()),
+            require_auth_for_reads: true,
+        };
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .route("/api/health/detail", get(|| async { "detail" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        // /api/health stays public (minimal liveness for probes).
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+
+        // /api/health/detail is gated by the flag.
+        let detail = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health/detail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            detail.status(),
+            StatusCode::UNAUTHORIZED,
+            "/api/health/detail leaks config warnings + operational metrics; must \
+             require auth when the flag is on"
+        );
     }
 
     /// `/api/status` used to be in the always-public set, but its handler
