@@ -783,7 +783,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 });
 
 // Input box - with shortcut hints
-function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string }) {
+function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, supportsThinking }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string; supportsThinking?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -834,7 +834,8 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
           ))}
         </div>
       )}
-      {/* Thinking mode toggles */}
+      {/* Thinking mode toggles — only shown when the model supports thinking */}
+      {supportsThinking && (
       <div className="flex items-center gap-2 flex-wrap">
         <button
           type="button"
@@ -863,6 +864,7 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
           <span>{t("chat.show_thinking")}</span>
         </button>
       </div>
+      )}
       <div className="flex gap-2 sm:gap-3 items-end">
         <div className="flex-1">
           <textarea
@@ -1667,6 +1669,7 @@ export function ChatPage() {
               placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
               authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
               providerName={selectedAgent?.model_provider}
+              supportsThinking={selectedAgent?.supports_thinking}
             />
           </div>
         </main>
