@@ -118,6 +118,10 @@ const SECRET_KEYS: &[&str] = &[
     "api_key",
     "apikey",
     "api-key",
+    "authorization",
+    "proxy-authorization",
+    "access_token",
+    "refresh_token",
     "token",
     "secret",
     "password",
@@ -215,9 +219,16 @@ fn check_taint_outbound_text(payload: &str, sink: &TaintSink) -> Option<String> 
     // assignment separators so plain prose ("a token of appreciation")
     // doesn't trip the filter.
     if !hit {
+        let normalized = lower
+            .replace(" = ", "=")
+            .replace(" =", "=")
+            .replace("= ", "=")
+            .replace(" : ", ":")
+            .replace(" :", ":")
+            .replace(": ", ":");
         for k in SECRET_KEYS {
             for sep in ["=", ":", "\":", "':"] {
-                if lower.contains(&format!("{k}{sep}")) {
+                if normalized.contains(&format!("{k}{sep}")) {
                     hit = true;
                     break;
                 }
@@ -4732,6 +4743,9 @@ mod tests {
             "here is my api_key=sk-123",
             "x-api-key: abcdef",
             "{\"token\":\"mytoken\"}",
+            "{\"authorization\": \"Bearer sk-live-secret\"}",
+            "{\"proxy-authorization\": \"Basic Zm9vOmJhcg==\"}",
+            "api_key = sk-123",
             "'password': 'hunter2'",
             "Authorization: Bearer abc",
             "some text bearer=abc",
