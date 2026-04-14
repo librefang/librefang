@@ -299,7 +299,12 @@ async fn handle_terminal_ws(
 
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     let ws_idle_timeout = Duration::from_secs(rl_cfg.ws_idle_timeout_secs);
-    let max_input_per_min: usize = rl_cfg.ws_messages_per_minute as usize;
+    // Use the terminal-specific input budget: PTY sessions send one WS
+    // message per keystroke, so the generic `ws_messages_per_minute` (sized
+    // for chat where a "message" is a whole utterance) was two orders of
+    // magnitude too low and made interactive programs like vim appear to
+    // freeze after ~10 keys.
+    let max_input_per_min: usize = rl_cfg.ws_terminal_messages_per_minute as usize;
     let mut input_times: Vec<std::time::Instant> = Vec::new();
     let input_window: Duration = Duration::from_secs(60);
 
