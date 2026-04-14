@@ -5,8 +5,9 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders } from "../api";
+import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders, listActiveHands } from "../api";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool } from "../api";
+import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff } from "lucide-react";
@@ -1383,17 +1384,62 @@ export function ChatPage() {
     tts.stop();
   }, [selectedAgentId, tts.stop]);
 
-  const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
-  const agents = useMemo(() => [...(agentsQuery.data ?? [])].sort((a, b) => {
-    // Auth missing → sort to bottom
-    const aNoAuth = isAuthUnavailable(a.auth_status) ? 1 : 0;
-    const bNoAuth = isAuthUnavailable(b.auth_status) ? 1 : 0;
-    if (aNoAuth !== bNoAuth) return aNoAuth - bNoAuth;
-    const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
-    const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
-    if (aSusp !== bSusp) return aSusp - bSusp;
-    return a.name.localeCompare(b.name);
-  }), [agentsQuery.data]);
+  const [showHandAgents, setShowHandAgents] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("librefang.chat.show_hand_agents") === "1";
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(
+      "librefang.chat.show_hand_agents",
+      showHandAgents ? "1" : "0",
+    );
+  }, [showHandAgents]);
+  // Toggle setter is wired into the sidebar toggle pill in the next commit.
+  void setShowHandAgents;
+
+  const agentsQuery = useQuery({
+    queryKey: ["agents", "list", "chat", showHandAgents],
+    queryFn: () => listAgents({ includeHands: showHandAgents }),
+    staleTime: 30000,
+  });
+  const handsQuery = useQuery({
+    queryKey: ["hands", "active", "chat"],
+    queryFn: listActiveHands,
+    enabled: showHandAgents,
+    staleTime: 30000,
+  });
+
+  const sortedAgents = useMemo(
+    () =>
+      [...(agentsQuery.data ?? [])].sort((a, b) => {
+        // Auth missing → sort to bottom
+        const aNoAuth = isAuthUnavailable(a.auth_status) ? 1 : 0;
+        const bNoAuth = isAuthUnavailable(b.auth_status) ? 1 : 0;
+        if (aNoAuth !== bNoAuth) return aNoAuth - bNoAuth;
+        const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
+        const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
+        if (aSusp !== bSusp) return aSusp - bSusp;
+        return a.name.localeCompare(b.name);
+      }),
+    [agentsQuery.data],
+  );
+
+  const picker = useMemo(
+    () =>
+      groupedPicker(sortedAgents, handsQuery.data, showHandAgents),
+    [sortedAgents, handsQuery.data, showHandAgents],
+  );
+
+  // Flat view used by downstream consumers (default-selection logic,
+  // selectedAgent lookup, export). Standalone first, then groups in order.
+  const agents = useMemo(
+    () => [
+      ...picker.standalone,
+      ...picker.handGroups.flatMap((g) => g.agents),
+    ],
+    [picker],
+  );
   // Session state — bump version to force message reload after switch
   const [sessionVersion, setSessionVersion] = useState(0);
   const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents, sessionVersion);
