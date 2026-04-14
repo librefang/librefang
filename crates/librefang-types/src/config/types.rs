@@ -1788,17 +1788,23 @@ pub struct KernelConfig {
     /// config, budget, sessions, approvals, hands, skills, workflows, …)
     /// requires a bearer token.
     ///
-    /// * `None` (default, or `auto` / unset in config.toml) — **derive
-    ///   from `api_key`**: the reads allowlist is collapsed *automatically*
+    /// * `None` (default, unset in config.toml) — **derive from
+    ///   configured auth**: the reads allowlist is collapsed *automatically*
     ///   whenever any authentication is configured (non-empty `api_key`,
     ///   per-user keys, or dashboard credentials). This is the safe
     ///   default: operators who already set an `api_key` shouldn't also
     ///   have to remember a separate flag before their read endpoints
     ///   stop leaking agent IDs to the LAN.
-    /// * `Some(true)` — force the allowlist closed even when auth is
-    ///   misconfigured (the middleware will still refuse the read). Used
-    ///   to catch an accidental `api_key = ""` redeploy rather than
-    ///   silently exposing reads.
+    /// * `Some(true)` — state the intent explicitly. The daemon logs a
+    ///   boot-time warning if no authentication is actually configured
+    ///   (so an accidental `api_key = ""` redeploy is visible in the
+    ///   logs), but the middleware itself only enforces the closed
+    ///   allowlist when some form of auth is also configured: with no
+    ///   `api_key`, user keys, or dashboard credentials there is nothing
+    ///   to authenticate against and reads fall through to the
+    ///   unauthenticated local-development bypass. Configure an
+    ///   `api_key` (or per-user keys / dashboard credentials) alongside
+    ///   this flag to actually close the allowlist.
     /// * `Some(false)` — force the allowlist open even when `api_key`
     ///   is set. Provided as an explicit escape hatch for deployments
     ///   that front the daemon with an external auth proxy and want the
