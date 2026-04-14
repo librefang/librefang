@@ -695,15 +695,15 @@ impl KernelConfig {
                 );
             }
 
-            // Warn if trust_proxy_headers is set but api_listen is loopback-only
-            if self.terminal.trust_proxy_headers {
+            // Warn if require_proxy_headers is set but api_listen is loopback-only
+            if self.terminal.require_proxy_headers {
                 let listen = &self.api_listen;
                 if listen.starts_with("127.0.0.1:")
                     || listen.starts_with("localhost:")
                     || listen.starts_with("[::1]:")
                 {
                     warnings.push(
-                        "terminal.trust_proxy_headers is true but api_listen is loopback-only — \
+                        "terminal.require_proxy_headers is true but api_listen is loopback-only — \
                          proxy headers have no effect when only local connections can reach the server"
                             .to_string(),
                     );

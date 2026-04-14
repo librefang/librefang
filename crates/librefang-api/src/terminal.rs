@@ -156,8 +156,7 @@ pub fn shell_for_current_os() -> (String, &'static str) {
 pub fn is_running_as_root() -> bool {
     #[cfg(unix)]
     {
-        // SAFETY: geteuid() is a simple read of process metadata, no UB possible.
-        unsafe { libc::geteuid() == 0 }
+        rustix::process::geteuid().is_root()
     }
     #[cfg(not(unix))]
     {

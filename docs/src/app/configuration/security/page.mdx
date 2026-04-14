@@ -51,9 +51,10 @@ allowed_origins = ["https://dashboard.example.com"]
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Master switch for the terminal feature. When `false`, the terminal WebSocket endpoint is disabled entirely. |
-| `allow_remote` | bool | `false` | Allows unauthenticated access from remote or proxied connections when no auth is configured. Default behavior is local-only access without auth. |
+| `allow_remote` | bool | `false` | Allows access from remote or proxied connections. When no auth is configured, `allow_unauthenticated_remote` must also be `true` or the connection is refused. Default behavior is local-only access without auth. |
+| `allow_unauthenticated_remote` | bool | `false` | Hard foot-gun guard. Must be explicitly set to `true` to expose an unauthenticated shell over the network when `allow_remote = true` and no auth is configured. Otherwise such connections are refused even if `allow_remote = true`. |
 | `allowed_origins` | list of strings | `[]` | Additional browser `Origin` values allowed for terminal WebSocket connections beyond localhost. Use this when the dashboard is served from a custom domain. `[*]` allows any HTTP/HTTPS origin and should only be used intentionally. |
-| `trust_proxy_headers` | bool | `false` | When `true`, loopback connections without proxy headers (X-Forwarded-For, X-Real-IP) are rejected. Enable only when running behind a reverse proxy that injects these headers. |
+| `require_proxy_headers` | bool | `false` | When `true`, loopback connections without proxy headers (X-Forwarded-For, X-Real-IP) are rejected. Enable only when running behind a reverse proxy that injects these headers. (Old name: `trust_proxy_headers`, still accepted as alias.) |
 
 Notes:
 

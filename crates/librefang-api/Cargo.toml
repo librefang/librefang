@@ -141,7 +141,7 @@ mini = [
 ]
 
 [target.'cfg(unix)'.dependencies]
-libc = { version = "0.2" }
+rustix = { version = "0.38", features = ["process"] }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

@@ -3481,21 +3481,14 @@ impl KernelConfig {
 
     /// Parse the TCP port number from `api_listen`.
     ///
-    /// Returns the port as `u16`, falling back to `4545` if parsing fails
-    /// (e.g. malformed address string). Validation warnings for a bad port
-    /// are emitted separately by `KernelConfig::validate()`.
-    pub fn listen_port(&self) -> u16 {
+    /// Returns `None` when the address string is malformed. Callers that rely
+    /// on the port for security-relevant decisions (e.g. Origin validation)
+    /// MUST fail closed in the `None` case rather than assume a default.
+    pub fn listen_port(&self) -> Option<u16> {
         self.api_listen
             .rsplit(':')
             .next()
             .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or_else(|| {
-                eprintln!(
-                    "WARNING: Failed to parse port from api_listen '{}', falling back to 4545",
-                    self.api_listen
-                );
-                4545
-            })
     }
 
     /// Resolve the API key env var name for a provider.
@@ -5731,11 +5724,25 @@ pub struct TerminalConfig {
     #[serde(default)]
     pub allow_remote: bool,
 
-    /// When true, X-Forwarded-For / X-Real-IP headers are trusted for
-    /// locality detection. Must be explicitly enabled when running behind
-    /// a reverse proxy. Default: false.
+    /// When true, bare-loopback connections (127.0.0.1 / ::1 with no proxy
+    /// headers) are rejected at auth time — only connections that arrived via
+    /// a reverse proxy (carrying X-Forwarded-For / X-Real-IP) are considered
+    /// "local". Enable only when running behind a reverse proxy that strips
+    /// direct loopback access. Default: false.
+    ///
+    /// (Historically named `trust_proxy_headers`; the old name is still
+    /// accepted for backward compatibility via `serde(alias)`.)
+    #[serde(default, alias = "trust_proxy_headers")]
+    pub require_proxy_headers: bool,
+
+    /// Hard-override for the "remote + no authentication" combination.
+    /// When `allow_remote` is true and no auth is configured, the terminal
+    /// will still refuse every connection unless this flag is explicitly
+    /// set to `true`. Intended as a foot-gun guard: enabling `allow_remote`
+    /// alone is not enough to expose an unauthenticated shell to the network.
+    /// Default: false.
     #[serde(default)]
-    pub trust_proxy_headers: bool,
+    pub allow_unauthenticated_remote: bool,
 }
 
 fn default_terminal_enabled() -> bool {
@@ -5748,7 +5755,8 @@ impl Default for TerminalConfig {
             enabled: true,
             allowed_origins: Vec::new(),
             allow_remote: false,
-            trust_proxy_headers: false,
+            require_proxy_headers: false,
+            allow_unauthenticated_remote: false,
         }
     }
 }

@@ -135,6 +135,121 @@ pub async fn terminal_health(State(_state): State<Arc<AppState>>) -> impl IntoRe
     Json(serde_json::json!({ "ok": true }))
 }
 
+/// Authentication method recorded for a successful terminal WS connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMethod {
+    ApiKey,
+    Session,
+    UserKey,
+    /// No auth configured, connection is local (loopback, not proxied).
+    LocalBypass,
+    /// No auth configured, remote connection accepted because
+    /// `allow_remote` + `allow_unauthenticated_remote` are both true.
+    RemoteOpen,
+}
+
+impl AuthMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            AuthMethod::ApiKey => "api_key",
+            AuthMethod::Session => "session",
+            AuthMethod::UserKey => "user_key",
+            AuthMethod::LocalBypass => "local_bypass",
+            AuthMethod::RemoteOpen => "remote_open",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenStatus {
+    Valid(AuthMethod),
+    InvalidToken,
+    NoToken,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AuthContext {
+    pub is_local: bool,
+    pub is_proxied: bool,
+    pub require_proxy_headers: bool,
+    pub allow_remote: bool,
+    pub allow_unauthenticated_remote: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthDecision {
+    Authenticated(AuthMethod),
+    LocalBypass,
+    RemoteOpen,
+    Reject {
+        status: axum::http::StatusCode,
+        reason: &'static str,
+    },
+}
+
+/// Pure policy-matrix function — takes the three orthogonal inputs
+/// (token status, whether auth is configured, connection context) and returns
+/// the single outcome. No I/O, no async, fully unit-testable.
+///
+/// Matrix semantics:
+/// * A valid token always wins.
+/// * If auth is configured, token must be valid — missing/invalid → 401.
+/// * If auth is NOT configured, the token (if any) is ignored and we fall
+///   through to the locality / allow_remote checks. This keeps no-token and
+///   bogus-token behaviour identical from the client's point of view.
+/// * `require_proxy_headers=true` rejects bare-loopback (loopback without
+///   X-Forwarded-For / X-Real-IP) — used when running behind a proxy that is
+///   expected to be the only path in.
+/// * Remote + no-auth requires BOTH `allow_remote` and
+///   `allow_unauthenticated_remote` to be true; otherwise refused.
+pub fn decide_auth(
+    token_status: TokenStatus,
+    auth_configured: bool,
+    ctx: AuthContext,
+) -> AuthDecision {
+    use axum::http::StatusCode;
+
+    if let TokenStatus::Valid(m) = token_status {
+        return AuthDecision::Authenticated(m);
+    }
+
+    if auth_configured {
+        return AuthDecision::Reject {
+            status: StatusCode::UNAUTHORIZED,
+            reason: match token_status {
+                TokenStatus::InvalidToken => "invalid_token",
+                TokenStatus::NoToken => "missing_token",
+                TokenStatus::Valid(_) => unreachable!(),
+            },
+        };
+    }
+
+    // From here on, auth is NOT configured. Token (if any) is meaningless;
+    // outcome depends solely on connection locality and remote policy.
+    if ctx.is_local {
+        if ctx.require_proxy_headers && !ctx.is_proxied {
+            return AuthDecision::Reject {
+                status: StatusCode::FORBIDDEN,
+                reason: "loopback_without_proxy_headers",
+            };
+        }
+        return AuthDecision::LocalBypass;
+    }
+
+    if ctx.allow_remote && ctx.allow_unauthenticated_remote {
+        return AuthDecision::RemoteOpen;
+    }
+
+    AuthDecision::Reject {
+        status: StatusCode::FORBIDDEN,
+        reason: if ctx.allow_remote {
+            "remote_no_auth_unauthenticated_not_allowed"
+        } else {
+            "remote_no_auth"
+        },
+    }
+}
+
 pub async fn terminal_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -161,18 +276,24 @@ pub async fn terminal_ws(
     let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
     let auth_configured = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
     if !auth_configured {
-        if cfg.terminal.allow_remote {
+        if cfg.terminal.allow_remote && cfg.terminal.allow_unauthenticated_remote {
             tracing::error!(
-                "Terminal is enabled with allow_remote=true but NO authentication configured — \
+                "Terminal is enabled with allow_remote=true AND \
+                 allow_unauthenticated_remote=true but NO authentication configured — \
                  unauthenticated shell access is exposed to the network. \
                  Set api_key, dashboard credentials, or users to prevent this."
+            );
+        } else if cfg.terminal.allow_remote {
+            tracing::warn!(
+                "Terminal has allow_remote=true without auth; remote connections \
+                 will be refused unless allow_unauthenticated_remote is also set to true"
             );
         } else {
             warn!("Terminal is enabled without any authentication configured — any local connection gets unauthenticated shell access");
         }
     }
 
-    let trust_proxy_headers = cfg.terminal.trust_proxy_headers;
+    let require_proxy_headers = cfg.terminal.require_proxy_headers;
     let listen_port = cfg.listen_port();
     if let Err(reason) = validate_ws_origin(
         &headers,
@@ -199,17 +320,17 @@ pub async fn terminal_ws(
         );
     }
 
-    let auth_method: &'static str;
     let provided_token = ws_auth_token(&headers, &uri);
 
-    if let Some(token_str) = provided_token.as_deref() {
+    // Validate the token (if any) before consulting the policy matrix so the
+    // decision table can treat token-ok / token-bad / no-token uniformly.
+    let token_status = if let Some(token_str) = provided_token.as_deref() {
         let api_auth = {
             use subtle::ConstantTimeEq;
             valid_tokens.iter().any(|key| {
                 token_str.len() == key.len() && token_str.as_bytes().ct_eq(key.as_bytes()).into()
             })
         };
-
         let session_auth = {
             let mut sessions = state.active_sessions.write().await;
             sessions.retain(|_, st| {
@@ -220,96 +341,83 @@ pub async fn terminal_ws(
             });
             sessions.contains_key(token_str)
         };
-
-        let mut user_key_auth = false;
-        if !session_auth {
-            user_key_auth = user_api_keys
+        let user_key_auth = !session_auth
+            && user_api_keys
                 .iter()
                 .any(|user| crate::password_hash::verify_password(token_str, &user.api_key_hash));
-        }
 
-        if api_auth || session_auth || user_key_auth {
-            auth_method = if api_auth {
-                "api_key"
-            } else if session_auth {
-                "session"
-            } else {
-                "user_key"
-            };
-        } else if auth_configured {
-            // Auth is configured but the provided token is invalid — reject.
-            warn!(
-                ip = %locality.source_ip,
-                proxied = locality.is_proxied,
-                reason = "invalid_token",
-                "Terminal WebSocket rejected — invalid auth token"
-            );
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
-        } else if locality.is_local() {
-            if trust_proxy_headers && !locality.is_proxied {
-                warn!(
-                    ip = %locality.source_ip,
-                    proxied = locality.is_proxied,
-                    "Terminal WebSocket rejected — loopback connection without proxy headers but trust_proxy_headers is enabled; refusing local_bypass"
-                );
-                return axum::http::StatusCode::FORBIDDEN.into_response();
-            }
-            auth_method = "local_bypass";
+        if api_auth {
+            TokenStatus::Valid(AuthMethod::ApiKey)
+        } else if session_auth {
+            TokenStatus::Valid(AuthMethod::Session)
+        } else if user_key_auth {
+            TokenStatus::Valid(AuthMethod::UserKey)
         } else {
-            warn!(
-                ip = %locality.source_ip,
-                proxied = locality.is_proxied,
-                reason = "remote_no_auth",
-                "Terminal WebSocket rejected — remote connection denied without auth"
-            );
-            return axum::http::StatusCode::FORBIDDEN.into_response();
+            TokenStatus::InvalidToken
         }
-    } else if auth_configured {
-        warn!(
-            ip = %locality.source_ip,
-            proxied = locality.is_proxied,
-            reason = "missing_token",
-            "Terminal WebSocket rejected — no auth token provided"
-        );
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    } else if locality.is_local() {
-        if trust_proxy_headers && !locality.is_proxied {
-            warn!(
-                ip = %locality.source_ip,
-                proxied = locality.is_proxied,
-                "Terminal WebSocket rejected — loopback connection without proxy headers but trust_proxy_headers is enabled; refusing local_bypass"
-            );
-            return axum::http::StatusCode::FORBIDDEN.into_response();
-        }
-        auth_method = "local_bypass";
-    } else if cfg.terminal.allow_remote {
-        auth_method = "remote_open";
     } else {
-        warn!(
-            ip = %locality.source_ip,
-            proxied = locality.is_proxied,
-            reason = "remote_no_auth",
-            "Terminal WebSocket rejected — remote connection denied without auth"
-        );
-        return axum::http::StatusCode::FORBIDDEN.into_response();
+        TokenStatus::NoToken
     };
 
-    if auth_method == "local_bypass" {
-        warn!(
-            ip = %locality.source_ip,
-            local = locality.is_local(),
-            proxied = locality.is_proxied,
-            auth = %auth_method,
-            "Terminal WebSocket connected"
-        );
-    } else {
-        info!(
-            ip = %locality.source_ip,
-            local = locality.is_local(),
-            proxied = locality.is_proxied,
-            auth = %auth_method,
-            "Terminal WebSocket connected"
-        );
+    let decision = decide_auth(
+        token_status,
+        auth_configured,
+        AuthContext {
+            is_local: locality.is_local(),
+            is_proxied: locality.is_proxied,
+            require_proxy_headers,
+            allow_remote: cfg.terminal.allow_remote,
+            allow_unauthenticated_remote: cfg.terminal.allow_unauthenticated_remote,
+        },
+    );
+
+    let auth_method = match decision {
+        AuthDecision::Authenticated(m) => m,
+        AuthDecision::LocalBypass => AuthMethod::LocalBypass,
+        AuthDecision::RemoteOpen => AuthMethod::RemoteOpen,
+        AuthDecision::Reject { status, reason } => {
+            warn!(
+                ip = %locality.source_ip,
+                proxied = locality.is_proxied,
+                reason = reason,
+                "Terminal WebSocket rejected"
+            );
+            return status.into_response();
+        }
+    };
+
+    match auth_method {
+        AuthMethod::LocalBypass => {
+            warn!(
+                ip = %locality.source_ip,
+                local = locality.is_local(),
+                proxied = locality.is_proxied,
+                auth = auth_method.as_str(),
+                "Terminal WebSocket connected"
+            );
+        }
+        AuthMethod::RemoteOpen => {
+            // Per-connection error-level log for every accepted unauthenticated
+            // remote session — operators should see this in their error feed
+            // each time it happens, not only once at handler entry.
+            tracing::error!(
+                ip = %locality.source_ip,
+                local = locality.is_local(),
+                proxied = locality.is_proxied,
+                auth = auth_method.as_str(),
+                "Terminal WebSocket connected with NO authentication over a remote connection \
+                 (allow_remote=true, allow_unauthenticated_remote=true, no api_key/users/dashboard)"
+            );
+        }
+        _ => {
+            info!(
+                ip = %locality.source_ip,
+                local = locality.is_local(),
+                proxied = locality.is_proxied,
+                auth = auth_method.as_str(),
+                "Terminal WebSocket connected"
+            );
+        }
     }
 
     let ip = addr.ip();
@@ -734,14 +842,14 @@ mod terminal_ws_auth_tests {
     fn validate_ws_origin_allows_matching_port_on_localhost() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://localhost:4545".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &[], false).is_ok());
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
     }
 
     #[test]
     fn validate_ws_origin_rejects_mismatched_port() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://localhost:8080".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &[], false).is_err());
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_err());
     }
 
     #[test]
@@ -749,15 +857,15 @@ mod terminal_ws_auth_tests {
         // Wildcard + allow_remote=false → rejected
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://evil.example:9999".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &["*".to_string()], false).is_err());
+        assert!(validate_ws_origin(&headers, Some(4545), &["*".to_string()], false).is_err());
 
         // Wildcard + allow_remote=true → allowed
-        assert!(validate_ws_origin(&headers, 4545, &["*".to_string()], true).is_ok());
+        assert!(validate_ws_origin(&headers, Some(4545), &["*".to_string()], true).is_ok());
 
         // Also works with https
         let mut headers2 = HeaderMap::new();
         headers2.insert("origin", "https://other.host:1234".parse().unwrap());
-        assert!(validate_ws_origin(&headers2, 4545, &["*".to_string()], true).is_ok());
+        assert!(validate_ws_origin(&headers2, Some(4545), &["*".to_string()], true).is_ok());
     }
 
     #[test]
@@ -765,7 +873,7 @@ mod terminal_ws_auth_tests {
         let allowed = vec!["https://my.domain.com".to_string()];
         let mut headers = HeaderMap::new();
         headers.insert("origin", "https://my.domain.com".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &allowed, false).is_ok());
+        assert!(validate_ws_origin(&headers, Some(4545), &allowed, false).is_ok());
     }
 
     #[test]
@@ -773,7 +881,7 @@ mod terminal_ws_auth_tests {
         let allowed = vec!["https://my.domain.com".to_string()];
         let mut headers = HeaderMap::new();
         headers.insert("origin", "https://evil.example".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &allowed, false).is_err());
+        assert!(validate_ws_origin(&headers, Some(4545), &allowed, false).is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -795,7 +903,7 @@ mod terminal_ws_auth_tests {
 
     #[test]
     fn locality_loopback_with_proxy_header_not_local() {
-        // trust_proxy_headers=true scenario: loopback + XFF = not local → denied local_bypass
+        // require_proxy_headers=true scenario: loopback + XFF = not local → denied local_bypass
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "8.8.8.8".parse().unwrap());
@@ -809,7 +917,7 @@ mod terminal_ws_auth_tests {
     fn origin_localhost_same_port_passes() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://localhost:4545".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &[], false).is_ok());
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
     }
 
     #[test]
@@ -817,7 +925,7 @@ mod terminal_ws_auth_tests {
         // This is the CSRF fix: external host on same port → rejected
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://attacker.example:4545".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &[], false).is_err());
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_err());
     }
 
     #[test]
@@ -826,7 +934,7 @@ mod terminal_ws_auth_tests {
         headers.insert("origin", "http://myserver.lan:4545".parse().unwrap());
         assert!(validate_ws_origin(
             &headers,
-            4545,
+            Some(4545),
             &["http://myserver.lan:4545".to_string()],
             false
         )
@@ -838,7 +946,7 @@ mod terminal_ws_auth_tests {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://evil.example:9999".parse().unwrap());
         // wildcard + allow_remote=false → rejected
-        assert!(validate_ws_origin(&headers, 4545, &["*".to_string()], false).is_err());
+        assert!(validate_ws_origin(&headers, Some(4545), &["*".to_string()], false).is_err());
     }
 
     #[test]
@@ -846,7 +954,7 @@ mod terminal_ws_auth_tests {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://evil.example:9999".parse().unwrap());
         // wildcard + allow_remote=true → allowed
-        assert!(validate_ws_origin(&headers, 4545, &["*".to_string()], true).is_ok());
+        assert!(validate_ws_origin(&headers, Some(4545), &["*".to_string()], true).is_ok());
     }
 
     #[test]
@@ -862,13 +970,193 @@ mod terminal_ws_auth_tests {
     fn origin_ipv6_loopback_same_port_passes() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://[::1]:4545".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &[], false).is_ok());
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
     }
 
     #[test]
     fn origin_127_0_0_1_same_port_passes() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://127.0.0.1:4545".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &[], false).is_ok());
+        assert!(validate_ws_origin(&headers, Some(4545), &[], false).is_ok());
+    }
+
+    #[test]
+    fn origin_validation_fails_closed_on_unknown_listen_port() {
+        // Malformed api_listen → listen_port() returns None. Even a same-port
+        // localhost origin must not be auto-allowed in that case.
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://localhost:4545".parse().unwrap());
+        assert!(validate_ws_origin(&headers, None, &[], false).is_err());
+    }
+
+    #[test]
+    fn origin_host_comparison_is_case_insensitive() {
+        // Per RFC 3986 host components are case-insensitive.
+        let allowed = vec!["http://My.Domain.com:4545".to_string()];
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://my.domain.com:4545".parse().unwrap());
+        assert!(validate_ws_origin(&headers, Some(4545), &allowed, false).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod auth_policy_matrix_tests {
+    //! Exhaustive coverage of the terminal auth decision table.
+    //! Mirrors the scenarios operators actually face:
+    //!
+    //! axes: (auth_configured) × (token = valid/invalid/missing) ×
+    //!       (local/remote) × (allow_remote) × (allow_unauthenticated_remote) ×
+    //!       (require_proxy_headers & is_proxied)
+    use super::{decide_auth, AuthContext, AuthDecision, AuthMethod, TokenStatus};
+    use axum::http::StatusCode;
+
+    fn ctx_local() -> AuthContext {
+        AuthContext {
+            is_local: true,
+            is_proxied: false,
+            require_proxy_headers: false,
+            allow_remote: false,
+            allow_unauthenticated_remote: false,
+        }
+    }
+
+    fn ctx_remote() -> AuthContext {
+        AuthContext {
+            is_local: false,
+            is_proxied: false,
+            require_proxy_headers: false,
+            allow_remote: false,
+            allow_unauthenticated_remote: false,
+        }
+    }
+
+    // ── valid token always wins, regardless of other knobs ────────────────
+    #[test]
+    fn valid_token_authenticates_even_when_remote_and_no_allow_remote() {
+        let d = decide_auth(TokenStatus::Valid(AuthMethod::ApiKey), true, ctx_remote());
+        assert_eq!(d, AuthDecision::Authenticated(AuthMethod::ApiKey));
+    }
+
+    // ── auth_configured: missing/invalid token rejected ───────────────────
+    #[test]
+    fn auth_configured_invalid_token_returns_401() {
+        let d = decide_auth(TokenStatus::InvalidToken, true, ctx_local());
+        assert!(matches!(
+            d,
+            AuthDecision::Reject {
+                status: StatusCode::UNAUTHORIZED,
+                reason: "invalid_token"
+            }
+        ));
+    }
+
+    #[test]
+    fn auth_configured_missing_token_returns_401() {
+        let d = decide_auth(TokenStatus::NoToken, true, ctx_local());
+        assert!(matches!(
+            d,
+            AuthDecision::Reject {
+                status: StatusCode::UNAUTHORIZED,
+                reason: "missing_token"
+            }
+        ));
+    }
+
+    // ── !auth_configured: token content ignored ───────────────────────────
+    #[test]
+    fn no_auth_configured_local_no_token_is_local_bypass() {
+        let d = decide_auth(TokenStatus::NoToken, false, ctx_local());
+        assert_eq!(d, AuthDecision::LocalBypass);
+    }
+
+    #[test]
+    fn no_auth_configured_local_invalid_token_is_also_local_bypass() {
+        // Policy consistency: bogus token and no token produce the SAME outcome
+        // when auth is not configured — there is nothing to check against.
+        let d = decide_auth(TokenStatus::InvalidToken, false, ctx_local());
+        assert_eq!(d, AuthDecision::LocalBypass);
+    }
+
+    // ── remote + no auth: needs BOTH allow_remote AND allow_unauth ────────
+    #[test]
+    fn no_auth_remote_bare_allow_remote_without_unauth_refused() {
+        let mut c = ctx_remote();
+        c.allow_remote = true;
+        // allow_unauthenticated_remote stays false → hard-refuse
+        let d = decide_auth(TokenStatus::NoToken, false, c);
+        assert!(matches!(
+            d,
+            AuthDecision::Reject {
+                status: StatusCode::FORBIDDEN,
+                reason: "remote_no_auth_unauthenticated_not_allowed",
+            }
+        ));
+    }
+
+    #[test]
+    fn no_auth_remote_with_both_flags_is_remote_open() {
+        let mut c = ctx_remote();
+        c.allow_remote = true;
+        c.allow_unauthenticated_remote = true;
+        let d = decide_auth(TokenStatus::NoToken, false, c);
+        assert_eq!(d, AuthDecision::RemoteOpen);
+    }
+
+    #[test]
+    fn no_auth_remote_invalid_token_matches_no_token_behavior() {
+        // #1 in the review: same client intent (remote + no auth), bogus token
+        // vs no token should produce the SAME outcome — no longer 401 vs 200.
+        let mut c = ctx_remote();
+        c.allow_remote = true;
+        c.allow_unauthenticated_remote = true;
+
+        let d_bogus = decide_auth(TokenStatus::InvalidToken, false, c);
+        let d_none = decide_auth(TokenStatus::NoToken, false, c);
+        assert_eq!(d_bogus, d_none);
+        assert_eq!(d_bogus, AuthDecision::RemoteOpen);
+    }
+
+    #[test]
+    fn no_auth_remote_no_allow_remote_is_rejected() {
+        let d = decide_auth(TokenStatus::NoToken, false, ctx_remote());
+        assert!(matches!(
+            d,
+            AuthDecision::Reject {
+                status: StatusCode::FORBIDDEN,
+                reason: "remote_no_auth",
+            }
+        ));
+    }
+
+    // ── require_proxy_headers: reject bare loopback ───────────────────────
+    #[test]
+    fn require_proxy_headers_rejects_bare_loopback() {
+        let mut c = ctx_local();
+        c.require_proxy_headers = true;
+        c.is_proxied = false;
+        let d = decide_auth(TokenStatus::NoToken, false, c);
+        assert!(matches!(
+            d,
+            AuthDecision::Reject {
+                status: StatusCode::FORBIDDEN,
+                reason: "loopback_without_proxy_headers",
+            }
+        ));
+    }
+
+    #[test]
+    fn require_proxy_headers_with_proxy_header_allowed() {
+        let mut c = AuthContext {
+            is_local: true,
+            is_proxied: true,
+            require_proxy_headers: true,
+            allow_remote: false,
+            allow_unauthenticated_remote: false,
+        };
+        // Note: real detect_connection_locality would demote proxied loopback
+        // to non-local; here we test the decision function in isolation.
+        c.is_local = true;
+        let d = decide_auth(TokenStatus::NoToken, false, c);
+        assert_eq!(d, AuthDecision::LocalBypass);
     }
 }

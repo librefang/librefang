@@ -143,7 +143,7 @@ pub fn ws_auth_token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
 /// Returns Err(reason) if Origin is present but doesn't match any allowed origin.
 pub fn validate_ws_origin(
     headers: &HeaderMap,
-    listen_port: u16,
+    listen_port: Option<u16>,
     extra_origins: &[String],
     allow_remote: bool,
 ) -> Result<(), String> {
@@ -168,11 +168,14 @@ pub fn validate_ws_origin(
     };
 
     // Only loopback hosts (localhost / 127.0.0.1 / ::1) on the same port
-    // are auto-allowed. Everything else requires explicit allowed_origins.
-    if origin_port == listen_port {
-        let normalized = normalize_origin_host(origin_host);
-        if normalized.eq_ignore_ascii_case("localhost") {
-            return Ok(());
+    // are auto-allowed. Fail closed when listen_port is unknown — otherwise
+    // a malformed api_listen would cause us to trust the wrong localhost:port.
+    if let Some(lp) = listen_port {
+        if origin_port == lp {
+            let normalized = normalize_origin_host(origin_host);
+            if normalized.eq_ignore_ascii_case("localhost") {
+                return Ok(());
+            }
         }
     }
 
@@ -1624,7 +1627,7 @@ mod tests {
     #[test]
     fn validate_ws_origin_missing_origin_allowed() {
         let headers = HeaderMap::new();
-        let result = validate_ws_origin(&headers, 4545, &[], false);
+        let result = validate_ws_origin(&headers, Some(4545), &[], false);
         assert!(result.is_ok());
     }
 
@@ -1632,7 +1635,7 @@ mod tests {
     fn validate_ws_origin_localhost_valid() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://localhost:4545".parse().unwrap());
-        let result = validate_ws_origin(&headers, 4545, &[], false);
+        let result = validate_ws_origin(&headers, Some(4545), &[], false);
         assert!(result.is_ok());
     }
 
@@ -1640,7 +1643,7 @@ mod tests {
     fn validate_ws_origin_127_0_0_1_valid() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://127.0.0.1:4545".parse().unwrap());
-        let result = validate_ws_origin(&headers, 4545, &[], false);
+        let result = validate_ws_origin(&headers, Some(4545), &[], false);
         assert!(result.is_ok());
     }
 
@@ -1648,7 +1651,7 @@ mod tests {
     fn validate_ws_origin_ipv6_loopback_valid() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://[::1]:4545".parse().unwrap());
-        let result = validate_ws_origin(&headers, 4545, &[], false);
+        let result = validate_ws_origin(&headers, Some(4545), &[], false);
         assert!(result.is_ok());
     }
 
@@ -1657,7 +1660,7 @@ mod tests {
         // Port mismatch: origin port 9999 != listen_port 4545
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://evil.com:9999".parse().unwrap());
-        let result = validate_ws_origin(&headers, 4545, &[], false);
+        let result = validate_ws_origin(&headers, Some(4545), &[], false);
         assert!(result.is_err());
     }
 
@@ -1666,7 +1669,7 @@ mod tests {
         // LAN IP with matching port should be rejected without explicit allowed_origins.
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://192.168.1.5:4545".parse().unwrap());
-        let result = validate_ws_origin(&headers, 4545, &[], false);
+        let result = validate_ws_origin(&headers, Some(4545), &[], false);
         assert!(result.is_err());
     }
 
@@ -1675,7 +1678,7 @@ mod tests {
         // Any hostname with matching port is rejected without explicit allowed_origins.
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://myserver.local:8080".parse().unwrap());
-        let result = validate_ws_origin(&headers, 8080, &[], false);
+        let result = validate_ws_origin(&headers, Some(8080), &[], false);
         assert!(result.is_err());
     }
 
@@ -1685,7 +1688,7 @@ mod tests {
         headers.insert("origin", "http://192.168.1.5:4545".parse().unwrap());
         let result = validate_ws_origin(
             &headers,
-            4545,
+            Some(4545),
             &["http://192.168.1.5:4545".to_string()],
             false,
         );
@@ -1696,7 +1699,7 @@ mod tests {
     fn validate_ws_origin_port_mismatch_rejected() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://localhost:9999".parse().unwrap());
-        let result = validate_ws_origin(&headers, 4545, &[], false);
+        let result = validate_ws_origin(&headers, Some(4545), &[], false);
         assert!(result.is_err());
     }
 
@@ -1704,7 +1707,7 @@ mod tests {
     fn validate_ws_origin_https_with_default_port_allowed() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "https://localhost".parse().unwrap());
-        let result = validate_ws_origin(&headers, 443, &[], false);
+        let result = validate_ws_origin(&headers, Some(443), &[], false);
         assert!(result.is_ok());
     }
 
@@ -1714,7 +1717,7 @@ mod tests {
         headers.insert("origin", "http://my.domain.com:8080".parse().unwrap());
         let result = validate_ws_origin(
             &headers,
-            4545,
+            Some(4545),
             &["http://my.domain.com:8080".to_string()],
             false,
         );
@@ -1727,7 +1730,7 @@ mod tests {
         headers.insert("origin", "http://my.domain.com".parse().unwrap());
         let result = validate_ws_origin(
             &headers,
-            4545,
+            Some(4545),
             &["https://my.domain.com".to_string()],
             false,
         );
@@ -1739,10 +1742,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://evil.example:9999".parse().unwrap());
         // Wildcard + allow_remote=false should be rejected
-        let result = validate_ws_origin(&headers, 4545, &["*".to_string()], false);
+        let result = validate_ws_origin(&headers, Some(4545), &["*".to_string()], false);
         assert!(result.is_err());
         // Wildcard + allow_remote=true should be allowed
-        let result = validate_ws_origin(&headers, 4545, &["*".to_string()], true);
+        let result = validate_ws_origin(&headers, Some(4545), &["*".to_string()], true);
         assert!(result.is_ok());
     }
 
@@ -1751,10 +1754,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "https://evil.example".parse().unwrap());
         // Wildcard + allow_remote=false should be rejected
-        let result = validate_ws_origin(&headers, 4545, &["*".to_string()], false);
+        let result = validate_ws_origin(&headers, Some(4545), &["*".to_string()], false);
         assert!(result.is_err());
         // Wildcard + allow_remote=true should be allowed
-        let result = validate_ws_origin(&headers, 4545, &["*".to_string()], true);
+        let result = validate_ws_origin(&headers, Some(4545), &["*".to_string()], true);
         assert!(result.is_ok());
     }
 
@@ -1762,7 +1765,7 @@ mod tests {
     fn validate_ws_origin_wildcard_rejects_non_http_scheme() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "file://evil.example".parse().unwrap());
-        let result = validate_ws_origin(&headers, 4545, &["*".to_string()], true);
+        let result = validate_ws_origin(&headers, Some(4545), &["*".to_string()], true);
         assert!(result.is_err());
     }
 
@@ -1770,7 +1773,7 @@ mod tests {
     fn validate_ws_origin_wildcard_rejects_malformed_origin() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "not-a-url".parse().unwrap());
-        let result = validate_ws_origin(&headers, 4545, &["*".to_string()], true);
+        let result = validate_ws_origin(&headers, Some(4545), &["*".to_string()], true);
         assert!(result.is_err());
     }
 
