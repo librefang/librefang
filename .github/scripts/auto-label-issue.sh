@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+#
+# Compute area / type labels for a librefang issue based on its title and
+# body. Used by .github/workflows/issue-auto-label.yml — both the
+# event-driven path (single new/edited issue) and the workflow_dispatch
+# backfill path (re-label all unlabeled open issues).
+#
+# Usage:
+#   auto-label-issue.sh <issue_number> <title> <body_file>
+#
+# Output (stdout): a comma-separated list of label names, no leading
+# comma, no trailing newline. Empty output means "no labels to apply".
+#
+# Design notes
+# - Both title and body are scanned. Body is read from a file so newlines
+#   and shell metacharacters survive the env -> arg boundary.
+# - Each rule sets a `matched` flag. If nothing matched after every rule
+#   has run, the script falls back to `needs-triage` so maintainers can
+#   spot orphaned issues in the list view.
+# - Conventional-commit-style title prefixes are matched as well, but
+#   chore: / refactor: / test: only set the matched flag without adding
+#   a label (they're meta, not category).
+# - Keyword regexes use `\b` word boundaries where the keyword is short
+#   enough to false-positive on substrings (e.g. `\bcli\b` so it doesn't
+#   trip on `client`).
+
+set -euo pipefail
+
+issue_number="${1:-}"
+title="${2:-}"
+body_file="${3:-/dev/null}"
+
+if [ -z "$issue_number" ] || [ -z "$title" ]; then
+  echo "usage: $0 <issue_number> <title> <body_file>" >&2
+  exit 2
+fi
+
+title_lower=$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]')
+body_lower=$(tr '[:upper:]' '[:lower:]' < "$body_file" 2>/dev/null || true)
+combined=$(printf '%s\n%s' "$title_lower" "$body_lower")
+
+labels=""
+matched=0
+
+# ── Conventional commit prefix → type label (title only) ─────────────
+case "$title_lower" in
+  feat:*|'feat('*|feat!:*)
+    labels="$labels,enhancement"; matched=1 ;;
+  fix:*|'fix('*|fix!:*)
+    labels="$labels,bug"; matched=1 ;;
+  perf:*|'perf('*)
+    labels="$labels,enhancement"; matched=1 ;;
+  docs:*|doc:*|'docs('*)
+    labels="$labels,area/docs"; matched=1 ;;
+  ci:*|build:*|'ci('*|'build('*)
+    labels="$labels,area/ci"; matched=1 ;;
+  refactor:*|chore:*|test:*|'refactor('*|'chore('*|'test('*)
+    matched=1 ;;
+esac
+
+# ── Keyword → area label (title + body) ──────────────────────────────
+add_label_if_match() {
+  local pattern="$1"
+  local label="$2"
+  if printf '%s' "$combined" | grep -qiE -- "$pattern"; then
+    labels="$labels,$label"
+    matched=1
+  fi
+}
+
+add_label_if_match 'channel|telegram|discord|slack|whatsapp|feishu|webhook|messaging' 'area/channels'
+add_label_if_match 'skill|fanghub|marketplace' 'area/skills'
+add_label_if_match 'kernel|scheduler|cron|rbac|workflow|trigger|\bevent\b|\btask\b|session|\bhand\b|spawn' 'area/kernel'
+add_label_if_match 'runtime|agent.?loop|\bllm\b|wasm|sandbox|driver|provider|\bmcp\b|tool.?call|prompt' 'area/runtime'
+add_label_if_match '\bapi\b|endpoint|dashboard|frontend|\bui\b|react|http|rest|websocket|\broute\b' 'area/api'
+add_label_if_match '\bsdk\b|python|javascript|typescript|\bnpm\b|\bpip\b' 'area/sdk'
+add_label_if_match '\bmemory\b|knowledge|vector|embedding|sqlite' 'area/memory'
+add_label_if_match 'security|\bauth\b|\btoken\b|vulnerability|audit|taint|capability|approval|totp|\bcve\b|sandbox.escape' 'area/security'
+add_label_if_match 'docker|deploy|github.?action|gh.?action|pipeline|\bbuild\b' 'area/ci'
+add_label_if_match 'documentation|readme|\bguide\b|tutorial|translat|i18n' 'area/docs'
+add_label_if_match '\bcli\b|\btui\b' 'area/cli'
+add_label_if_match 'tauri|desktop.?app' 'area/desktop'
+add_label_if_match 'translat|i18n|chinese|japanese|korean' 'no-rust-required'
+
+# ── Fallback ────────────────────────────────────────────────────────
+if [ "$matched" -eq 0 ]; then
+  labels="needs-triage"
+fi
+
+# ── Strip leading comma + dedupe + drop empties ─────────────────────
+printf '%s' "${labels#,}" \
+  | tr ',' '\n' \
+  | grep -v '^$' \
+  | sort -u \
+  | paste -sd, -
