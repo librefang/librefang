@@ -301,6 +301,12 @@ pub async fn auth(
     // `require_auth_for_reads` is on. These are either (a) static assets
     // needed to render the login screen, (b) auth flow entry points, or
     // (c) minimal liveness probes that leak nothing sensitive.
+    //
+    // `/api/status` intentionally stays out of this set: its handler returns
+    // the full agent listing (id + name + model + profile) plus `home_dir`,
+    // `api_listen`, and session count, which is exactly the enumeration
+    // surface `require_auth_for_reads` exists to close. It lives in the
+    // `dashboard_read_*` group below so it gets locked down with the flag.
     let always_public_method_free = matches!(
         path,
         "/" | "/logo.png"
@@ -308,7 +314,6 @@ pub async fn auth(
             | "/api/versions"
             | "/api/health"
             | "/api/health/detail"
-            | "/api/status"
             | "/api/version"
             | "/api/auth/callback"
             | "/api/auth/dashboard-login"
@@ -334,6 +339,7 @@ pub async fn auth(
         "/api/agents"
             | "/api/profiles"
             | "/api/config"
+            | "/api/status"
             | "/api/models"
             | "/api/models/aliases"
             | "/api/providers"
@@ -359,8 +365,16 @@ pub async fn auth(
     let dashboard_read_public =
         (is_get && (dashboard_read_exact || dashboard_read_prefix)) || path == "/api/logs/stream"; // SSE stream, read-only
 
-    let api_key_present = !api_key.trim().is_empty();
-    let enforce_auth_on_reads = auth_state.require_auth_for_reads && api_key_present;
+    // The flag only engages when *some* form of auth is actually configured.
+    // Gating on `api_key.is_empty()` alone would silently no-op the flag
+    // whenever an operator configures only per-user keys or dashboard
+    // username/password auth — which is exactly the setup most production
+    // deployments use. Mirror the "auth configured?" check below so every
+    // auth mode participates.
+    let auth_configured = !api_key.trim().is_empty()
+        || !auth_state.user_api_keys.is_empty()
+        || auth_state.dashboard_auth_enabled;
+    let enforce_auth_on_reads = auth_state.require_auth_for_reads && auth_configured;
 
     let is_public = always_public || (dashboard_read_public && !enforce_auth_on_reads);
 
@@ -1026,5 +1040,126 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// `/api/status` used to be in the always-public set, but its handler
+    /// returns the full agents listing + home_dir + api_listen — exactly
+    /// the enumeration surface the flag exists to close. It must be locked
+    /// down when the flag is on.
+    #[tokio::test]
+    async fn test_require_auth_for_reads_blocks_api_status() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(Vec::new()),
+            require_auth_for_reads: true,
+        };
+        let app = Router::new()
+            .route("/api/status", get(|| async { "status" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "/api/status leaks the agent list; must require auth when the flag is on"
+        );
+    }
+
+    /// The flag must gate on any configured auth method, not just `api_key`.
+    /// An operator with only per-user API keys (and empty `api_key`) must
+    /// still get dashboard reads locked down when they enable the flag —
+    /// gating on `api_key_present` alone would silently no-op here.
+    #[tokio::test]
+    async fn test_require_auth_for_reads_engages_with_user_api_keys_only() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(vec![ApiUserAuth {
+                name: "alice".into(),
+                role: UserRole::User,
+                api_key_hash: crate::password_hash::hash_password("alice-key").unwrap(),
+            }]),
+            require_auth_for_reads: true,
+        };
+        let app = Router::new()
+            .route("/api/agents", get(|| async { "agents listing" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        // Unauthenticated → must be rejected.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "flag must engage when auth is configured via user_api_keys alone"
+        );
+
+        // Valid per-user key → must succeed.
+        let ok = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents")
+                    .header("authorization", "Bearer alice-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+    }
+
+    /// Flag is set but no auth of any kind is configured → must not
+    /// accidentally start returning 401 for unauthenticated reads. The
+    /// startup warning in server.rs covers operator-visible feedback; the
+    /// middleware preserves the open-development default.
+    #[tokio::test]
+    async fn test_require_auth_for_reads_is_noop_without_any_auth() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(Vec::new()),
+            require_auth_for_reads: true,
+        };
+        let app = Router::new()
+            .route("/api/agents", get(|| async { "agents listing" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "flag must not block unauthenticated reads when no auth is configured — \
+             the startup warning handles operator feedback"
+        );
     }
 }
