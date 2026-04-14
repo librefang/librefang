@@ -350,12 +350,13 @@ export function McpServersPage() {
     setForm(prev => ({ ...prev, [key]: value }));
 
   function installFromTemplate(tpl: IntegrationTemplate) {
+    const transport = tpl.transport;
     setForm({
       name: tpl.id,
-      transportType: "stdio",
-      command: "",
-      args: "",
-      url: "",
+      transportType: (transport?.type ?? "stdio") as TransportType,
+      command: transport?.command ?? "",
+      args: (transport?.args ?? []).join("\n"),
+      url: transport?.url ?? "",
       timeout: 30,
       env: (tpl.required_env ?? []).map(e => `${e.name}=`).join("\n"),
       headers: "",

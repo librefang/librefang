@@ -3788,6 +3788,17 @@ pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> 
         .iter()
         .map(|t| {
             let installed = registry.is_installed(&t.id);
+            let transport = match &t.transport {
+                librefang_extensions::McpTransportTemplate::Stdio { command, args } => {
+                    serde_json::json!({ "type": "stdio", "command": command, "args": args })
+                }
+                librefang_extensions::McpTransportTemplate::Sse { url } => {
+                    serde_json::json!({ "type": "sse", "url": url })
+                }
+                librefang_extensions::McpTransportTemplate::Http { url } => {
+                    serde_json::json!({ "type": "http", "url": url })
+                }
+            };
             serde_json::json!({
                 "id": t.id,
                 "name": t.name,
@@ -3796,6 +3807,7 @@ pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> 
                 "category": t.category.to_string(),
                 "installed": installed,
                 "tags": t.tags,
+                "transport": transport,
                 "required_env": t.required_env.iter().map(|e| serde_json::json!({
                     "name": e.name,
                     "label": e.label,

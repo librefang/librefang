@@ -2455,6 +2455,13 @@ export interface IntegrationRequiredEnv {
   get_url?: string;
 }
 
+export interface IntegrationTransport {
+  type: "stdio" | "sse" | "http";
+  command?: string;
+  args?: string[];
+  url?: string;
+}
+
 export interface IntegrationTemplate {
   id: string;
   name: string;
@@ -2463,6 +2470,7 @@ export interface IntegrationTemplate {
   category?: string;
   installed: boolean;
   tags?: string[];
+  transport?: IntegrationTransport;
   required_env?: IntegrationRequiredEnv[];
   has_oauth?: boolean;
   setup_instructions?: string;
