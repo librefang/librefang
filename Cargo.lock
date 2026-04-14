@@ -4249,6 +4249,8 @@ dependencies = [
  "librefang-channels",
  "librefang-http",
  "librefang-memory",
+ "librefang-runtime-mcp",
+ "librefang-runtime-oauth",
  "librefang-skills",
  "librefang-types",
  "once_cell",
@@ -4278,6 +4280,45 @@ dependencies = [
  "uuid",
  "wasmtime",
  "webpki-roots",
+ "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-mcp"
+version = "2026.4.13-beta19"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "http",
+ "librefang-http",
+ "librefang-types",
+ "rand 0.10.0",
+ "reqwest 0.13.2",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "librefang-runtime-oauth"
+version = "2026.4.13-beta19"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "librefang-http",
+ "librefang-types",
+ "rand 0.10.0",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "zeroize",
 ]
 
