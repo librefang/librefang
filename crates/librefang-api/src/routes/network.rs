@@ -493,14 +493,22 @@ fn is_url_safe_for_ssrf(raw_url: &str, allowed_hosts: &[String]) -> Result<(), S
     };
 
     for ip in &addrs {
-        if is_private_ip(ip) {
+        // Canonicalise IPv4-mapped IPv6 (::ffff:X.X.X.X) before any safety
+        // check. The OS transparently connects these to the embedded IPv4
+        // target, so leaving them as IPv6 lets an attacker reach loopback /
+        // private / cloud-metadata IPs via the v6 form (e.g.
+        // [::ffff:169.254.169.254]) which the v6-only branches of
+        // is_private_ip / is_cloud_metadata_ip do not recognise.
+        let canonical = canonical_ip(ip);
+        if is_private_ip(&canonical) {
             // Cloud metadata ranges are unconditionally blocked even when
             // the host appears in the allowlist.
-            if !is_cloud_metadata_ip(ip) && is_host_allowed(host, ip, allowed_hosts) {
+            if !is_cloud_metadata_ip(&canonical) && is_host_allowed(host, &canonical, allowed_hosts)
+            {
                 continue;
             }
             return Err(format!(
-                "Requests to private/internal IP addresses are not allowed ({ip})"
+                "Requests to private/internal IP addresses are not allowed ({canonical})"
             ));
         }
     }
@@ -508,10 +516,22 @@ fn is_url_safe_for_ssrf(raw_url: &str, allowed_hosts: &[String]) -> Result<(), S
     Ok(())
 }
 
+/// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) to its IPv4 form. All other
+/// addresses are returned unchanged.
+fn canonical_ip(ip: &IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(*v6),
+        },
+        IpAddr::V4(_) => *ip,
+    }
+}
+
 /// Returns true if the IP is in a cloud metadata / CGNAT range that must be
 /// blocked unconditionally (`169.254.0.0/16` or `100.64.0.0/10`).
 fn is_cloud_metadata_ip(ip: &IpAddr) -> bool {
-    match ip {
+    match canonical_ip(ip) {
         IpAddr::V4(v4) => {
             let o = v4.octets();
             (o[0] == 169 && o[1] == 254) || (o[0] == 100 && (o[1] & 0xC0) == 64)
@@ -597,7 +617,7 @@ fn cidr_contains(cidr: &str, ip: &IpAddr) -> Result<bool, ()> {
 /// Returns true if the IP address is in a private, loopback, link-local, or
 /// otherwise internal range that should not be reachable from user-supplied URLs.
 fn is_private_ip(ip: &IpAddr) -> bool {
-    match ip {
+    match canonical_ip(ip) {
         IpAddr::V4(v4) => {
             v4.is_loopback()              // 127.0.0.0/8
                 || v4.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
@@ -1430,4 +1450,48 @@ pub(crate) fn remove_toml_section(content: &str, section: &str) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonical_ip, is_cloud_metadata_ip, is_private_ip};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn canonical_ip_unwraps_ipv4_mapped_v6() {
+        let mapped: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert_eq!(
+            canonical_ip(&mapped),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))
+        );
+        // Real IPv6 is left alone.
+        let real_v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(canonical_ip(&real_v6), real_v6);
+    }
+
+    #[test]
+    fn is_private_ip_recognises_ipv4_mapped_v6() {
+        // Without canonicalisation the V6 arms only cover fc00::/7 + fe80::/10,
+        // letting ::ffff:X.X.X.X slip past as "public". These must be blocked.
+        assert!(is_private_ip(&"::ffff:10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:169.254.169.254".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:192.168.1.1".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:100.64.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_cloud_metadata_ip_recognises_ipv4_mapped_v6() {
+        // AWS IMDS + Alibaba IMDS (CGNAT) expressed as IPv4-mapped IPv6 must
+        // unconditionally be blocked — this is the exact reproduction from
+        // PR #2396 but exercising the network.rs copy of the guard.
+        assert!(is_cloud_metadata_ip(
+            &"::ffff:169.254.169.254".parse().unwrap()
+        ));
+        assert!(is_cloud_metadata_ip(&"::ffff:a9fe:a9fe".parse().unwrap()));
+        assert!(is_cloud_metadata_ip(&"::ffff:100.64.0.1".parse().unwrap()));
+        assert!(is_cloud_metadata_ip(
+            &"::ffff:100.100.100.200".parse().unwrap()
+        ));
+    }
 }

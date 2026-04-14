@@ -5,6 +5,49 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.13] - 2026-04-13
+
+### Added
+
+- Allow editing hand agent model settings from agents page (#2335) (@leszek3737)
+- Add config-driven session_mode for agent triggers (#2341) (@neo-wanderer)
+- Telegram rich media, polls, interactive commands, and channel_send tool (#2356) (@leszek3737)
+
+### Fixed
+
+- Decryption retry, streaming tag leak, session isolation (#2217) (@f-liva)
+- Inherit kernel default_model instead of hardcoded Anthropic (#2299) (@houko)
+- Per-agent loading state so streaming one agent doesn't block others (#2324) (@houko)
+- Write MCP server config as TOML table, not stringified JSON (#2327) (@houko)
+- Load secrets.env autonomously at boot time (#2359) (@f-liva)
+- Prevent zombie processes on shutdown (#2360) (@f-liva)
+- Refuse direct DELETE on hand-spawned agents + clarify revert warning (#2361) (@houko)
+- Normalize MIME type parameters before allowlist check (#2362) (@f-liva)
+- Resolve LID JIDs to phone numbers for owner detection (#2363) (@f-liva)
+- Harden poll_options parsing and poll context cleanup (#2364) (@houko)
+- Deterministic prompt context ordering and raise truncation cap (#2365) (@houko)
+- Stop Qwen driver from leaking raw JSON into chat (#2366) (@f-liva)
+- Let FallbackDriver recover from transient unhealthiness (#2367) (@f-liva)
+- Clear stale per-agent overrides on provider switch (#2371) (@neo-wanderer)
+- Scrub NO_REPLY sentinel in every reply path (#2373) (@f-liva)
+- Restore /message/send-audio endpoint accidentally removed in #2217 (#2376) (@f-liva)
+- Support "date" metric format and drop ureq from cli (#2382) (@houko)
+
+### Performance
+
+- Shrink dev debug info to line-tables-only (#2378) (@houko)
+
+### Maintenance
+
+- Split Docker image and deploy status (#2323) (@houko)
+- Fix max_tokens assertions after pure-text short-circuit (#2325) (@houko)
+- Strengthen telegram sanitizer coverage (#2334) (@leszek3737)
+- Fix rustfmt on upsert_mcp_server test assert (#2358) (@houko)
+- Replace cat with sleep in process_manager tests to fix flake (#2375) (@houko)
+- Skip security and install-smoke on unrelated PRs (#2377) (@houko)
+- Apply cargo fmt to runtime drivers (#2380) (@houko)
+
+
 ## [Unreleased]
 
 ### Added

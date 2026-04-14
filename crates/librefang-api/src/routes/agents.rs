@@ -1176,6 +1176,9 @@ pub async fn send_message(
         (req.message.clone(), false)
     };
 
+    let thinking_override = req.thinking;
+    let show_thinking = req.show_thinking.unwrap_or(true);
+
     let result = if is_ephemeral {
         // Ephemeral "side question" — use a temp session, no persistence
         state
@@ -1187,14 +1190,24 @@ pub async fn send_message(
         if let Some(sender) = sender_context.as_ref() {
             state
                 .kernel
-                .send_message_with_sender_context(agent_id, &effective_message, sender)
+                .send_message_with_sender_context_and_thinking(
+                    agent_id,
+                    &effective_message,
+                    sender,
+                    thinking_override,
+                )
                 .await
         } else {
             let kernel_handle: Arc<dyn KernelHandle> =
                 state.kernel.clone() as Arc<dyn KernelHandle>;
             state
                 .kernel
-                .send_message_with_handle(agent_id, &effective_message, Some(kernel_handle))
+                .send_message_with_thinking_override(
+                    agent_id,
+                    &effective_message,
+                    Some(kernel_handle),
+                    thinking_override,
+                )
                 .await
         }
     };
@@ -1218,7 +1231,13 @@ pub async fn send_message(
                 );
             }
 
-            // Strip <think>...</think> blocks from model output
+            // Extract reasoning trace (optional) and strip <think>...</think>
+            // blocks from the final model output.
+            let thinking_trace = if show_thinking {
+                crate::ws::extract_think_content(&result.response)
+            } else {
+                None
+            };
             let cleaned = crate::ws::strip_think_tags(&result.response);
 
             // Guard: ensure we never return an empty response to the client
@@ -1244,6 +1263,7 @@ pub async fn send_message(
                     memories_saved: result.memories_saved,
                     memories_used: result.memories_used,
                     memory_conflicts: result.memory_conflicts,
+                    thinking: thinking_trace,
                 })),
             )
         }
@@ -4085,13 +4105,35 @@ pub(crate) static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> =
 #[allow(dead_code)]
 const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
 
-/// Allowed content type prefixes for upload.
-const ALLOWED_CONTENT_TYPES: &[&str] = &["image/", "text/", "application/pdf", "audio/"];
+/// Non-media MIME types also accepted on `/api/agents/{id}/upload` — text
+/// files and PDFs that the agent loop consumes directly. Media types are
+/// sourced from `librefang_types::media::{ALLOWED_IMAGE_TYPES,
+/// ALLOWED_AUDIO_TYPES}` so the upload endpoint, the channel bridge, and
+/// `MediaAttachment::validate()` can never drift.
+const EXTRA_ALLOWED_UPLOAD_TYPES: &[&str] =
+    &["text/plain", "text/markdown", "text/csv", "application/pdf"];
 
+/// Exact-match MIME allowlist for `/api/agents/{id}/upload`.
+///
+/// Historically this was the prefix list `["image/", "text/",
+/// "application/pdf", "audio/"]`, which accepted any `image/*` subtype —
+/// including `image/svg+xml` (scriptable → XSS / SSRF via `<use
+/// xlink:href>`), `image/x-icon`, `image/tiff`, `image/heic` — and every
+/// `text/*` subtype including `text/html` and `text/xml`. That
+/// contradicted the SECURITY.md promise of *"Media type whitelist
+/// (png/jpeg/gif/webp)"*.
+///
+/// The new check is exact-match against the canonical
+/// `librefang_types::media::ALLOWED_IMAGE_TYPES` +
+/// `ALLOWED_AUDIO_TYPES` constants, so the upload endpoint and
+/// `MediaAttachment::validate()` share a single source of truth and
+/// cannot drift.
 fn is_allowed_content_type(ct: &str) -> bool {
-    ALLOWED_CONTENT_TYPES
-        .iter()
-        .any(|prefix| ct.starts_with(prefix))
+    use librefang_types::media::{mime_base, ALLOWED_AUDIO_TYPES, ALLOWED_IMAGE_TYPES};
+    let base = mime_base(ct);
+    ALLOWED_IMAGE_TYPES.contains(&base.as_str())
+        || ALLOWED_AUDIO_TYPES.contains(&base.as_str())
+        || EXTRA_ALLOWED_UPLOAD_TYPES.contains(&base.as_str())
 }
 
 /// POST /api/agents/{id}/upload — Upload a file attachment.
@@ -4517,6 +4559,60 @@ pub async fn push_message(
 mod tests {
     use super::*;
 
+    /// The pre-fix prefix-match (`"image/"`) let SVG, BMP, TIFF, HEIC and
+    /// friends through. Post-fix the allowlist is exact-match over the
+    /// same four formats SECURITY.md advertises.
+    #[test]
+    fn test_upload_mime_allowlist_rejects_previously_accepted_types() {
+        // Previously accepted via prefix match, now explicitly rejected.
+        for bad in [
+            "image/svg+xml",
+            "image/svg+xml; charset=utf-8",
+            "image/bmp",
+            "image/tiff",
+            "image/x-icon",
+            "image/heic",
+            "image/heif",
+            "image/avif",
+            "image/vnd.microsoft.icon",
+            "text/html", // text/ prefix used to let this through
+            "text/xml",
+            "audio/vnd.rn-realaudio",
+            "application/octet-stream",
+            "application/javascript",
+        ] {
+            assert!(
+                !is_allowed_content_type(bad),
+                "{bad} must be rejected by the upload allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn test_upload_mime_allowlist_accepts_expected_formats() {
+        for good in [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp",
+            "image/PNG",                 // case-insensitive
+            "image/png; charset=binary", // MIME params stripped
+            "audio/mpeg",
+            "audio/wav",
+            "audio/ogg",
+            "audio/flac",
+            "text/plain",
+            "text/markdown",
+            "text/csv",
+            "application/pdf",
+        ] {
+            assert!(
+                is_allowed_content_type(good),
+                "{good} must be accepted by the upload allowlist"
+            );
+        }
+    }
+
     #[test]
     fn test_clone_request_defaults() {
         let json = r#"{"new_name": "clone-1"}"#;
@@ -4624,6 +4720,8 @@ mod tests {
             is_group: false,
             was_mentioned: false,
             ephemeral: false,
+            thinking: None,
+            show_thinking: None,
         };
         assert!(request_sender_context(&req).is_none());
     }
@@ -4639,6 +4737,8 @@ mod tests {
             is_group: false,
             was_mentioned: false,
             ephemeral: false,
+            thinking: None,
+            show_thinking: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.user_id, "u-123");
@@ -4657,6 +4757,8 @@ mod tests {
             is_group: true,
             was_mentioned: true,
             ephemeral: false,
+            thinking: None,
+            show_thinking: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert!(sender.is_group);

@@ -27,6 +27,10 @@ interface UIState {
   toasts: Toast[];
   skillOutputs: SkillOutput[];
   hiddenModelKeys: string[];
+  deepThinking: boolean;
+  showThinkingProcess: boolean;
+  setDeepThinking: (value: boolean) => void;
+  setShowThinkingProcess: (value: boolean) => void;
   toggleTheme: () => void;
   setLanguage: (lang: string) => void;
   setMobileMenuOpen: (open: boolean) => void;
@@ -55,6 +59,10 @@ export const useUIStore = create<UIState>()(
       toasts: [],
       skillOutputs: [],
       hiddenModelKeys: [],
+      deepThinking: false,
+      showThinkingProcess: true,
+      setDeepThinking: (value) => set({ deepThinking: value }),
+      setShowThinkingProcess: (value) => set({ showThinkingProcess: value }),
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
       setLanguage: (lang) => {
@@ -107,6 +115,8 @@ export const useUIStore = create<UIState>()(
         language: state.language,
         navLayout: state.navLayout,
         hiddenModelKeys: state.hiddenModelKeys,
+        deepThinking: state.deepThinking,
+        showThinkingProcess: state.showThinkingProcess,
       }),
     }
   )

@@ -81,12 +81,47 @@ fn compute_entry_hash(
 /// An append-only, tamper-evident audit log using a Merkle hash chain.
 ///
 /// Thread-safe — all access is serialised through internal mutexes.
-/// Optionally backed by SQLite for persistence across daemon restarts.
+/// Optionally backed by SQLite for persistence across daemon restarts,
+/// and optionally anchored to an external file so a full rewrite of the
+/// SQLite table can be detected on the next verification.
+///
+/// # Threat model — the anchor file
+///
+/// The in-DB Merkle chain alone is only self-consistent: an attacker with
+/// write access to `audit_entries` can delete every row, insert a
+/// fabricated history, and recompute every hash from the genesis sentinel
+/// forward — `verify_integrity` returns `Ok` because it has nothing to
+/// compare the tip against. The anchor file closes that gap by storing
+/// the latest `seq:hash` outside the SQLite row store, so the chain must
+/// agree with an external witness the attacker would have to tamper with
+/// separately. For stronger guarantees point `anchor_path` at a location
+/// the daemon can write to but unprivileged code cannot (a chmod-0400
+/// file owned by a different user, a systemd `ReadOnlyPaths=` mount, an
+/// NFS share, or a pipe to `logger`).
 pub struct AuditLog {
     entries: Mutex<Vec<AuditEntry>>,
     tip: Mutex<String>,
     /// Optional database connection for persistent storage.
     db: Option<Arc<Mutex<Connection>>>,
+    /// Optional filesystem path where the latest `seq:hash` pair is
+    /// atomically rewritten after every `record()`. Startup and
+    /// `verify_integrity()` compare the in-DB tip against the anchor's
+    /// contents and refuse to return success if they diverge.
+    anchor_path: Option<std::path::PathBuf>,
+}
+
+/// On-disk format of the audit anchor file: `<seq> <hex-hash>\n`. Parsed
+/// by [`AuditLog::read_anchor`]. Kept deliberately minimal so a human
+/// inspecting the file (or a log collector) can read it directly.
+fn format_anchor_line(seq: u64, hash: &str) -> String {
+    format!("{seq} {hash}\n")
+}
+
+/// A tip hash recovered from the anchor file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnchorRecord {
+    seq: u64,
+    hash: String,
 }
 
 impl AuditLog {
@@ -98,7 +133,122 @@ impl AuditLog {
             entries: Mutex::new(Vec::new()),
             tip: Mutex::new("0".repeat(64)),
             db: None,
+            anchor_path: None,
         }
+    }
+
+    /// Atomically rewrite the anchor file with the given `seq:hash`.
+    ///
+    /// Uses `<path>.tmp` + rename so a crash mid-write never leaves a
+    /// truncated anchor that would fail startup verification.
+    fn write_anchor(path: &std::path::Path, seq: u64, hash: &str) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            // Best-effort; if the parent exists already this is a no-op.
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension("anchor.tmp");
+        std::fs::write(&tmp, format_anchor_line(seq, hash))?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Load the `AnchorRecord` stored in `path`, or `None` if the file
+    /// does not exist. Malformed contents are reported as `Err` so
+    /// verification can fail closed rather than silently treating a
+    /// corrupted anchor as "no anchor".
+    fn read_anchor(path: &std::path::Path) -> Result<Option<AnchorRecord>, String> {
+        match std::fs::read_to_string(path) {
+            Ok(body) => {
+                let line = body.lines().next().unwrap_or("").trim();
+                if line.is_empty() {
+                    return Ok(None);
+                }
+                let mut parts = line.splitn(2, char::is_whitespace);
+                let seq_str = parts.next().ok_or("anchor file has no seq column")?;
+                let hash = parts
+                    .next()
+                    .ok_or("anchor file has no hash column")?
+                    .trim()
+                    .to_string();
+                let seq = seq_str
+                    .parse::<u64>()
+                    .map_err(|e| format!("anchor seq is not a u64: {e}"))?;
+                if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!("anchor hash is not 64 hex chars: {hash:?}"));
+                }
+                Ok(Some(AnchorRecord { seq, hash }))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("cannot read audit anchor: {e}")),
+        }
+    }
+
+    /// Creates an audit log backed by a database connection **and** an
+    /// external tip-anchor file. See the struct-level docs for why the
+    /// anchor matters: a DB-only chain is self-consistent but cannot
+    /// detect a full rewrite of `audit_entries`, while the anchor closes
+    /// that gap by storing the latest `seq:hash` outside SQLite.
+    ///
+    /// On construction:
+    ///  1. Entries are loaded from SQLite as before.
+    ///  2. The Merkle chain is re-verified.
+    ///  3. The anchor file (if it exists) is compared against the in-DB
+    ///     tip. If they disagree, a loud error is logged — the daemon
+    ///     still comes up, because refusing to start would be worse than
+    ///     surfacing the integrity failure via `/api/audit/verify`, but
+    ///     subsequent `verify_integrity()` calls will return `Err`.
+    ///  4. If the DB has rows but no anchor exists yet, the anchor is
+    ///     created from the current tip so future rewrites can be
+    ///     detected even when upgrading an older deployment.
+    pub fn with_db_anchored(conn: Arc<Mutex<Connection>>, anchor_path: std::path::PathBuf) -> Self {
+        let mut log = Self::with_db(conn);
+        log.anchor_path = Some(anchor_path.clone());
+
+        // Compare against the anchor file (if any) and warn loudly on
+        // divergence. The call to `verify_integrity` below will also
+        // return `Err` in that case so `/api/audit/verify` surfaces it.
+        match Self::read_anchor(&anchor_path) {
+            Ok(Some(record)) => {
+                let current_tip = log.tip.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let current_seq =
+                    log.entries.lock().unwrap_or_else(|e| e.into_inner()).len() as u64;
+                if record.hash != current_tip {
+                    tracing::error!(
+                        anchor_seq = record.seq,
+                        anchor_hash = %record.hash,
+                        db_seq = current_seq,
+                        db_tip = %current_tip,
+                        "Audit anchor MISMATCH on boot — SQLite audit_entries may \
+                         have been rewritten; `/api/audit/verify` will fail until \
+                         the database and anchor agree again"
+                    );
+                }
+            }
+            Ok(None) => {
+                // First run with an anchor configured: seed it from the
+                // current tip so subsequent boots can detect tampering.
+                let tip = log.tip.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let seq = log.entries.lock().unwrap_or_else(|e| e.into_inner()).len() as u64;
+                if let Err(e) = Self::write_anchor(&anchor_path, seq, &tip) {
+                    tracing::warn!("Failed to initialise audit anchor {anchor_path:?}: {e}");
+                } else {
+                    tracing::info!(
+                        path = ?anchor_path,
+                        seq = seq,
+                        "Audit anchor file initialised"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Audit anchor at {anchor_path:?} is corrupt ({e}); refusing to \
+                     overwrite it until an operator inspects / removes the file — \
+                     `/api/audit/verify` will fail until resolved"
+                );
+            }
+        }
+
+        log
     }
 
     /// Creates an audit log backed by a database connection.
@@ -161,6 +311,7 @@ impl AuditLog {
             entries: Mutex::new(entries),
             tip: Mutex::new(tip),
             db: Some(conn),
+            anchor_path: None,
         };
 
         // Verify chain integrity on load
@@ -234,6 +385,24 @@ impl AuditLog {
 
         entries.push(entry);
         *tip = hash.clone();
+
+        // Advance the external anchor so a later DB rewrite is detectable.
+        // The anchor stores the post-push count so `verify_integrity`
+        // can compare it directly against `entries.len()`. Failures are
+        // logged but not propagated — the entry is already in SQLite,
+        // and refusing the append because of a filesystem hiccup would
+        // lose an audit record, which is strictly worse than an anchor
+        // that trails by one tick.
+        if let Some(ref anchor_path) = self.anchor_path {
+            let count = entries.len() as u64;
+            if let Err(e) = Self::write_anchor(anchor_path, count, &hash) {
+                tracing::warn!(
+                    path = ?anchor_path,
+                    "Failed to update audit anchor (entry still persisted): {e}"
+                );
+            }
+        }
+
         hash
     }
 
@@ -271,6 +440,47 @@ impl AuditLog {
             }
 
             expected_prev = entry.hash.clone();
+        }
+
+        // External anchor check (if configured). The in-DB chain is
+        // internally consistent at this point, so we now make sure the
+        // tip agrees with the anchor file that lives outside SQLite.
+        // This is the step that catches a full table rewrite where the
+        // attacker recomputed every hash from the genesis sentinel
+        // forward and the linked-list check above is useless.
+        if let Some(ref anchor_path) = self.anchor_path {
+            match Self::read_anchor(anchor_path) {
+                Ok(Some(record)) => {
+                    let current_tip = expected_prev.clone(); // hash of last entry
+                    let current_len = entries.len() as u64;
+                    // `seq` in the anchor is the number of entries at
+                    // the time it was last written. For an append-only
+                    // log this must match `entries.len()` once the
+                    // chain is up to date.
+                    if record.seq != current_len || record.hash != current_tip {
+                        return Err(format!(
+                            "audit anchor mismatch: anchor says seq={} tip={} \
+                             but DB has len={} tip={}",
+                            record.seq, record.hash, current_len, current_tip
+                        ));
+                    }
+                }
+                Ok(None) => {
+                    // Anchor was configured but the file is missing —
+                    // fail closed. A legitimate operator would either
+                    // remove the anchor configuration or let
+                    // `with_db_anchored` seed it on boot; a silent
+                    // disappearance is indistinguishable from an
+                    // attacker deleting it.
+                    return Err(format!(
+                        "audit anchor file {anchor_path:?} is missing — cannot \
+                         verify tip integrity against external witness"
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!("audit anchor unreadable: {e}"));
+                }
+            }
         }
 
         Ok(())
@@ -460,5 +670,195 @@ mod tests {
         // Verify tip is correct
         let entries = log2.recent(3);
         assert_eq!(entries[2].prev_hash, entries[1].hash);
+    }
+
+    // ── External tip anchor ───────────────────────────────────────────────
+    //
+    // These tests target the scenario documented in the SECURITY audit
+    // threat model: an attacker who can write `audit_entries` can wipe
+    // every row, insert a fabricated history, and recompute every hash
+    // from the genesis sentinel forward, because the linked-list check
+    // only proves internal consistency. The external anchor file is
+    // what catches that rewrite.
+
+    fn setup_anchored_log() -> (AuditLog, Arc<Mutex<Connection>>, std::path::PathBuf) {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let dir = tempfile::tempdir().unwrap();
+        let anchor_path = dir.path().join("audit.anchor");
+        // Leak the TempDir so the file survives for the duration of the
+        // test — we return the PathBuf so the caller keeps owning the
+        // cleanup via process exit. Keeping it simple avoids plumbing
+        // the TempDir through every test helper.
+        std::mem::forget(dir);
+        let log = AuditLog::with_db_anchored(Arc::clone(&db), anchor_path.clone());
+        (log, db, anchor_path)
+    }
+
+    #[test]
+    fn test_anchor_detects_full_chain_rewrite() {
+        let (log, db, anchor_path) = setup_anchored_log();
+        log.record(
+            "agent-1",
+            AuditAction::ToolInvoke,
+            "read_file /etc/hosts",
+            "ok",
+        );
+        log.record("agent-1", AuditAction::ShellExec, "ls -la", "ok");
+        log.record("agent-2", AuditAction::AgentSpawn, "spawn helper", "ok");
+        assert!(log.verify_integrity().is_ok(), "clean chain should verify");
+
+        // Simulate an attacker wiping the DB and planting a fabricated
+        // history with hashes recomputed from the genesis sentinel.
+        // Mirror the logic the audit module uses so the in-DB chain
+        // stays internally consistent and fools the linked-list check.
+        {
+            let conn = db.lock().unwrap();
+            conn.execute("DELETE FROM audit_entries", []).unwrap();
+            let mut prev = "0".repeat(64);
+            let fabricated: [(u64, &str, AuditAction, &str, &str); 2] = [
+                (
+                    0,
+                    "innocent",
+                    AuditAction::AgentMessage,
+                    "everything was fine",
+                    "ok",
+                ),
+                (
+                    1,
+                    "innocent",
+                    AuditAction::ToolInvoke,
+                    "read-only access",
+                    "ok",
+                ),
+            ];
+            for (seq, aid, action, detail, outcome) in fabricated {
+                let ts = "2026-04-14T00:00:00+00:00";
+                let hash = compute_entry_hash(seq, ts, aid, &action, detail, outcome, &prev);
+                conn.execute(
+                    "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        seq as i64,
+                        ts,
+                        aid,
+                        action.to_string(),
+                        detail,
+                        outcome,
+                        &prev,
+                        &hash,
+                    ],
+                )
+                .unwrap();
+                prev = hash;
+            }
+        }
+
+        // Reopen the log against the rewritten DB — the anchor file
+        // still holds the pre-rewrite tip, so verify_integrity must
+        // refuse the new chain.
+        let log2 = AuditLog::with_db_anchored(Arc::clone(&db), anchor_path.clone());
+        let result = log2.verify_integrity();
+        assert!(
+            result.is_err(),
+            "full chain rewrite must be rejected once the anchor exists"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("audit anchor mismatch"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_anchor_is_seeded_on_first_boot_if_missing() {
+        // DB has rows but no anchor yet: `with_db_anchored` must create
+        // the file so subsequent boots can detect tampering.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        // First run — no anchor argument, build up some history.
+        let log = AuditLog::with_db(Arc::clone(&db));
+        log.record("agent-1", AuditAction::ToolInvoke, "read_file", "ok");
+        log.record("agent-1", AuditAction::ShellExec, "ls", "ok");
+        let current_tip = log.tip_hash();
+        drop(log);
+
+        // Second run — upgrade path: anchor file does not exist yet.
+        let dir = tempfile::tempdir().unwrap();
+        let anchor_path = dir.path().join("audit.anchor");
+        assert!(!anchor_path.exists());
+        let log2 = AuditLog::with_db_anchored(Arc::clone(&db), anchor_path.clone());
+        assert!(
+            anchor_path.exists(),
+            "anchor file should be seeded on first boot with an existing DB"
+        );
+        assert!(
+            log2.verify_integrity().is_ok(),
+            "seeded anchor should agree with current tip"
+        );
+
+        // The anchor file should hold the current tip.
+        let record = AuditLog::read_anchor(&anchor_path)
+            .unwrap()
+            .expect("anchor file should parse");
+        assert_eq!(record.hash, current_tip);
+    }
+
+    #[test]
+    fn test_anchor_missing_after_config_fails_closed() {
+        let (log, _db, anchor_path) = setup_anchored_log();
+        log.record("agent-1", AuditAction::ToolInvoke, "read_file", "ok");
+        assert!(log.verify_integrity().is_ok());
+
+        // Attacker removes the anchor file hoping verification will
+        // fall back to the DB-only path. It must not.
+        std::fs::remove_file(&anchor_path).unwrap();
+        let result = log.verify_integrity();
+        assert!(result.is_err(), "missing anchor must fail closed");
+        assert!(
+            result.unwrap_err().contains("missing"),
+            "error message should mention the missing anchor"
+        );
+    }
+
+    #[test]
+    fn test_anchor_write_atomic_rename_on_record() {
+        let (log, _db, anchor_path) = setup_anchored_log();
+        log.record("agent-1", AuditAction::ToolInvoke, "first", "ok");
+        let first = AuditLog::read_anchor(&anchor_path).unwrap().unwrap();
+        log.record("agent-1", AuditAction::ToolInvoke, "second", "ok");
+        let second = AuditLog::read_anchor(&anchor_path).unwrap().unwrap();
+
+        assert_ne!(first.hash, second.hash, "anchor should advance per record");
+        assert_eq!(second.seq, 2, "anchor seq should equal entries.len()");
+        // No leftover .tmp file.
+        let tmp = anchor_path.with_extension("anchor.tmp");
+        assert!(!tmp.exists(), "tempfile should have been renamed away");
     }
 }

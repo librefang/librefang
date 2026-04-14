@@ -66,14 +66,13 @@ impl SignedManifest {
         }
     }
 
-    /// Verifies the integrity and authenticity of this signed manifest.
-    ///
-    /// Checks:
-    /// 1. The `content_hash` matches a fresh SHA-256 of `manifest`.
-    /// 2. The `signature` is valid for `content_hash` under `signer_public_key`.
-    ///
-    /// Returns `Ok(())` on success, or `Err(description)` on failure.
-    pub fn verify(&self) -> Result<(), String> {
+    /// Recompute the SHA-256 and validate the bundled signature against
+    /// the bundled `signer_public_key`. This is **not** identity
+    /// verification on its own — see the module docs — so the helper is
+    /// deliberately private. All public entry points must go through
+    /// [`Self::verify_with_trusted_keys`], which checks the signer is
+    /// in the caller's trust anchor list *before* falling through here.
+    fn check_envelope_integrity(&self) -> Result<(), String> {
         // Re-compute the hash and compare.
         let recomputed = hash_manifest(&self.manifest);
         if recomputed != self.content_hash {
@@ -105,6 +104,43 @@ impl SignedManifest {
             .verify(self.content_hash.as_bytes(), &signature)
             .map_err(|e| format!("signature verification failed: {}", e))
     }
+
+    /// Supply-chain-safe verification: requires the envelope's
+    /// `signer_public_key` to byte-equal one of `trusted_keys` before
+    /// running the normal integrity + signature check.
+    ///
+    /// `trusted_keys` is the caller's allowlist of 32-byte Ed25519 public
+    /// keys — typically sourced from `KernelConfig.trusted_manifest_signers`.
+    /// An empty list is treated as "no signers are trusted" and every
+    /// envelope is rejected, so a misconfigured daemon fails closed instead
+    /// of silently accepting self-signed envelopes.
+    pub fn verify_with_trusted_keys(&self, trusted_keys: &[[u8; 32]]) -> Result<(), String> {
+        if trusted_keys.is_empty() {
+            return Err("manifest signature rejected: no trusted_manifest_signers \
+                 configured — add the signer's Ed25519 public key to \
+                 `trusted_manifest_signers` in config.toml"
+                .to_string());
+        }
+
+        // Check the bundled signer_public_key is on the allowlist before we
+        // do anything else. If the attacker embedded their own public key
+        // this is the step that rejects the envelope.
+        let pk_bytes: [u8; 32] = self
+            .signer_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| "invalid public key length (expected 32 bytes)".to_string())?;
+        if !trusted_keys.iter().any(|k| k == &pk_bytes) {
+            return Err(format!(
+                "manifest signature rejected: signer {} is not in \
+                 trusted_manifest_signers",
+                self.signer_id
+            ));
+        }
+
+        // Known-good signer — run the normal integrity / signature check.
+        self.check_envelope_integrity()
+    }
 }
 
 #[cfg(test)]
@@ -135,7 +171,11 @@ network = false
         let signed = SignedManifest::sign(manifest, &signing_key, "test@librefang.ai");
         assert_eq!(signed.content_hash, hash_manifest(manifest));
         assert_eq!(signed.signer_id, "test@librefang.ai");
-        assert!(signed.verify().is_ok());
+
+        // A real caller must go through verify_with_trusted_keys — prove
+        // that round-trip works when the signer is on the allowlist.
+        let trusted: [[u8; 32]; 1] = [signing_key.verifying_key().to_bytes()];
+        assert!(signed.verify_with_trusted_keys(&trusted).is_ok());
     }
 
     #[test]
@@ -148,7 +188,8 @@ network = false
         // Tamper with the manifest content after signing.
         signed.manifest = "[agent]\nname = \"evil-agent\"\nshell = true\n".to_string();
 
-        let result = signed.verify();
+        let trusted: [[u8; 32]; 1] = [signing_key.verifying_key().to_bytes()];
+        let result = signed.verify_with_trusted_keys(&trusted);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("content hash mismatch"));
     }
@@ -161,13 +202,97 @@ network = false
         let manifest = "[agent]\nname = \"test\"\n";
         let mut signed = SignedManifest::sign(manifest, &signing_key, "signer-a");
 
-        // Replace the public key with a different key's public key.
+        // Replace the public key with a different key's public key but
+        // put the new public key on the trust list so we reach the
+        // signature check rather than the allowlist rejection.
         signed.signer_public_key = wrong_key.verifying_key().to_bytes().to_vec();
 
-        let result = signed.verify();
+        let trusted: [[u8; 32]; 1] = [wrong_key.verifying_key().to_bytes()];
+        let result = signed.verify_with_trusted_keys(&trusted);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .contains("signature verification failed"));
+    }
+
+    /// Regression: the attacker-generated envelope that used to slip
+    /// through bare `verify()` must now be rejected at the allowlist
+    /// check, because there is no longer a public path to the bare
+    /// integrity test. This locks the API shape — any future
+    /// re-introduction of a bare "verify envelope" method would need
+    /// to update this test.
+    #[test]
+    fn test_attacker_envelope_rejected_without_trust_anchor() {
+        let attacker = test_signing_key(42);
+        let official = test_signing_key(1);
+        let evil = "[agent]\nname = \"evil\"\nshell = true\n";
+        let signed = SignedManifest::sign(evil, &attacker, "attacker@evil");
+
+        // Trust anchor is the official signer only; attacker envelope
+        // must fail even though it is internally consistent.
+        let trusted: [[u8; 32]; 1] = [official.verifying_key().to_bytes()];
+        let err = signed
+            .verify_with_trusted_keys(&trusted)
+            .expect_err("self-signed attacker envelope must be rejected");
+        assert!(
+            err.contains("not in trusted_manifest_signers"),
+            "err was {err}"
+        );
+    }
+
+    #[test]
+    fn test_trusted_verify_rejects_untrusted_signer() {
+        let attacker = test_signing_key(42);
+        let official = test_signing_key(1);
+        let evil = "[agent]\nname = \"evil\"\nshell = true\n";
+        let signed = SignedManifest::sign(evil, &attacker, "attacker@evil");
+
+        let trusted: [[u8; 32]; 1] = [official.verifying_key().to_bytes()];
+        let err = signed
+            .verify_with_trusted_keys(&trusted)
+            .expect_err("self-signed envelope must be rejected");
+        assert!(
+            err.contains("not in trusted_manifest_signers"),
+            "err was {err}"
+        );
+    }
+
+    #[test]
+    fn test_trusted_verify_accepts_trusted_signer() {
+        let official = test_signing_key(1);
+        let manifest = "[agent]\nname = \"hello\"\n";
+        let signed = SignedManifest::sign(manifest, &official, "official@librefang");
+
+        let trusted: [[u8; 32]; 1] = [official.verifying_key().to_bytes()];
+        signed
+            .verify_with_trusted_keys(&trusted)
+            .expect("trusted signer must pass");
+    }
+
+    #[test]
+    fn test_trusted_verify_empty_allowlist_fails_closed() {
+        let official = test_signing_key(1);
+        let manifest = "[agent]\nname = \"hello\"\n";
+        let signed = SignedManifest::sign(manifest, &official, "official@librefang");
+
+        let err = signed
+            .verify_with_trusted_keys(&[])
+            .expect_err("empty trust list must fail closed");
+        assert!(err.contains("no trusted_manifest_signers"), "err was {err}");
+    }
+
+    #[test]
+    fn test_trusted_verify_rejects_tampered_manifest_from_trusted_signer() {
+        let official = test_signing_key(1);
+        let manifest = "[agent]\nname = \"hello\"\n";
+        let mut signed = SignedManifest::sign(manifest, &official, "official@librefang");
+        // Attacker swaps the manifest body but keeps the original signature.
+        signed.manifest = "[agent]\nname = \"evil\"\nshell = true\n".to_string();
+
+        let trusted: [[u8; 32]; 1] = [official.verifying_key().to_bytes()];
+        let err = signed
+            .verify_with_trusted_keys(&trusted)
+            .expect_err("tampered manifest must be rejected even under trust check");
+        assert!(err.contains("content hash mismatch"), "err was {err}");
     }
 }

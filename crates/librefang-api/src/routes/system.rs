@@ -290,6 +290,67 @@ pub async fn get_profile(
 // Template endpoints
 // ---------------------------------------------------------------------------
 
+/// Validate a template name supplied via URL path before joining it onto the
+/// templates directory. Only permits `[A-Za-z0-9_-]` to guarantee the result
+/// cannot escape the base directory through `..`, absolute paths, or platform
+/// separators (`/`, `\`). Rejects empty names and anything longer than 64
+/// chars to cap log noise.
+fn validate_template_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() || name.len() > 64 {
+        return Err("invalid template name");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err("invalid template name");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod template_name_validation_tests {
+    use super::validate_template_name;
+
+    #[test]
+    fn accepts_simple_names() {
+        assert!(validate_template_name("assistant").is_ok());
+        assert!(validate_template_name("customer-support").is_ok());
+        assert!(validate_template_name("coder_v2").is_ok());
+        assert!(validate_template_name("a1").is_ok());
+    }
+
+    #[test]
+    fn rejects_path_traversal() {
+        assert!(validate_template_name("..").is_err());
+        assert!(validate_template_name("../../etc").is_err());
+        assert!(validate_template_name("foo/../bar").is_err());
+        assert!(validate_template_name("..\\..\\tmp").is_err());
+    }
+
+    #[test]
+    fn rejects_separators_and_absolute_paths() {
+        assert!(validate_template_name("foo/bar").is_err());
+        assert!(validate_template_name("foo\\bar").is_err());
+        assert!(validate_template_name("/etc/passwd").is_err());
+        assert!(validate_template_name("C:\\Windows").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_and_oversized() {
+        assert!(validate_template_name("").is_err());
+        assert!(validate_template_name(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn rejects_null_and_special_chars() {
+        assert!(validate_template_name("foo\0bar").is_err());
+        assert!(validate_template_name("foo bar").is_err());
+        assert!(validate_template_name("foo.bar").is_err());
+        assert!(validate_template_name("foo%2fbar").is_err());
+    }
+}
+
 /// GET /api/templates — List available agent templates.
 #[utoipa::path(get, path = "/api/templates", tag = "system", operation_id = "list_agent_templates", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
 pub async fn list_agent_templates() -> impl IntoResponse {
@@ -338,6 +399,9 @@ pub async fn get_agent_template(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+    }
     let agents_dir = librefang_kernel::config::librefang_home()
         .join("workspaces")
         .join("agents");
@@ -390,6 +454,14 @@ pub async fn get_agent_template_toml(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    if validate_template_name(&name).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+            t.t("api-error-template-not-found"),
+        )
+            .into_response();
+    }
     let agents_dir = librefang_kernel::config::librefang_home()
         .join("workspaces")
         .join("agents");

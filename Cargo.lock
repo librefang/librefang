@@ -3898,7 +3898,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "argon2",
  "async-trait",
@@ -3958,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "aes",
  "async-trait",
@@ -4007,7 +4007,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "clap",
  "clap_complete",
@@ -4036,14 +4036,13 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "unic-langid",
- "ureq",
  "uuid",
  "zeroize",
 ]
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "axum",
  "clap",
@@ -4073,7 +4072,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4090,6 +4089,7 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "serial_test",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
@@ -4105,7 +4105,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4123,8 +4123,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "librefang-http"
+version = "2026.4.13-beta19"
+dependencies = [
+ "librefang-types",
+ "reqwest 0.13.2",
+ "rustls",
+ "rustls-native-certs",
+ "tracing",
+ "webpki-roots",
+]
+
+[[package]]
 name = "librefang-kernel"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4140,6 +4152,8 @@ dependencies = [
  "librefang-channels",
  "librefang-extensions",
  "librefang-hands",
+ "librefang-kernel-metering",
+ "librefang-kernel-router",
  "librefang-memory",
  "librefang-runtime",
  "librefang-skills",
@@ -4166,8 +4180,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "librefang-kernel-handle"
+version = "2026.4.13-beta19"
+dependencies = [
+ "async-trait",
+ "librefang-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "librefang-kernel-metering"
+version = "2026.4.13-beta19"
+dependencies = [
+ "librefang-memory",
+ "librefang-runtime",
+ "librefang-types",
+ "serde",
+]
+
+[[package]]
+name = "librefang-kernel-router"
+version = "2026.4.13-beta19"
+dependencies = [
+ "dirs 6.0.0",
+ "librefang-hands",
+ "librefang-runtime",
+ "librefang-types",
+ "regex-lite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
+name = "librefang-llm-driver"
+version = "2026.4.13-beta19"
+dependencies = [
+ "async-trait",
+ "librefang-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "librefang-memory"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4188,7 +4253,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-migrate"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4207,7 +4272,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4224,7 +4289,14 @@ dependencies = [
  "http",
  "landlock",
  "librefang-channels",
+ "librefang-http",
+ "librefang-kernel-handle",
+ "librefang-llm-driver",
  "librefang-memory",
+ "librefang-runtime-drivers",
+ "librefang-runtime-mcp",
+ "librefang-runtime-oauth",
+ "librefang-runtime-wasm",
  "librefang-skills",
  "librefang-types",
  "once_cell",
@@ -4258,8 +4330,95 @@ dependencies = [
 ]
 
 [[package]]
+name = "librefang-runtime-drivers"
+version = "2026.4.13-beta19"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "futures",
+ "hex",
+ "hmac",
+ "librefang-http",
+ "librefang-llm-driver",
+ "librefang-runtime-oauth",
+ "librefang-types",
+ "rand 0.10.0",
+ "regex-lite",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-mcp"
+version = "2026.4.13-beta19"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "http",
+ "librefang-http",
+ "librefang-types",
+ "rand 0.10.0",
+ "reqwest 0.13.2",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "librefang-runtime-oauth"
+version = "2026.4.13-beta19"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "librefang-http",
+ "librefang-types",
+ "rand 0.10.0",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-wasm"
+version = "2026.4.13-beta19"
+dependencies = [
+ "anyhow",
+ "librefang-http",
+ "librefang-kernel-handle",
+ "librefang-types",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wasmtime",
+]
+
+[[package]]
 name = "librefang-skills"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4286,7 +4445,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -4295,7 +4454,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "async-trait",
  "axum",
@@ -4322,7 +4481,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4343,7 +4502,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "async-trait",
  "chrono",
@@ -8898,16 +9057,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-serde"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
-dependencies = [
- "serde",
- "tracing-core",
-]
-
-[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8917,15 +9066,12 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
- "serde",
- "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
- "tracing-serde",
 ]
 
 [[package]]
@@ -10809,7 +10955,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "base64 0.22.1",
  "chrono",

@@ -137,6 +137,7 @@ pub enum MetricFormat {
     Bytes,
     Percentage,
     Text,
+    Date,
 }
 
 /// A metric displayed on the Hand dashboard.

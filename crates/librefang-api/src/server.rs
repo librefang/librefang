@@ -322,9 +322,15 @@ async fn dashboard_auth_check(
         "none"
     };
 
+    // Intentionally do NOT echo the configured dashboard username here: the
+    // endpoint is unauthenticated (the SPA calls it before the user has
+    // logged in) and returning the username would hand an anonymous remote
+    // caller one half of the credential pair, enabling targeted credential
+    // stuffing. The `mode` field is enough for the SPA to pick the right
+    // login form; the user already knows their own username.
     axum::response::Json(serde_json::json!({
         "mode": mode,
-        "username": if has_credentials { du.trim().to_string() } else { String::new() },
+        "username": "",
     }))
 }
 
@@ -683,11 +689,27 @@ pub async fn build_router(
     };
 
     // AuthState shares api_key_lock with AppState so change_password can update it live.
+    let user_api_keys_vec = configured_user_api_keys(state.kernel.as_ref());
+    let dashboard_auth_enabled = has_dashboard_credentials(state.kernel.as_ref());
+    let require_auth_for_reads = state.kernel.config_ref().require_auth_for_reads;
+    if require_auth_for_reads {
+        let api_key_set = !state.kernel.config_ref().api_key.trim().is_empty();
+        let any_auth = api_key_set || !user_api_keys_vec.is_empty() || dashboard_auth_enabled;
+        if !any_auth {
+            tracing::warn!(
+                "require_auth_for_reads = true but no authentication is configured \
+                 (api_key, user_api_keys, and dashboard credentials are all empty). \
+                 The flag will have no effect — set an api_key or configure dashboard \
+                 credentials to lock down read endpoints."
+            );
+        }
+    }
     let auth_state = middleware::AuthState {
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),
-        dashboard_auth_enabled: has_dashboard_credentials(state.kernel.as_ref()),
-        user_api_keys: Arc::new(configured_user_api_keys(state.kernel.as_ref())),
+        dashboard_auth_enabled,
+        user_api_keys: Arc::new(user_api_keys_vec),
+        require_auth_for_reads,
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     let gcra_limiter = rate_limiter::GcraState {

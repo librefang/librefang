@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listChannels, configureChannel, testChannel, reloadChannels, wechatQrStart, wechatQrStatus, whatsappQrStart, whatsappQrStatus, type ChannelItem } from "../api";
 import { useUIStore } from "../lib/store";
+import { copyToClipboard } from "../lib/clipboard";
 import QRCode from "qrcode";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -406,7 +407,10 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
                       className="flex-1 rounded-lg border border-border-subtle bg-main/50 px-3 py-2 text-xs text-text-dim font-mono"
                     />
                     <button
-                      onClick={() => navigator.clipboard.writeText(field.value || field.placeholder || "")}
+                      onClick={async () => {
+                        const ok = await copyToClipboard(field.value || field.placeholder || "");
+                        addToast(ok ? t("common.copied") : t("common.copy_failed"), ok ? "success" : "error");
+                      }}
                       className="px-3 py-2 rounded-lg bg-brand/10 text-brand text-xs hover:bg-brand/20 transition-colors shrink-0"
                       title="Copy"
                     >
@@ -792,7 +796,7 @@ export function ChannelsPage() {
       </div>
 
       {channelsQuery.isLoading ? (
-        <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-2"}>
+        <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
           {[1, 2, 3].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : channels.length === 0 ? (
@@ -815,7 +819,7 @@ export function ChannelsPage() {
             )}
           </div>
 
-          <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-2"}>
+          <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
             {paginatedChannels.map((c) => (
               <ChannelCard
                 key={c.name}

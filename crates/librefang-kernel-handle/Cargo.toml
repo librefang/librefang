@@ -1,0 +1,15 @@
+[package]
+name = "librefang-kernel-handle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KernelHandle trait for in-process callers into the LibreFang kernel"
+
+[dependencies]
+librefang-types = { path = "../librefang-types" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

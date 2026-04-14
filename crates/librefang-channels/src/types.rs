@@ -619,7 +619,17 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
 fn retreat_past_html_entity(text: &str, pos: usize) -> usize {
     // Maximum entity length we consider (e.g. `&#1114111;` = 10 chars).
     const MAX_ENTITY_LEN: usize = 12;
-    let search_start = pos.saturating_sub(MAX_ENTITY_LEN);
+    // `pos.saturating_sub(MAX_ENTITY_LEN)` is a raw byte offset that can
+    // land inside a multi-byte UTF-8 character (e.g. `ñ` is 2 bytes,
+    // `😀` is 4). Slicing at a non-char-boundary index panics, so walk
+    // forward to the next char boundary before slicing. See issue #2285.
+    let raw_start = pos.saturating_sub(MAX_ENTITY_LEN);
+    let search_start = (raw_start..=pos)
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(pos);
+    if search_start >= pos {
+        return pos;
+    }
     // Look for the last `&` in the window ending at `pos`.
     if let Some(rel) = text[search_start..pos].rfind('&') {
         let amp_pos = search_start + rel;
@@ -669,6 +679,58 @@ mod tests {
         let text = "line1\nline2\nline3";
         let chunks = split_message(text, 10);
         assert_eq!(chunks, vec!["line1", "line2", "line3"]);
+    }
+
+    /// Regression: #2285 — `retreat_past_html_entity` used to slice a raw
+    /// byte offset that could land inside a multi-byte UTF-8 char, causing
+    /// `byte index N is not a char boundary; it is inside 'ñ' ...`.
+    #[test]
+    fn test_split_message_multibyte_at_boundary() {
+        // Place a 2-byte char (`ñ`) right where the entity-retreat window
+        // would otherwise slice into it. With max_len = 10, the look-back
+        // window is the 12 bytes before pos. We craft a string so the
+        // window starts inside `ñ`.
+        let text = "abcdefghijñklmn";
+        // Should not panic; should split at a char boundary.
+        let chunks = split_message(text, 10);
+        // Verify all chunks are valid UTF-8 (implicit since `&str`) and
+        // their concatenation reconstructs the original text.
+        let rebuilt: String = chunks.concat();
+        assert_eq!(rebuilt, text);
+    }
+
+    #[test]
+    fn test_split_message_emoji_near_boundary() {
+        // 4-byte emoji at the boundary — same panic class.
+        let text = "0123456789😀abcdefghij";
+        let chunks = split_message(text, 12);
+        let rebuilt: String = chunks.concat();
+        assert_eq!(rebuilt, text);
+    }
+
+    #[test]
+    fn test_split_message_long_multibyte_does_not_panic() {
+        // Reproduce the production trace: a long string of 2-byte chars
+        // straddling the 4096 boundary used to panic on `byte index 4084`.
+        let text: String = "coño ".repeat(900);
+        let chunks = split_message(&text, 4096);
+        let rebuilt: String = chunks.concat();
+        assert_eq!(rebuilt, text);
+    }
+
+    #[test]
+    fn test_retreat_past_html_entity_multibyte_safe() {
+        // Direct unit test of the helper with a string where the retreat
+        // window would land inside a multi-byte char.
+        let text = "abñ";
+        // pos = 4 (= text.len(), past the end of `ñ`)
+        // raw_start = pos.saturating_sub(12) = 0, which is on a boundary,
+        // so this case is fine. Test the harder case where pos itself is
+        // small enough that the window is fully inside the multi-byte char.
+        let result = retreat_past_html_entity(text, 4);
+        // Should not panic; should return either 4 or an earlier valid boundary.
+        assert!(text.is_char_boundary(result));
+        assert!(result <= 4);
     }
 
     #[test]

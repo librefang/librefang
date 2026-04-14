@@ -243,6 +243,14 @@ export interface AgentMessageResponse {
   silent?: boolean;
   memories_saved?: string[];
   memories_used?: string[];
+  thinking?: string;
+}
+
+export interface SendAgentMessageOptions {
+  /** Force deep-thinking on/off for this call. Omitted = manifest default. */
+  thinking?: boolean;
+  /** Whether to receive the model's reasoning trace. Defaults to true. */
+  show_thinking?: boolean;
 }
 
 export interface ApiActionResponse {
@@ -823,11 +831,17 @@ export async function loadAgentSession(agentId: string): Promise<AgentSessionRes
 
 export async function sendAgentMessage(
   agentId: string,
-  message: string
+  message: string,
+  options?: SendAgentMessageOptions,
 ): Promise<AgentMessageResponse> {
-  return post<AgentMessageResponse>(`/api/agents/${encodeURIComponent(agentId)}/message`, {
-    message
-  }, LONG_RUNNING_TIMEOUT_MS);
+  const body: Record<string, unknown> = { message };
+  if (options?.thinking !== undefined) body.thinking = options.thinking;
+  if (options?.show_thinking !== undefined) body.show_thinking = options.show_thinking;
+  return post<AgentMessageResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/message`,
+    body,
+    LONG_RUNNING_TIMEOUT_MS,
+  );
 }
 
 export async function listProviders(): Promise<ProviderItem[]> {
@@ -2375,6 +2389,7 @@ export interface McpServerConfigured {
   timeout_secs?: number;
   env?: string[];
   headers?: string[];
+  auth_state?: { state: string; auth_url?: string; message?: string };
 }
 
 export interface McpServerConnected {
@@ -2405,6 +2420,29 @@ export async function updateMcpServer(name: string, server: Partial<McpServerCon
 
 export async function deleteMcpServer(name: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`);
+}
+
+// MCP OAuth Auth
+export interface McpAuthStatusResponse {
+  server: string;
+  auth: { state: string; auth_url?: string; message?: string };
+}
+
+export interface McpAuthStartResponse {
+  auth_url: string;
+  server: string;
+}
+
+export async function getMcpAuthStatus(name: string): Promise<McpAuthStatusResponse> {
+  return get<McpAuthStatusResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/status`);
+}
+
+export async function startMcpAuth(name: string): Promise<McpAuthStartResponse> {
+  return post<McpAuthStartResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/start`, {});
+}
+
+export async function revokeMcpAuth(name: string): Promise<{ server: string; state: string }> {
+  return del<{ server: string; state: string }>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/revoke`);
 }
 
 // ---------------------------------------------------------------------------
