@@ -2478,16 +2478,21 @@ impl LibreFangKernel {
         let workflow_home_dir = config.home_dir.clone();
         let oauth_home_dir = config.home_dir.clone();
         let trigger_config = config.triggers.clone();
-        // Default audit anchor lives next to the SQLite file so operators
-        // who do nothing still get a tip-anchored log that detects full
-        // `audit_entries` rewrites. The anchor file path is intentionally
-        // derived from `data_dir` rather than a new config knob — if an
-        // operator needs to put the anchor somewhere the daemon can write
-        // to but unprivileged code cannot (chmod-0400 file, systemd
-        // ReadOnlyPaths mount, syslog pipe) they can symlink it. A first-
-        // class `audit.anchor_path` config field can land in a follow-up
-        // once the shape of the hardening story is settled.
-        let audit_anchor_path = config.data_dir.join("audit.anchor");
+        // Resolve the audit anchor path from `[audit].anchor_path`. When
+        // unset, the default is `data_dir/audit.anchor` — good enough to
+        // catch most casual tampering since it sits next to the SQLite
+        // file. When the operator points it somewhere the daemon can
+        // write to but unprivileged code cannot (chmod-0400 file, systemd
+        // `ReadOnlyPaths=` mount, NFS share, pipe to `logger`), the same
+        // rewrite check becomes a real supply-chain boundary. Relative
+        // paths resolve against `data_dir` so operators can write
+        // `anchor_path = "audit/tip.anchor"` without hard-coding an
+        // absolute path in config.toml.
+        let audit_anchor_path = match config.audit.anchor_path.as_ref() {
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => config.data_dir.join(path),
+            None => config.data_dir.join("audit.anchor"),
+        };
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
             data_dir_boot: config.data_dir.clone(),

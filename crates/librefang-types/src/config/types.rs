@@ -2981,17 +2981,36 @@ fn default_max_request_body_bytes() -> usize {
 /// ```toml
 /// [audit]
 /// retention_days = 90
+/// # Optional override for the external tip-anchor path. Relative
+/// # paths resolve against `data_dir`. Leave unset for the default
+/// # `data_dir/audit.anchor`.
+/// anchor_path = "/var/log/librefang/audit.anchor"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuditConfig {
     /// How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.
     pub retention_days: u32,
+    /// Optional override for the external Merkle-tip anchor file that
+    /// `AuditLog::with_db_anchored` uses to detect full rewrites of
+    /// `audit_entries`. When unset the daemon writes to
+    /// `data_dir/audit.anchor`, which catches most casual tampering but
+    /// sits in the same filesystem namespace as the SQLite file it is
+    /// meant to verify. Operators who want a stronger boundary can
+    /// point this at a path the daemon can write to but unprivileged
+    /// code cannot — a chmod-0400 file owned by a dedicated user, a
+    /// `systemd ReadOnlyPaths=` mount, an NFS share, or a pipe to
+    /// `logger`. Relative paths are resolved against `data_dir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_path: Option<PathBuf>,
 }
 
 impl Default for AuditConfig {
     fn default() -> Self {
-        Self { retention_days: 90 }
+        Self {
+            retention_days: 90,
+            anchor_path: None,
+        }
     }
 }
 
