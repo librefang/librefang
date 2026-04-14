@@ -8,6 +8,18 @@ on:
     types: [created, labeled]
   discussion_comment:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: 'Create issues for all existing Ideas discussions that lack one'
+        required: false
+        type: boolean
+        default: false
+      category:
+        description: 'Category to backfill (default: Ideas)'
+        required: false
+        type: string
+        default: 'Ideas'
 
 permissions:
   issues: write
@@ -22,6 +34,7 @@ jobs:
       github.event.action == 'created' &&
       (
         github.event.discussion.category.name == 'Ideas' ||
+        github.event.discussion.category.name == 'General' ||
         github.event.discussion.category.name == 'Q&A'
       )
     steps:
@@ -183,3 +196,81 @@ jobs:
           gh api "repos/${REPO}/discussions/${DISC_NUMBER}/comments" \
             -f body="Tracked as issue #${ISSUE_NUMBER}" \
             --silent
+
+  # ── Backfill: create issues for existing discussions ─────────────
+  backfill:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.backfill == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Backfill existing discussions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          CATEGORY: ${{ github.event.inputs.category }}
+        run: |
+          set -euo pipefail
+
+          echo "Backfilling discussions in category: ${CATEGORY}"
+
+          gh api repos/${REPO}/discussions --paginate --jq \
+            ".[] | select(.category.name == \"${CATEGORY}\") | @base64" \
+          | while IFS= read -r row; do
+              decoded=$(printf '%s' "$row" | base64 -d)
+              DISC_NUMBER=$(printf '%s' "$decoded" | jq -r '.number')
+              DISC_TITLE=$(printf '%s' "$decoded" | jq -r '.title')
+              DISC_URL=$(printf '%s' "$decoded" | jq -r '.html_url')
+              DISC_AUTHOR=$(printf '%s' "$decoded" | jq -r '.user.login')
+
+              EXISTING=$(gh issue list --repo "$REPO" --state all --limit 500 --json number,body \
+                --jq "[.[] | select(.body | test(\"discussion #${DISC_NUMBER}\"))] | length" 2>/dev/null || echo "0")
+              if [ "${EXISTING:-0}" -gt 0 ]; then
+                echo "#${DISC_NUMBER}: already has issue, skipping"
+                continue
+              fi
+
+              DISC_BODY=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" --jq '.body // ""')
+              CLEAN_TITLE=$(printf '%s' "$DISC_TITLE" | sed 's/^[^a-zA-Z0-9[({]*//')
+
+              case "${CATEGORY}" in
+                Ideas)    LABELS="enhancement" ;;
+                "Q&A")    LABELS="question" ;;
+                General)  LABELS="" ;;
+                *)        LABELS="" ;;
+              esac
+
+              body_file=$(mktemp)
+              printf '%s' "$DISC_BODY" > "$body_file"
+              AREA_LABELS=$(bash .github/scripts/auto-label-issue.sh "0" "$CLEAN_TITLE" "$body_file" 2>/dev/null || true)
+              rm -f "$body_file"
+
+              if [ -n "$AREA_LABELS" ] && [ "$AREA_LABELS" != "needs-triage" ]; then
+                if [ -n "$LABELS" ]; then LABELS="${LABELS},${AREA_LABELS}"; else LABELS="$AREA_LABELS"; fi
+              fi
+
+              ISSUE_BODY="$(cat <<EOF
+          _Auto-created from discussion #${DISC_NUMBER} by @${DISC_AUTHOR} (${CATEGORY})_
+
+          ---
+
+          ${DISC_BODY}
+
+          ---
+          > Source: ${DISC_URL}
+          EOF
+              )"
+
+              ISSUE_URL=$(gh issue create \
+                --repo "$REPO" \
+                --title "$CLEAN_TITLE" \
+                --body "$ISSUE_BODY" \
+                ${LABELS:+--label "$LABELS"})
+
+              ISSUE_NUMBER=$(printf '%s' "$ISSUE_URL" | grep -oE '[0-9]+$')
+              echo "#${DISC_NUMBER} → issue #${ISSUE_NUMBER}"
+
+              gh api "repos/${REPO}/discussions/${DISC_NUMBER}/comments" \
+                -f body="Tracked as issue #${ISSUE_NUMBER}" --silent
+
+              sleep 2
+            done
