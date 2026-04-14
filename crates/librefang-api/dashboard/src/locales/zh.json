@@ -1043,6 +1043,7 @@
     "title": "对话",
     "neural_terminal": "智能终端",
     "group_standalone": "独立",
+    "hand_coordinator": "协调者",
     "select_agent": "选择智能体",
     "select_agent_desc": "从列表中选择一个智能体以建立通信链路。",
     "transmit_command": "输入消息...",

@@ -17,6 +17,21 @@ export interface GroupedPicker {
   handGroups: HandGroup[];
 }
 
+// A hand instance is "usable" for the chat picker only if it's currently
+// Active, has at least one role→agent mapping, and carries the hand_id /
+// hand_name metadata we need to render its group header. Anything else is
+// dropped so paused / partially-spawned / stripped instances don't surface
+// orphaned agents in the list. (See Q1/Q6 in the design spec.)
+export function isUsableHandInstance(h: HandInstanceItem): boolean {
+  return (
+    (h.status ?? "") === "Active" &&
+    !!h.agent_ids &&
+    Object.keys(h.agent_ids).length > 0 &&
+    h.hand_id !== undefined &&
+    h.hand_name !== undefined
+  );
+}
+
 export function groupedPicker(
   agents: AgentItem[],
   handInstances: HandInstanceItem[] | undefined,
@@ -29,14 +44,7 @@ export function groupedPicker(
     };
   }
 
-  const activeHands = (handInstances ?? []).filter(
-    (h) =>
-      (h.status ?? "") === "Active" &&
-      h.agent_ids &&
-      Object.keys(h.agent_ids).length > 0 &&
-      h.hand_id !== undefined &&
-      h.hand_name !== undefined,
-  );
+  const activeHands = (handInstances ?? []).filter(isUsableHandInstance);
 
   // Build agent_id → { hand metadata, role, isCoordinator } lookup.
   type Membership = {

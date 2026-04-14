@@ -1324,12 +1324,17 @@ pub async fn list_active_hands(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let lang = headers
+    // Split on `,`/`;` to isolate the primary tag, then try the full tag
+    // ("zh-CN") before falling back to the base ("zh") so hand i18n maps with
+    // region codes resolve correctly instead of silently dropping to the
+    // default name.
+    let primary = headers
         .get("accept-language")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(&[',', ';', '-'][..]).next())
-        .unwrap_or("en")
-        .to_string();
+        .and_then(|s| s.split(&[',', ';'][..]).next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "en".to_string());
+    let base = primary.split('-').next().unwrap_or("en").to_string();
 
     let instances = state.kernel.hands().list_instances();
     let items: Vec<serde_json::Value> = instances
@@ -1338,7 +1343,8 @@ pub async fn list_active_hands(
             let def = state.kernel.hands().get_definition(&i.hand_id);
             let hand_name = def.as_ref().map(|d| {
                 d.i18n
-                    .get(&lang)
+                    .get(&primary)
+                    .or_else(|| d.i18n.get(&base))
                     .and_then(|l| l.name.as_deref())
                     .unwrap_or(&d.name)
                     .to_string()

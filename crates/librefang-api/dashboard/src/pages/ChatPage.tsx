@@ -1406,6 +1406,7 @@ export function ChatPage() {
     queryFn: listActiveHands,
     enabled: showHandAgents,
     staleTime: 30000,
+    refetchInterval: 30000,
   });
 
   const sortedAgents = useMemo(
@@ -1519,6 +1520,18 @@ export function ChatPage() {
     queryClient.invalidateQueries({ queryKey: ["agent-sessions", selectedAgentId] });
   }, [selectedAgentId, queryClient]);
 
+  // If the current selection is no longer visible (e.g. hand agents toggled
+  // off while a hand-spawned agent was selected), clear it so the auto-select
+  // effect below picks a new one instead of leaving the chat pane in a broken
+  // state with selectedAgent === undefined.
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    if (agentsQuery.data === undefined) return;
+    if (!agents.some(a => a.id === selectedAgentId)) {
+      setSelectedAgentId("");
+    }
+  }, [agents, selectedAgentId, agentsQuery.data]);
+
   useEffect(() => {
     // Auto-select first running agent
     if (!selectedAgentId && agents.length > 0) {
@@ -1576,7 +1589,7 @@ export function ChatPage() {
         </div>
         {isCoordinator ? (
           <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
-            coordinator
+            {t("chat.hand_coordinator", { defaultValue: "coordinator" })}
           </p>
         ) : (
           <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
@@ -1688,7 +1701,9 @@ export function ChatPage() {
                   {group.agents.map((agent) => (
                     <option key={agent.id} value={agent.id}>
                       {agent.role}
-                      {agent.isCoordinator ? " (coordinator)" : ""}
+                      {agent.isCoordinator
+                        ? ` (${t("chat.hand_coordinator", { defaultValue: "coordinator" })})`
+                        : ""}
                     </option>
                   ))}
                 </optgroup>
