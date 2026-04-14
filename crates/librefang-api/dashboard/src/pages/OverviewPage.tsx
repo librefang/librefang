@@ -266,13 +266,13 @@ export function OverviewPage() {
               </button>
             </div>
             {isLoading ? (
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 {[1, 2].map(i => (
                   <div key={i} className="h-16 rounded-xl bg-gradient-to-r from-main via-surface-hover to-main bg-[length:200%_100%]" style={{ animation: "shimmer 1.5s ease-in-out infinite" }} />
                 ))}
               </div>
             ) : snapshot?.agents && snapshot.agents.length > 0 ? (
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 {snapshot.agents.filter(a => !a.is_hand && !a.name.includes(":")).slice(0, 4).map(agent => (
                   <div
                     key={agent.id}
