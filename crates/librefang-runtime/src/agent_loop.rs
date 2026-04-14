@@ -4608,6 +4608,25 @@ pub async fn run_agent_loop_streaming(
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
+                    // §A — capture owner_notice from notify_owner tool and
+                    // surface it on the live SSE stream so the gateway can
+                    // route it to OWNER_JID without waiting for turn end.
+                    if let Some(ref notice) = executed.result.owner_notice {
+                        pending_owner_notice = Some(match pending_owner_notice.take() {
+                            Some(prev) => format!("{prev}\n\n{notice}"),
+                            None => notice.clone(),
+                        });
+                        if stream_tx
+                            .send(StreamEvent::OwnerNotice {
+                                text: notice.clone(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            warn!(agent = %manifest.name, "Stream consumer disconnected during owner_notice emit");
+                        }
+                    }
+
                     // Layer 2: per-result budget — persist oversized outputs to disk.
                     let budgeted_content = ToolBudgetEnforcer::default().maybe_persist_result(
                         &executed.final_content,
