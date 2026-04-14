@@ -44,6 +44,7 @@ use async_trait::async_trait;
 use librefang_channels::types::SenderContext;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
@@ -10860,8 +10861,23 @@ impl KernelHandle for LibreFangKernel {
     }
 
     async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+        // Resolve `agent_id` as either a UUID (used directly) or an agent
+        // name (looked up via the registry → its UUID). Tasks are stored
+        // under the canonical UUID, so name-based callers used to silently
+        // get zero matches. Issue #2330.
+        let resolved = match librefang_types::agent::AgentId::from_str(agent_id) {
+            Ok(_) => agent_id.to_string(),
+            Err(_) => match self.registry.find_by_name(agent_id) {
+                Some(entry) => entry.id.to_string(),
+                None => {
+                    return Err(format!(
+                        "Task claim failed: agent {agent_id:?} not found by UUID or name"
+                    ));
+                }
+            },
+        };
         self.memory
-            .task_claim(agent_id)
+            .task_claim(&resolved)
             .await
             .map_err(|e| format!("Task claim failed: {e}"))
     }
