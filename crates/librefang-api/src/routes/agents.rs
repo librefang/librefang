@@ -4085,52 +4085,35 @@ pub(crate) static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> =
 #[allow(dead_code)]
 const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
 
-/// Explicit MIME allowlist for `/api/agents/{id}/upload`.
+/// Non-media MIME types also accepted on `/api/agents/{id}/upload` — text
+/// files and PDFs that the agent loop consumes directly. Media types are
+/// sourced from `librefang_types::media::{ALLOWED_IMAGE_TYPES,
+/// ALLOWED_AUDIO_TYPES}` so the upload endpoint, the channel bridge, and
+/// `MediaAttachment::validate()` can never drift.
+const EXTRA_ALLOWED_UPLOAD_TYPES: &[&str] =
+    &["text/plain", "text/markdown", "text/csv", "application/pdf"];
+
+/// Exact-match MIME allowlist for `/api/agents/{id}/upload`.
 ///
-/// Historically this was `["image/", "text/", "application/pdf", "audio/"]`,
-/// which is a **prefix match**: any `image/*` subtype passed, including
-/// `image/svg+xml` (scriptable → XSS / SSRF via `<use xlink:href>`),
-/// `image/x-icon`, `image/tiff`, `image/heic`, and anything else. That
-/// contradicts the SECURITY.md promise of *"Media type whitelist
-/// (png/jpeg/gif/webp)"*. The new list is exact-match, mirrors
-/// `librefang_types::media::ALLOWED_IMAGE_TYPES`, and covers only the
-/// formats the agent loop actually consumes, so a crafted SVG posted via
-/// browser drag-drop or API can no longer land in uploads/.
-const ALLOWED_UPLOAD_CONTENT_TYPES: &[&str] = &[
-    // Images — matches ALLOWED_IMAGE_TYPES exactly
-    "image/png",
-    "image/jpeg",
-    "image/gif",
-    "image/webp",
-    // Audio — used by transcribe/STT paths
-    "audio/mpeg",
-    "audio/wav",
-    "audio/ogg",
-    "audio/mp4",
-    "audio/webm",
-    "audio/x-wav",
-    "audio/flac",
-    // Text + PDF passthrough
-    "text/plain",
-    "text/markdown",
-    "text/csv",
-    "application/pdf",
-];
-
-/// Strip MIME parameters (`; charset=utf-8`) and lowercase before matching.
-fn normalise_upload_mime(ct: &str) -> String {
-    ct.split(';')
-        .next()
-        .unwrap_or(ct)
-        .trim()
-        .to_ascii_lowercase()
-}
-
+/// Historically this was the prefix list `["image/", "text/",
+/// "application/pdf", "audio/"]`, which accepted any `image/*` subtype —
+/// including `image/svg+xml` (scriptable → XSS / SSRF via `<use
+/// xlink:href>`), `image/x-icon`, `image/tiff`, `image/heic` — and every
+/// `text/*` subtype including `text/html` and `text/xml`. That
+/// contradicted the SECURITY.md promise of *"Media type whitelist
+/// (png/jpeg/gif/webp)"*.
+///
+/// The new check is exact-match against the canonical
+/// `librefang_types::media::ALLOWED_IMAGE_TYPES` +
+/// `ALLOWED_AUDIO_TYPES` constants, so the upload endpoint and
+/// `MediaAttachment::validate()` share a single source of truth and
+/// cannot drift.
 fn is_allowed_content_type(ct: &str) -> bool {
-    let base = normalise_upload_mime(ct);
-    ALLOWED_UPLOAD_CONTENT_TYPES
-        .iter()
-        .any(|allowed| *allowed == base)
+    use librefang_types::media::{mime_base, ALLOWED_AUDIO_TYPES, ALLOWED_IMAGE_TYPES};
+    let base = mime_base(ct);
+    ALLOWED_IMAGE_TYPES.contains(&base.as_str())
+        || ALLOWED_AUDIO_TYPES.contains(&base.as_str())
+        || EXTRA_ALLOWED_UPLOAD_TYPES.contains(&base.as_str())
 }
 
 /// POST /api/agents/{id}/upload — Upload a file attachment.
