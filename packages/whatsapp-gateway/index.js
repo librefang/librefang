@@ -2244,8 +2244,8 @@ async function runCatchUpSweep() {
       // Determine if sender is owner or stranger. Mirror the logic used in
       // `messages.upsert`: a LID JID is not a phone number, so accept either
       // a resolved phone-number JID or a known owner LID.
-      const isLidMsgJid = msg.jid && msg.jid.endsWith('@lid');
-      const senderPnJid = msg.phone ? msg.phone.replace(/^\+/, '') + '@s.whatsapp.net' : '';
+      const isLidMsgJid = isLidJid(msg.jid);
+      const senderPnJid = msg.phone ? phoneToJid(msg.phone) : '';
       const isOwner = OWNER_JIDS.size > 0 && (
         (!isLidMsgJid && msg.jid && OWNER_JIDS.has(msg.jid)) ||
         (senderPnJid && OWNER_JIDS.has(senderPnJid)) ||
@@ -2255,7 +2255,7 @@ async function runCatchUpSweep() {
       // Never re-forward group messages — we cannot tell if the bot was
       // mentioned, so replaying them violates group_policy and can leak
       // internal text (rate-limit errors, recovery prefixes) into groups.
-      const isCatchupGroup = msg.jid && msg.jid.endsWith('@g.us');
+      const isCatchupGroup = isGroupJid(msg.jid);
       if (isCatchupGroup) {
         dbMarkProcessed(msg.id, 1);
         console.log(`[gateway][catchup] Skipping group message ${msg.id} (${msg.jid}) — group catchup disabled`);
