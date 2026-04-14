@@ -29,6 +29,9 @@ const {
   resolveLidProactively,
   checkHeartbeat,
   computeBackoffDelay,
+  echoTracker,
+  ECHO_TRACKER_ENABLED,
+  EchoTracker,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -640,6 +643,86 @@ describe('ST-02 computeBackoffDelay', () => {
     assert.match(src, /DisconnectReason\.forbidden/);
     // New backoff call site is present.
     assert.match(src, /computeBackoffDelay\(reconnectAttempts\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3 §A — Echo tracker wiring (EB-01)
+// ---------------------------------------------------------------------------
+describe('echo tracker wiring (Phase 3 §A)', () => {
+  it('exports tracker handle, ECHO_TRACKER_ENABLED, and EchoTracker class', () => {
+    assert.ok(echoTracker, 'echoTracker should be exported');
+    assert.equal(typeof echoTracker.track, 'function');
+    assert.equal(typeof echoTracker.isEcho, 'function');
+    assert.equal(typeof echoTracker.size, 'function');
+    assert.equal(typeof echoTracker.reset, 'function');
+    assert.equal(typeof EchoTracker, 'function');
+    assert.equal(typeof EchoTracker.normalize, 'function');
+    // Default flag state (no env var set in test env)
+    assert.equal(typeof ECHO_TRACKER_ENABLED, 'boolean');
+  });
+
+  it('integration: outbound track then inbound echo would drop (raw body)', () => {
+    echoTracker.reset();
+    // Simulate the outbound wire-in (every sock.sendMessage({ text }) is followed by track)
+    echoTracker.track('ciao');
+    // Simulate the inbound gate condition with the same body
+    assert.equal(echoTracker.isEcho('ciao'), true,
+      'inbound echo of just-sent message must be detected');
+    assert.equal(echoTracker.size(), 1);
+  });
+
+  it('integration: normalization works through wiring (Hello. -> hello)', () => {
+    echoTracker.reset();
+    echoTracker.track('Hello.');
+    assert.equal(echoTracker.isEcho('hello'), true,
+      'normalized echo (case + trailing punct) must drop');
+    assert.equal(echoTracker.isEcho('HELLO!'), true);
+  });
+
+  it('integration: unrelated inbound is NOT dropped (no false positive)', () => {
+    echoTracker.reset();
+    echoTracker.track('ciao');
+    assert.equal(echoTracker.isEcho('something else'), false,
+      'unrelated message must pass through (forwardToLibreFang would be called)');
+    // tracker unchanged for non-matching probe
+    assert.equal(echoTracker.size(), 1);
+  });
+
+  it('flag gate: when LIBREFANG_ECHO_TRACKER=off, gate is bypassed', () => {
+    // ECHO_TRACKER_ENABLED is captured at module load. We assert the source
+    // shape so a future regression (gating without flag check) is caught.
+    const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'index.js'), 'utf8');
+    // The gate must be wrapped in an ECHO_TRACKER_ENABLED check.
+    assert.match(src,
+      /if\s*\(\s*ECHO_TRACKER_ENABLED\s*&&\s*messageText\s*&&\s*echoTracker\.isEcho/,
+      'inbound gate must be flag-gated by ECHO_TRACKER_ENABLED');
+    // Each track call must also be flag-gated.
+    const trackCalls = src.match(/echoTracker\.track\(/g) || [];
+    const flaggedTrackCalls = src.match(/if\s*\(\s*ECHO_TRACKER_ENABLED\s*\)\s*echoTracker\.track\(/g) || [];
+    assert.equal(trackCalls.length, flaggedTrackCalls.length,
+      `every echoTracker.track() must be flag-gated (found ${trackCalls.length} calls, ${flaggedTrackCalls.length} flagged)`);
+    // Default ON: env unset → enabled.
+    assert.equal(process.env.LIBREFANG_ECHO_TRACKER, undefined);
+    assert.equal(ECHO_TRACKER_ENABLED, true);
+  });
+
+  it('echo_drop log structure is correct shape (would emit on drop)', () => {
+    // Verify the source emits the spec'd log structure when isEcho fires.
+    const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'index.js'), 'utf8');
+    assert.match(src, /event:\s*'echo_drop'/);
+    assert.match(src, /body_excerpt:/);
+    assert.match(src, /tracker_size:/);
+    assert.match(src, /elapsed_ms_since_last_sent:/);
+    // Body excerpt must be capped at 80 chars.
+    assert.match(src, /\.slice\(0,\s*80\)/);
+  });
+
+  it('outbound wire-in covers all 7 text sendMessage sites', () => {
+    const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'index.js'), 'utf8');
+    const trackCount = (src.match(/echoTracker\.track\(/g) || []).length;
+    assert.equal(trackCount, 7,
+      `expected 7 echoTracker.track() calls (one per outbound text site), got ${trackCount}`);
   });
 });
 

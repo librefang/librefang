@@ -7,6 +7,17 @@ const path = require('node:path');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const toml = require('toml');
+const { EchoTracker } = require('./lib/echo-tracker');
+
+// ---------------------------------------------------------------------------
+// Echo tracker (EB-01, Phase 3 §A)
+// ---------------------------------------------------------------------------
+// Process-local LRU that records every outbound text sent via
+// `sock.sendMessage({ text })`. On inbound `messages.upsert` we consult
+// `echoTracker.isEcho(...)` and drop the self-loop echo before forwarding to
+// librefang. Flag `LIBREFANG_ECHO_TRACKER=off` disables end-to-end (no-op).
+const ECHO_TRACKER_ENABLED = process.env.LIBREFANG_ECHO_TRACKER !== 'off';
+const echoTracker = new EchoTracker(100);
 
 // ---------------------------------------------------------------------------
 // SQLite Message Store (better-sqlite3)
@@ -763,6 +774,7 @@ async function executeRelay(relay) {
 
   try {
     const sentRelay = await sock.sendMessage(jid, { text: markdownToWhatsApp(message) });
+    if (ECHO_TRACKER_ENABLED) echoTracker.track(message);
 
     // F4: Audit log
     console.log(`[gateway] RELAY SENT | to: ${convo.pushName} (${convo.phone}) [${jid}] | message: "${message.substring(0, 100)}" | timestamp: ${new Date().toISOString()}`);
@@ -1261,6 +1273,21 @@ async function startConnection() {
 
       if (!messageText && attachments.length === 0) continue;
 
+      // --- Phase 3 §A: Echo tracker gate (EB-01) ---
+      // Drop messages whose body matches a recently-sent outbound text
+      // (self-loop prevention when WhatsApp reflects our own message back
+      // via sync/cross-device mirror). Flag `LIBREFANG_ECHO_TRACKER=off`
+      // disables this gate. Only checks text bodies (never attachments).
+      if (ECHO_TRACKER_ENABLED && messageText && echoTracker.isEcho(messageText)) {
+        console.log(JSON.stringify({
+          event: 'echo_drop',
+          body_excerpt: EchoTracker.normalize(messageText).slice(0, 80),
+          tracker_size: echoTracker.size(),
+          elapsed_ms_since_last_sent: echoTracker.elapsedSinceLastSent(),
+        }));
+        continue;
+      }
+
       // --- FASE 2: Reply context (quotedMessage) ---
       const contextSources = [
         innerMsg.extendedTextMessage?.contextInfo,
@@ -1371,6 +1398,7 @@ async function startConnection() {
           } else {
             await sock.sendMessage(sender, { text: formatted, edit: streamMsgKey });
           }
+          if (ECHO_TRACKER_ENABLED) echoTracker.track(cleaned);
         };
 
         // Phase 2 §C — fetch participant roster for groups (cached 5min).
@@ -1390,10 +1418,13 @@ async function startConnection() {
           if (streamMsgKey && jid === sender) {
             // Edit the message we've been streaming
             await sock.sendMessage(jid, { text: finalText, edit: streamMsgKey });
+            if (ECHO_TRACKER_ENABLED) echoTracker.track(finalText);
             return streamMsgKey;
           }
           // No streaming happened (fallback path) — send new message
-          return (await sock.sendMessage(jid, { text: finalText }))?.key;
+          const sentKey = (await sock.sendMessage(jid, { text: finalText }))?.key;
+          if (ECHO_TRACKER_ENABLED) echoTracker.track(finalText);
+          return sentKey;
         };
 
         if (response && sock) {
@@ -1429,6 +1460,7 @@ async function startConnection() {
 
               // Send notification to primary owner
               await sock.sendMessage(OWNER_JID, { text: ownerNotif });
+              if (ECHO_TRACKER_ENABLED) echoTracker.track(ownerNotif);
               console.log(`[gateway] NOTIFY_OWNER sent for ${pushName}: ${notif.reason}`);
             }
 
@@ -2228,6 +2260,7 @@ async function runCatchUpSweep() {
         try {
           const formatted = markdownToWhatsApp(response);
           await sock.sendMessage(msg.jid, { text: formatted });
+          if (ECHO_TRACKER_ENABLED) echoTracker.track(response);
           dbSaveMessage({ id: randomUUID(), jid: msg.jid, senderJid: ownJid, pushName: null, phone: msg.phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
         } catch (sendErr) {
           console.warn(`[gateway][catchup] Could not send catch-up reply to ${msg.jid}: ${sendErr.message}`);
@@ -2274,6 +2307,7 @@ async function sendMessage(to, text) {
 
   const formatted = markdownToWhatsApp(text);
   const sent = await sock.sendMessage(jid, { text: formatted });
+  if (ECHO_TRACKER_ENABLED) echoTracker.track(text);
   // Save outbound message to DB (store formatted text to match what was delivered)
   dbSaveMessage({
     id: sent?.key?.id || randomUUID(),
@@ -2703,4 +2737,8 @@ module.exports = {
   invalidateGroupRoster,
   groupMetadataCache,
   GROUP_METADATA_TTL_MS,
+  // Phase 3 §A — echo tracker handle (testing + introspection)
+  echoTracker,
+  ECHO_TRACKER_ENABLED,
+  EchoTracker,
 };
