@@ -153,7 +153,7 @@ jobs:
             const allCheckRuns = await github.paginate(
               github.rest.checks.listForRef,
               { owner: context.repo.owner, repo: context.repo.repo, ref: suite.head_sha, per_page: 100 },
-              (response) => response.data,
+              (response) => response.data.check_runs,
             );
 
             const hasFailure = allCheckRuns.some(
