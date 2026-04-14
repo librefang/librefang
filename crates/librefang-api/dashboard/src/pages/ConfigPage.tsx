@@ -74,9 +74,11 @@ function ConfigFieldInput({
     const strOptions = options.map((o) => (typeof o === "string" ? o : o.id));
     // Backend may return enum values in different casing (e.g. "Stable" vs "stable")
     const rawValue = String(value ?? "");
-    const matched = strOptions.find((o) => o.toLowerCase() === rawValue.toLowerCase()) ?? "";
+    const matched = strOptions.find((o) => o.toLowerCase() === rawValue.toLowerCase()) ?? rawValue;
     return (
       <select value={matched} onChange={(e) => onChange(e.target.value)} className={inputClass}>
+        {/* Show current value as option if it doesn't match any schema option */}
+        {matched && !strOptions.includes(matched) && <option value={matched}>{matched}</option>}
         {strOptions.map((o) => <option key={o} value={o}>{o}</option>)}
       </select>
     );
@@ -144,6 +146,9 @@ function SectionCard({
       const reloadFailed = data.status !== "ok" && data.status !== "saved";
       if (reloadFailed) {
         setSaveStatus({ path: variables.path, ok: false, msg: t("config.saved_reload_failed", "Saved but reload failed") });
+        // Value is persisted to disk even though reload failed — clear pending
+        setPendingChanges((p) => { const next = { ...p }; delete next[variables.path]; return next; });
+        queryClient.invalidateQueries({ queryKey: ["config", "full"] });
         setTimeout(() => setSaveStatus(null), 5000);
         return;
       }
@@ -151,7 +156,7 @@ function SectionCard({
       setSaveStatus({ path: variables.path, ok: true, msg });
       // Only clear pending if user hasn't made a newer edit while save was in-flight
       setPendingChanges((p) => {
-        if (!(variables.path in p) || p[variables.path] === variables.value) {
+        if (!(variables.path in p) || JSON.stringify(p[variables.path]) === JSON.stringify(variables.value)) {
           const next = { ...p }; delete next[variables.path]; return next;
         }
         return p; // newer edit exists, keep it
@@ -271,7 +276,7 @@ export function ConfigPage({ category }: { category: string }) {
   if (schemaQuery.isLoading || configQuery.isLoading) {
     return (
       <div className="flex flex-col gap-6 p-6">
-        <PageHeader title={categoryTitle} icon={Settings} description={t("config.desc", "System configuration editor")} />
+        <PageHeader badge={t("nav.config")} title={categoryTitle} subtitle={t("config.desc", "System configuration editor")} icon={<Settings className="h-4 w-4" />} />
         <div className="rounded-2xl border border-border-subtle bg-surface p-8 text-center text-text-dim text-sm">
           {t("common.loading", "Loading...")}
         </div>
@@ -282,7 +287,7 @@ export function ConfigPage({ category }: { category: string }) {
   return (
     <div className="flex flex-col gap-6 p-6">
       <div className="flex items-center justify-between">
-        <PageHeader title={categoryTitle} icon={Settings} description={t("config.desc", "System configuration editor")} />
+        <PageHeader badge={t("nav.config")} title={categoryTitle} subtitle={t("config.desc", "System configuration editor")} icon={<Settings className="h-4 w-4" />} />
         <Button variant="secondary" size="sm" onClick={() => reloadMutation.mutate()} isLoading={reloadMutation.isPending}>
           <RefreshCw className="w-3 h-3 mr-1.5" />
           {t("config.reload", "Reload")}
