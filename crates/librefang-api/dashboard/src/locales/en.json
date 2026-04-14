@@ -1648,9 +1648,12 @@
     "username_placeholder": "Enter username...",
     "password_placeholder": "Enter password...",
     "submit": "Authenticate",
+    "verify_totp": "Verify",
+    "totp_prompt": "Enter the 6-digit code from your authenticator app.",
     "invalid": "Authentication failed. Please try again.",
     "invalid_api_key": "Invalid API key. Please try again.",
-    "invalid_credentials": "Invalid username or password. Please try again."
+    "invalid_credentials": "Invalid username or password. Please try again.",
+    "invalid_totp": "Invalid TOTP code. Please try again."
   },
   "network": {
     "section": "OFP Network",

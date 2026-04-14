@@ -17,8 +17,10 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   const [authMethod, setAuthMethod] = useState<"credentials" | "api_key">(
     mode === "api_key" ? "api_key" : "credentials",
   );
-  const [errorKey, setErrorKey] = useState<"invalid_api_key" | "invalid_credentials" | null>(null);
+  const [errorKey, setErrorKey] = useState<"invalid_api_key" | "invalid_credentials" | "invalid_totp" | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [totpRequired, setTotpRequired] = useState(false);
+  const [totpCode, setTotpCode] = useState("");
 
   useEffect(() => {
     setAuthMethod(mode === "api_key" ? "api_key" : "credentials");
@@ -55,20 +57,36 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
     setErrorKey(null);
 
     try {
+      if (totpRequired) {
+        if (!totpCode || totpCode.length !== 6) {
+          setErrorKey("invalid_totp");
+          return;
+        }
+        const result = await dashboardLogin(username.trim(), password, totpCode);
+        if (!result.ok) {
+          setErrorKey("invalid_totp");
+          return;
+        }
+        onAuthenticated();
+        return;
+      }
+
       if (!username.trim() || !password) {
         setErrorKey("invalid_credentials");
         return;
       }
 
       const result = await dashboardLogin(username.trim(), password);
+      if (result.requires_totp) {
+        setTotpRequired(true);
+        setTotpCode("");
+        return;
+      }
       if (!result.ok) {
         setErrorKey("invalid_credentials");
         return;
       }
 
-      // The login response already proves the credential path succeeded.
-      // Avoid immediately probing session-backed auth before the new session
-      // is fully visible server-side.
       onAuthenticated();
     } finally {
       setSubmitting(false);
@@ -112,7 +130,26 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             </div>
           )}
           <form onSubmit={isCredentials ? handleCredentialsSubmit : handleApiKeySubmit} className="space-y-4">
-            {isCredentials ? (
+            {isCredentials && totpRequired ? (
+              <>
+                <p className="text-sm text-text-dim text-center">{t("auth.totp_prompt")}</p>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={totpCode}
+                  onChange={(e) => { setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6)); setErrorKey(null); }}
+                  placeholder="000000"
+                  autoFocus
+                  className={`w-full rounded-xl border px-4 py-3 text-center text-2xl font-mono tracking-[0.5em] focus:ring-2 outline-none transition-colors ${
+                    errorKey === "invalid_totp"
+                      ? "border-error focus:border-error focus:ring-error/10"
+                      : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+                  }`}
+                />
+              </>
+            ) : isCredentials ? (
               <>
                 <input
                   type="text"
@@ -157,10 +194,10 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             )}
             <button
               type="submit"
-              disabled={submitting || (isCredentials ? !username.trim() || !password : !key.trim())}
+              disabled={submitting || (isCredentials ? (totpRequired ? totpCode.length !== 6 : !username.trim() || !password) : !key.trim())}
               className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-colors shadow-lg shadow-brand/20"
             >
-              {t("auth.submit")}
+              {totpRequired ? t("auth.verify_totp") : t("auth.submit")}
             </button>
           </form>
         </div>

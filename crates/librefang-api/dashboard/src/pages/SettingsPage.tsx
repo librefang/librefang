@@ -177,7 +177,6 @@ function TotpSection() {
   const statusQuery = useQuery({
     queryKey: ["totp", "status"],
     queryFn: totpStatus,
-    staleTime: 30_000,
   });
 
   const status = statusQuery.data;

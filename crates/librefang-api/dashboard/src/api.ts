@@ -2152,12 +2152,14 @@ export async function getDashboardUsername(): Promise<string> {
   }
 }
 
-export async function dashboardLogin(username: string, password: string): Promise<{ ok: boolean; token?: string; error?: string }> {
+export async function dashboardLogin(username: string, password: string, totpCode?: string): Promise<{ ok: boolean; token?: string; error?: string; requires_totp?: boolean }> {
   try {
+    const body: Record<string, string> = { username, password };
+    if (totpCode) body.totp_code = totpCode;
     const resp = await fetch("/api/auth/dashboard-login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(body),
     });
     const data = await resp.json();
     if (data.ok && data.token) {

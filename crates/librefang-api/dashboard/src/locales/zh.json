@@ -1623,9 +1623,12 @@
     "username_placeholder": "输入用户名...",
     "password_placeholder": "输入密码...",
     "submit": "认证",
+    "verify_totp": "验证",
+    "totp_prompt": "请输入验证器应用中的 6 位动态码。",
     "invalid": "认证失败，请重试。",
     "invalid_api_key": "无效的 API Key，请重试。",
-    "invalid_credentials": "用户名或密码无效，请重试。"
+    "invalid_credentials": "用户名或密码无效，请重试。",
+    "invalid_totp": "动态码无效，请重试。"
   },
   "network": {
     "section": "OFP 网络",
