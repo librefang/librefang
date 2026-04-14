@@ -1,6 +1,5 @@
 import { lazy, Suspense } from "react";
 import { Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
-import { createHashHistory } from "@tanstack/history";
 import { App } from "./App";
 
 // Lazy-loaded pages — each becomes a separate chunk
@@ -306,7 +305,7 @@ const routeTree = rootRoute.addChildren([
 
 export const router = createRouter({
   routeTree,
-  history: createHashHistory(),
+  basepath: "/dashboard",
   defaultPreload: "intent",
 });
 
