@@ -7,12 +7,23 @@
 use super::AppState;
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use librefang_kernel::mcp_oauth_provider::KernelOAuthProvider;
 use librefang_runtime::mcp_oauth::{self, McpAuthState, OAuthTokens};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
+
+fn callback_text(body: String) -> Response {
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+}
+
+fn auth_failed(detail: impl std::fmt::Display) -> Response {
+    callback_text(format!(
+        "Authorization Failed\n\n{detail}\n\nYou can close this tab."
+    ))
+}
 
 /// GET /api/mcp/servers/{name}/auth/status
 ///
@@ -320,6 +331,11 @@ pub async fn auth_start(
     let (pkce_verifier, pkce_challenge) = mcp_oauth::generate_pkce();
     let pkce_state = mcp_oauth::generate_state();
 
+    // Wipe any abandoned prior-flow state before storing new PKCE values.
+    for field in &["pkce_verifier", "pkce_state", "redirect_uri"] {
+        let _ = provider.vault_remove(&KernelOAuthProvider::vault_key(&server_url, field));
+    }
+
     // Store PKCE state in vault for the callback to retrieve
     let store = |field: &str, value: &str| -> Result<(), String> {
         provider.vault_set(&KernelOAuthProvider::vault_key(&server_url, field), value)
@@ -410,7 +426,7 @@ pub async fn auth_callback(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     axum::extract::Query(params): axum::extract::Query<AuthCallbackParams>,
-) -> impl IntoResponse {
+) -> Response {
     // Handle error response from authorization server
     if let Some(ref error) = params.error {
         let desc = params.error_description.as_deref().unwrap_or("");
@@ -421,40 +437,20 @@ pub async fn auth_callback(
                 message: format!("{error}: {desc}"),
             },
         );
-        return axum::response::Html(format!(
-            "<html><body>\
-             <h2>Authorization Failed</h2>\
-             <p>{error}: {desc}</p>\
-             <p>You can close this tab.</p>\
-             </body></html>"
-        ));
+        return auth_failed(format!("{error}: {desc}"));
     }
 
     let code = match params.code {
         Some(ref c) => c.clone(),
         None => {
-            return axum::response::Html(
-                "<html><body>\
-                 <h2>Authorization Failed</h2>\
-                 <p>Missing authorization code.</p>\
-                 <p>You can close this tab.</p>\
-                 </body></html>"
-                    .to_string(),
-            );
+            return auth_failed("Missing authorization code.");
         }
     };
 
     let received_state = match params.state {
         Some(ref s) => s.clone(),
         None => {
-            return axum::response::Html(
-                "<html><body>\
-                 <h2>Authorization Failed</h2>\
-                 <p>Missing state parameter.</p>\
-                 <p>You can close this tab.</p>\
-                 </body></html>"
-                    .to_string(),
-            );
+            return auth_failed("Missing state parameter.");
         }
     };
 
@@ -465,25 +461,11 @@ pub async fn auth_callback(
             Some(librefang_types::config::McpTransportEntry::Http { url }) => url.clone(),
             Some(librefang_types::config::McpTransportEntry::Sse { url }) => url.clone(),
             _ => {
-                return axum::response::Html(
-                    "<html><body>\
-                     <h2>Authorization Failed</h2>\
-                     <p>Server has no HTTP/SSE transport.</p>\
-                     <p>You can close this tab.</p>\
-                     </body></html>"
-                        .to_string(),
-                );
+                return auth_failed("Server has no HTTP/SSE transport.");
             }
         },
         None => {
-            return axum::response::Html(format!(
-                "<html><body>\
-                 <h2>Authorization Failed</h2>\
-                 <p>MCP server '{}' not found.</p>\
-                 <p>You can close this tab.</p>\
-                 </body></html>",
-                name
-            ));
+            return auth_failed(format!("MCP server '{name}' not found."));
         }
     };
 
@@ -501,20 +483,19 @@ pub async fn auth_callback(
                 "PKCE state not found in vault — vault may not be initialized or \
                  LIBREFANG_VAULT_KEY not set"
             );
-            return axum::response::Html(
-                "<html><body>\
-                 <h2>Authorization Failed</h2>\
-                 <p>No pending auth flow found (PKCE state missing from vault).</p>\
-                 <p>Check that LIBREFANG_VAULT_KEY is set in your environment.</p>\
-                 <p>You can close this tab.</p>\
-                 </body></html>"
-                    .to_string(),
+            return auth_failed(
+                "No pending auth flow found (PKCE state missing from vault). \
+                 Check that LIBREFANG_VAULT_KEY is set in your environment.",
             );
         }
     };
 
-    // Validate state
-    if received_state != stored_state {
+    // Validate state using constant-time comparison to prevent timing attacks.
+    let received_bytes = received_state.as_bytes();
+    let stored_bytes = stored_state.as_bytes();
+    let states_match = received_bytes.len() == stored_bytes.len()
+        && bool::from(received_bytes.ct_eq(stored_bytes));
+    if !states_match {
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
         auth_states.insert(
             name.clone(),
@@ -522,46 +503,33 @@ pub async fn auth_callback(
                 message: "OAuth state mismatch - possible CSRF".to_string(),
             },
         );
-        return axum::response::Html(
-            "<html><body>\
-             <h2>Authorization Failed</h2>\
-             <p>State parameter mismatch. This may indicate a CSRF attack.</p>\
-             <p>You can close this tab.</p>\
-             </body></html>"
-                .to_string(),
-        );
+        return auth_failed("State parameter mismatch. This may indicate a CSRF attack.");
     }
 
     let pkce_verifier = match load("pkce_verifier") {
         Some(v) => v,
         None => {
-            return axum::response::Html(
-                "<html><body>\
-                 <h2>Authorization Failed</h2>\
-                 <p>PKCE verifier missing from vault.</p>\
-                 <p>You can close this tab.</p>\
-                 </body></html>"
-                    .to_string(),
-            );
+            return auth_failed("PKCE verifier missing from vault.");
         }
     };
 
     let token_endpoint = match load("token_endpoint") {
         Some(t) => t,
         None => {
-            return axum::response::Html(
-                "<html><body>\
-                 <h2>Authorization Failed</h2>\
-                 <p>Token endpoint missing from vault.</p>\
-                 <p>You can close this tab.</p>\
-                 </body></html>"
-                    .to_string(),
-            );
+            return auth_failed("Token endpoint missing from vault.");
         }
     };
 
     let client_id = load("client_id");
-    let redirect_uri = load("redirect_uri").unwrap_or_default();
+    let redirect_uri = match load("redirect_uri") {
+        Some(r) if !r.is_empty() => r,
+        _ => {
+            return auth_failed(
+                "Redirect URI missing from vault — auth flow state was lost. \
+                 Please retry from the dashboard.",
+            );
+        }
+    };
 
     // Exchange authorization code for tokens
     let http_client = reqwest::Client::new();
@@ -591,20 +559,16 @@ pub async fn auth_callback(
                     message: msg.clone(),
                 },
             );
-            return axum::response::Html(format!(
-                "<html><body>\
-                 <h2>Authorization Failed</h2>\
-                 <p>{msg}</p>\
-                 <p>You can close this tab.</p>\
-                 </body></html>"
-            ));
+            return auth_failed(msg);
         }
     };
 
     if !token_resp.status().is_success() {
         let status = token_resp.status();
-        let body = token_resp.text().await.unwrap_or_default();
-        let msg = format!("Token exchange failed (HTTP {status}): {body}");
+        let body_raw = token_resp.text().await.unwrap_or_default();
+        // Truncate to guard against a malicious server sending a huge payload.
+        let body_preview: String = body_raw.chars().take(500).collect();
+        let msg = format!("Token exchange failed (HTTP {status}): {body_preview}");
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
         auth_states.insert(
             name.clone(),
@@ -612,13 +576,7 @@ pub async fn auth_callback(
                 message: msg.clone(),
             },
         );
-        return axum::response::Html(format!(
-            "<html><body>\
-             <h2>Authorization Failed</h2>\
-             <p>{msg}</p>\
-             <p>You can close this tab.</p>\
-             </body></html>"
-        ));
+        return auth_failed(msg);
     }
 
     let body = match token_resp.text().await {
@@ -632,20 +590,16 @@ pub async fn auth_callback(
                     message: msg.clone(),
                 },
             );
-            return axum::response::Html(format!(
-                "<html><body>\
-                 <h2>Authorization Failed</h2>\
-                 <p>{msg}</p>\
-                 <p>You can close this tab.</p>\
-                 </body></html>"
-            ));
+            return auth_failed(msg);
         }
     };
 
     let tokens: OAuthTokens = match serde_json::from_str(&body) {
         Ok(t) => t,
         Err(e) => {
-            let msg = format!("Failed to parse token response: {e}. Body: {body}");
+            // Truncate body preview to guard against a malicious server sending a huge payload.
+            let body_preview: String = body.chars().take(500).collect();
+            let msg = format!("Failed to parse token response: {e}. Body: {body_preview}");
             let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
             auth_states.insert(
                 name.clone(),
@@ -653,13 +607,7 @@ pub async fn auth_callback(
                     message: msg.clone(),
                 },
             );
-            return axum::response::Html(format!(
-                "<html><body>\
-                 <h2>Authorization Failed</h2>\
-                 <p>{msg}</p>\
-                 <p>You can close this tab.</p>\
-                 </body></html>"
-            ));
+            return auth_failed(msg);
         }
     };
 
@@ -674,31 +622,15 @@ pub async fn auth_callback(
         let _ = provider.vault_remove(&KernelOAuthProvider::vault_key(&server_url, field));
     }
 
-    // Update auth state to Authorized
-    {
-        let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
-        auth_states.insert(
-            name.clone(),
-            McpAuthState::Authorized {
-                expires_at: None,
-                tokens: None,
-            },
-        );
-    }
-
     // Retry the MCP connection now that we have tokens.
-    // Await inline so the connection is established before the response,
-    // avoiding the brief "Authorized but Disconnected" state in the dashboard.
+    // Awaited inline (blocks the browser tab up to the kernel's 60s tool-discovery timeout)
+    // to avoid a transient "Authorized but Disconnected" state in the dashboard —
+    // the UX cost is worth the state consistency.
+    // The kernel's retry_mcp_connection is the single source of truth for setting
+    // Authorized (on Ok) or Error (on Err) in mcp_auth_states.
     state.kernel.retry_mcp_connection(&name).await;
 
-    axum::response::Html(
-        "<html><body>\
-         <h2>Authorization Complete</h2>\
-         <p>You can close this tab.</p>\
-         <script>window.close()</script>\
-         </body></html>"
-            .to_string(),
-    )
+    callback_text("Authorization Complete\n\nYou can close this tab.".to_string())
 }
 
 /// DELETE /api/mcp/servers/{name}/auth/revoke
@@ -764,6 +696,7 @@ pub async fn auth_revoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use axum::http::{HeaderName, HeaderValue};
 
     fn hdrs(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -778,6 +711,59 @@ mod tests {
     }
 
     const LISTEN: &str = "0.0.0.0:4545";
+
+    /// Helper: extract the Content-Type header value from a Response as a String.
+    fn content_type(resp: &Response) -> String {
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn auth_failed_sets_plain_text_content_type() {
+        let resp = auth_failed("some error");
+        assert_eq!(
+            content_type(&resp),
+            "text/plain; charset=utf-8",
+            "auth_failed must return text/plain, not HTML"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_callback_error_param_is_not_html() {
+        // Simulate a crafted XSS payload in the error detail.
+        // The detail passes through as plain text — no HTML parsing/execution,
+        // because the Content-Type is text/plain, not text/html.
+        let payload = "<script>alert(1)</script>";
+        let resp = auth_failed(payload);
+
+        // Content-Type must be text/plain — this is the key XSS mitigation.
+        assert_eq!(
+            content_type(&resp),
+            "text/plain; charset=utf-8",
+            "Content-Type must be text/plain, not text/html"
+        );
+
+        // The body must NOT be wrapped in HTML tags — confirm no <html>/<body> shell.
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(
+            !body_str.contains("<html"),
+            "Body must not contain HTML wrapper, got: {body_str}"
+        );
+        assert!(
+            !body_str.contains("<body"),
+            "Body must not contain HTML wrapper, got: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_text_sets_plain_text_content_type() {
+        let resp = callback_text("Hello".to_string());
+        assert_eq!(content_type(&resp), "text/plain; charset=utf-8");
+    }
 
     #[test]
     fn spoofed_host_falls_back_to_loopback_when_allowlist_empty() {

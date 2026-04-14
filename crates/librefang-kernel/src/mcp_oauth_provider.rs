@@ -12,6 +12,20 @@ use tracing::{debug, warn};
 /// Vault key prefix for MCP OAuth tokens.
 const VAULT_PREFIX: &str = "mcp_oauth";
 
+/// All vault fields stored per MCP server under the mcp_oauth namespace.
+/// Kept in sync with every `store`/`vault_set` call in auth_start, store_tokens,
+/// and try_refresh so that `clear_tokens` is exhaustive by construction.
+const ALL_VAULT_FIELDS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "expires_at",
+    "token_endpoint",
+    "client_id",
+    "pkce_verifier",
+    "pkce_state",
+    "redirect_uri",
+];
+
 /// OAuth provider backed by the librefang encrypted credential vault.
 ///
 /// Each instance is stateless — it opens and unlocks the vault on every
@@ -38,7 +52,13 @@ impl KernelOAuthProvider {
     pub fn vault_get(&self, key: &str) -> Option<String> {
         let vault_path = self.home_dir.join("vault.enc");
         let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
-        if vault.unlock().is_err() {
+        if let Err(e) = vault.unlock() {
+            tracing::warn!(
+                error = %e,
+                key = %key,
+                "MCP OAuth vault_get: unlock failed — returning None. \
+                 Check that LIBREFANG_VAULT_KEY is set."
+            );
             return None;
         }
         vault.get(key).map(|s| s.to_string())
@@ -236,17 +256,20 @@ impl McpOAuthProvider for KernelOAuthProvider {
     }
 
     async fn clear_tokens(&self, server_url: &str) -> Result<(), String> {
-        for field in &[
-            "access_token",
-            "refresh_token",
-            "expires_at",
-            "token_endpoint",
-            "client_id",
-        ] {
+        for field in ALL_VAULT_FIELDS {
             let _ = self.vault_remove(&Self::vault_key(server_url, field));
         }
         debug!(server = %server_url, "MCP OAuth tokens cleared from vault");
         Ok(())
+    }
+}
+
+impl KernelOAuthProvider {
+    /// Returns the canonical list of vault fields cleared by `clear_tokens`.
+    /// Exposed for tests to assert exhaustiveness without a live vault.
+    #[cfg(test)]
+    pub(crate) fn clear_token_fields() -> &'static [&'static str] {
+        ALL_VAULT_FIELDS
     }
 }
 
@@ -269,17 +292,8 @@ mod tests {
     #[test]
     fn vault_key_all_fields_namespaced() {
         let url = "https://mcp.notion.com/mcp";
-        // All fields that should be cleaned up on delete
-        for field in &[
-            "access_token",
-            "refresh_token",
-            "expires_at",
-            "token_endpoint",
-            "client_id",
-            "pkce_verifier",
-            "pkce_state",
-            "redirect_uri",
-        ] {
+        // All fields that should be cleaned up on delete — driven by ALL_VAULT_FIELDS
+        for field in ALL_VAULT_FIELDS {
             let key = KernelOAuthProvider::vault_key(url, field);
             assert!(
                 key.starts_with("mcp_oauth:"),
@@ -311,30 +325,31 @@ mod tests {
 
     #[test]
     fn clear_tokens_covers_all_stored_fields() {
-        // This test verifies that clear_tokens removes every field that
-        // store_tokens or auth_start might store. If a new field is added
-        // to store_tokens/auth_start but not to clear_tokens, this test
-        // should be updated.
-        let stored_fields: &[&str] = &[
+        // Verifies that ALL_VAULT_FIELDS (used by clear_tokens) covers every field
+        // that store_tokens or auth_start might write. If a new field is added to
+        // those functions, add it to ALL_VAULT_FIELDS and this assertion will pass;
+        // if it's forgotten in ALL_VAULT_FIELDS, this test will fail.
+        let fields = KernelOAuthProvider::clear_token_fields();
+        for expected in &[
             "access_token",
             "refresh_token",
             "expires_at",
             "token_endpoint",
             "client_id",
-        ];
-        let cleared_fields: &[&str] = &[
-            "access_token",
-            "refresh_token",
-            "expires_at",
-            "token_endpoint",
-            "client_id",
-        ];
-        for field in stored_fields {
+            "pkce_verifier",
+            "pkce_state",
+            "redirect_uri",
+        ] {
             assert!(
-                cleared_fields.contains(field),
-                "Field '{}' is stored by store_tokens but not cleared by clear_tokens",
-                field
+                fields.contains(expected),
+                "ALL_VAULT_FIELDS is missing '{}' — clear_tokens won't wipe it",
+                expected
             );
         }
+        assert_eq!(
+            fields.len(),
+            8,
+            "Unexpected field count in ALL_VAULT_FIELDS — update this assertion if new fields are intentionally added"
+        );
     }
 }

@@ -9162,6 +9162,12 @@ system_prompt = "You are a helpful assistant."
                 );
                 self.extension_health
                     .report_error(&server_config.name, e.to_string());
+                self.mcp_auth_states.lock().await.insert(
+                    server_name.to_string(),
+                    librefang_runtime::mcp_oauth::McpAuthState::Error {
+                        message: format!("Connection failed after auth: {e}"),
+                    },
+                );
             }
         }
     }

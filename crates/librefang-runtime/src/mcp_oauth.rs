@@ -146,15 +146,84 @@ pub fn parse_www_authenticate(header: &str) -> HashMap<String, String> {
 
 /// Extract the `resource_metadata` URL from parsed WWW-Authenticate parameters.
 ///
-/// Returns `Some(url)` if the key exists and starts with `http://` or `https://`.
-pub fn extract_metadata_url(params: &HashMap<String, String>) -> Option<String> {
-    params.get("resource_metadata").and_then(|url| {
-        if url.starts_with("http://") || url.starts_with("https://") {
-            Some(url.clone())
-        } else {
-            None
-        }
-    })
+/// Validates with three layered checks before returning:
+/// 1. **HTTPS only** — RFC 8414 requires TLS; `http://` is rejected.
+/// 2. **Same-origin** — the metadata URL must share scheme+host+port with `server_url`
+///    to prevent a rogue MCP server from redirecting OAuth discovery cross-domain.
+/// 3. **No loopback / link-local / private IPs** — belt-and-braces defence-in-depth
+///    even in the (unlikely) case same-origin passes on a private-range server.
+pub fn extract_metadata_url(params: &HashMap<String, String>, server_url: &str) -> Option<String> {
+    let url_str = params.get("resource_metadata")?;
+
+    // Layer 1: HTTPS only
+    if !url_str.starts_with("https://") {
+        return None;
+    }
+
+    let metadata_url = Url::parse(url_str).ok()?;
+    let server_parsed = Url::parse(server_url).ok()?;
+
+    // Layer 2: Same-origin — compares scheme, host, and port
+    if metadata_url.origin() != server_parsed.origin() {
+        return None;
+    }
+
+    // Layer 3: Block loopback / link-local / private addresses
+    let host = metadata_url.host_str()?;
+    if is_ssrf_blocked_host(host) {
+        return None;
+    }
+
+    Some(url_str.clone())
+}
+
+/// Return `true` when the given host string resolves to a network range that
+/// must not be reachable via OAuth metadata fetches (SSRF defence-in-depth).
+///
+/// Blocked ranges:
+/// * Exact hostnames: `localhost`, `metadata.google.internal`
+/// * IPv4 loopback      127.0.0.0/8
+/// * IPv4 private       10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+/// * IPv4 link-local    169.254.0.0/16
+/// * IPv6 loopback      ::1
+/// * IPv6 unique-local  fc00::/7
+/// * IPv6 link-local    fe80::/10
+fn is_ssrf_blocked_host(host: &str) -> bool {
+    use std::net::IpAddr;
+
+    let lower = host.to_lowercase();
+    if lower == "localhost" || lower == "metadata.google.internal" {
+        return true;
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => {
+                let o = v4.octets();
+                // 127.0.0.0/8 loopback
+                o[0] == 127
+                // 10.0.0.0/8
+                || o[0] == 10
+                // 172.16.0.0/12
+                || (o[0] == 172 && (o[1] & 0xf0) == 16)
+                // 192.168.0.0/16
+                || (o[0] == 192 && o[1] == 168)
+                // 169.254.0.0/16 link-local
+                || (o[0] == 169 && o[1] == 254)
+            }
+            IpAddr::V6(v6) => {
+                let segs = v6.segments();
+                // ::1 loopback
+                v6.is_loopback()
+                // fc00::/7 unique-local
+                || (segs[0] & 0xfe00) == 0xfc00
+                // fe80::/10 link-local
+                || (segs[0] & 0xffc0) == 0xfe80
+            }
+        };
+    }
+
+    false
 }
 
 /// Construct the `.well-known/oauth-authorization-server` URL for a given server URL.
@@ -310,7 +379,7 @@ pub async fn discover_oauth_metadata(
     // Tier 1: WWW-Authenticate header -> resource_metadata URL
     if let Some(header) = www_authenticate {
         let params = parse_www_authenticate(header);
-        if let Some(metadata_url) = extract_metadata_url(&params) {
+        if let Some(metadata_url) = extract_metadata_url(&params, server_url) {
             debug!(url = %metadata_url, "Tier 1: fetching metadata from WWW-Authenticate resource_metadata");
             match client.get(&metadata_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
@@ -467,19 +536,20 @@ mod tests {
         let mut params = HashMap::new();
         params.insert(
             "resource_metadata".to_string(),
-            "https://auth.example.com/.well-known/oauth-authorization-server".to_string(),
+            "https://example.com/.well-known/oauth-authorization-server".to_string(),
         );
-        let url = extract_metadata_url(&params);
+        // Same origin: metadata and server both on example.com
+        let url = extract_metadata_url(&params, "https://example.com/mcp");
         assert_eq!(
             url.unwrap(),
-            "https://auth.example.com/.well-known/oauth-authorization-server"
+            "https://example.com/.well-known/oauth-authorization-server"
         );
     }
 
     #[test]
     fn test_extract_metadata_url_missing() {
         let params = HashMap::new();
-        assert!(extract_metadata_url(&params).is_none());
+        assert!(extract_metadata_url(&params, "https://example.com/mcp").is_none());
     }
 
     #[test]
@@ -489,7 +559,72 @@ mod tests {
             "resource_metadata".to_string(),
             "ftp://bad.example.com".to_string(),
         );
-        assert!(extract_metadata_url(&params).is_none());
+        assert!(extract_metadata_url(&params, "https://example.com/mcp").is_none());
+    }
+
+    // -- B2: SSRF hardening tests for extract_metadata_url --
+
+    #[test]
+    fn extract_metadata_url_rejects_http() {
+        let mut params = HashMap::new();
+        params.insert(
+            "resource_metadata".to_string(),
+            "http://example.com/meta".to_string(),
+        );
+        assert!(extract_metadata_url(&params, "https://example.com/mcp").is_none());
+    }
+
+    #[test]
+    fn extract_metadata_url_rejects_cross_origin() {
+        let mut params = HashMap::new();
+        params.insert(
+            "resource_metadata".to_string(),
+            "https://evil.com/meta".to_string(),
+        );
+        assert!(extract_metadata_url(&params, "https://example.com/mcp").is_none());
+    }
+
+    #[test]
+    fn extract_metadata_url_accepts_same_origin_https() {
+        let mut params = HashMap::new();
+        params.insert(
+            "resource_metadata".to_string(),
+            "https://example.com/meta".to_string(),
+        );
+        let result = extract_metadata_url(&params, "https://example.com/mcp");
+        assert_eq!(result.unwrap(), "https://example.com/meta");
+    }
+
+    #[test]
+    fn extract_metadata_url_rejects_loopback_literal() {
+        // Same-origin already rejects this (different hosts), but layer 3 also blocks
+        // loopback IPs as defence-in-depth.
+        let mut params = HashMap::new();
+        params.insert(
+            "resource_metadata".to_string(),
+            "https://127.0.0.1/meta".to_string(),
+        );
+        assert!(extract_metadata_url(&params, "https://example.com/mcp").is_none());
+    }
+
+    #[test]
+    fn extract_metadata_url_rejects_link_local() {
+        let mut params = HashMap::new();
+        params.insert(
+            "resource_metadata".to_string(),
+            "https://169.254.169.254/latest/meta-data/".to_string(),
+        );
+        assert!(extract_metadata_url(&params, "https://example.com/mcp").is_none());
+    }
+
+    #[test]
+    fn extract_metadata_url_rejects_missing_scheme() {
+        let mut params = HashMap::new();
+        params.insert(
+            "resource_metadata".to_string(),
+            "example.com/meta".to_string(),
+        );
+        assert!(extract_metadata_url(&params, "https://example.com/mcp").is_none());
     }
 
     // -- well_known_url tests --
