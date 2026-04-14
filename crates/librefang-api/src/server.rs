@@ -691,18 +691,41 @@ pub async fn build_router(
     // AuthState shares api_key_lock with AppState so change_password can update it live.
     let user_api_keys_vec = configured_user_api_keys(state.kernel.as_ref());
     let dashboard_auth_enabled = has_dashboard_credentials(state.kernel.as_ref());
-    let require_auth_for_reads = state.kernel.config_ref().require_auth_for_reads;
-    if require_auth_for_reads {
-        let api_key_set = !state.kernel.config_ref().api_key.trim().is_empty();
-        let any_auth = api_key_set || !user_api_keys_vec.is_empty() || dashboard_auth_enabled;
-        if !any_auth {
-            tracing::warn!(
-                "require_auth_for_reads = true but no authentication is configured \
-                 (api_key, user_api_keys, and dashboard credentials are all empty). \
-                 The flag will have no effect — set an api_key or configure dashboard \
-                 credentials to lock down read endpoints."
-            );
-        }
+    let api_key_set = !state.kernel.config_ref().api_key.trim().is_empty();
+    let any_auth = api_key_set || !user_api_keys_vec.is_empty() || dashboard_auth_enabled;
+
+    // Resolve the effective value of `require_auth_for_reads`.
+    // - Explicit `Some(true)`  → operators are forcing the allowlist
+    //   closed even if auth is misconfigured (catches an accidental
+    //   `api_key = ""` redeploy).
+    // - Explicit `Some(false)` → operators are deliberately keeping the
+    //   reads allowlist open even when an `api_key` is set; typical
+    //   for deployments fronted by an external auth proxy.
+    // - `None` (default)       → derive from whether *any* authentication
+    //   is configured. This makes the safe default "set an api_key and
+    //   the reads allowlist closes automatically", instead of forcing
+    //   operators to remember a separate flag before reads stop leaking
+    //   agent IDs to the LAN.
+    let configured_require_auth_for_reads = state.kernel.config_ref().require_auth_for_reads;
+    let require_auth_for_reads = match configured_require_auth_for_reads {
+        Some(explicit) => explicit,
+        None => any_auth,
+    };
+    if require_auth_for_reads && !any_auth {
+        tracing::warn!(
+            "require_auth_for_reads = true but no authentication is configured \
+             (api_key, user_api_keys, and dashboard credentials are all empty). \
+             The flag will have no effect — set an api_key or configure dashboard \
+             credentials to lock down read endpoints."
+        );
+    }
+    if require_auth_for_reads && configured_require_auth_for_reads.is_none() && any_auth {
+        tracing::info!(
+            "require_auth_for_reads auto-enabled because authentication is configured \
+             (api_key / user_api_keys / dashboard credentials). Dashboard reads now \
+             require a bearer token. Set `require_auth_for_reads = false` in config.toml \
+             to restore the legacy public reads allowlist."
+        );
     }
     let auth_state = middleware::AuthState {
         api_key_lock: api_key_lock.clone(),

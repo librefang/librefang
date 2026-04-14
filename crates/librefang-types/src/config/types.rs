@@ -1784,17 +1784,31 @@ pub struct KernelConfig {
     /// require a `Authorization: Bearer <key>` header.
     /// If empty, the API is unauthenticated (local development only).
     pub api_key: String,
-    /// When `true` AND `api_key` is configured, the dashboard read-endpoint
-    /// allowlist is collapsed to just static assets, OAuth entry points, and
-    /// `/api/health*`. Every other GET (agents, config, budget, sessions,
-    /// approvals, hands, skills, workflows, …) requires a valid bearer token.
+    /// Controls whether the dashboard read-endpoint allowlist (agents,
+    /// config, budget, sessions, approvals, hands, skills, workflows, …)
+    /// requires a bearer token.
     ///
-    /// Default is `false` to preserve the pre-flag behaviour where the
-    /// unauthenticated dashboard SPA could render before the user supplied
-    /// credentials. Operators exposing the daemon beyond loopback should
-    /// enable this to stop remote enumeration of agents, config, and spend.
-    #[serde(default)]
-    pub require_auth_for_reads: bool,
+    /// * `None` (default, or `auto` / unset in config.toml) — **derive
+    ///   from `api_key`**: the reads allowlist is collapsed *automatically*
+    ///   whenever any authentication is configured (non-empty `api_key`,
+    ///   per-user keys, or dashboard credentials). This is the safe
+    ///   default: operators who already set an `api_key` shouldn't also
+    ///   have to remember a separate flag before their read endpoints
+    ///   stop leaking agent IDs to the LAN.
+    /// * `Some(true)` — force the allowlist closed even when auth is
+    ///   misconfigured (the middleware will still refuse the read). Used
+    ///   to catch an accidental `api_key = ""` redeploy rather than
+    ///   silently exposing reads.
+    /// * `Some(false)` — force the allowlist open even when `api_key`
+    ///   is set. Provided as an explicit escape hatch for deployments
+    ///   that front the daemon with an external auth proxy and want the
+    ///   in-tree dashboard to keep rendering before the reverse proxy
+    ///   has attached its own credentials.
+    ///
+    /// Unauthenticated static assets, OAuth flow endpoints, and
+    /// `/api/health*` stay reachable in every mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_auth_for_reads: Option<bool>,
     /// Hex-encoded Ed25519 public keys (32 bytes → 64 hex chars) allowed to
     /// sign agent manifests. `verify_signed_manifest` requires the envelope's
     /// `signer_public_key` to be on this list before accepting a signature —
@@ -3399,7 +3413,7 @@ impl Default for KernelConfig {
             network: NetworkConfig::default(),
             channels: ChannelsConfig::default(),
             api_key: String::new(),
-            require_auth_for_reads: false,
+            require_auth_for_reads: None,
             trusted_manifest_signers: Vec::new(),
             dashboard_user: String::new(),
             dashboard_pass: String::new(),
