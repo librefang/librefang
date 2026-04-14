@@ -9,7 +9,7 @@ import {
   Shield, CheckCircle, XCircle, Download,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
-import { totpSetup, totpConfirm, totpStatus, totpRevoke } from "../api";
+import { totpSetup, totpConfirm, totpStatus, totpRevoke, setConfigValue } from "../api";
 
 interface SegmentOption<T extends string> {
   value: T;
@@ -271,6 +271,34 @@ function TotpSection() {
             )}
           </div>
         </SettingRow>
+
+        {status?.confirmed && (
+          <SettingRow
+            icon={Shield}
+            iconColor="text-blue-500"
+            label={t("settings.totp_scope_title", "TOTP Scope")}
+            description={t("settings.totp_scope_desc", "Where to require TOTP verification")}
+          >
+            <select
+              value={status.scope ?? "none"}
+              onChange={async (e) => {
+                try {
+                  await setConfigValue("approvals.second_factor", e.target.value);
+                  statusQuery.refetch();
+                  setSuccess(t("settings.totp_scope_saved", "TOTP scope updated. Restart may be required."));
+                } catch (err: any) {
+                  setError(err.message || "Failed to update scope");
+                }
+              }}
+              className="rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-bold outline-none focus:border-brand"
+            >
+              <option value="none">{t("settings.totp_scope_none", "Disabled")}</option>
+              <option value="totp">{t("settings.totp_scope_approval", "Approvals only")}</option>
+              <option value="login">{t("settings.totp_scope_login", "Login only")}</option>
+              <option value="both">{t("settings.totp_scope_both", "Approvals + Login")}</option>
+            </select>
+          </SettingRow>
+        )}
 
         {status?.confirmed && status.remaining_recovery_codes <= 2 && (
           <div className="px-1 py-2 text-sm text-warning flex items-center gap-2">
