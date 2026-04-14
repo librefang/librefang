@@ -71,13 +71,20 @@ add_label_if_match() {
   fi
 }
 
+# Keyword regexes use a left-anchored \b only (no trailing \b) for words
+# that commonly appear glued to a suffix in librefang's domain vocabulary
+# — `MemoryUpdate`, `EventBus`, `TaskBoard`, `tool_use`, `tool_result`,
+# `EmbeddingStore`, etc. The leading \b still prevents substring hits
+# like `remembered` (no \b before `mem`) or `subtask` (no \b before
+# `task`). Words with high suffix FP risk (`hand`, `auth`) keep the
+# trailing \b.
 add_label_if_match 'channel|telegram|discord|slack|whatsapp|feishu|webhook|messaging' 'area/channels'
 add_label_if_match 'skill|fanghub|marketplace' 'area/skills'
-add_label_if_match 'kernel|scheduler|cron|rbac|workflow|trigger|\bevent\b|\btask\b|session|\bhand\b|spawn' 'area/kernel'
-add_label_if_match 'runtime|agent.?loop|\bllm\b|wasm|sandbox|driver|provider|\bmcp\b|tool.?call|prompt' 'area/runtime'
+add_label_if_match 'kernel|scheduler|cron|rbac|workflow|trigger|\bevent|\btask|session|\bhand\b|spawn' 'area/kernel'
+add_label_if_match 'runtime|agent.?loop|\bllm\b|wasm|sandbox|driver|provider|\bmcp\b|\btool[._ -]?(call|use|result)|prompt' 'area/runtime'
 add_label_if_match '\bapi\b|endpoint|dashboard|frontend|\bui\b|react|http|rest|websocket|\broute\b' 'area/api'
 add_label_if_match '\bsdk\b|python|javascript|typescript|\bnpm\b|\bpip\b' 'area/sdk'
-add_label_if_match '\bmemory\b|knowledge|vector|embedding|sqlite' 'area/memory'
+add_label_if_match '\bmemory|knowledge|vector|embedding|sqlite' 'area/memory'
 add_label_if_match 'security|\bauth\b|\btoken\b|vulnerability|audit|taint|capability|approval|totp|\bcve\b|sandbox.escape' 'area/security'
 add_label_if_match 'docker|deploy|github.?action|gh.?action|pipeline|\bbuild\b' 'area/ci'
 add_label_if_match 'documentation|readme|\bguide\b|tutorial|translat|i18n' 'area/docs'
