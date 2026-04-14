@@ -1,39 +1,33 @@
 name: Discussion to Issue
 
-# Automatically create issues from new Discussions in Ideas and Q&A categories.
-# Also supports manual "/to-issue" command from maintainers in any category.
+# Automatically create issues from new Discussions in Ideas/General/Q&A.
+# Also supports manual "/to-issue" command and daily backfill.
 
 on:
   discussion:
-    types: [created, labeled]
+    types: [created]
   discussion_comment:
     types: [created]
   schedule:
     - cron: '17 4 * * *' # daily 04:17 UTC — catch missed discussions
   workflow_dispatch:
     inputs:
-      backfill:
-        description: 'Create issues for all existing Ideas discussions that lack one'
-        required: false
-        type: boolean
-        default: false
       category:
-        description: 'Category to backfill (default: Ideas)'
+        description: 'Category to backfill (Ideas, General, Q&A, or all)'
         required: false
         type: string
-        default: 'Ideas'
+        default: 'all'
 
 permissions:
   issues: write
   discussions: write
 
 jobs:
-  # ── Auto-promote new Ideas/Q&A discussions ───────────────────────
+  # ── Auto-promote new discussions ─────────────────────────────────
   auto-promote:
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'discussion' &&
-      github.event.action == 'created' &&
       (
         github.event.discussion.category.name == 'Ideas' ||
         github.event.discussion.category.name == 'General' ||
@@ -46,76 +40,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          set -euo pipefail
-
-          DISC_NUMBER="${{ github.event.discussion.number }}"
-          DISC_TITLE="${{ github.event.discussion.title }}"
-          DISC_URL="${{ github.event.discussion.html_url }}"
-          DISC_AUTHOR="${{ github.event.discussion.user.login }}"
-          DISC_CATEGORY="${{ github.event.discussion.category.name }}"
-
-          # Extract discussion body via API
-          DISC_BODY=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" --jq '.body // ""')
-
-          # Strip emoji prefixes common in discussion titles
-          CLEAN_TITLE=$(printf '%s' "$DISC_TITLE" | sed 's/^[^a-zA-Z0-9[({]*//')
-
-          # Map discussion category to labels
-          case "$DISC_CATEGORY" in
-            Ideas)   LABELS="enhancement" ;;
-            "Q&A")   LABELS="question" ;;
-            *)       LABELS="" ;;
-          esac
-
-          # Run auto-label script for area labels
-          body_file=$(mktemp)
-          printf '%s' "$DISC_BODY" > "$body_file"
-          AREA_LABELS=$(bash .github/scripts/auto-label-issue.sh "0" "$CLEAN_TITLE" "$body_file" 2>/dev/null || true)
-          rm -f "$body_file"
-
-          if [ -n "$AREA_LABELS" ] && [ "$AREA_LABELS" != "needs-triage" ]; then
-            if [ -n "$LABELS" ]; then
-              LABELS="${LABELS},${AREA_LABELS}"
-            else
-              LABELS="$AREA_LABELS"
-            fi
-          fi
-
-          # Build issue body
-          ISSUE_BODY="$(cat <<EOF
-          _Auto-created from discussion #${DISC_NUMBER} by @${DISC_AUTHOR} (${DISC_CATEGORY})_
-
-          ---
-
-          ${DISC_BODY}
-
-          ---
-          > Source: ${DISC_URL}
-          EOF
-          )"
-
-          # Check for duplicate — skip if an issue already references this discussion
-          EXISTING=$(gh issue list --repo "$REPO" --state all --limit 200 --json number,body \
-            --jq "[.[] | select(.body | test(\"discussion #${DISC_NUMBER}\"))] | length")
-          if [ "${EXISTING:-0}" -gt 0 ]; then
-            echo "Issue already exists for discussion #${DISC_NUMBER}, skipping"
-            exit 0
-          fi
-
-          # Create the issue
-          ISSUE_URL=$(gh issue create \
-            --repo "$REPO" \
-            --title "$CLEAN_TITLE" \
-            --body "$ISSUE_BODY" \
-            ${LABELS:+--label "$LABELS"})
-
-          ISSUE_NUMBER=$(printf '%s' "$ISSUE_URL" | grep -oE '[0-9]+$')
-          echo "Created issue #${ISSUE_NUMBER}"
-
-          # Comment on the discussion
-          gh api "repos/${REPO}/discussions/${DISC_NUMBER}/comments" \
-            -f body="Tracked as issue #${ISSUE_NUMBER}" \
-            --silent
+          bash .github/scripts/discussion-to-issue.sh \
+            "${{ github.event.discussion.number }}" \
+            "${{ github.event.discussion.title }}" \
+            "${{ github.event.discussion.html_url }}" \
+            "${{ github.event.discussion.user.login }}" \
+            "${{ github.event.discussion.category.name }}"
 
   # ── Manual /to-issue command from maintainers ────────────────────
   manual-promote:
@@ -135,157 +65,50 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          set -euo pipefail
+          bash .github/scripts/discussion-to-issue.sh \
+            "${{ github.event.discussion.number }}" \
+            "${{ github.event.discussion.title }}" \
+            "${{ github.event.discussion.html_url }}" \
+            "${{ github.event.discussion.user.login }}" \
+            "${{ github.event.discussion.category.name }}"
 
-          DISC_NUMBER="${{ github.event.discussion.number }}"
-          DISC_TITLE="${{ github.event.discussion.title }}"
-          DISC_URL="${{ github.event.discussion.html_url }}"
-          DISC_AUTHOR="${{ github.event.discussion.user.login }}"
-          DISC_CATEGORY="${{ github.event.discussion.category.name }}"
-
-          DISC_BODY=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" --jq '.body // ""')
-          CLEAN_TITLE=$(printf '%s' "$DISC_TITLE" | sed 's/^[^a-zA-Z0-9[({]*//')
-
-          case "$DISC_CATEGORY" in
-            Ideas)   LABELS="enhancement" ;;
-            "Q&A")   LABELS="question" ;;
-            *)       LABELS="" ;;
-          esac
-
-          body_file=$(mktemp)
-          printf '%s' "$DISC_BODY" > "$body_file"
-          AREA_LABELS=$(bash .github/scripts/auto-label-issue.sh "0" "$CLEAN_TITLE" "$body_file" 2>/dev/null || true)
-          rm -f "$body_file"
-
-          if [ -n "$AREA_LABELS" ] && [ "$AREA_LABELS" != "needs-triage" ]; then
-            if [ -n "$LABELS" ]; then
-              LABELS="${LABELS},${AREA_LABELS}"
-            else
-              LABELS="$AREA_LABELS"
-            fi
-          fi
-
-          ISSUE_BODY="$(cat <<EOF
-          _Promoted from discussion #${DISC_NUMBER} by @${DISC_AUTHOR} (${DISC_CATEGORY})_
-
-          ---
-
-          ${DISC_BODY}
-
-          ---
-          > Source: ${DISC_URL}
-          EOF
-          )"
-
-          EXISTING=$(gh issue list --repo "$REPO" --state all --limit 200 --json number,body \
-            --jq "[.[] | select(.body | test(\"discussion #${DISC_NUMBER}\"))] | length")
-          if [ "${EXISTING:-0}" -gt 0 ]; then
-            echo "Issue already exists for discussion #${DISC_NUMBER}, skipping"
-            gh api "repos/${REPO}/discussions/${DISC_NUMBER}/comments" \
-              -f body="An issue already exists for this discussion." --silent
-            exit 0
-          fi
-
-          ISSUE_URL=$(gh issue create \
-            --repo "$REPO" \
-            --title "$CLEAN_TITLE" \
-            --body "$ISSUE_BODY" \
-            ${LABELS:+--label "$LABELS"})
-
-          ISSUE_NUMBER=$(printf '%s' "$ISSUE_URL" | grep -oE '[0-9]+$')
-          echo "Created issue #${ISSUE_NUMBER}"
-
-          gh api "repos/${REPO}/discussions/${DISC_NUMBER}/comments" \
-            -f body="Tracked as issue #${ISSUE_NUMBER}" \
-            --silent
-
-  # ── Backfill: create issues for existing discussions ─────────────
-  # Runs on: schedule (daily, all categories), workflow_dispatch (chosen category)
+  # ── Backfill: scheduled + manual ─────────────────────────────────
   backfill:
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.backfill == 'true')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - name: Backfill existing discussions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          CATEGORY: ${{ github.event.inputs.category || '' }}
+          INPUT_CATEGORY: ${{ github.event.inputs.category }}
         run: |
           set -euo pipefail
 
-          # On schedule: scan all promotable categories
-          # On dispatch: scan only the chosen category
-          if [ -z "$CATEGORY" ]; then
-            CATEGORIES="Ideas General Q&A"
+          # Build category list — iterate one at a time to avoid Q&A word-split
+          if [ -z "${INPUT_CATEGORY:-}" ] || [ "$INPUT_CATEGORY" = "all" ]; then
+            cats=("Ideas" "General" "Q&A")
           else
-            CATEGORIES="$CATEGORY"
+            cats=("$INPUT_CATEGORY")
           fi
 
-          for CAT in $CATEGORIES; do
-          echo "=== Scanning category: ${CAT} ==="
+          for CAT in "${cats[@]}"; do
+            echo "=== Scanning category: ${CAT} ==="
 
-          gh api repos/${REPO}/discussions --paginate --jq \
-            ".[] | select(.category.name == \"${CAT}\") | @base64" \
-          | while IFS= read -r row; do
-              decoded=$(printf '%s' "$row" | base64 -d)
-              DISC_NUMBER=$(printf '%s' "$decoded" | jq -r '.number')
-              DISC_TITLE=$(printf '%s' "$decoded" | jq -r '.title')
-              DISC_URL=$(printf '%s' "$decoded" | jq -r '.html_url')
-              DISC_AUTHOR=$(printf '%s' "$decoded" | jq -r '.user.login')
+            gh api "repos/${REPO}/discussions" --paginate --jq \
+              ".[] | select(.category.name == \"${CAT}\") | @base64" \
+            | while IFS= read -r row; do
+                decoded=$(printf '%s' "$row" | base64 -d)
+                num=$(printf '%s' "$decoded" | jq -r '.number')
+                title=$(printf '%s' "$decoded" | jq -r '.title')
+                url=$(printf '%s' "$decoded" | jq -r '.html_url')
+                author=$(printf '%s' "$decoded" | jq -r '.user.login')
 
-              EXISTING=$(gh issue list --repo "$REPO" --state all --limit 500 --json number,body \
-                --jq "[.[] | select(.body | test(\"discussion #${DISC_NUMBER}\"))] | length" 2>/dev/null || echo "0")
-              if [ "${EXISTING:-0}" -gt 0 ]; then
-                echo "#${DISC_NUMBER}: already has issue, skipping"
-                continue
-              fi
+                bash .github/scripts/discussion-to-issue.sh \
+                  "$num" "$title" "$url" "$author" "$CAT" \
+                  || echo "  (skipped or failed)"
 
-              DISC_BODY=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" --jq '.body // ""')
-              CLEAN_TITLE=$(printf '%s' "$DISC_TITLE" | sed 's/^[^a-zA-Z0-9[({]*//')
-
-              case "${CAT}" in
-                Ideas)    LABELS="enhancement" ;;
-                "Q&A")    LABELS="question" ;;
-                General)  LABELS="" ;;
-                *)        LABELS="" ;;
-              esac
-
-              body_file=$(mktemp)
-              printf '%s' "$DISC_BODY" > "$body_file"
-              AREA_LABELS=$(bash .github/scripts/auto-label-issue.sh "0" "$CLEAN_TITLE" "$body_file" 2>/dev/null || true)
-              rm -f "$body_file"
-
-              if [ -n "$AREA_LABELS" ] && [ "$AREA_LABELS" != "needs-triage" ]; then
-                if [ -n "$LABELS" ]; then LABELS="${LABELS},${AREA_LABELS}"; else LABELS="$AREA_LABELS"; fi
-              fi
-
-              ISSUE_BODY="$(cat <<EOF
-          _Auto-created from discussion #${DISC_NUMBER} by @${DISC_AUTHOR} (${CAT})_
-
-          ---
-
-          ${DISC_BODY}
-
-          ---
-          > Source: ${DISC_URL}
-          EOF
-              )"
-
-              ISSUE_URL=$(gh issue create \
-                --repo "$REPO" \
-                --title "$CLEAN_TITLE" \
-                --body "$ISSUE_BODY" \
-                ${LABELS:+--label "$LABELS"})
-
-              ISSUE_NUMBER=$(printf '%s' "$ISSUE_URL" | grep -oE '[0-9]+$')
-              echo "#${DISC_NUMBER} → issue #${ISSUE_NUMBER}"
-
-              gh api "repos/${REPO}/discussions/${DISC_NUMBER}/comments" \
-                -f body="Tracked as issue #${ISSUE_NUMBER}" --silent
-
-              sleep 2
-            done
-          done # end category loop
+                sleep 2
+              done
+          done
