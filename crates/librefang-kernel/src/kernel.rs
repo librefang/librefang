@@ -10966,7 +10966,13 @@ impl KernelHandle for LibreFangKernel {
             serde_json::from_value(job_json["delivery"].clone())
                 .map_err(|e| format!("Invalid delivery: {e}"))?
         } else {
-            CronDelivery::None
+            // Default to LastChannel so cron jobs created by an agent in
+            // a channel context actually deliver their output back to
+            // that channel. The previous default (`None`) silently
+            // dropped every result and gave users no way to recover the
+            // originating channel without explicit `delivery` config.
+            // Issue #2338.
+            CronDelivery::LastChannel
         };
         let one_shot = job_json["one_shot"].as_bool().unwrap_or(false);
 
