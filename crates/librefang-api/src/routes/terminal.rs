@@ -161,7 +161,15 @@ pub async fn terminal_ws(
     let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
     let auth_configured = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
     if !auth_configured {
-        warn!("Terminal is enabled without any authentication configured — any local connection gets unauthenticated shell access");
+        if cfg.terminal.allow_remote {
+            tracing::error!(
+                "Terminal is enabled with allow_remote=true but NO authentication configured — \
+                 unauthenticated shell access is exposed to the network. \
+                 Set api_key, dashboard credentials, or users to prevent this."
+            );
+        } else {
+            warn!("Terminal is enabled without any authentication configured — any local connection gets unauthenticated shell access");
+        }
     }
 
     let trust_proxy_headers = cfg.terminal.trust_proxy_headers;
@@ -228,7 +236,8 @@ pub async fn terminal_ws(
             } else {
                 "user_key"
             };
-        } else if auth_configured || cfg.terminal.allow_remote {
+        } else if auth_configured {
+            // Auth is configured but the provided token is invalid — reject.
             warn!(
                 ip = %locality.source_ip,
                 proxied = locality.is_proxied,

@@ -407,7 +407,11 @@ export function App() {
 
     getStatus().then((s) => {
       setTerminalEnabled(s.terminal_enabled !== false);
-    }).catch(() => {});
+    }).catch(() => {
+      // If status fetch fails, assume terminal is available (fail-open).
+      // The WebSocket connection itself will enforce actual policy.
+      setTerminalEnabled(true);
+    });
 
     return () => {
       cancelled = true;

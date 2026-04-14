@@ -171,7 +171,7 @@ pub fn validate_ws_origin(
     // are auto-allowed. Everything else requires explicit allowed_origins.
     if origin_port == listen_port {
         let normalized = normalize_origin_host(origin_host);
-        if normalized == "localhost" {
+        if normalized.eq_ignore_ascii_case("localhost") {
             return Ok(());
         }
     }
@@ -198,7 +198,7 @@ pub fn validate_ws_origin(
 
         let normalized_extra_host = normalize_origin_host(extra_host);
 
-        if normalized_extra_host == normalize_origin_host(origin_host)
+        if normalized_extra_host.eq_ignore_ascii_case(normalize_origin_host(origin_host))
             && extra_scheme == origin_scheme
             && origin_port == extra_port
         {
