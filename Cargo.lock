@@ -4152,6 +4152,7 @@ dependencies = [
  "librefang-channels",
  "librefang-extensions",
  "librefang-hands",
+ "librefang-kernel-metering",
  "librefang-memory",
  "librefang-runtime",
  "librefang-skills",
@@ -4178,15 +4179,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "librefang-llm-driver"
-version = "2026.4.13-beta19"
+name = "librefang-kernel-metering"
+version = "2026.4.11-beta18"
 dependencies = [
- "async-trait",
+ "librefang-memory",
+ "librefang-runtime",
  "librefang-types",
  "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
@@ -4249,10 +4248,7 @@ dependencies = [
  "landlock",
  "librefang-channels",
  "librefang-http",
- "librefang-llm-driver",
  "librefang-memory",
- "librefang-runtime-drivers",
- "librefang-runtime-oauth",
  "librefang-skills",
  "librefang-types",
  "once_cell",
@@ -4282,56 +4278,6 @@ dependencies = [
  "uuid",
  "wasmtime",
  "webpki-roots",
- "zeroize",
-]
-
-[[package]]
-name = "librefang-runtime-drivers"
-version = "2026.4.13-beta19"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "dashmap",
- "futures",
- "hex",
- "hmac",
- "librefang-http",
- "librefang-llm-driver",
- "librefang-runtime-oauth",
- "librefang-types",
- "rand 0.10.0",
- "regex-lite",
- "reqwest 0.13.2",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tracing",
- "url",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "librefang-runtime-oauth"
-version = "2026.4.13-beta19"
-dependencies = [
- "base64 0.22.1",
- "hex",
- "librefang-http",
- "librefang-types",
- "rand 0.10.0",
- "reqwest 0.13.2",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
  "zeroize",
 ]
 
