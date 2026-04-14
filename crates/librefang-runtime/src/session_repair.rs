@@ -687,16 +687,15 @@ pub fn prune_heartbeat_turns(messages: &mut Vec<Message>, keep_recent: usize) {
 
     for (i, msg) in messages.iter().enumerate().take(prune_end) {
         if msg.role == Role::Assistant {
+            // Delegate to the canonical silent-response detector so the
+            // heartbeat prune logic stays in lock-step with the rest of the
+            // runtime (single source of truth — see silent_response.rs).
             let is_no_reply = match &msg.content {
-                MessageContent::Text(text) => {
-                    let t = text.trim();
-                    t == "NO_REPLY" || t == "[no reply needed]"
-                }
+                MessageContent::Text(text) => crate::silent_response::is_silent_response(text),
                 MessageContent::Blocks(blocks) => {
                     blocks.len() == 1
                         && matches!(&blocks[0], ContentBlock::Text { text, .. } if {
-                            let t = text.trim();
-                            t == "NO_REPLY" || t == "[no reply needed]"
+                            crate::silent_response::is_silent_response(text)
                         })
                 }
             };

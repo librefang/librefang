@@ -27,6 +27,36 @@
 //! prompts accumulate trailing tokens and we cannot regress them silently.
 
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+/// Env-flag rollback hatch: setting `LIBREFANG_SILENT_V2=off` reverts to
+/// the legacy (pre-Phase-2) detector semantics — exact match or trailing
+/// suffix only, no emoji/punctuation tolerance, no bracket-form
+/// case-folding. Captured once at first call to avoid per-call env reads.
+fn v2_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        !matches!(
+            std::env::var("LIBREFANG_SILENT_V2")
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str(),
+            "off" | "0" | "false" | "no"
+        )
+    })
+}
+
+/// Legacy detector — bit-for-bit equivalent to the pre-Phase-2 `is_no_reply`
+/// helper that lived in `agent_loop.rs`. Used when `LIBREFANG_SILENT_V2=off`.
+fn legacy_is_silent(text: &str) -> bool {
+    let t = text.trim();
+    t == "NO_REPLY"
+        || t.ends_with("NO_REPLY")
+        || t == "[no reply needed]"
+        || t.ends_with("[no reply needed]")
+        || t == "no reply needed"
+        || t.ends_with("no reply needed")
+}
 
 /// Reason classification for a silent decision. Used in structured logs
 /// (`event = "silent_response_detected"`) so observability tooling can
@@ -56,6 +86,10 @@ pub fn is_silent_response(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return false;
+    }
+
+    if !v2_enabled() {
+        return legacy_is_silent(text);
     }
 
     // Strip trailing punctuation/whitespace and trailing emoji codepoints

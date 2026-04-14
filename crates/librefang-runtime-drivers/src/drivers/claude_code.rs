@@ -781,6 +781,18 @@ impl LlmDriver for ClaudeCodeDriver {
 
                     // Helper: detect text that must never be streamed to
                     // channel users (rate-limit messages and NO_REPLY tokens).
+                    //
+                    // NB: this driver runs at a layer BELOW librefang-runtime
+                    // (drivers is a leaf dep of runtime — depending the other
+                    // way would create a cycle). The sentinel check here is a
+                    // deliberate, narrow duplicate of the canonical
+                    // `librefang_runtime::silent_response::is_silent_response`
+                    // detector — it operates on streaming line fragments
+                    // (which may be partial sentences), so a permissive
+                    // trim/ends_with check is the correct semantics for this
+                    // call site. The canonical module remains the
+                    // single-source-of-truth for whole-response classification
+                    // upstream (agent_loop, session_repair, gateway).
                     let should_suppress = |t: &str| -> bool {
                         let l = t.to_lowercase();
                         l.contains("hit your limit")
