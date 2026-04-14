@@ -1,0 +1,124 @@
+name: Issue Labels
+
+on:
+  issues:
+    types: [opened, reopened, edited, closed]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: 'Re-label all open issues currently missing labels'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  # ── Area labels based on title keywords ───────────────────────────
+  area:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute and apply labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          set -euo pipefail
+          body_file=$(mktemp)
+          printf '%s' "${ISSUE_BODY:-}" > "$body_file"
+          labels=$(bash .github/scripts/auto-label-issue.sh "$ISSUE_NUMBER" "$ISSUE_TITLE" "$body_file")
+          rm -f "$body_file"
+          if [ -n "$labels" ]; then
+            gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "$labels"
+            echo "#$ISSUE_NUMBER → $labels"
+          else
+            echo "#$ISSUE_NUMBER → no labels (script returned empty)"
+          fi
+
+  # ── Response state tracking ───────────────────────────────────────
+  response-state:
+    # Only pure issues — skip PR comments (handled by pr-labels.yml)
+    if: >-
+      (github.event_name == 'issues' && github.event.action == 'closed') ||
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update response state labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          LABEL_WAITING="awaiting-response"
+          LABEL_ATTENTION="needs-attention"
+          ISSUE="${{ github.event.issue.number }}"
+
+          add_label() { gh issue edit "$ISSUE" --repo "$REPO" --add-label "$1" 2>/dev/null || true; }
+          remove_label() { gh issue edit "$ISSUE" --repo "$REPO" --remove-label "$1" 2>/dev/null || true; }
+
+          is_maintainer() {
+            case "$1" in
+              OWNER|MEMBER|COLLABORATOR) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            # Issue closed — clean up state labels
+            remove_label "$LABEL_WAITING"
+            remove_label "$LABEL_ATTENTION"
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            ASSOC="${{ github.event.comment.author_association }}"
+            if is_maintainer "$ASSOC"; then
+              remove_label "$LABEL_ATTENTION"
+              add_label "$LABEL_WAITING"
+            else
+              remove_label "$LABEL_WAITING"
+              add_label "$LABEL_ATTENTION"
+            fi
+          fi
+
+  # ── Backfill unlabeled issues ─────────────────────────────────────
+  backfill:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.backfill == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Re-label every unlabeled open issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh issue list --repo "$REPO" --state open --limit 1000 \
+            --json number,title,body,labels \
+            --jq '.[] | select(.labels | length == 0) | @base64' \
+            | while IFS= read -r row; do
+                decoded=$(printf '%s' "$row" | base64 -d)
+                num=$(printf '%s' "$decoded" | jq -r '.number')
+                title=$(printf '%s' "$decoded" | jq -r '.title')
+                body=$(printf '%s' "$decoded" | jq -r '.body // ""')
+                body_file=$(mktemp)
+                printf '%s' "$body" > "$body_file"
+                labels=$(bash .github/scripts/auto-label-issue.sh "$num" "$title" "$body_file")
+                rm -f "$body_file"
+                if [ -n "$labels" ]; then
+                  gh issue edit "$num" --repo "$REPO" --add-label "$labels" \
+                    && echo "#$num → $labels" \
+                    || echo "#$num → FAILED to apply $labels"
+                else
+                  echo "#$num → no labels"
+                fi
+              done

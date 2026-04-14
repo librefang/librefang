@@ -113,7 +113,7 @@ export function A2APage() {
       {showDiscover && (
         <Card padding="md" className="animate-fade-in-scale">
           <h3 className="text-sm font-black mb-3">{t("a2a.discover_agent")}</h3>
-          <div className="flex gap-3">
+          <div className="flex flex-col sm:flex-row gap-3">
             <input
               type="url"
               value={discoverUrl}

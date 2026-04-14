@@ -304,7 +304,7 @@ export function TerminalPage() {
           <div className="h-full min-h-[400px] flex flex-col">
             <div
               ref={containerRef}
-              className="flex-1 bg-[#1a1a2e] rounded-b-lg p-2 overflow-hidden h-full min-[1001px]:h-[70%]"
+              className="flex-1 bg-[#1a1a2e] rounded-b-lg p-2 overflow-hidden h-full lg:h-[70%]"
             />
           </div>
         </Card>

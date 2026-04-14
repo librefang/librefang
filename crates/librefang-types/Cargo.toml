@@ -20,6 +20,7 @@ hex = { workspace = true }
 rand = { workspace = true }
 fluent = { workspace = true }
 unic-langid = { workspace = true }
+regex-lite = { workspace = true }
 
 [dev-dependencies]
 rmp-serde = { workspace = true }

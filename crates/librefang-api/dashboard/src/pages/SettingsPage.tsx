@@ -273,7 +273,6 @@ function TotpSection() {
           </div>
         </SettingRow>
 
-        {/* Recovery codes warning */}
         {status?.confirmed && status.remaining_recovery_codes <= 2 && (
           <div className="px-1 py-2 text-sm text-warning flex items-center gap-2">
             <Shield className="w-4 h-4 shrink-0" />
@@ -286,25 +285,18 @@ function TotpSection() {
           </div>
         )}
 
-        {/* Setup flow */}
         <div className="py-4">
           {showResetPrompt && !setupData ? (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
               <input
                 type="text"
                 value={resetCode}
                 onChange={(e) => setResetCode(e.target.value)}
                 placeholder={t("settings.totp_reset_placeholder", "Current TOTP or recovery code")}
-                className="w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
                 onKeyDown={(e) => e.key === "Enter" && resetCode && handleSetup(resetCode)}
               />
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => handleSetup(resetCode)}
-                disabled={!resetCode || loading}
-                isLoading={loading}
-              >
+              <Button variant="primary" size="sm" onClick={() => handleSetup(resetCode)} disabled={!resetCode || loading} isLoading={loading}>
                 {t("settings.totp_verify_reset", "Verify & Reset")}
               </Button>
               <Button variant="ghost" size="sm" onClick={() => { setShowResetPrompt(false); setResetCode(""); }}>
@@ -312,13 +304,13 @@ function TotpSection() {
               </Button>
             </div>
           ) : showRevokePrompt && !setupData ? (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
               <input
                 type="text"
                 value={revokeCode}
                 onChange={(e) => setRevokeCode(e.target.value)}
                 placeholder={t("settings.totp_revoke_placeholder", "TOTP or recovery code")}
-                className="w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
                 onKeyDown={(e) => e.key === "Enter" && revokeCode && handleRevoke()}
               />
               <Button variant="danger" size="sm" onClick={handleRevoke} disabled={!revokeCode || loading} isLoading={loading}>
@@ -330,12 +322,7 @@ function TotpSection() {
             </div>
           ) : !setupData ? (
             <div className="flex gap-2">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={initiateSetup}
-                isLoading={loading}
-              >
+              <Button variant="secondary" size="sm" onClick={initiateSetup} isLoading={loading}>
                 {status?.confirmed
                   ? t("settings.totp_reset", "Reset TOTP")
                   : t("settings.totp_setup", "Set up TOTP")}
@@ -357,7 +344,7 @@ function TotpSection() {
               </p>
               {setupData.qr_code && (
                 <div className="flex justify-center p-4 bg-white rounded-xl border border-border-subtle">
-                  <img src={setupData.qr_code} alt="TOTP QR Code" className="w-48 h-48" />
+                  <img src={setupData.qr_code} alt="TOTP QR Code" className="w-40 h-40 sm:w-48 sm:h-48" />
                 </div>
               )}
               <code className="block text-sm font-mono bg-main border border-border-subtle rounded-lg px-3 py-2 break-all select-all">
@@ -387,32 +374,18 @@ function TotpSection() {
                   className="w-28 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
                   onKeyDown={(e) => e.key === "Enter" && handleConfirm()}
                 />
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={handleConfirm}
-                  disabled={confirmCode.length !== 6 || loading}
-                  isLoading={loading}
-                >
+                <Button variant="primary" size="sm" onClick={handleConfirm} disabled={confirmCode.length !== 6 || loading} isLoading={loading}>
                   {t("settings.totp_confirm", "Confirm")}
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => { setSetupData(null); setConfirmCode(""); setError(null); }}
-                >
+                <Button variant="ghost" size="sm" onClick={() => { setSetupData(null); setConfirmCode(""); setError(null); }}>
                   {t("common.cancel", "Cancel")}
                 </Button>
               </div>
             </div>
           )}
 
-          {error && (
-            <p className="mt-2 text-sm text-danger">{error}</p>
-          )}
-          {success && (
-            <p className="mt-2 text-sm text-success">{success}</p>
-          )}
+          {error && <p className="mt-2 text-sm text-danger">{error}</p>}
+          {success && <p className="mt-2 text-sm text-success">{success}</p>}
         </div>
       </div>
     </div>

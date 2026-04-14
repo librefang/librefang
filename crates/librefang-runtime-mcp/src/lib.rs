@@ -13,11 +13,127 @@ use librefang_types::config::{
     HttpCompatHeaderConfig, HttpCompatMethod, HttpCompatRequestMode, HttpCompatResponseMode,
     HttpCompatToolConfig,
 };
+use librefang_types::taint::{check_outbound_text_violation, TaintSink};
 use librefang_types::tool::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+/// Maximum JSON nesting depth the taint scanner will traverse. Anything
+/// deeper is rejected outright so a pathological payload can't blow the
+/// stack or pin CPU. 64 is well beyond any sane tool-call shape.
+const MCP_TAINT_SCAN_MAX_DEPTH: usize = 64;
+
+/// Object keys that, when present in an MCP argument tree with a
+/// non-empty string value, are treated as credential-shaped
+/// regardless of what the value looks like. Catches the common
+/// shape `{"headers": {"Authorization": "Bearer …"}}` that the
+/// value-only text heuristic misses (whitespace + scheme word).
+const MCP_SENSITIVE_KEY_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "api_key",
+    "apikey",
+    "api-key",
+    "x-api-key",
+    "access_token",
+    "accesstoken",
+    "refresh_token",
+    "bearer",
+    "password",
+    "passwd",
+    "secret",
+    "client_secret",
+    "private_key",
+];
+
+fn is_sensitive_key_name(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    MCP_SENSITIVE_KEY_NAMES.iter().any(|k| lower == *k)
+}
+
+/// Walk every string leaf in a JSON argument tree and run
+/// [`check_outbound_text_violation`] against it with the
+/// `TaintSink::mcp_tool_call` sink. Returns a *redacted* rule
+/// description (JSON path + rule name) if any leaf trips the
+/// denylist, otherwise `None`.
+///
+/// IMPORTANT: the returned string must NOT contain the offending
+/// payload. It flows back to the LLM as an error and is emitted to
+/// logs — echoing the secret we just blocked would defeat the
+/// filter. We only surface the JSON path to the offending leaf.
+///
+/// Non-string leaves (numbers, bools, null) can't carry plaintext
+/// credentials in any meaningful way, so they are skipped.
+///
+/// Recursion is hard-capped at [`MCP_TAINT_SCAN_MAX_DEPTH`].
+fn scan_mcp_arguments_for_taint(value: &serde_json::Value) -> Option<String> {
+    let sink = TaintSink::mcp_tool_call();
+    fn walk(v: &serde_json::Value, sink: &TaintSink, path: &str, depth: usize) -> Option<String> {
+        if depth > MCP_TAINT_SCAN_MAX_DEPTH {
+            return Some(format!(
+                "taint violation: MCP argument tree exceeds max depth {} at '{}'",
+                MCP_TAINT_SCAN_MAX_DEPTH, path
+            ));
+        }
+        match v {
+            serde_json::Value::String(s) => {
+                // Discard the underlying violation string entirely — it
+                // may be derived from the payload — and report only the
+                // JSON path of the offending leaf.
+                if check_outbound_text_violation(s, sink).is_some() {
+                    Some(format!(
+                        "taint violation: sensitive value in MCP argument '{}' (blocked by sink '{}')",
+                        path, sink.name
+                    ))
+                } else {
+                    None
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    let child = format!("{path}[{i}]");
+                    if let Some(violation) = walk(item, sink, &child, depth + 1) {
+                        return Some(violation);
+                    }
+                }
+                None
+            }
+            serde_json::Value::Object(obj) => {
+                for (k, v) in obj {
+                    let child = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    // Credential-shaped object key with a non-empty
+                    // string value is an unambiguous outbound
+                    // credential, regardless of what the value looks
+                    // like (e.g. `"Authorization": "Bearer sk-…"`
+                    // has whitespace and wouldn't trip the text
+                    // heuristic alone).
+                    if is_sensitive_key_name(k) {
+                        if let serde_json::Value::String(s) = v {
+                            if !s.trim().is_empty() {
+                                return Some(format!(
+                                    "taint violation: sensitive MCP argument key at '{}' (blocked by sink '{}')",
+                                    child, sink.name
+                                ));
+                            }
+                        }
+                    }
+                    if let Some(violation) = walk(v, sink, &child, depth + 1) {
+                        return Some(violation);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+    walk(value, &sink, "$", 0)
+}
 
 // ---------------------------------------------------------------------------
 // Configuration types
@@ -540,21 +656,24 @@ impl McpConnection {
                 Ok((McpInner::Rmcp(client), Some(tools), auth_state))
             }
             Err(e) => {
-                // Attempt structured extraction first: walk the source() chain and
-                // downcast to StreamableHttpError::AuthRequired to get the
-                // www_authenticate_header without fragile string parsing.
+                // Extract the WWW-Authenticate header directly from the
+                // underlying `StreamableHttpError::AuthRequired` variant.
                 //
-                // TODO(rmcp): ClientInitializeError::TransportError does not annotate
-                // its `error: DynamicTransportError` field with #[source], so the
-                // source() chain is broken at that boundary — the downcast always
-                // returns None in practice. The fallback substring check below is the
-                // effective working path until rmcp adds #[source] to that field.
-                let err_dyn: &(dyn std::error::Error + 'static) = &e;
-                let www_authenticate = Self::extract_auth_required(err_dyn);
+                // rmcp's `ClientInitializeError::TransportError` wraps the
+                // transport error in a `DynamicTransportError`, which
+                // type-erases the inner error into a `Box<dyn Error>`.
+                // `std::error::Error::source()` traversal does not reach
+                // inside that box because the outer field is not annotated
+                // with `#[source]`, so we match on the variant by hand and
+                // `downcast_ref` the box contents.
+                //
+                // If anything in the chain ever changes we fall through to
+                // a substring check so we don't regress on plain 401 /
+                // "Unauthorized" / "Auth required" errors from future rmcp
+                // versions or alternative transports.
+                let www_authenticate = Self::extract_auth_header_from_error(&e);
 
                 if www_authenticate.is_none() {
-                    // Fall back to substring check so we don't regress if rmcp ever
-                    // changes its Display output to not include these markers.
                     let error_str = e.to_string();
                     let is_auth_error = error_str.contains("401")
                         || error_str.contains("Unauthorized")
@@ -566,17 +685,12 @@ impl McpConnection {
                     }
                     debug!(
                         url = %url,
-                        "401 detected via fallback string match — structured downcast did not reach"
+                        "401 detected via Display match — structured extraction did not reach the \
+                         AuthRequired variant (rmcp chain layout may have changed)"
                     );
                 }
 
                 debug!(url = %url, "MCP server returned auth error, attempting OAuth discovery");
-
-                // Use the structured header if we got one; otherwise scrape from
-                // the error Display output (fallback-only — see extract_www_authenticate).
-                let error_str = e.to_string();
-                let www_authenticate =
-                    www_authenticate.or_else(|| Self::extract_www_authenticate(&error_str));
 
                 // Discover OAuth metadata using three-tier resolution.
                 let metadata = crate::mcp_oauth::discover_oauth_metadata(
@@ -604,45 +718,36 @@ impl McpConnection {
         }
     }
 
-    /// Walk the `std::error::Error::source()` chain and attempt to downcast each
-    /// node to `StreamableHttpError<reqwest::Error>`. Returns the
-    /// `www_authenticate_header` string if an `AuthRequired` variant is found.
+    /// Extract the `www_authenticate_header` from a
+    /// `ClientInitializeError::TransportError` whose underlying error is a
+    /// `StreamableHttpError::AuthRequired`.
     ///
-    /// In practice this returns `None` today because
-    /// `ClientInitializeError::TransportError` does not annotate its inner
-    /// `DynamicTransportError` with `#[source]`, breaking the chain at that
-    /// boundary (see TODO(rmcp) at the call site). The helper is correct and
-    /// will work once rmcp adds the annotation.
-    fn extract_auth_required(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    /// Implementation note: walking `std::error::Error::source()` does not
+    /// reach the inner variant because rmcp's
+    /// `ClientInitializeError::TransportError` field is not annotated with
+    /// `#[source]`, so the chain stops at `DynamicTransportError`. We match
+    /// on the outer variant directly, then downcast the `Box<dyn Error>`
+    /// inside `DynamicTransportError` to the concrete
+    /// `StreamableHttpError<reqwest::Error>`.
+    fn extract_auth_header_from_error(e: &rmcp::service::ClientInitializeError) -> Option<String> {
+        use rmcp::service::ClientInitializeError;
         use rmcp::transport::streamable_http_client::{AuthRequiredError, StreamableHttpError};
 
-        let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
-        while let Some(e) = cur {
-            if let Some(StreamableHttpError::AuthRequired(AuthRequiredError {
-                www_authenticate_header,
-                ..
-            })) = e.downcast_ref::<StreamableHttpError<reqwest::Error>>()
-            {
-                return Some(www_authenticate_header.clone());
-            }
-            cur = e.source();
+        let ClientInitializeError::TransportError { error: dyn_err, .. } = e else {
+            return None;
+        };
+        let streamable = dyn_err
+            .error
+            .downcast_ref::<StreamableHttpError<reqwest::Error>>()?;
+        if let StreamableHttpError::AuthRequired(AuthRequiredError {
+            www_authenticate_header,
+            ..
+        }) = streamable
+        {
+            Some(www_authenticate_header.clone())
+        } else {
+            None
         }
-        None
-    }
-
-    /// **Fallback only.** Try to extract a WWW-Authenticate header value from
-    /// an error's `Display` output.
-    ///
-    /// rmcp's `StreamableHttpError` embeds the header in its `Debug`/`Display`
-    /// format as `www_authenticate_header: "..."`. This helper scrapes that
-    /// pattern out. It is kept as a fallback for when the structured downcast
-    /// via [`Self::extract_auth_required`] cannot traverse the error chain.
-    fn extract_www_authenticate(error: &str) -> Option<String> {
-        let marker = "www_authenticate_header: \"";
-        let start = error.find(marker)? + marker.len();
-        let rest = &error[start..];
-        let end = rest.find('"')?;
-        Some(rest[..end].to_string())
     }
 
     /// Send the MCP `initialize` handshake over SSE transport.
@@ -863,6 +968,27 @@ impl McpConnection {
         name: &str,
         arguments: &serde_json::Value,
     ) -> Result<String, String> {
+        // SECURITY: best-effort taint filter before shipping arguments
+        // to an out-of-process MCP server. An LLM that has been pushed
+        // into smuggling credentials into tool-call arguments would
+        // otherwise exfiltrate them straight through this call — the
+        // MCP transport hands the JSON to whoever implements the server.
+        // Walk every string leaf in the arguments tree and refuse the
+        // call if anything trips `check_outbound_text_violation`. Non-
+        // string leaves (numbers, bools, null) can't carry plaintext
+        // credentials in any meaningful way, so they are left alone.
+        //
+        // This is still a best-effort pattern match (see
+        // `librefang_types::taint::check_outbound_text_violation` for
+        // exactly which patterns trip it) — not a full information-
+        // flow tracker. Copy-pasted obfuscation still bypasses it.
+        if let Some(violation) = scan_mcp_arguments_for_taint(arguments) {
+            // `violation` is already a redacted rule description from
+            // the scanner — do NOT concatenate the raw payload or the
+            // offending value into the error surface.
+            return Err(violation);
+        }
+
         // Resolve to an owned String immediately so the borrow of self.original_names
         // and self.config.name ends before any mutable operations below.
         let raw_name: String = self
@@ -1341,6 +1467,117 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    // ── MCP outbound taint scanning ──────────────────────────────────────
+
+    #[test]
+    fn test_scan_mcp_arguments_rejects_secret_string_leaf() {
+        let args = serde_json::json!({
+            "repo": "libre/librefang",
+            "token": "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_some());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_walks_nested_trees() {
+        let args = serde_json::json!({
+            "filter": {
+                "headers": {
+                    "Authorization": "Bearer sk-live-secret",
+                }
+            }
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_some());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_rejects_secret_inside_array() {
+        let args = serde_json::json!({
+            "env": ["PATH=/usr/bin", "api_key=sk-00000"],
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_some());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_allows_plain_strings() {
+        let args = serde_json::json!({
+            "query": "What tokens does this crate use?",
+            "limit": 10,
+            "include_drafts": false,
+            "tags": ["rust", "security"],
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_none());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_rejects_json_authorization_string_leaf() {
+        let args = serde_json::json!({
+            "body": r#"{"authorization": "Bearer sk-live-secret"}"#,
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_some());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_rejects_pii_string_leaf() {
+        let args = serde_json::json!({
+            "email": "john@example.com",
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_some());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_error_does_not_leak_secret() {
+        // The scanner must redact: the returned error string is
+        // surfaced to the LLM and to logs, and must NOT contain the
+        // exact credential payload we just blocked.
+        let secret = "ghp_SECRETabcdef0123456789SECRETabcdef0123";
+        let args = serde_json::json!({
+            "headers": { "Authorization": format!("Bearer {secret}") }
+        });
+        let err = scan_mcp_arguments_for_taint(&args).expect("must flag credential-shaped value");
+        assert!(
+            !err.contains(secret),
+            "error string leaked the blocked secret: {err}"
+        );
+        assert!(
+            !err.contains("Bearer"),
+            "error string leaked the header value: {err}"
+        );
+        // It should still identify the offending path for debugging.
+        assert!(
+            err.contains("headers.Authorization") || err.contains("Authorization"),
+            "error string should point at the offending path: {err}"
+        );
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_depth_cap() {
+        // Build a 200-deep nested object. The scanner must bail out
+        // at MCP_TAINT_SCAN_MAX_DEPTH rather than recursing forever.
+        let mut v = serde_json::Value::String("ok".to_string());
+        for _ in 0..200 {
+            let mut m = serde_json::Map::new();
+            m.insert("next".to_string(), v);
+            v = serde_json::Value::Object(m);
+        }
+        let err =
+            scan_mcp_arguments_for_taint(&v).expect("depth cap must reject pathological nesting");
+        assert!(
+            err.contains("max depth"),
+            "expected depth-cap error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_allows_null_and_numbers() {
+        let args = serde_json::json!({
+            "cursor": null,
+            "page": 3,
+            "rate": 1.5,
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_none());
+    }
 
     #[test]
     fn test_mcp_tool_namespacing() {
@@ -1829,38 +2066,19 @@ mod tests {
         assert!(McpConnection::check_ssrf("https://api.example.com/mcp", "test").is_ok());
     }
 
-    /// Verify that `extract_auth_required` returns None for a non-AuthRequired
-    /// `StreamableHttpError` variant (e.g. TransportChannelClosed).
-    ///
-    /// Note: `AuthRequiredError` is `#[non_exhaustive]` in rmcp, so we cannot
-    /// construct `StreamableHttpError::AuthRequired(...)` from outside the crate.
-    /// The positive case (returning `Some(header)`) is exercised by the fallback
-    /// substring path in production; this test verifies the downcast logic
-    /// correctly skips non-matching variants and returns None.
+    /// `extract_auth_header_from_error` returns `None` for any
+    /// `ClientInitializeError` variant that isn't `TransportError`. The
+    /// positive path (returning `Some(header)`) requires constructing a
+    /// `DynamicTransportError` holding a `StreamableHttpError::AuthRequired`,
+    /// which can't be built from outside rmcp because `AuthRequiredError`
+    /// is `#[non_exhaustive]`. This negative-path test pins the "bail out
+    /// early on the wrong variant" invariant so the downcast chain stays
+    /// correct under future rmcp shape changes.
     #[test]
-    fn test_extract_auth_required_returns_none_for_non_auth_error() {
-        use rmcp::transport::streamable_http_client::StreamableHttpError;
+    fn test_extract_auth_header_from_error_returns_none_for_non_transport_variant() {
+        use rmcp::service::ClientInitializeError;
 
-        let err = StreamableHttpError::<reqwest::Error>::TransportChannelClosed;
-        let dyn_err: &(dyn std::error::Error + 'static) = &err;
-        assert!(McpConnection::extract_auth_required(dyn_err).is_none());
-    }
-
-    /// Verify that `extract_auth_required` returns None for a completely
-    /// unrelated error type (not a StreamableHttpError at all).
-    #[test]
-    fn test_extract_auth_required_returns_none_for_unrelated_type() {
-        #[derive(Debug)]
-        struct DummyError;
-        impl std::fmt::Display for DummyError {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "dummy")
-            }
-        }
-        impl std::error::Error for DummyError {}
-
-        let err = DummyError;
-        let dyn_err: &(dyn std::error::Error + 'static) = &err;
-        assert!(McpConnection::extract_auth_required(dyn_err).is_none());
+        let err = ClientInitializeError::ConnectionClosed("simulated".to_string());
+        assert!(McpConnection::extract_auth_header_from_error(&err).is_none());
     }
 }

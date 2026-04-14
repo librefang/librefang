@@ -591,6 +591,18 @@ pub struct RateLimitConfig {
     /// Maximum WebSocket messages per minute per connection. Default: 10.
     #[serde(default = "default_ws_messages_per_minute")]
     pub ws_messages_per_minute: u32,
+    /// Maximum terminal WebSocket input messages per minute per connection.
+    /// Default: 3600.
+    ///
+    /// Terminal sessions send one WebSocket message per keystroke, so the
+    /// generic `ws_messages_per_minute = 10` (sized for chat WS where a
+    /// "message" is a whole utterance) is two orders of magnitude too low
+    /// for an interactive PTY — typing `vim` + `:wq` in vim already
+    /// exhausts the budget and the session appears to freeze. 3600/min
+    /// (60/sec ≈ 720 WPM) covers any human typing speed plus TUI
+    /// navigation bursts while still capping pathological floods.
+    #[serde(default = "default_ws_terminal_messages_per_minute")]
+    pub ws_terminal_messages_per_minute: u32,
     /// WebSocket idle timeout in seconds (close after inactivity). Default: 1800.
     #[serde(default = "default_ws_idle_timeout_secs")]
     pub ws_idle_timeout_secs: u64,
@@ -614,6 +626,9 @@ fn default_max_ws_per_ip() -> usize {
 fn default_ws_messages_per_minute() -> u32 {
     10
 }
+fn default_ws_terminal_messages_per_minute() -> u32 {
+    3600
+}
 fn default_ws_idle_timeout_secs() -> u64 {
     1800
 }
@@ -631,6 +646,7 @@ impl Default for RateLimitConfig {
             retry_after_secs: default_retry_after_secs(),
             max_ws_per_ip: default_max_ws_per_ip(),
             ws_messages_per_minute: default_ws_messages_per_minute(),
+            ws_terminal_messages_per_minute: default_ws_terminal_messages_per_minute(),
             ws_idle_timeout_secs: default_ws_idle_timeout_secs(),
             ws_debounce_ms: default_ws_debounce_ms(),
             ws_debounce_chars: default_ws_debounce_chars(),
@@ -1784,6 +1800,47 @@ pub struct KernelConfig {
     /// require a `Authorization: Bearer <key>` header.
     /// If empty, the API is unauthenticated (local development only).
     pub api_key: String,
+    /// Controls whether the dashboard read-endpoint allowlist (agents,
+    /// config, budget, sessions, approvals, hands, skills, workflows, …)
+    /// requires a bearer token.
+    ///
+    /// * `None` (default, unset in config.toml) — **derive from
+    ///   configured auth**: the reads allowlist is collapsed *automatically*
+    ///   whenever any authentication is configured (non-empty `api_key`,
+    ///   per-user keys, or dashboard credentials). This is the safe
+    ///   default: operators who already set an `api_key` shouldn't also
+    ///   have to remember a separate flag before their read endpoints
+    ///   stop leaking agent IDs to the LAN.
+    /// * `Some(true)` — state the intent explicitly. The daemon logs a
+    ///   boot-time warning if no authentication is actually configured
+    ///   (so an accidental `api_key = ""` redeploy is visible in the
+    ///   logs), but the middleware itself only enforces the closed
+    ///   allowlist when some form of auth is also configured: with no
+    ///   `api_key`, user keys, or dashboard credentials there is nothing
+    ///   to authenticate against and reads fall through to the
+    ///   unauthenticated local-development bypass. Configure an
+    ///   `api_key` (or per-user keys / dashboard credentials) alongside
+    ///   this flag to actually close the allowlist.
+    /// * `Some(false)` — force the allowlist open even when `api_key`
+    ///   is set. Provided as an explicit escape hatch for deployments
+    ///   that front the daemon with an external auth proxy and want the
+    ///   in-tree dashboard to keep rendering before the reverse proxy
+    ///   has attached its own credentials.
+    ///
+    /// Unauthenticated static assets, OAuth flow endpoints, and
+    /// `/api/health*` stay reachable in every mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_auth_for_reads: Option<bool>,
+    /// Hex-encoded Ed25519 public keys (32 bytes → 64 hex chars) allowed to
+    /// sign agent manifests. `verify_signed_manifest` requires the envelope's
+    /// `signer_public_key` to be on this list before accepting a signature —
+    /// without a trust anchor, a self-signed envelope from any attacker
+    /// passes internal-consistency checks and would be indistinguishable
+    /// from a legitimate one. When empty, `SignedManifest` JSON payloads are
+    /// rejected outright (fail-closed). Raw unsigned TOML manifests are
+    /// unaffected; this list only gates the signed-envelope path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_manifest_signers: Vec<String>,
     /// Dashboard login username. When both dashboard_user and dashboard_pass
     /// are set, the dashboard requires username/password login.
     /// Can also be set via `LIBREFANG_DASHBOARD_USER` env var.
@@ -2896,6 +2953,26 @@ pub struct OAuthConfig {
     pub slack_client_id: Option<String>,
 }
 
+/// Per-provider spending limits.
+///
+/// Lets you cap spend on paid providers (e.g. Moonshot, OpenAI) without
+/// throttling free local providers (e.g. litellm, ollama). All limits
+/// default to 0 which means "unlimited" — only non-zero limits are enforced.
+/// Keyed by the provider id in `BudgetConfig.providers`, which must match
+/// the `model.provider` field of the agent's `ModelConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProviderBudget {
+    /// Maximum cost in USD per hour for this provider (0.0 = unlimited).
+    pub max_cost_per_hour_usd: f64,
+    /// Maximum cost in USD per day for this provider (0.0 = unlimited).
+    pub max_cost_per_day_usd: f64,
+    /// Maximum cost in USD per month for this provider (0.0 = unlimited).
+    pub max_cost_per_month_usd: f64,
+    /// Maximum total tokens per hour for this provider (0 = unlimited).
+    pub max_tokens_per_hour: u64,
+}
+
 /// Global spending budget configuration.
 ///
 /// Set limits to 0.0 for unlimited. All limits apply across all agents.
@@ -2914,6 +2991,10 @@ pub struct BudgetConfig {
     /// will be overridden to this value. Set to 0 to keep each agent's own limit.
     /// Use this to globally raise or lower the token budget for all agents.
     pub default_max_llm_tokens_per_hour: u64,
+    /// Per-provider spending caps, keyed by provider id (e.g. `"moonshot"`,
+    /// `"openai"`, `"litellm"`). Missing providers are unlimited.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub providers: std::collections::HashMap<String, ProviderBudget>,
 }
 
 impl Default for BudgetConfig {
@@ -2924,6 +3005,7 @@ impl Default for BudgetConfig {
             max_monthly_usd: 0.0,
             alert_threshold: 0.8,
             default_max_llm_tokens_per_hour: 0,
+            providers: std::collections::HashMap::new(),
         }
     }
 }
@@ -2963,17 +3045,36 @@ fn default_max_request_body_bytes() -> usize {
 /// ```toml
 /// [audit]
 /// retention_days = 90
+/// # Optional override for the external tip-anchor path. Relative
+/// # paths resolve against `data_dir`. Leave unset for the default
+/// # `data_dir/audit.anchor`.
+/// anchor_path = "/var/log/librefang/audit.anchor"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuditConfig {
     /// How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.
     pub retention_days: u32,
+    /// Optional override for the external Merkle-tip anchor file that
+    /// `AuditLog::with_db_anchored` uses to detect full rewrites of
+    /// `audit_entries`. When unset the daemon writes to
+    /// `data_dir/audit.anchor`, which catches most casual tampering but
+    /// sits in the same filesystem namespace as the SQLite file it is
+    /// meant to verify. Operators who want a stronger boundary can
+    /// point this at a path the daemon can write to but unprivileged
+    /// code cannot — a chmod-0400 file owned by a dedicated user, a
+    /// `systemd ReadOnlyPaths=` mount, an NFS share, or a pipe to
+    /// `logger`. Relative paths are resolved against `data_dir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_path: Option<PathBuf>,
 }
 
 impl Default for AuditConfig {
     fn default() -> Self {
-        Self { retention_days: 90 }
+        Self {
+            retention_days: 90,
+            anchor_path: None,
+        }
     }
 }
 
@@ -3381,6 +3482,8 @@ impl Default for KernelConfig {
             network: NetworkConfig::default(),
             channels: ChannelsConfig::default(),
             api_key: String::new(),
+            require_auth_for_reads: None,
+            trusted_manifest_signers: Vec::new(),
             dashboard_user: String::new(),
             dashboard_pass: String::new(),
             dashboard_pass_hash: String::new(),
@@ -5958,6 +6061,55 @@ type = "number"
         assert_eq!(
             toml_str, toml_str2,
             "KernelConfig default roundtrip mismatch — a field may be missing from Default impl"
+        );
+    }
+
+    /// Per-provider budget TOML roundtrip (issue #2316).
+    #[test]
+    fn test_budget_config_per_provider_roundtrip() {
+        let toml_str = r#"
+max_hourly_usd = 0.0
+max_daily_usd = 10.0
+max_monthly_usd = 0.0
+alert_threshold = 0.8
+default_max_llm_tokens_per_hour = 0
+
+[providers.moonshot]
+max_cost_per_day_usd = 2.0
+max_tokens_per_hour = 500000
+
+[providers.litellm]
+# all zeros -> unlimited
+"#;
+        let cfg: BudgetConfig = toml::from_str(toml_str).expect("parse budget TOML");
+        assert_eq!(cfg.providers.len(), 2);
+
+        let moonshot = cfg.providers.get("moonshot").expect("moonshot entry");
+        assert!((moonshot.max_cost_per_day_usd - 2.0).abs() < f64::EPSILON);
+        assert_eq!(moonshot.max_tokens_per_hour, 500_000);
+        // Unset fields default to 0 (unlimited).
+        assert_eq!(moonshot.max_cost_per_hour_usd, 0.0);
+        assert_eq!(moonshot.max_cost_per_month_usd, 0.0);
+
+        let litellm = cfg.providers.get("litellm").expect("litellm entry");
+        assert_eq!(*litellm, ProviderBudget::default());
+
+        // Round-trip: serialize then re-parse, structs should match.
+        let reserialized = toml::to_string(&cfg).expect("serialize budget");
+        let cfg2: BudgetConfig = toml::from_str(&reserialized).expect("reparse budget");
+        assert_eq!(cfg2.providers, cfg.providers);
+    }
+
+    #[test]
+    fn test_budget_config_default_has_empty_providers() {
+        let b = BudgetConfig::default();
+        assert!(b.providers.is_empty());
+        // An empty providers map must not appear in serialized output so that
+        // users who never configured per-provider caps see a clean config.
+        let s = toml::to_string(&b).expect("serialize");
+        assert!(
+            !s.contains("providers"),
+            "empty providers map should be skipped: {s}"
         );
     }
 }

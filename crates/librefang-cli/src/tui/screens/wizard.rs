@@ -155,7 +155,7 @@ const PROVIDERS: &[ProviderInfo] = &[
     ProviderInfo {
         name: "alibaba-coding-plan",
         env_var: "ALIBABA_CODING_PLAN_API_KEY",
-        default_model: "alibaba-coding-plan/qwen3.5-plus",
+        default_model: "alibaba-coding-plan/qwen3.6-plus",
         needs_key: true,
     },
 ];

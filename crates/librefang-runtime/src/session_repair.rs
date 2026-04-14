@@ -9,6 +9,7 @@
 //! - Empty messages with no content
 //! - Aborted assistant messages (empty blocks before tool results)
 //! - Consecutive same-role messages (Anthropic API requires alternation)
+//! - ToolResult blocks misplaced in assistant-role messages (crash artifacts)
 //! - Oversized or potentially malicious tool result content
 
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
@@ -31,6 +32,8 @@ pub struct RepairStats {
     pub synthetic_results_inserted: usize,
     /// Number of duplicate ToolResults removed.
     pub duplicates_removed: usize,
+    /// Number of ToolResult blocks rescued from assistant-role messages.
+    pub misplaced_results_rescued: usize,
 }
 
 /// Validate and repair a message history for LLM consumption.
@@ -38,6 +41,7 @@ pub struct RepairStats {
 /// This ensures the message list is well-formed:
 /// 1. Drops orphaned ToolResult blocks that have no matching ToolUse
 /// 2. Drops empty messages
+///    - 2a. Rescues ToolResult blocks from assistant-role messages (crash artifacts)
 ///    - 2b. Reorders misplaced ToolResults to follow their matching ToolUse
 ///    - 2c. Inserts synthetic error results for unmatched ToolUse blocks
 ///    - 2d. Deduplicates ToolResults with the same tool_use_id
@@ -115,6 +119,13 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
         });
     }
 
+    // Phase 2a: Rescue ToolResult blocks stuck in assistant-role messages.
+    // After a crash, ToolResult blocks may end up inside assistant messages
+    // instead of user messages. Extract them and place them in a proper
+    // user-role message immediately after the assistant message.
+    let rescued_count = rescue_misplaced_tool_results(&mut cleaned);
+    stats.misplaced_results_rescued = rescued_count;
+
     // Phase 2b: Reorder misplaced ToolResults
     let reordered_count = reorder_tool_results(&mut cleaned);
     stats.results_reordered = reordered_count;
@@ -143,11 +154,30 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
     }
 
     // Phase 3: Merge consecutive same-role messages
+    //
+    // Anthropic's API requires each `ToolUse` block to be followed by its
+    // matching `ToolResult` block in the very next message — they cannot
+    // be separated by other text/tool blocks. A naive same-role merge can
+    // break that invariant: e.g. merging
+    //   Assistant[ToolUse#1] + Assistant[Text]   →   Assistant[ToolUse#1, Text]
+    // leaves ToolUse#1 with no immediately-following ToolResult, and the
+    // next API call returns 400 with no way to recover. Issue #2353.
+    //
+    // Skip the merge whenever it would splice across a tool-call boundary:
+    //   • `last` ends with a ToolUse — the next message MUST be a
+    //     same-shape ToolResult delivery, not a merged content blob.
+    //   • `msg` is a pure tool-result delivery — keep it as its own
+    //     message so the pairing stays intact.
     let pre_merge_len = cleaned.len();
     let mut merged: Vec<Message> = Vec::with_capacity(cleaned.len());
     for msg in cleaned {
         if let Some(last) = merged.last_mut() {
-            if last.role == msg.role {
+            if last.role == msg.role
+                && !message_has_tool_use(last)
+                && !message_is_only_tool_results(&msg)
+                && !message_has_tool_use(&msg)
+                && !message_is_only_tool_results(last)
+            {
                 merge_content(&mut last.content, msg.content);
                 stats.messages_merged += 1;
                 continue;
@@ -172,11 +202,97 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
             reordered = stats.results_reordered,
             synthetic = stats.synthetic_results_inserted,
             duplicates = stats.duplicates_removed,
+            rescued = stats.misplaced_results_rescued,
             "Session repair applied fixes"
         );
     }
 
     (merged, stats)
+}
+
+/// Phase 2a: Rescue ToolResult blocks from assistant-role messages.
+///
+/// After a crash, ToolResult blocks may end up inside an assistant-role message
+/// instead of a user-role message. Per OpenAI/Moonshot API contract, tool results
+/// MUST be in user-role messages. This pass extracts such misplaced ToolResult
+/// blocks and moves them into a user-role message immediately after the assistant
+/// message they were found in.
+fn rescue_misplaced_tool_results(messages: &mut Vec<Message>) -> usize {
+    // Collect (assistant_msg_idx, Vec<ToolResult blocks>) for assistant messages
+    // that contain ToolResult blocks.
+    let mut to_rescue: Vec<(usize, Vec<ContentBlock>)> = Vec::new();
+
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role != Role::Assistant {
+            continue;
+        }
+        if let MessageContent::Blocks(blocks) = &msg.content {
+            let misplaced: Vec<ContentBlock> = blocks
+                .iter()
+                .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                .cloned()
+                .collect();
+            if !misplaced.is_empty() {
+                to_rescue.push((idx, misplaced));
+            }
+        }
+    }
+
+    if to_rescue.is_empty() {
+        return 0;
+    }
+
+    let total_rescued: usize = to_rescue.iter().map(|(_, blocks)| blocks.len()).sum();
+
+    // Remove ToolResult blocks from assistant messages
+    for (idx, _) in &to_rescue {
+        if let MessageContent::Blocks(blocks) = &mut messages[*idx].content {
+            blocks.retain(|b| !matches!(b, ContentBlock::ToolResult { .. }));
+        }
+    }
+
+    // Insert rescued blocks into user-role messages after each assistant message.
+    // Process in reverse order so indices stay valid during insertion.
+    for (assistant_idx, rescued_blocks) in to_rescue.into_iter().rev() {
+        let insert_pos = assistant_idx + 1;
+        if insert_pos < messages.len() && messages[insert_pos].role == Role::User {
+            // Append to existing user message
+            if let MessageContent::Blocks(existing) = &mut messages[insert_pos].content {
+                existing.extend(rescued_blocks);
+            } else {
+                let old = std::mem::replace(
+                    &mut messages[insert_pos].content,
+                    MessageContent::Text(String::new()),
+                );
+                let mut new_blocks = content_to_blocks(old);
+                new_blocks.extend(rescued_blocks);
+                messages[insert_pos].content = MessageContent::Blocks(new_blocks);
+            }
+        } else {
+            // Create a new user message for the rescued blocks
+            messages.insert(
+                insert_pos.min(messages.len()),
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Blocks(rescued_blocks),
+                    pinned: false,
+                },
+            );
+        }
+
+        debug!(
+            assistant_idx,
+            "Rescued ToolResult blocks from assistant-role message"
+        );
+    }
+
+    // Remove any assistant messages that became empty after extraction
+    messages.retain(|m| match &m.content {
+        MessageContent::Text(s) => !s.is_empty(),
+        MessageContent::Blocks(b) => !b.is_empty(),
+    });
+
+    total_rescued
 }
 
 /// Phase 2b: Reorder misplaced ToolResults -- ensure each result follows its use.
@@ -328,9 +444,13 @@ fn reorder_tool_results(messages: &mut Vec<Message>) -> usize {
 /// ToolResult anywhere in the history, a synthetic error result is inserted
 /// immediately after the assistant message to prevent API validation errors.
 fn insert_synthetic_results(messages: &mut Vec<Message>) -> usize {
-    // Collect all existing ToolResult IDs
+    // Collect existing ToolResult IDs from user-role messages only.
+    // ToolResult blocks in assistant-role messages are invalid per the API
+    // contract and should have been rescued by Phase 2a already, but we
+    // guard here as well to ensure orphaned tool_use IDs get synthetic results.
     let existing_result_ids: HashSet<String> = messages
         .iter()
+        .filter(|m| m.role == Role::User)
         .flat_map(|m| match &m.content {
             MessageContent::Blocks(blocks) => blocks
                 .iter()
@@ -1563,5 +1683,284 @@ mod tests {
             Message::assistant("a2"),
         ];
         assert_eq!(find_safe_trim_point(&messages, 0), Some(1));
+    }
+
+    // --- Misplaced ToolResult in assistant-role message tests (issue #2344) ---
+
+    #[test]
+    fn test_rescue_tool_result_from_assistant_message() {
+        // After a crash, a ToolResult ends up inside an assistant message
+        // instead of a user message. The repair should move it to a user message.
+        let messages = vec![
+            Message::user("Do something"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "tu-crash".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"cmd": "ls"}),
+                        provider_metadata: None,
+                    },
+                    // ToolResult stuck in assistant message after crash
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tu-crash".to_string(),
+                        tool_name: "bash".to_string(),
+                        content: "file1.txt".to_string(),
+                        is_error: false,
+                        status: ToolExecutionStatus::Completed,
+                        approval_request_id: None,
+                    },
+                ]),
+                pinned: false,
+            },
+            Message::assistant("Here are the files"),
+        ];
+
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+
+        assert_eq!(
+            stats.misplaced_results_rescued, 1,
+            "Should rescue 1 misplaced ToolResult"
+        );
+
+        // The assistant message should no longer contain a ToolResult
+        for msg in &repaired {
+            if msg.role == Role::Assistant {
+                if let MessageContent::Blocks(blocks) = &msg.content {
+                    for block in blocks {
+                        assert!(
+                            !matches!(block, ContentBlock::ToolResult { .. }),
+                            "Assistant message should not contain ToolResult blocks"
+                        );
+                    }
+                }
+            }
+        }
+
+        // There should be a user-role message with the rescued ToolResult
+        let has_user_result = repaired.iter().any(|m| {
+            m.role == Role::User
+                && matches!(&m.content, MessageContent::Blocks(blocks) if blocks.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tu-crash")
+                }))
+        });
+        assert!(
+            has_user_result,
+            "Rescued ToolResult should be in a user-role message"
+        );
+    }
+
+    #[test]
+    fn test_rescue_tool_result_prevents_permanent_400() {
+        // Scenario from issue #2344: ToolResult in assistant message is counted
+        // as "existing" by insert_synthetic_results, so no synthetic is emitted,
+        // but the API rejects it because it's in the wrong role. After the fix,
+        // the result should be moved to a user message and no synthetic needed.
+        let messages = vec![
+            Message::user("Run a command"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "tu-400".to_string(),
+                    name: "shell".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+            },
+            // ToolResult in a SEPARATE assistant message (crash artifact)
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "tu-400".to_string(),
+                    tool_name: "shell".to_string(),
+                    content: "output".to_string(),
+                    is_error: false,
+                    status: ToolExecutionStatus::Completed,
+                    approval_request_id: None,
+                }]),
+                pinned: false,
+            },
+            Message::assistant("Done"),
+        ];
+
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+
+        // The misplaced result should have been rescued
+        assert_eq!(stats.misplaced_results_rescued, 1);
+
+        // No synthetic result should be needed since the rescued result covers it
+        assert_eq!(
+            stats.synthetic_results_inserted, 0,
+            "No synthetic needed when rescued result covers the tool_use"
+        );
+
+        // Verify the ToolResult is now in a user-role message
+        let user_result = repaired.iter().find(|m| {
+            m.role == Role::User
+                && matches!(&m.content, MessageContent::Blocks(blocks) if blocks.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tu-400")
+                }))
+        });
+        assert!(
+            user_result.is_some(),
+            "ToolResult should be in a user-role message"
+        );
+
+        // Verify role alternation is maintained
+        for window in repaired.windows(2) {
+            assert_ne!(
+                window[0].role, window[1].role,
+                "Adjacent messages should alternate roles"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rescue_multiple_tool_results_from_assistant() {
+        // Multiple ToolResult blocks stuck in an assistant message
+        let messages = vec![
+            Message::user("Search and fetch"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "tu-multi-1".to_string(),
+                        name: "search".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tu-multi-2".to_string(),
+                        name: "fetch".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                    // Both results stuck in assistant message
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tu-multi-1".to_string(),
+                        tool_name: "search".to_string(),
+                        content: "search results".to_string(),
+                        is_error: false,
+                        status: ToolExecutionStatus::Completed,
+                        approval_request_id: None,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tu-multi-2".to_string(),
+                        tool_name: "fetch".to_string(),
+                        content: "fetched data".to_string(),
+                        is_error: false,
+                        status: ToolExecutionStatus::Completed,
+                        approval_request_id: None,
+                    },
+                ]),
+                pinned: false,
+            },
+            Message::assistant("All done"),
+        ];
+
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+
+        assert_eq!(stats.misplaced_results_rescued, 2);
+        assert_eq!(stats.synthetic_results_inserted, 0);
+
+        // Both results should now be in user-role messages
+        let user_result_count: usize = repaired
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .map(|m| match &m.content {
+                MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                    .count(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(
+            user_result_count, 2,
+            "Both rescued ToolResults should be in user-role messages"
+        );
+    }
+
+    #[test]
+    fn test_assistant_only_tool_result_no_tool_use() {
+        // ToolResult in assistant message but also no matching ToolUse anywhere.
+        // The rescue pass extracts it; then orphan removal should drop it.
+        let messages = vec![
+            Message::user("Hello"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "tu-phantom".to_string(),
+                    tool_name: String::new(),
+                    content: "phantom result".to_string(),
+                    is_error: false,
+                    status: ToolExecutionStatus::Completed,
+                    approval_request_id: None,
+                }]),
+                pinned: false,
+            },
+            Message::assistant("Hmm"),
+        ];
+
+        let (repaired, _stats) = validate_and_repair_with_stats(&messages);
+
+        // The phantom ToolResult has no matching ToolUse, so it should be
+        // dropped by Phase 1 (orphan removal). The assistant message that
+        // contained only the ToolResult becomes empty and is also dropped.
+        // We don't need to verify exact stats; just ensure no ToolResult
+        // blocks remain for "tu-phantom".
+        let has_phantom = repaired.iter().any(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
+                matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tu-phantom")
+            }),
+            _ => false,
+        });
+        assert!(
+            !has_phantom,
+            "Orphaned phantom result should have been removed"
+        );
+    }
+
+    #[test]
+    fn test_insert_synthetic_ignores_assistant_role_results() {
+        // If Phase 2a didn't run (hypothetically), insert_synthetic_results
+        // should still emit a synthetic result because the ToolResult in the
+        // assistant message is not in a valid position.
+        let mut messages = vec![
+            Message::user("Run command"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "tu-synth-check".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tu-synth-check".to_string(),
+                        tool_name: "bash".to_string(),
+                        content: "wrong-role result".to_string(),
+                        is_error: false,
+                        status: ToolExecutionStatus::Completed,
+                        approval_request_id: None,
+                    },
+                ]),
+                pinned: false,
+            },
+            Message::assistant("Continuing"),
+        ];
+
+        // Call insert_synthetic_results directly (without rescue pass)
+        let count = insert_synthetic_results(&mut messages);
+
+        // Should have inserted a synthetic result because the existing result
+        // is in an assistant-role message (not counted)
+        assert_eq!(
+            count, 1,
+            "Should insert synthetic for tool_use with result in wrong role"
+        );
     }
 }

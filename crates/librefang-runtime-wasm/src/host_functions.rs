@@ -377,6 +377,45 @@ fn extract_host_from_url(url: &str) -> String {
 // Shell (capability-checked)
 // ---------------------------------------------------------------------------
 
+/// Environment variables re-added after `env_clear` on a sandboxed child
+/// process. Mirrors the list in `librefang-runtime/src/subprocess_sandbox.rs`
+/// so that WASM guests invoking `shell_exec` get the same stripped-down
+/// environment as the top-level shell tool. Keeping the list inline (rather
+/// than taking a dependency on `librefang-runtime`) avoids a crate cycle.
+const WASM_SHELL_SAFE_ENV_VARS: &[&str] = &[
+    "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TERM",
+];
+
+/// Clear the child's environment and re-add only the safe allowlist. The
+/// WASM sandbox path used to skip this, so an agent whose `ShellExec`
+/// capability was granted inherited the entire daemon environment — every
+/// LLM provider API key, vault master key override, cloud metadata token,
+/// etc. — regardless of how tightly its Wasm fuel and epoch budget were
+/// capped. This closes that exfiltration hole while leaving the capability
+/// gate above untouched.
+fn sanitize_shell_env(cmd: &mut std::process::Command) {
+    cmd.env_clear();
+    for var in WASM_SHELL_SAFE_ENV_VARS {
+        if let Ok(val) = std::env::var(var) {
+            cmd.env(var, val);
+        }
+    }
+    #[cfg(windows)]
+    for var in [
+        "USERPROFILE",
+        "SYSTEMROOT",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "COMSPEC",
+        "WINDIR",
+        "PATHEXT",
+    ] {
+        if let Ok(val) = std::env::var(var) {
+            cmd.env(var, val);
+        }
+    }
+}
+
 fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
     let command = match params.get("command").and_then(|c| c.as_str()) {
         Some(c) => c,
@@ -399,6 +438,7 @@ fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json
     // Each argument is passed directly to the process.
     let mut cmd = std::process::Command::new(command);
     cmd.args(&args);
+    sanitize_shell_env(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -601,6 +641,51 @@ mod tests {
         let result = host_shell_exec(&state, &json!({"command": "ls"}));
         let err = result["error"].as_str().unwrap();
         assert!(err.contains("denied"));
+    }
+
+    /// Regression: a WASM guest with an explicit `ShellExec("*")` capability
+    /// used to inherit the daemon's full environment, including every LLM
+    /// provider API key. The fix strips the env before exec so only the
+    /// hard-coded safe allowlist (PATH, HOME, LANG, …) survives. Stamp a
+    /// fake secret into the parent environment, drive the host call, and
+    /// verify that the child's `env` output does not contain it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_shell_exec_strips_parent_env_secrets() {
+        // Use a unique key per run so concurrent tests don't collide.
+        let key = format!("LF_WASM_FAKE_SECRET_{}", std::process::id());
+        let value = "sk-should-not-reach-child";
+        std::env::set_var(&key, value);
+
+        let state = test_state(vec![Capability::ShellExec("*".to_string())]);
+        let result = host_shell_exec(
+            &state,
+            &json!({
+                "command": "/usr/bin/env",
+                "args": [],
+            }),
+        );
+
+        // Tidy up the parent env regardless of assertion outcome.
+        std::env::remove_var(&key);
+
+        let ok = result
+            .get("ok")
+            .expect("shell_exec should succeed with ShellExec(*) capability");
+        let stdout = ok
+            .get("stdout")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default();
+        assert!(
+            !stdout.contains(&key) && !stdout.contains(value),
+            "WASM shell_exec child must not inherit parent secrets; got stdout:\n{stdout}"
+        );
+        // And PATH (on the safe allowlist) should still be present so
+        // legitimate shell invocations keep working.
+        assert!(
+            stdout.contains("PATH="),
+            "WASM shell_exec child must still see PATH; got stdout:\n{stdout}"
+        );
     }
 
     #[tokio::test]

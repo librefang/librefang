@@ -654,6 +654,10 @@ pub async fn list_plugin_registries(State(state): State<Arc<AppState>>) -> impl 
                     serde_json::json!({
                         "name": e.name,
                         "installed": installed_names.contains(&e.name),
+                        "version": e.version,
+                        "description": e.description,
+                        "author": e.author,
+                        "hooks": e.hooks,
                     })
                 })
                 .collect::<Vec<_>>(),

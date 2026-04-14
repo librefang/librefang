@@ -7,6 +7,11 @@ const { Readable } = require('node:stream');
 
 // Override DB path to temp location before requiring the module
 process.env.WHATSAPP_DB_PATH = '/tmp/test-wa-gateway-' + process.pid + '.db';
+// Bind a mock LibreFang HTTP server on a fixed port BEFORE requiring the
+// module — `LIBREFANG_URL` is captured at module load. Using a dedicated
+// loopback port (4547) avoids clashing with a real daemon on 4545.
+const MOCK_LIBREFANG_PORT = 24547;
+process.env.LIBREFANG_URL = `http://127.0.0.1:${MOCK_LIBREFANG_PORT}`;
 
 const {
   markdownToWhatsApp,
@@ -18,6 +23,15 @@ const {
   isAllowedOrigin,
   parseBody,
   MAX_BODY_SIZE,
+  forwardToLibreFang,
+  forwardToLibreFangStreaming,
+  shouldSkipCatchupForMissingJid,
+  resolveLidProactively,
+  checkHeartbeat,
+  computeBackoffDelay,
+  echoTracker,
+  ECHO_TRACKER_ENABLED,
+  EchoTracker,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -338,6 +352,377 @@ describe('parseBody', () => {
 describe('MAX_BODY_SIZE', () => {
   it('is 64KB', () => {
     assert.equal(MAX_BODY_SIZE, 64 * 1024);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CS-01: forwardToLibreFang* throw on empty chatJid + catchup guard
+// ---------------------------------------------------------------------------
+describe('CS-01 forwardToLibreFang chatJid enforcement', () => {
+  let mockServer;
+  const lastRequests = [];
+
+  before(async () => {
+    mockServer = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        const parsed = body ? JSON.parse(body) : null;
+        lastRequests.push({ url: req.url, method: req.method, body: parsed });
+        if (req.url === '/api/agents' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify([{ id: 'test-agent-id', name: 'TestAgent' }]));
+          return;
+        }
+        if (req.url && req.url.startsWith('/api/agents/') && req.url.endsWith('/message')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ response: 'mock reply' }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+    await new Promise((resolve) => mockServer.listen(MOCK_LIBREFANG_PORT, '127.0.0.1', resolve));
+  });
+
+  after(async () => {
+    if (mockServer) await new Promise((r) => mockServer.close(r));
+  });
+
+  it('Test 1: forwardToLibreFang throws when chatJid is empty', async () => {
+    await assert.rejects(
+      () => forwardToLibreFang('hi', '', '+39123', 'Alice', false, [], { isGroup: false, wasMentioned: false, chatJid: '' }),
+      (err) => {
+        assert.equal(err.code, 'CHATJID_EMPTY');
+        assert.match(err.message, /chatJid empty/);
+        assert.match(err.message, /phone=\+39123/);
+        assert.match(err.message, /pushName=Alice/);
+        assert.match(err.message, /isGroup=false/);
+        return true;
+      }
+    );
+  });
+
+  it('Test 2: forwardToLibreFangStreaming throws when chatJid is empty', async () => {
+    await assert.rejects(
+      () => forwardToLibreFangStreaming('hi', '', '+39123', 'Alice', false, [], () => {}, '', { isGroup: true, wasMentioned: false }),
+      (err) => {
+        assert.equal(err.code, 'CHATJID_EMPTY');
+        assert.match(err.message, /isGroup=true/);
+        return true;
+      }
+    );
+  });
+
+  it('Test 3: forwardToLibreFang proceeds with valid chatJid and sends channel_type=whatsapp:<jid>', async () => {
+    lastRequests.length = 0;
+    const jid = '39123@s.whatsapp.net';
+    const reply = await forwardToLibreFang('hello', '', '+39123', 'Alice', false, [], { isGroup: false, wasMentioned: false, chatJid: jid });
+    assert.equal(reply, 'mock reply');
+    const msgReq = lastRequests.find((r) => r.url && r.url.endsWith('/message'));
+    assert.ok(msgReq, 'expected /message POST to have fired');
+    assert.equal(msgReq.body.channel_type, `whatsapp:${jid}`);
+  });
+
+  it('Test 4: no code path produces bare channel_type "whatsapp"', () => {
+    // Source-level invariant: the only channelType assignments are
+    // `whatsapp:${chatJid}`, and entry is guarded by the CS-01 throw.
+    const fs = require('node:fs');
+    const src = fs.readFileSync(__dirname + '/index.js', 'utf8');
+    assert.equal(src.includes("chatJid ? `whatsapp:"), false, 'ternary fallback must be removed');
+    assert.equal(/channelType\s*=\s*'whatsapp'\s*;/.test(src), false, 'bare whatsapp assignment must not exist');
+  });
+
+  it('Test 5 (catchup guard): shouldSkipCatchupForMissingJid returns true for null/empty jid rows', () => {
+    assert.equal(shouldSkipCatchupForMissingJid({ id: 1, jid: null }), true);
+    assert.equal(shouldSkipCatchupForMissingJid({ id: 2, jid: '' }), true);
+    assert.equal(shouldSkipCatchupForMissingJid({ id: 3, jid: undefined }), true);
+    assert.equal(shouldSkipCatchupForMissingJid({ id: 4, jid: '39123@s.whatsapp.net' }), false);
+    assert.equal(shouldSkipCatchupForMissingJid(null), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CS-02: proactive LID → PN resolution for first-seen LIDs
+// ---------------------------------------------------------------------------
+describe('CS-02 resolveLidProactively', () => {
+  it('Test 1: first-seen LID triggers onWhatsApp and populates cache', async () => {
+    const cache = new Map();
+    let calls = 0;
+    const sock = {
+      onWhatsApp: (lids) => {
+        calls += 1;
+        return Promise.resolve([{ jid: '39123@s.whatsapp.net', lid: lids[0] }]);
+      },
+    };
+    const result = await resolveLidProactively(sock, '999@lid', cache, 500);
+    assert.equal(result, 'resolved');
+    assert.equal(calls, 1);
+    assert.equal(cache.get('999@lid'), '39123@s.whatsapp.net');
+  });
+
+  it('Test 2: cached LID is NOT re-queried', async () => {
+    const cache = new Map([['999@lid', '39123@s.whatsapp.net']]);
+    let calls = 0;
+    const sock = { onWhatsApp: () => { calls += 1; return Promise.resolve([]); } };
+    const result = await resolveLidProactively(sock, '999@lid', cache, 500);
+    assert.equal(result, 'skipped');
+    assert.equal(calls, 0);
+  });
+
+  it('Test 3: onWhatsApp timeout does NOT block and does NOT populate cache', async () => {
+    const cache = new Map();
+    const sock = { onWhatsApp: () => new Promise(() => {}) }; // never resolves
+    const t0 = Date.now();
+    const result = await resolveLidProactively(sock, '999@lid', cache, 80);
+    const elapsed = Date.now() - t0;
+    assert.equal(result, 'timeout');
+    assert.ok(elapsed >= 70 && elapsed < 500, `elapsed=${elapsed}`);
+    assert.equal(cache.has('999@lid'), false);
+  });
+
+  it('Test 4: onWhatsApp returns [] → lid_resolve_empty tag, cache untouched', async () => {
+    const cache = new Map();
+    const sock = { onWhatsApp: () => Promise.resolve([]) };
+    const result = await resolveLidProactively(sock, '999@lid', cache, 500);
+    assert.equal(result, 'empty');
+    assert.equal(cache.has('999@lid'), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ST-01: heartbeat watchdog
+// ---------------------------------------------------------------------------
+describe('ST-01 heartbeat watchdog', () => {
+  it('Test 1: watchdog invokes sock.end + logs heartbeat_timeout when silence exceeds threshold', async () => {
+    // Reconstruct the watchdog interval body exactly as wired in index.js —
+    // we can't drive the module-internal `lastInboundAt` directly, but the
+    // pure checkHeartbeat predicate + sock.end contract is the same.
+    const logs = [];
+    const origLog = console.log;
+    console.log = (msg) => { logs.push(msg); };
+    let ended = 0;
+    const sock = { end: () => { ended += 1; } };
+    let connStatus = 'connected';
+    let lastInbound = Date.now() - 200_000; // 200s ago → over 180s threshold
+
+    const HEARTBEAT_MS = 180_000;
+    const tick = () => {
+      if (!sock || connStatus !== 'connected') return;
+      const now = Date.now();
+      if (checkHeartbeat(now, lastInbound, HEARTBEAT_MS)) {
+        console.log(JSON.stringify({
+          event: 'heartbeat_timeout',
+          last_inbound_ms: now - lastInbound,
+          threshold_ms: HEARTBEAT_MS,
+        }));
+        try { sock.end(undefined); } catch {}
+      }
+    };
+    const interval = setInterval(tick, 10);
+    await new Promise((r) => setTimeout(r, 30));
+    clearInterval(interval);
+    console.log = origLog;
+
+    assert.ok(ended >= 1, `expected sock.end to fire (got ${ended})`);
+    const htLog = logs.find((l) => typeof l === 'string' && l.includes('heartbeat_timeout'));
+    assert.ok(htLog, 'expected heartbeat_timeout log line');
+    const parsed = JSON.parse(htLog);
+    assert.equal(parsed.threshold_ms, 180_000);
+    assert.ok(parsed.last_inbound_ms >= 180_000);
+  });
+
+  it('Test 2: checkHeartbeat returns false within threshold (recent activity)', () => {
+    const now = 1_000_000;
+    assert.equal(checkHeartbeat(now, now - 10_000, 180_000), false);
+    assert.equal(checkHeartbeat(now, now - 179_999, 180_000), false);
+    assert.equal(checkHeartbeat(now, now - 180_001, 180_000), true);
+  });
+
+  it('Test 3: watchdog NO-OPs when sock is null or status != connected', () => {
+    let ended = 0;
+    const sock = { end: () => { ended += 1; } };
+    const HEARTBEAT_MS = 180_000;
+    const lastInbound = Date.now() - 500_000;
+
+    // sock null → no action regardless of silence
+    const tickSockNull = () => {
+      const currentSock = null;
+      if (!currentSock || 'connected' !== 'connected') return;
+      if (checkHeartbeat(Date.now(), lastInbound, HEARTBEAT_MS)) currentSock && currentSock.end();
+    };
+    tickSockNull();
+
+    // status != connected → no action
+    const tickStatusReconnecting = () => {
+      const connStatus = 'disconnected';
+      if (!sock || connStatus !== 'connected') return;
+      if (checkHeartbeat(Date.now(), lastInbound, HEARTBEAT_MS)) sock.end();
+    };
+    tickStatusReconnecting();
+
+    assert.equal(ended, 0);
+  });
+
+  it('Test 4: source-level invariant — cleanupSocket + close branch clear heartbeatInterval', () => {
+    const fs = require('node:fs');
+    const src = fs.readFileSync(__dirname + '/index.js', 'utf8');
+    // cleanupSocket clears the interval
+    assert.match(src, /cleanupSocket[\s\S]*?heartbeatInterval[\s\S]*?clearInterval\(heartbeatInterval\)/);
+    // messages.upsert refreshes lastInboundAt
+    assert.match(src, /messages\.upsert[\s\S]*?lastInboundAt = Date\.now\(\)/);
+    // heartbeat log uses the exact event name
+    assert.match(src, /event: 'heartbeat_timeout'/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ST-02: jittered exponential backoff
+// ---------------------------------------------------------------------------
+describe('ST-02 computeBackoffDelay', () => {
+  // Deterministic RNG — Mulberry32 seeded.
+  function mulberry32(seed) {
+    let s = seed >>> 0;
+    return function () {
+      s = (s + 0x6D2B79F5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  it('Test 1: delay stays within [base*0.75, base*1.25] and respects cap', () => {
+    const rng = mulberry32(42);
+    // attempt 1: base = 2000 → [1500, 2500]
+    const d1 = computeBackoffDelay(1, rng);
+    assert.ok(d1 >= 1500 && d1 <= 2500, `attempt 1 delay=${d1}`);
+    // attempt 2: base = 3600 → [2700, 4500]
+    const d2 = computeBackoffDelay(2, rng);
+    assert.ok(d2 >= 2700 && d2 <= 4500, `attempt 2 delay=${d2}`);
+    // attempt 8: base hits 30000 cap → [22500, 37500]
+    const d8 = computeBackoffDelay(8, rng);
+    assert.ok(d8 >= 22500 && d8 <= 37500, `attempt 8 delay=${d8}`);
+    // attempt 20: still capped at 30000 base → [22500, 37500]
+    const d20 = computeBackoffDelay(20, rng);
+    assert.ok(d20 >= 22500 && d20 <= 37500, `attempt 20 delay=${d20}`);
+  });
+
+  it('Test 1b: compound growth factor ≈ 1.8 before cap', () => {
+    // With rng fixed to 0.5 → jitter factor = 1.0 exactly.
+    const noJitter = () => 0.5;
+    assert.equal(computeBackoffDelay(1, noJitter), 2000);
+    assert.equal(computeBackoffDelay(2, noJitter), 3600);   // 2000 * 1.8
+    assert.equal(computeBackoffDelay(3, noJitter), 6480);   // 2000 * 1.8^2
+    assert.equal(computeBackoffDelay(4, noJitter), 11664);
+    assert.equal(computeBackoffDelay(5, noJitter), 20995);
+    assert.equal(computeBackoffDelay(6, noJitter), 30000);  // capped
+    assert.equal(computeBackoffDelay(100, noJitter), 30000);
+  });
+
+  it('Test 2: no hard stop — attempt 100 still produces a finite delay (≤ cap range)', () => {
+    const d = computeBackoffDelay(100, mulberry32(7));
+    assert.ok(Number.isFinite(d) && d > 0 && d <= 37500);
+  });
+
+  it('Test 3: loggedOut / forbidden branches remain untouched (source invariant)', () => {
+    const fs = require('node:fs');
+    const src = fs.readFileSync(__dirname + '/index.js', 'utf8');
+    // The hard-stop check must be gone.
+    assert.equal(
+      /reconnectAttempts\s*>=\s*MAX_RECONNECT_ATTEMPTS/.test(src),
+      false,
+      'hard-stop check must be removed'
+    );
+    // Legacy constants removed — zero remaining references.
+    assert.equal((src.match(/MAX_RECONNECT_ATTEMPTS/g) || []).length, 0);
+    assert.equal((src.match(/MAX_RECONNECT_DELAY/g) || []).length, 0);
+    // loggedOut / forbidden branches preserved.
+    assert.match(src, /DisconnectReason\.loggedOut/);
+    assert.match(src, /DisconnectReason\.forbidden/);
+    // New backoff call site is present.
+    assert.match(src, /computeBackoffDelay\(reconnectAttempts\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3 §A — Echo tracker wiring (EB-01)
+// ---------------------------------------------------------------------------
+describe('echo tracker wiring (Phase 3 §A)', () => {
+  it('exports tracker handle, ECHO_TRACKER_ENABLED, and EchoTracker class', () => {
+    assert.ok(echoTracker, 'echoTracker should be exported');
+    assert.equal(typeof echoTracker.track, 'function');
+    assert.equal(typeof echoTracker.isEcho, 'function');
+    assert.equal(typeof echoTracker.size, 'function');
+    assert.equal(typeof echoTracker.reset, 'function');
+    assert.equal(typeof EchoTracker, 'function');
+    assert.equal(typeof EchoTracker.normalize, 'function');
+    // Default flag state (no env var set in test env)
+    assert.equal(typeof ECHO_TRACKER_ENABLED, 'boolean');
+  });
+
+  it('integration: outbound track then inbound echo would drop (raw body)', () => {
+    echoTracker.reset();
+    // Simulate the outbound wire-in (every sock.sendMessage({ text }) is followed by track)
+    echoTracker.track('ciao');
+    // Simulate the inbound gate condition with the same body
+    assert.equal(echoTracker.isEcho('ciao'), true,
+      'inbound echo of just-sent message must be detected');
+    assert.equal(echoTracker.size(), 1);
+  });
+
+  it('integration: normalization works through wiring (Hello. -> hello)', () => {
+    echoTracker.reset();
+    echoTracker.track('Hello.');
+    assert.equal(echoTracker.isEcho('hello'), true,
+      'normalized echo (case + trailing punct) must drop');
+    assert.equal(echoTracker.isEcho('HELLO!'), true);
+  });
+
+  it('integration: unrelated inbound is NOT dropped (no false positive)', () => {
+    echoTracker.reset();
+    echoTracker.track('ciao');
+    assert.equal(echoTracker.isEcho('something else'), false,
+      'unrelated message must pass through (forwardToLibreFang would be called)');
+    // tracker unchanged for non-matching probe
+    assert.equal(echoTracker.size(), 1);
+  });
+
+  it('flag gate: when LIBREFANG_ECHO_TRACKER=off, gate is bypassed', () => {
+    // ECHO_TRACKER_ENABLED is captured at module load. We assert the source
+    // shape so a future regression (gating without flag check) is caught.
+    const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'index.js'), 'utf8');
+    // The gate must be wrapped in an ECHO_TRACKER_ENABLED check.
+    assert.match(src,
+      /if\s*\(\s*ECHO_TRACKER_ENABLED\s*&&\s*messageText\s*&&\s*echoTracker\.isEcho/,
+      'inbound gate must be flag-gated by ECHO_TRACKER_ENABLED');
+    // Each track call must also be flag-gated.
+    const trackCalls = src.match(/echoTracker\.track\(/g) || [];
+    const flaggedTrackCalls = src.match(/if\s*\(\s*ECHO_TRACKER_ENABLED\s*\)\s*echoTracker\.track\(/g) || [];
+    assert.equal(trackCalls.length, flaggedTrackCalls.length,
+      `every echoTracker.track() must be flag-gated (found ${trackCalls.length} calls, ${flaggedTrackCalls.length} flagged)`);
+    // Default ON: env unset → enabled.
+    assert.equal(process.env.LIBREFANG_ECHO_TRACKER, undefined);
+    assert.equal(ECHO_TRACKER_ENABLED, true);
+  });
+
+  it('echo_drop log structure is correct shape (would emit on drop)', () => {
+    // Verify the source emits the spec'd log structure when isEcho fires.
+    const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'index.js'), 'utf8');
+    assert.match(src, /event:\s*'echo_drop'/);
+    assert.match(src, /body_excerpt:/);
+    assert.match(src, /tracker_size:/);
+    assert.match(src, /elapsed_ms_since_last_sent:/);
+    // Body excerpt must be capped at 80 chars.
+    assert.match(src, /\.slice\(0,\s*80\)/);
+  });
+
+  it('outbound wire-in covers all 7 text sendMessage sites', () => {
+    const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'index.js'), 'utf8');
+    const trackCount = (src.match(/echoTracker\.track\(/g) || []).length;
+    assert.equal(trackCount, 7,
+      `expected 7 echoTracker.track() calls (one per outbound text site), got ${trackCount}`);
   });
 });
 

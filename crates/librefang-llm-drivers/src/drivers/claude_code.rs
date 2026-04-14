@@ -8,6 +8,7 @@
 //! Tracks active subprocess PIDs and enforces message timeouts to prevent
 //! hung CLI processes from blocking agents indefinitely.
 
+pub use crate::llm_driver::McpBridgeConfig;
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
 use base64::Engine;
@@ -66,6 +67,8 @@ pub struct ClaudeCodeDriver {
     /// Optional profile config directory.  When set, every spawned CLI process
     /// gets `CLAUDE_CONFIG_DIR=<path>` so it uses that profile's credentials.
     config_dir: Option<std::path::PathBuf>,
+    /// Optional MCP bridge config (see [`McpBridgeConfig`]).
+    mcp_bridge: Option<McpBridgeConfig>,
 }
 
 impl ClaudeCodeDriver {
@@ -91,12 +94,20 @@ impl ClaudeCodeDriver {
             active_pids: Arc::new(DashMap::new()),
             message_timeout_secs: DEFAULT_MESSAGE_TIMEOUT_SECS,
             config_dir: None,
+            mcp_bridge: None,
         }
     }
 
     /// Set the profile config directory (`CLAUDE_CONFIG_DIR`).
     pub fn with_config_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.config_dir = Some(dir);
+        self
+    }
+
+    /// Enable the MCP bridge so LibreFang tools are exposed to the spawned
+    /// Claude CLI via its native `--mcp-config` support.
+    pub fn with_mcp_bridge(mut self, bridge: McpBridgeConfig) -> Self {
+        self.mcp_bridge = Some(bridge);
         self
     }
 
@@ -254,7 +265,44 @@ impl ClaudeCodeDriver {
         PreparedPrompt {
             text: parts.join("\n\n"),
             image_dir,
+            mcp_config_path: None,
         }
+    }
+
+    /// Write a temp `mcp_config.json` describing the LibreFang MCP server and
+    /// return its path. The file is written to a unique location per call so
+    /// concurrent subprocess spawns never collide.
+    ///
+    /// Claude CLI's `--mcp-config` accepts JSON files with the standard
+    /// `mcpServers` shape; the `type: "http"` transport points at the
+    /// daemon's existing `/mcp` endpoint (see
+    /// `librefang-api/src/routes/network.rs::mcp_http`).
+    fn write_mcp_config(bridge: &McpBridgeConfig) -> std::io::Result<PathBuf> {
+        let path =
+            std::env::temp_dir().join(format!("librefang-mcp-{}.json", uuid::Uuid::new_v4()));
+        let base = bridge.base_url.trim_end_matches('/');
+        let url = format!("{base}/mcp");
+
+        let mut server = serde_json::json!({
+            "type": "http",
+            "url": url,
+        });
+        if let Some(key) = bridge.api_key.as_deref() {
+            if !key.trim().is_empty() {
+                server["headers"] = serde_json::json!({
+                    "X-API-Key": key,
+                });
+            }
+        }
+
+        let config = serde_json::json!({
+            "mcpServers": {
+                "librefang": server,
+            }
+        });
+
+        std::fs::write(&path, serde_json::to_vec_pretty(&config)?)?;
+        Ok(path)
     }
 
     /// Map a model ID like "claude-code/opus" to CLI --model flag value.
@@ -321,6 +369,20 @@ impl ClaudeCodeDriver {
 
         args
     }
+
+    /// Append `--mcp-config` / `--strict-mcp-config` / `--allowedTools` flags
+    /// to a command arg list. Factored out of the two call sites so the test
+    /// suite can compare the full arg vector.
+    fn append_mcp_args(args: &mut Vec<String>, mcp_config_path: &std::path::Path) {
+        args.push("--mcp-config".to_string());
+        args.push(mcp_config_path.to_string_lossy().into_owned());
+        args.push("--strict-mcp-config".to_string());
+        args.push("--allowedTools".to_string());
+        // Allow every tool exposed by the `librefang` MCP server. Claude CLI's
+        // tool-name convention for MCP-sourced tools is `mcp__<server>__<tool>`,
+        // and passing just the server prefix permits all of them.
+        args.push("mcp__librefang".to_string());
+    }
 }
 
 /// Prompt text plus optional temp directory containing decoded images.
@@ -329,14 +391,22 @@ struct PreparedPrompt {
     /// Temporary directory holding image files. The caller should pass this
     /// path via `--add-dir` and remove it after the CLI exits.
     image_dir: Option<PathBuf>,
+    /// Temporary file holding the MCP bridge config (when tools are enabled).
+    /// Passed to the CLI via `--mcp-config` and removed after the CLI exits.
+    mcp_config_path: Option<PathBuf>,
 }
 
 impl PreparedPrompt {
-    /// Clean up temporary image files, if any.
+    /// Clean up temporary image files and MCP config, if any.
     fn cleanup(&self) {
         if let Some(ref dir) = self.image_dir {
             if let Err(e) = std::fs::remove_dir_all(dir) {
                 debug!(error = %e, dir = %dir.display(), "Failed to clean up image temp dir");
+            }
+        }
+        if let Some(ref path) = self.mcp_config_path {
+            if let Err(e) = std::fs::remove_file(path) {
+                debug!(error = %e, path = %path.display(), "Failed to clean up MCP config temp file");
             }
         }
     }
@@ -425,11 +495,43 @@ fn detect_cli_error_in_text(text: &str) -> Option<LlmError> {
 #[async_trait]
 impl LlmDriver for ClaudeCodeDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let prepared = Self::build_prompt(&request);
+        // Issue #2314: LibreFang tools are bridged to the spawned Claude CLI
+        // via its native `--mcp-config` MCP-client support. When `tools` is
+        // non-empty and the kernel has wired an MCP bridge into this driver,
+        // we write a temp mcp_config.json pointing at the daemon's `/mcp`
+        // endpoint and pass it to `claude -p`. Claude CLI handles the full
+        // tool_use / tool_result round-trip natively — no stream parsing,
+        // no session plumbing on our side.
+        let mut prepared = Self::build_prompt(&request);
         let model_flag = Self::model_flag(&request.model);
 
+        if !request.tools.is_empty() {
+            if let Some(ref bridge) = self.mcp_bridge {
+                match Self::write_mcp_config(bridge) {
+                    Ok(path) => prepared.mcp_config_path = Some(path),
+                    Err(e) => {
+                        prepared.cleanup();
+                        return Err(LlmError::Http(format!(
+                            "Failed to write Claude Code MCP bridge config: {e}"
+                        )));
+                    }
+                }
+            } else {
+                warn!(
+                    tool_count = request.tools.len(),
+                    "claude_code driver received tools but no MCP bridge is configured; \
+                     tools will not be available inside the spawned CLI"
+                );
+            }
+        }
+
         let mut cmd = tokio::process::Command::new(&self.cli_path);
-        for arg in self.build_command_args(&prepared.text, "json", false, model_flag.as_deref()) {
+        let mut args =
+            self.build_command_args(&prepared.text, "json", false, model_flag.as_deref());
+        if let Some(ref path) = prepared.mcp_config_path {
+            Self::append_mcp_args(&mut args, path);
+        }
+        for arg in args {
             cmd.arg(arg);
         }
 
@@ -645,13 +747,36 @@ impl LlmDriver for ClaudeCodeDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
-        let prepared = Self::build_prompt(&request);
+        let mut prepared = Self::build_prompt(&request);
         let model_flag = Self::model_flag(&request.model);
 
+        if !request.tools.is_empty() {
+            if let Some(ref bridge) = self.mcp_bridge {
+                match Self::write_mcp_config(bridge) {
+                    Ok(path) => prepared.mcp_config_path = Some(path),
+                    Err(e) => {
+                        prepared.cleanup();
+                        return Err(LlmError::Http(format!(
+                            "Failed to write Claude Code MCP bridge config: {e}"
+                        )));
+                    }
+                }
+            } else {
+                warn!(
+                    tool_count = request.tools.len(),
+                    "claude_code driver received tools but no MCP bridge is configured; \
+                     tools will not be available inside the spawned CLI"
+                );
+            }
+        }
+
         let mut cmd = tokio::process::Command::new(&self.cli_path);
-        for arg in
-            self.build_command_args(&prepared.text, "stream-json", true, model_flag.as_deref())
-        {
+        let mut args =
+            self.build_command_args(&prepared.text, "stream-json", true, model_flag.as_deref());
+        if let Some(ref path) = prepared.mcp_config_path {
+            Self::append_mcp_args(&mut args, path);
+        }
+        for arg in args {
             cmd.arg(arg);
         }
 

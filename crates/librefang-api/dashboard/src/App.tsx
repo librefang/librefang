@@ -467,6 +467,20 @@ export function App() {
       ],
     },
     {
+      key: "config",
+      label: t("nav.config"),
+      items: [
+        { to: "/config/general", label: t("config.cat_general"), icon: Settings },
+        { to: "/config/memory", label: t("config.cat_memory"), icon: Database },
+        { to: "/config/tools", label: t("config.cat_tools"), icon: Sparkles },
+        { to: "/config/channels", label: t("config.cat_channels"), icon: Network },
+        { to: "/config/security", label: t("config.cat_security"), icon: Shield },
+        { to: "/config/network", label: t("config.cat_network"), icon: Share2 },
+        { to: "/config/infra", label: t("config.cat_infra"), icon: Server },
+        { to: "/settings", label: t("nav.settings"), icon: Settings },
+      ],
+    },
+    {
       key: "automate",
       label: t("nav.automate"),
       items: [
@@ -719,7 +733,7 @@ export function App() {
 
         {/* Main Content */}
         <main id="main-content" className="flex-1 overflow-y-auto overflow-x-hidden bg-main" tabIndex={-1}>
-          <div className="mx-auto max-w-7xl p-3 sm:p-4 lg:p-8">
+          <div className="w-full p-3 sm:p-4 lg:p-8">
             <Outlet />
           </div>
         </main>

@@ -58,7 +58,12 @@ LibreFang implements defense-in-depth with the following security controls:
 ### Input Validation
 - **Path traversal protection**: `safe_resolve_path()` / `safe_resolve_parent()` on all file operations
 - **SSRF protection**: Private IP blocking, DNS resolution checks, cloud metadata endpoint filtering
-- **Image validation**: Media type whitelist (png/jpeg/gif/webp), 5MB size limit
+- **Image upload validation**: exact-match MIME allowlist on
+  `/api/agents/{id}/upload` covers `image/png`, `image/jpeg`, `image/gif`,
+  `image/webp`; scriptable formats like `image/svg+xml` are rejected.
+  Upload size is capped by `KernelConfig.max_upload_size_bytes` (default
+  10 MiB — tighten it in `config.toml` if your threat model demands a
+  smaller limit).
 - **Prompt injection heuristics** *(best-effort, not a security boundary)*: Skill content is
   scanned for a short hard-coded list of English override phrases and exfiltration keywords
   (`ignore previous instructions`, `exfiltrate`, `post to https`, …) via case-insensitive
@@ -74,12 +79,47 @@ LibreFang implements defense-in-depth with the following security controls:
 ### Cryptographic Security
 - **Ed25519 signed manifests**: Agent identity verification
 - **HMAC-SHA256 wire protocol**: Mutual authentication with nonce-based replay protection
-- **Secret zeroization**: `Zeroizing<String>` on all API key fields, wiped on drop
+- **Secret zeroization** *(scoped to the credential vault)*: the encrypted
+  credential vault in `librefang-extensions/src/vault.rs` stores every
+  entry as `Zeroizing<String>`, so individual vault reads drop plaintext
+  immediately after use and the vault master key is also held in
+  `Zeroizing<[u8; 32]>`. The embedding driver re-wraps its API key with
+  `Zeroizing::new` after reading it from config. Other secret-carrying
+  fields on `KernelConfig` (`api_key`, `dashboard_pass`,
+  `dashboard_pass_hash`) are still plain `String`: adding a destructor to
+  `KernelConfig` breaks partial-move patterns across ~700 call sites,
+  and switching every field to `Zeroizing<String>` requires a
+  serde-compatible newtype rollout that is not yet in place. The
+  in-process copy of these fields therefore persists in heap memory
+  until the owning `Arc<KernelConfig>` is dropped, which is
+  good-enough against post-exit forensics on most platforms but is
+  **not** the "wiped on every drop" guarantee the previous bullet
+  implied. If you need stronger memory hygiene, run the daemon inside
+  a memory-encrypted VM or disable core dumps for the process.
 
 ### Runtime Isolation
 - **WASM dual metering**: Fuel limits + epoch interruption with watchdog thread
 - **Subprocess sandbox**: Environment isolation (`env_clear()`), restricted PATH
-- **Taint tracking**: Information flow labels prevent untrusted data in privileged operations
+- **Tool-sink heuristics** *(pattern match, not full information-flow tracking)*:
+  `crates/librefang-types/src/taint.rs` defines `TaintLabel`, `TaintedValue`,
+  and `TaintSink`, and the LLM tool runner checks two sinks before
+  executing risky tool calls:
+  `check_taint_shell_exec` refuses commands matching `curl `, `wget `,
+  `| sh`, `| bash`, `base64 -d`, `eval ` (plus the shell-metacharacter
+  denylist), and `check_taint_net_fetch` refuses URLs whose query string
+  or percent-decoded parameter names contain `api_key`, `apikey`,
+  `token`, `secret`, `password`, or an `authorization:` header fragment.
+  Values that hit a pattern are wrapped in `TaintedValue` and run
+  through `check_sink`, which is where the refusal originates.
+
+  This is **not** a general information-flow control system: labels are
+  attached at the call site the moment a pattern matches, they do not
+  propagate across function boundaries, LLM tool outputs are not
+  automatically labelled, and there is no compiler/type-level
+  enforcement — code that never constructs a `TaintedValue` is
+  entirely outside the check. Treat it as a targeted denylist for two
+  specific exfiltration / injection shapes in the tool runner, not as
+  a lattice that covers all untrusted data in the process.
 
 ### Network Security
 - **GCRA rate limiter**: Cost-aware token buckets per IP
@@ -88,8 +128,8 @@ LibreFang implements defense-in-depth with the following security controls:
 - **CORS policy**: Restricted to localhost when no API key configured
 
 ### Audit
-- **Merkle hash chain**: Tamper-evident audit trail for all agent actions
-- **Tamper detection**: Chain integrity verification via `/api/audit/verify`
+- **Hash-linked audit log**: Each entry's hash covers its fields plus the previous entry's hash, and `/api/audit/verify` recomputes the chain from the genesis sentinel. This detects **in-place edits** (flip a byte in one entry and the chain breaks at that row) and **row deletions** (the successor's `prev_hash` no longer matches).
+- **Limitation — no external tip anchor**: the chain is only self-consistent, it is not anchored to a trust root outside the SQLite database. An attacker with write access to `~/.librefang/data/librefang.db` can delete every row, insert a fabricated history, and recompute every hash from genesis forward — `/api/audit/verify` will return `valid: true` because it has nothing to compare the tip against. Treat the audit log as tamper-*evident against casual or partial edits*, **not** as a cryptographic supply-chain proof. If you need the stronger property, mirror the tip hash to an append-only store you control (signed systemd-journald entry, transparency log, offsite append-only file) and reconcile on startup; this is not built in.
 
 ## Dependencies
 

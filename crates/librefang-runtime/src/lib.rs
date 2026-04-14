@@ -23,7 +23,7 @@ pub mod context_engine;
 pub mod context_overflow;
 pub use librefang_runtime_oauth::copilot_oauth;
 pub mod docker_sandbox;
-pub use librefang_runtime_drivers::drivers;
+pub use librefang_llm_drivers::drivers;
 pub mod embedding;
 pub mod graceful_shutdown;
 pub mod hooks;

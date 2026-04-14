@@ -9,7 +9,7 @@ use crate::router::AgentRouter;
 use crate::sanitizer::{InputSanitizer, SanitizeResult};
 use crate::types::{
     default_phase_emoji, truncate_utf8, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage,
-    ChannelUser, InteractiveButton, LifecycleReaction, SenderContext,
+    ChannelUser, InteractiveButton, LifecycleReaction, ParticipantRef, SenderContext,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -18,7 +18,7 @@ use librefang_types::config::{
     AutoRouteStrategy, ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat,
 };
 use librefang_types::message::ContentBlock;
-use regex::RegexSet;
+use regex::{Regex, RegexSet};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -1321,6 +1321,120 @@ fn matches_group_trigger_pattern(
     matched
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2 §C — Positional vocative trigger + addressee guard (OB-04, OB-05)
+// ---------------------------------------------------------------------------
+
+/// Truncate `text` to `max` chars (UTF-8 safe) for log excerpts.
+fn truncate_excerpt(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (i, ch) in text.chars().enumerate() {
+        if i >= max {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Returns true when `LIBREFANG_GROUP_ADDRESSEE_GUARD=on`.
+///
+/// Per D-§C-6 the guard is shipped default-off for a 1-week observation
+/// window. While off, the legacy substring matcher remains authoritative
+/// and the new positional/addressee functions are bypassed in
+/// `should_process_group_message`.
+fn addressee_guard_enabled() -> bool {
+    std::env::var("LIBREFANG_GROUP_ADDRESSEE_GUARD")
+        .ok()
+        .as_deref()
+        == Some("on")
+}
+
+/// Detect a leading-vocative `<Capitalized>[,!]` token in `text`.
+///
+/// Returns the captured name (without the punctuation) when the turn opens
+/// with a vocative form like "Caterina,". The match is anchored at the start
+/// of the string after optional whitespace; only ASCII-style capitalized
+/// names are recognized (Italian/English vocatives — sufficient for §C).
+fn leading_vocative_name(text: &str) -> Option<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        // ^\s* <Capitalized name (1+ letters)> followed by , or !
+        Regex::new(r"^\s*([A-ZÀ-Ý][A-Za-zÀ-ÿ]+)[,!]").expect("leading_vocative regex compiles")
+    });
+    re.captures(text)
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+}
+
+/// Strict positional vocative-trigger match for `pattern` in `text`.
+///
+/// True iff the (whole-word, case-sensitive — pattern is expected to be a
+/// proper name like "Signore") `pattern` appears either:
+///  * at the start of the turn after optional whitespace, or
+///  * immediately after a `[.!?]` punctuation boundary followed by whitespace.
+///
+/// Additionally REJECTED when another capitalized vocative appears BEFORE
+/// the matched pattern — this captures the Beeper-screenshot case
+/// `"Caterina, chiedi al Signore..."` where "Signore" is mentioned but the
+/// turn is addressed to Caterina.
+pub fn is_vocative_trigger(text: &str, pattern: &str) -> bool {
+    if text.is_empty() || pattern.is_empty() {
+        return false;
+    }
+    // Build a per-call regex (patterns vary per-agent and tests cover several).
+    // Pattern is a literal proper name; escape to avoid regex-meta surprises.
+    let escaped = regex::escape(pattern);
+    let combined = format!(r"(?:^|[.!?])\s*({escaped})\b", escaped = escaped);
+    let re = match Regex::new(&combined) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let Some(m) = re.find(text) else { return false };
+
+    // Heuristic: reject if any *other* capitalized vocative (`<Name>,`) appears
+    // BEFORE the pattern position. We scan only the prefix [0..match_start].
+    let prefix = &text[..m.start()];
+    static OTHER_VOCATIVE: OnceLock<Regex> = OnceLock::new();
+    let other = OTHER_VOCATIVE.get_or_init(|| {
+        Regex::new(r"\b([A-ZÀ-Ý][A-Za-zÀ-ÿ]+),\s").expect("other_vocative regex compiles")
+    });
+    for cap in other.captures_iter(prefix) {
+        if let Some(name) = cap.get(1) {
+            // If the prefix vocative IS the pattern itself we'd have matched at
+            // start; getting here means it's a *different* name → reject.
+            if !name.as_str().eq_ignore_ascii_case(pattern) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// True when the turn opens with a vocative addressed to a participant other
+/// than the agent (e.g. `"Caterina, chiedi..."` in a group containing
+/// Caterina + the Bot).
+///
+/// Heuristic: extract a leading `<Capitalized>[,!]` token and look it up
+/// (case-insensitively) in the participant roster. If found and not equal
+/// to `agent_name`, the turn is addressed to someone else.
+pub fn is_addressed_to_other_participant(
+    text: &str,
+    participants: &[ParticipantRef],
+    agent_name: &str,
+) -> bool {
+    let Some(name) = leading_vocative_name(text) else {
+        return false;
+    };
+    if name.eq_ignore_ascii_case(agent_name) {
+        return false;
+    }
+    participants.iter().any(|p| {
+        p.display_name.eq_ignore_ascii_case(&name)
+            && !p.display_name.eq_ignore_ascii_case(agent_name)
+    })
+}
+
 fn is_group_command(message: &ChannelMessage) -> bool {
     matches!(&message.content, ChannelContent::Command { .. })
         || matches!(&message.content, ChannelContent::Text(text) if text.starts_with('/'))
@@ -1389,23 +1503,114 @@ fn should_process_group_message(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let is_command = is_group_command(message);
-            let regex_triggered = !was_mentioned
-                && !is_command
-                && matches_group_trigger_pattern(
+            let text = text_content(message).unwrap_or("");
+            let sender_excerpt: &str = &message.sender.display_name;
+            let guard_on = addressee_guard_enabled();
+
+            // OB-04/OB-05 — addressee guard. When the turn opens with a vocative
+            // matching another participant in the group roster, abstain even if
+            // a substring of `group_trigger_patterns` matches mid-turn.
+            // (No owner short-circuit here: per OB-06 audit no `is_owner` branch
+            // exists in librefang-channels — owner is treated as any participant.)
+            if guard_on {
+                let participants = extract_group_participants(message);
+                let agent_name = extract_agent_name(message);
+                if is_addressed_to_other_participant(text, &participants, &agent_name) {
+                    info!(
+                        event = "group_gating_skip",
+                        reason = "addressed_to_other_participant",
+                        channel = ct_str,
+                        sender = %sender_excerpt,
+                        text_excerpt = %truncate_excerpt(text, 80),
+                        "OB-04: vocative addressed to other participant"
+                    );
+                    return false;
+                }
+            }
+
+            // Trigger-pattern check. Under guard-on we additionally require
+            // `is_vocative_trigger` (positional) on top of the substring match,
+            // so "Caterina, chiedi al Signore..." with pattern "Signore" no
+            // longer triggers (the substring matches but the position is wrong
+            // AND another vocative precedes it).
+            let regex_triggered = if !was_mentioned && !is_command {
+                let mut hit = matches_group_trigger_pattern(
                     ct_str,
                     message,
                     &overrides.group_trigger_patterns,
                 );
+                if hit && guard_on {
+                    let positional_ok = overrides
+                        .group_trigger_patterns
+                        .iter()
+                        .any(|p| is_vocative_trigger(text, p));
+                    if !positional_ok {
+                        info!(
+                            event = "group_gating_skip",
+                            reason = "vocative_position_mismatch",
+                            channel = ct_str,
+                            sender = %sender_excerpt,
+                            text_excerpt = %truncate_excerpt(text, 80),
+                            "OB-05: substring matched but not at vocative position"
+                        );
+                        hit = false;
+                    }
+                }
+                hit
+            } else {
+                false
+            };
+
             if !was_mentioned && !is_command && !regex_triggered {
-                debug!(
-                    "Ignoring group message on {ct_str} (group_policy=mention_only, not mentioned)"
+                info!(
+                    event = "group_gating_skip",
+                    reason = "mention_only_no_mention",
+                    channel = ct_str,
+                    sender = %sender_excerpt,
+                    text_excerpt = %truncate_excerpt(text, 80),
+                    "OB-06: mention_only and bot was not mentioned"
                 );
                 return false;
             }
+            info!(
+                event = "group_gating_pass",
+                channel = ct_str,
+                sender = %sender_excerpt,
+                was_mentioned,
+                is_command,
+                regex_triggered,
+                "Group message accepted for processing"
+            );
             true
         }
         GroupPolicy::All => true,
     }
+}
+
+/// Read `group_participants` from the inbound message metadata payload
+/// (populated gateway-side by `sock.groupMetadata`). Returns empty when the
+/// channel doesn't supply a roster — the addressee guard then becomes a no-op
+/// (cannot fire false positives).
+fn extract_group_participants(message: &ChannelMessage) -> Vec<ParticipantRef> {
+    message
+        .metadata
+        .get("group_participants")
+        .and_then(|v| serde_json::from_value::<Vec<ParticipantRef>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Read the canonical agent display name from message metadata when the
+/// caller provides it (gateway/runtime injects so the addressee guard knows
+/// "this name == us"). Empty string when absent — `eq_ignore_ascii_case("")`
+/// then never matches a real participant name, so the guard simply checks
+/// whether the leading vocative belongs to another roster member.
+fn extract_agent_name(message: &ChannelMessage) -> String {
+    message
+        .metadata
+        .get("agent_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Build a `SenderContext` from an incoming `ChannelMessage`.
@@ -1453,6 +1658,10 @@ fn build_sender_context(
         auto_route_confidence_threshold,
         auto_route_sticky_bonus,
         auto_route_divergence_count,
+        // §C: forward roster from inbound payload (gateway populates via
+        // sock.groupMetadata). Empty for non-WhatsApp channels — addressee
+        // guard then becomes a no-op (BC-01).
+        group_participants: extract_group_participants(message),
     }
 }
 
@@ -4421,6 +4630,316 @@ mod tests {
             assert!(result.is_some());
             let (drained_msg, _) = result.unwrap();
             assert_content_eq(&drained_msg.content, "1\n2");
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 2 §C — Vocative trigger + addressee guard tests (OB-04, OB-05)
+    // ---------------------------------------------------------------------
+
+    mod vocative_tests {
+        use super::super::is_vocative_trigger;
+
+        #[test]
+        fn matches_at_start_of_turn_with_comma() {
+            assert!(is_vocative_trigger("Signore, dimmi", "Signore"));
+        }
+
+        #[test]
+        fn matches_at_start_of_turn_with_space() {
+            assert!(is_vocative_trigger("Signore chiedi al bot", "Signore"));
+        }
+
+        #[test]
+        fn matches_after_strong_punctuation() {
+            assert!(is_vocative_trigger("ciao. Signore, come va?", "Signore"));
+        }
+
+        #[test]
+        fn matches_with_leading_whitespace() {
+            assert!(is_vocative_trigger("  Signore, ...", "Signore"));
+        }
+
+        #[test]
+        fn rejects_other_capitalized_vocative_before_pattern() {
+            // The Beeper-screenshot case (user directive).
+            assert!(!is_vocative_trigger(
+                "Caterina, chiedi al Signore il pagamento",
+                "Signore"
+            ));
+        }
+
+        #[test]
+        fn rejects_when_not_at_vocative_position() {
+            assert!(!is_vocative_trigger(
+                "Ieri il Signore ha detto di...",
+                "Signore"
+            ));
+        }
+
+        #[test]
+        fn rejects_lowercase_substring() {
+            // Pattern is "Signore" (proper-name); lowercase should not match.
+            assert!(!is_vocative_trigger("il signore è arrivato", "Signore"));
+        }
+
+        #[test]
+        fn rejects_with_alessandro_then_signore() {
+            assert!(!is_vocative_trigger(
+                "Alessandro, dopo chiama il Signore",
+                "Signore"
+            ));
+        }
+
+        #[test]
+        fn word_boundary_signori_not_signore() {
+            assert!(!is_vocative_trigger("Signori, ascoltate", "Signore"));
+        }
+
+        #[test]
+        fn empty_text_returns_false() {
+            assert!(!is_vocative_trigger("", "Signore"));
+        }
+
+        #[test]
+        fn dammi_il_signore_rejected() {
+            assert!(!is_vocative_trigger("dammi il Signore", "Signore"));
+        }
+    }
+
+    mod addressee_tests {
+        use super::super::is_addressed_to_other_participant;
+        use crate::types::ParticipantRef;
+
+        fn roster(names: &[&str]) -> Vec<ParticipantRef> {
+            names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| ParticipantRef {
+                    jid: format!("{}@s.whatsapp.net", i),
+                    display_name: (*n).to_string(),
+                })
+                .collect()
+        }
+
+        #[test]
+        fn caterina_with_caterina_in_roster_returns_true() {
+            let r = roster(&["Caterina", "Ambrogio"]);
+            assert!(is_addressed_to_other_participant(
+                "Caterina, chiedi...",
+                &r,
+                "Ambrogio"
+            ));
+        }
+
+        #[test]
+        fn agent_addressed_returns_false() {
+            let r = roster(&["Caterina", "Ambrogio"]);
+            assert!(!is_addressed_to_other_participant(
+                "Ambrogio, vieni qui",
+                &r,
+                "Ambrogio"
+            ));
+        }
+
+        #[test]
+        fn no_vocative_returns_false() {
+            let r = roster(&["Caterina", "Ambrogio"]);
+            assert!(!is_addressed_to_other_participant(
+                "stamattina è bello",
+                &r,
+                "Ambrogio"
+            ));
+        }
+
+        #[test]
+        fn exclamation_vocative_recognized() {
+            let r = roster(&["Caterina", "Bot"]);
+            assert!(is_addressed_to_other_participant("Caterina!", &r, "Bot"));
+        }
+
+        #[test]
+        fn beeper_screenshot_full_turn() {
+            let r = roster(&["Caterina", "Bot"]);
+            assert!(is_addressed_to_other_participant(
+                "Caterina, chiedi al Signore il pagamento",
+                &r,
+                "Bot"
+            ));
+        }
+
+        #[test]
+        fn name_not_in_roster_returns_false() {
+            // "Marco," is a vocative but Marco isn't a participant — guard
+            // does not fire (avoids false positives on names that happen to
+            // start a sentence but aren't in the group).
+            let r = roster(&["Caterina", "Bot"]);
+            assert!(!is_addressed_to_other_participant(
+                "Marco, dove sei?",
+                &r,
+                "Bot"
+            ));
+        }
+
+        #[test]
+        fn case_insensitive_match() {
+            let r = roster(&["caterina", "Bot"]);
+            assert!(is_addressed_to_other_participant(
+                "Caterina, vieni qui",
+                &r,
+                "Bot"
+            ));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // §C wiring tests — should_process_group_message + guard flag behavior
+    // ---------------------------------------------------------------------
+
+    mod should_process_group_message_v2 {
+        use super::super::{should_process_group_message, ParticipantRef};
+        use super::group_text_message;
+        use librefang_types::config::{ChannelOverrides, GroupPolicy};
+        use serde_json::json;
+        use std::sync::Mutex;
+
+        // Serialize tests that mutate the LIBREFANG_GROUP_ADDRESSEE_GUARD env
+        // var — env mutation is process-global.
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        fn with_guard_on<F: FnOnce()>(f: F) {
+            let _g = ENV_LOCK.lock().unwrap();
+            std::env::set_var("LIBREFANG_GROUP_ADDRESSEE_GUARD", "on");
+            f();
+            std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
+        }
+
+        fn with_guard_off<F: FnOnce()>(f: F) {
+            let _g = ENV_LOCK.lock().unwrap();
+            std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
+            f();
+        }
+
+        fn inject_roster(msg: &mut crate::types::ChannelMessage, names: &[&str], agent: &str) {
+            let participants: Vec<ParticipantRef> = names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| ParticipantRef {
+                    jid: format!("{i}@s.whatsapp.net"),
+                    display_name: (*n).to_string(),
+                })
+                .collect();
+            msg.metadata.insert(
+                "group_participants".to_string(),
+                serde_json::to_value(&participants).unwrap(),
+            );
+            msg.metadata.insert("agent_name".to_string(), json!(agent));
+        }
+
+        #[test]
+        fn caterina_chiedi_al_signore_rejected_under_guard() {
+            with_guard_on(|| {
+                let mut msg = group_text_message("Caterina, chiedi al Signore il pagamento");
+                inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
+                let overrides = ChannelOverrides {
+                    group_policy: GroupPolicy::MentionOnly,
+                    group_trigger_patterns: vec!["Signore".to_string()],
+                    ..Default::default()
+                };
+                assert!(!should_process_group_message("whatsapp", &overrides, &msg));
+            });
+        }
+
+        #[test]
+        fn signore_at_start_passes_under_guard() {
+            with_guard_on(|| {
+                let mut msg = group_text_message("Signore, conferma il prossimo appuntamento");
+                inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
+                let overrides = ChannelOverrides {
+                    group_policy: GroupPolicy::MentionOnly,
+                    group_trigger_patterns: vec!["Signore".to_string()],
+                    ..Default::default()
+                };
+                assert!(should_process_group_message("whatsapp", &overrides, &msg));
+            });
+        }
+
+        #[test]
+        fn owner_no_mention_no_pattern_rejected() {
+            // OB-06: "owner-in-group" doesn't bypass mention_only — there's
+            // no owner short-circuit in librefang-channels (audit confirms).
+            // A plain "ciao a tutti" with no mention is rejected.
+            with_guard_on(|| {
+                let mut msg = group_text_message("ciao a tutti, come va?");
+                inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
+                let overrides = ChannelOverrides {
+                    group_policy: GroupPolicy::MentionOnly,
+                    group_trigger_patterns: vec!["Signore".to_string()],
+                    ..Default::default()
+                };
+                assert!(!should_process_group_message("whatsapp", &overrides, &msg));
+            });
+        }
+
+        #[test]
+        fn owner_explicit_mention_passes() {
+            with_guard_on(|| {
+                let mut msg = group_text_message("@Bot rispondimi");
+                inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
+                msg.metadata
+                    .insert("was_mentioned".to_string(), json!(true));
+                let overrides = ChannelOverrides {
+                    group_policy: GroupPolicy::MentionOnly,
+                    ..Default::default()
+                };
+                assert!(should_process_group_message("whatsapp", &overrides, &msg));
+            });
+        }
+
+        #[test]
+        fn legacy_substring_still_works_with_guard_off() {
+            // Backward compat: with the flag default-off (rollback path)
+            // the pre-Phase-2 substring matcher remains authoritative.
+            with_guard_off(|| {
+                let msg = group_text_message("Caterina, chiedi al Signore il pagamento");
+                let overrides = ChannelOverrides {
+                    group_policy: GroupPolicy::MentionOnly,
+                    group_trigger_patterns: vec!["(?i)\\bSignore\\b".to_string()],
+                    ..Default::default()
+                };
+                // Legacy behavior: substring matches → returns true.
+                assert!(should_process_group_message("whatsapp", &overrides, &msg));
+            });
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // BC-02 — SenderContext serde-default for group_participants
+    // ---------------------------------------------------------------------
+
+    mod bc02_tests {
+        use crate::types::SenderContext;
+
+        #[test]
+        fn old_blob_without_group_participants_parses() {
+            // Stored canonical blob from before Phase 2 §C — no
+            // `group_participants` key. Must deserialize cleanly.
+            let json = r#"{
+                "channel": "whatsapp",
+                "user_id": "u1",
+                "display_name": "Alice",
+                "is_group": false,
+                "was_mentioned": false,
+                "thread_id": null,
+                "account_id": null,
+                "auto_route": "off",
+                "auto_route_ttl_minutes": 0,
+                "auto_route_confidence_threshold": 0,
+                "auto_route_sticky_bonus": 0,
+                "auto_route_divergence_count": 0
+            }"#;
+            let ctx: SenderContext = serde_json::from_str(json).expect("BC-02 parse");
+            assert!(ctx.group_participants.is_empty());
         }
     }
 }

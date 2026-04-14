@@ -1993,22 +1993,34 @@ supports_streaming = true
     #[test]
     fn test_alibaba_coding_plan_zero_cost() {
         let catalog = test_catalog();
-        let model = catalog
+        let qwen35plus = catalog
             .find_model("alibaba-coding-plan/qwen3.5-plus")
             .expect("qwen3.5-plus model should be registered");
-        assert_eq!(model.input_cost_per_m, 0.0);
-        assert_eq!(model.output_cost_per_m, 0.0);
+        assert_eq!(qwen35plus.input_cost_per_m, 0.0);
+        assert_eq!(qwen35plus.output_cost_per_m, 0.0);
+        let qwen36plus = catalog
+            .find_model("alibaba-coding-plan/qwen3.6-plus")
+            .expect("qwen3.6-plus model should be registered");
+        assert_eq!(qwen36plus.input_cost_per_m, 0.0);
+        assert_eq!(qwen36plus.output_cost_per_m, 0.0);
     }
 
     #[test]
     fn test_alibaba_coding_plan_vision_models() {
         let catalog = test_catalog();
-        let qwen_plus = catalog
+        let qwen35plus = catalog
             .find_model("alibaba-coding-plan/qwen3.5-plus")
             .expect("qwen3.5-plus model should be registered");
-        assert!(qwen_plus.supports_vision);
-        assert_eq!(qwen_plus.tier, ModelTier::Smart);
-        assert_eq!(qwen_plus.context_window, 1_000_000);
+        assert!(qwen35plus.supports_vision);
+        assert_eq!(qwen35plus.tier, ModelTier::Smart);
+        assert_eq!(qwen35plus.context_window, 1_000_000);
+
+        let qwen36plus = catalog
+            .find_model("alibaba-coding-plan/qwen3.6-plus")
+            .expect("qwen3.6-plus model should be registered");
+        assert!(qwen36plus.supports_vision);
+        assert_eq!(qwen36plus.tier, ModelTier::Smart);
+        assert_eq!(qwen36plus.context_window, 1_000_000);
 
         let kimi = catalog
             .find_model("alibaba-coding-plan/kimi-k2.5")

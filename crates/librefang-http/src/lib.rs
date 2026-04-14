@@ -183,7 +183,20 @@ pub fn new_client() -> reqwest::Client {
 pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder()
         .use_preconfigured_tls(tls_config())
-        .user_agent(USER_AGENT);
+        .user_agent(USER_AGENT)
+        // Default timeouts so the agent loop never hangs forever when an
+        // upstream stalls. These are per-request defaults that any caller
+        // may override via `.timeout()`, `.connect_timeout()`, etc. on the
+        // returned builder. Issue #2340.
+        //
+        // - `connect_timeout`: cap TCP / TLS handshake. 30s is generous
+        //   even for slow international links to LLM providers.
+        // - `read_timeout`: per-read inactivity timeout, NOT total request
+        //   time. Streaming LLM responses keep this alive as long as
+        //   tokens trickle in; a true upstream stall will fire it. 300s
+        //   gives slow models room while still bounding hangs.
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(300));
 
     // Build the NoProxy filter from explicit config only.
     let no_proxy_filter = proxy

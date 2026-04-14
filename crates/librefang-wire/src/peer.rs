@@ -34,6 +34,11 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct NonceTracker {
     seen: Arc<DashMap<String, Instant>>,
     window: Duration,
+    /// Hard cap on simultaneously tracked nonces. Without a cap an attacker
+    /// flooding fresh nonces would grow the map unbounded for the full
+    /// 5-minute window. 100k entries ≈ a few MB and is well above any
+    /// legitimate peer count.
+    max_entries: usize,
 }
 
 impl NonceTracker {
@@ -42,29 +47,46 @@ impl NonceTracker {
         Self {
             seen: Arc::new(DashMap::new()),
             window: Duration::from_secs(300), // 5 minutes
+            max_entries: 100_000,
         }
     }
 
-    /// Check if a nonce has been seen before. If not, record it and return Ok.
-    /// If already seen (replay), return Err.
+    /// Atomically check whether `nonce` has been seen before, and record it
+    /// if not. Single call to `DashMap::entry` avoids a TOCTOU race where
+    /// two concurrent handshakes with the same replayed nonce could both
+    /// pass the `contains_key` check before either `insert` ran.
+    ///
+    /// Returns `Err` on replay **or** when the tracker is at capacity —
+    /// failing closed under flood is preferable to silently accepting an
+    /// unbounded number of nonces.
     pub fn check_and_record(&self, nonce: &str) -> Result<(), String> {
+        use dashmap::mapref::entry::Entry;
         let now = Instant::now();
 
-        // Garbage-collect expired nonces (older than window)
+        // Garbage-collect expired nonces (older than window).
         self.seen
             .retain(|_, ts| now.duration_since(*ts) < self.window);
 
-        // Check for replay
-        if self.seen.contains_key(nonce) {
+        // Hard cap: after GC the tracker must still be at or below the
+        // bound, otherwise reject new nonces to keep memory usage finite.
+        if self.seen.len() >= self.max_entries {
             return Err(format!(
-                "Nonce replay detected: {}",
-                librefang_types::truncate_str(nonce, 16)
+                "Nonce tracker at capacity ({} entries); rejecting to \
+                 avoid unbounded growth",
+                self.max_entries
             ));
         }
 
-        // Record the nonce
-        self.seen.insert(nonce.to_string(), now);
-        Ok(())
+        match self.seen.entry(nonce.to_string()) {
+            Entry::Occupied(_) => Err(format!(
+                "Nonce replay detected: {}",
+                librefang_types::truncate_str(nonce, 16)
+            )),
+            Entry::Vacant(v) => {
+                v.insert(now);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1257,6 +1279,51 @@ mod tests {
         for i in 0..100 {
             assert!(tracker.check_and_record(&format!("unique-{i}")).is_ok());
         }
+    }
+
+    /// Regression: two threads calling `check_and_record` with the same
+    /// replayed nonce must never both return `Ok`. The old implementation
+    /// did `contains_key` then `insert` non-atomically, so racy attackers
+    /// could slip a replay through.
+    #[test]
+    fn test_nonce_tracker_race_rejects_duplicate() {
+        use std::sync::Arc as StdArc;
+        use std::thread;
+        let tracker = StdArc::new(NonceTracker::new());
+        let barrier = StdArc::new(std::sync::Barrier::new(32));
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let t = StdArc::clone(&tracker);
+            let b = StdArc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                b.wait();
+                t.check_and_record("racy-nonce").is_ok()
+            }));
+        }
+        let successes: usize = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent caller must win the race; got {successes}"
+        );
+    }
+
+    /// The tracker rejects new nonces once it is at capacity so a flooding
+    /// attacker cannot grow memory unbounded over the 5-minute window.
+    #[test]
+    fn test_nonce_tracker_capacity_cap() {
+        let mut tracker = NonceTracker::new();
+        tracker.max_entries = 8;
+        for i in 0..8 {
+            assert!(tracker.check_and_record(&format!("n-{i}")).is_ok());
+        }
+        let err = tracker
+            .check_and_record("overflow")
+            .expect_err("cap must trip");
+        assert!(err.contains("capacity"), "err was {err}");
     }
 
     // ── Per-message HMAC tests ───────────────────────────────────────────

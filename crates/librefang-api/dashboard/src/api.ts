@@ -244,6 +244,14 @@ export interface AgentMessageResponse {
   silent?: boolean;
   memories_saved?: string[];
   memories_used?: string[];
+  thinking?: string;
+}
+
+export interface SendAgentMessageOptions {
+  /** Force deep-thinking on/off for this call. Omitted = manifest default. */
+  thinking?: boolean;
+  /** Whether to receive the model's reasoning trace. Defaults to true. */
+  show_thinking?: boolean;
 }
 
 export interface ApiActionResponse {
@@ -824,11 +832,17 @@ export async function loadAgentSession(agentId: string): Promise<AgentSessionRes
 
 export async function sendAgentMessage(
   agentId: string,
-  message: string
+  message: string,
+  options?: SendAgentMessageOptions,
 ): Promise<AgentMessageResponse> {
-  return post<AgentMessageResponse>(`/api/agents/${encodeURIComponent(agentId)}/message`, {
-    message
-  }, LONG_RUNNING_TIMEOUT_MS);
+  const body: Record<string, unknown> = { message };
+  if (options?.thinking !== undefined) body.thinking = options.thinking;
+  if (options?.show_thinking !== undefined) body.show_thinking = options.show_thinking;
+  return post<AgentMessageResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/message`,
+    body,
+    LONG_RUNNING_TIMEOUT_MS,
+  );
 }
 
 export async function listProviders(): Promise<ProviderItem[]> {
@@ -1447,6 +1461,25 @@ export async function getSecurityStatus(): Promise<SecurityStatusResponse> {
 
 export async function getFullConfig(): Promise<Record<string, unknown>> {
   return get<Record<string, unknown>>("/api/config");
+}
+
+export interface ConfigFieldSchema {
+  type?: string;
+  options?: (string | { id: string; name: string; provider: string })[];
+}
+
+export interface ConfigSectionSchema {
+  fields: Record<string, string | ConfigFieldSchema>;
+  root_level?: boolean;
+  hot_reloadable?: boolean;
+}
+
+export async function getConfigSchema(): Promise<{ sections: Record<string, ConfigSectionSchema> }> {
+  return get<{ sections: Record<string, ConfigSectionSchema> }>("/api/config/schema");
+}
+
+export async function setConfigValue(path: string, value: unknown): Promise<{ status: string; restart_required?: boolean }> {
+  return post<{ status: string; restart_required?: boolean }>("/api/config/set", { path, value });
 }
 
 export async function listBackups(): Promise<{ backups?: BackupItem[]; total?: number }> {
@@ -2174,11 +2207,20 @@ export interface PluginItem {
   hooks?: { ingest?: boolean; after_turn?: boolean };
 }
 
+export interface RegistryPluginListing {
+  name: string;
+  installed: boolean;
+  version?: string | null;
+  description?: string | null;
+  author?: string | null;
+  hooks?: string[];
+}
+
 export interface RegistryEntry {
   name: string;
   github_repo: string;
   error?: string | null;
-  plugins: Array<{ name: string; installed: boolean }>;
+  plugins: RegistryPluginListing[];
 }
 
 export async function listPlugins(): Promise<{ plugins: PluginItem[]; total: number; plugins_dir: string }> {

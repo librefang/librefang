@@ -491,7 +491,13 @@ impl SessionStore {
     ) -> LibreFangResult<()> {
         let mut canonical = self.load_canonical(agent_id)?;
         canonical.compacted_summary = Some(summary.to_string());
-        canonical.messages = kept_messages;
+        canonical.messages = kept_messages
+            .into_iter()
+            .map(|message| CanonicalEntry {
+                message,
+                session_id: None,
+            })
+            .collect();
         canonical.compaction_cursor = 0;
         canonical.updated_at = Utc::now().to_rfc3339();
         self.save_canonical(&canonical)
@@ -668,6 +674,14 @@ const DEFAULT_CANONICAL_WINDOW: usize = 50;
 /// Default compaction threshold: when message count exceeds this, compact older messages.
 const DEFAULT_COMPACTION_THRESHOLD: usize = 100;
 
+/// A canonical message tagged with its originating session id for chat-scoped filtering.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CanonicalEntry {
+    pub message: Message,
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
+}
+
 /// A canonical session stores persistent cross-channel context for an agent.
 ///
 /// Unlike regular sessions (one per channel interaction), there is one canonical
@@ -677,8 +691,8 @@ const DEFAULT_COMPACTION_THRESHOLD: usize = 100;
 pub struct CanonicalSession {
     /// The agent this session belongs to.
     pub agent_id: AgentId,
-    /// Full message history (post-compaction window).
-    pub messages: Vec<Message>,
+    /// Full message history (post-compaction window), tagged by originating session.
+    pub messages: Vec<CanonicalEntry>,
     /// Index marking how far compaction has processed.
     pub compaction_cursor: usize,
     /// Summary of compacted (older) messages.
@@ -711,8 +725,22 @@ impl SessionStore {
 
         match result {
             Ok((messages_blob, cursor, summary, updated_at)) => {
-                let messages: Vec<Message> = rmp_serde::from_slice(&messages_blob)
-                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                // Try new format (tagged entries); fall back to legacy Vec<Message> for pre-fix rows.
+                let messages: Vec<CanonicalEntry> =
+                    match rmp_serde::from_slice::<Vec<CanonicalEntry>>(&messages_blob) {
+                        Ok(entries) => entries,
+                        Err(_) => {
+                            let legacy: Vec<Message> = rmp_serde::from_slice(&messages_blob)
+                                .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                            legacy
+                                .into_iter()
+                                .map(|message| CanonicalEntry {
+                                    message,
+                                    session_id: None,
+                                })
+                                .collect()
+                        }
+                    };
                 Ok(CanonicalSession {
                     agent_id,
                     messages,
@@ -745,9 +773,15 @@ impl SessionStore {
         agent_id: AgentId,
         new_messages: &[Message],
         compaction_threshold: Option<usize>,
+        session_id: Option<SessionId>,
     ) -> LibreFangResult<CanonicalSession> {
         let mut canonical = self.load_canonical(agent_id)?;
-        canonical.messages.extend(new_messages.iter().cloned());
+        canonical
+            .messages
+            .extend(new_messages.iter().cloned().map(|message| CanonicalEntry {
+                message,
+                session_id,
+            }));
 
         let threshold = compaction_threshold.unwrap_or(DEFAULT_COMPACTION_THRESHOLD);
 
@@ -762,7 +796,8 @@ impl SessionStore {
                 if let Some(ref existing) = canonical.compacted_summary {
                     summary_parts.push(existing.clone());
                 }
-                for msg in compacting {
+                for entry in compacting {
+                    let msg = &entry.message;
                     let role = match msg.role {
                         librefang_types::message::Role::User => "User",
                         librefang_types::message::Role::Assistant => "Assistant",
@@ -809,12 +844,24 @@ impl SessionStore {
     pub fn canonical_context(
         &self,
         agent_id: AgentId,
+        session_id: Option<SessionId>,
         window_size: Option<usize>,
     ) -> LibreFangResult<(Option<String>, Vec<Message>)> {
         let canonical = self.load_canonical(agent_id)?;
         let window = window_size.unwrap_or(DEFAULT_CANONICAL_WINDOW);
-        let start = canonical.messages.len().saturating_sub(window);
-        let recent = canonical.messages[start..].to_vec();
+        // Filter by session_id: include matching entries and untagged (legacy) entries.
+        let filtered: Vec<Message> = canonical
+            .messages
+            .iter()
+            .filter(|e| match (&session_id, &e.session_id) {
+                (Some(want), Some(got)) => want == got,
+                (Some(_), None) => true,
+                (None, _) => true,
+            })
+            .map(|e| e.message.clone())
+            .collect();
+        let start = filtered.len().saturating_sub(window);
+        let recent = filtered[start..].to_vec();
         Ok((canonical.compacted_summary.clone(), recent))
     }
 
@@ -1034,14 +1081,18 @@ mod tests {
             Message::user("Hello from Telegram"),
             Message::assistant("Hi! I'm your agent."),
         ];
-        store.append_canonical(agent_id, &msgs1, None).unwrap();
+        store
+            .append_canonical(agent_id, &msgs1, None, None)
+            .unwrap();
 
         // Append from "Discord"
         let msgs2 = vec![
             Message::user("Now I'm on Discord"),
             Message::assistant("I remember you from Telegram!"),
         ];
-        let canonical = store.append_canonical(agent_id, &msgs2, None).unwrap();
+        let canonical = store
+            .append_canonical(agent_id, &msgs2, None, None)
+            .unwrap();
 
         // Should have all 4 messages
         assert_eq!(canonical.messages.len(), 4);
@@ -1056,10 +1107,10 @@ mod tests {
         let msgs: Vec<Message> = (0..10)
             .map(|i| Message::user(format!("Message {i}")))
             .collect();
-        store.append_canonical(agent_id, &msgs, None).unwrap();
+        store.append_canonical(agent_id, &msgs, None, None).unwrap();
 
         // Request window of 3
-        let (summary, recent) = store.canonical_context(agent_id, Some(3)).unwrap();
+        let (summary, recent) = store.canonical_context(agent_id, None, Some(3)).unwrap();
         assert_eq!(recent.len(), 3);
         assert!(summary.is_none()); // No compaction yet
     }
@@ -1073,7 +1124,9 @@ mod tests {
         let msgs: Vec<Message> = (0..120)
             .map(|i| Message::user(format!("Message number {i} with some content")))
             .collect();
-        let canonical = store.append_canonical(agent_id, &msgs, Some(100)).unwrap();
+        let canonical = store
+            .append_canonical(agent_id, &msgs, Some(100), None)
+            .unwrap();
 
         // After compaction: should keep DEFAULT_CANONICAL_WINDOW (50) messages
         assert!(canonical.messages.len() <= 60); // some tolerance
@@ -1094,15 +1147,81 @@ mod tests {
                     Message::assistant("Nice to meet you, Jaber!"),
                 ],
                 None,
+                None,
             )
             .unwrap();
 
         // Channel 2: different channel queries same agent
-        let (summary, recent) = store.canonical_context(agent_id, None).unwrap();
+        let (summary, recent) = store.canonical_context(agent_id, None, None).unwrap();
         // The agent should have context about "Jaber" from the previous channel
         let all_text: String = recent.iter().map(|m| m.content.text_content()).collect();
         assert!(all_text.contains("Jaber"));
         assert!(summary.is_none()); // Only 2 messages, no compaction
+    }
+
+    #[test]
+    fn test_canonical_context_session_scoped() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let sid_a = SessionId::new();
+        let sid_b = SessionId::new();
+
+        store
+            .append_canonical(
+                agent_id,
+                &[Message::user("from A-1"), Message::assistant("reply A-1")],
+                None,
+                Some(sid_a),
+            )
+            .unwrap();
+        store
+            .append_canonical(
+                agent_id,
+                &[Message::user("from B-1"), Message::assistant("reply B-1")],
+                None,
+                Some(sid_b),
+            )
+            .unwrap();
+
+        let (_, recent_a) = store
+            .canonical_context(agent_id, Some(sid_a), None)
+            .unwrap();
+        let text_a: String = recent_a.iter().map(|m| m.content.text_content()).collect();
+        assert!(text_a.contains("A-1"));
+        assert!(!text_a.contains("B-1"));
+
+        let (_, recent_all) = store.canonical_context(agent_id, None, None).unwrap();
+        assert_eq!(recent_all.len(), 4);
+    }
+
+    #[test]
+    fn test_canonical_backward_compat_legacy_blob() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        let legacy: Vec<Message> = vec![
+            Message::user("legacy user"),
+            Message::assistant("legacy reply"),
+        ];
+        let blob = rmp_serde::to_vec(&legacy).unwrap();
+        let now = Utc::now().to_rfc3339();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO canonical_sessions (agent_id, messages, compaction_cursor, compacted_summary, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![agent_id.0.to_string(), blob, 0_i64, Option::<String>::None, now],
+            )
+            .unwrap();
+        }
+
+        let canonical = store.load_canonical(agent_id).unwrap();
+        assert_eq!(canonical.messages.len(), 2);
+        assert!(canonical.messages.iter().all(|e| e.session_id.is_none()));
+
+        let (_, recent) = store.canonical_context(agent_id, None, None).unwrap();
+        let text: String = recent.iter().map(|m| m.content.text_content()).collect();
+        assert!(text.contains("legacy"));
     }
 
     #[test]
