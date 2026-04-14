@@ -4288,6 +4288,7 @@ dependencies = [
  "hmac",
  "http",
  "landlock",
+ "libc",
  "librefang-channels",
  "librefang-http",
  "librefang-kernel-handle",
