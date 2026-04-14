@@ -25,6 +25,8 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   useEffect(() => {
     setAuthMethod(mode === "api_key" ? "api_key" : "credentials");
     setErrorKey(null);
+    setTotpRequired(false);
+    setTotpCode("");
   }, [mode]);
 
   async function handleApiKeySubmit(e: React.FormEvent) {
@@ -111,7 +113,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-main p-1">
               <button
                 type="button"
-                onClick={() => { setAuthMethod("credentials"); setErrorKey(null); setKey(""); }}
+                onClick={() => { setAuthMethod("credentials"); setErrorKey(null); setKey(""); setTotpRequired(false); setTotpCode(""); }}
                 className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
                   isCredentials ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-brand"
                 }`}
@@ -120,7 +122,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
               </button>
               <button
                 type="button"
-                onClick={() => { setAuthMethod("api_key"); setErrorKey(null); setUsername(""); setPassword(""); }}
+                onClick={() => { setAuthMethod("api_key"); setErrorKey(null); setUsername(""); setPassword(""); setTotpRequired(false); setTotpCode(""); }}
                 className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
                   !isCredentials ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-brand"
                 }`}
