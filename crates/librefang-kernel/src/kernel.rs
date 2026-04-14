@@ -2478,6 +2478,16 @@ impl LibreFangKernel {
         let workflow_home_dir = config.home_dir.clone();
         let oauth_home_dir = config.home_dir.clone();
         let trigger_config = config.triggers.clone();
+        // Default audit anchor lives next to the SQLite file so operators
+        // who do nothing still get a tip-anchored log that detects full
+        // `audit_entries` rewrites. The anchor file path is intentionally
+        // derived from `data_dir` rather than a new config knob — if an
+        // operator needs to put the anchor somewhere the daemon can write
+        // to but unprivileged code cannot (chmod-0400 file, systemd
+        // ReadOnlyPaths mount, syslog pipe) they can symlink it. A first-
+        // class `audit.anchor_path` config field can land in a follow-up
+        // once the shape of the hardening story is settled.
+        let audit_anchor_path = config.data_dir.join("audit.anchor");
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
             data_dir_boot: config.data_dir.clone(),
@@ -2494,7 +2504,10 @@ impl LibreFangKernel {
             template_registry: WorkflowTemplateRegistry::new(),
             triggers: TriggerEngine::with_config(&trigger_config),
             background,
-            audit_log: Arc::new(AuditLog::with_db(memory.usage_conn())),
+            audit_log: Arc::new(AuditLog::with_db_anchored(
+                memory.usage_conn(),
+                audit_anchor_path,
+            )),
             metering,
             default_driver: driver,
             wasm_sandbox,
