@@ -1056,7 +1056,8 @@
     "cat_infra": "基础设施",
     "saved_restart": "已保存（需要重启）",
     "saved_reload_failed": "已保存但重载失败",
-    "load_error": "无法加载配置"
+    "load_error": "无法加载配置",
+    "reload_success": "配置已重新加载"
   },
   "chat": {
     "title": "对话",

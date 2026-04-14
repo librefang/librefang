@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Button } from "../components/ui/Button";
@@ -26,6 +26,16 @@ const CATEGORY_SECTIONS: Record<string, string[]> = {
 
 function sectionLabel(key: string): string {
   return key.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+function fieldLabel(key: string): string {
+  return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\bApi\b/g, "API").replace(/\bUrl\b/g, "URL")
+    .replace(/\bSql\b/g, "SQL").replace(/\bSsl\b/g, "SSL")
+    .replace(/\bTls\b/g, "TLS").replace(/\bTtl\b/g, "TTL")
+    .replace(/\bEnv\b/g, "Env Var").replace(/\bId\b/g, "ID")
+    .replace(/\bUsd\b/g, "USD").replace(/\bLlm\b/g, "LLM")
+    .replace(/\bMdns\b/g, "mDNS").replace(/\bTotp\b/g, "TOTP");
 }
 
 function resolveFieldType(
@@ -215,8 +225,8 @@ function SectionCard({
           return (
             <div key={fieldKey} className="flex items-center gap-4 py-3 border-b border-border-subtle/30 last:border-0">
               <div className="w-48 shrink-0">
-                <p className="text-xs font-semibold font-mono">{fieldKey}</p>
-                <p className="text-[10px] text-text-dim">{fieldType}</p>
+                <p className="text-xs font-semibold">{fieldLabel(fieldKey)}</p>
+                <p className="text-[10px] text-text-dim font-mono">{fieldKey}</p>
               </div>
               <div className="flex-1 min-w-0">
                 <ConfigFieldInput fieldKey={fieldKey} fieldType={fieldType} options={options} value={currentValue}
@@ -262,10 +272,25 @@ export function ConfigPage({ category }: { category: string }) {
     staleTime: 30_000,
   });
 
+  const [reloadStatus, setReloadStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+
   const reloadMutation = useMutation({
     mutationFn: reloadConfig,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["config", "full"] }); },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["config", "full"] });
+      setReloadStatus({ ok: true, msg: t("config.reload_success", "Config reloaded") });
+    },
+    onError: (err: Error) => {
+      setReloadStatus({ ok: false, msg: err.message });
+    },
   });
+
+  useEffect(() => {
+    if (reloadStatus) {
+      const id = setTimeout(() => setReloadStatus(null), 3000);
+      return () => clearTimeout(id);
+    }
+  }, [reloadStatus]);
 
   const allSections = schemaQuery.data?.sections ?? {};
   const config = configQuery.data ?? {};
@@ -299,10 +324,17 @@ export function ConfigPage({ category }: { category: string }) {
     <div className="flex flex-col gap-6 p-6">
       <div className="flex items-center justify-between">
         <PageHeader badge={t("nav.config")} title={categoryTitle} subtitle={t("config.desc", "System configuration editor")} icon={<Settings className="h-4 w-4" />} />
-        <Button variant="secondary" size="sm" onClick={() => reloadMutation.mutate()} isLoading={reloadMutation.isPending}>
-          <RefreshCw className="w-3 h-3 mr-1.5" />
-          {t("config.reload", "Reload")}
-        </Button>
+        <div className="flex items-center gap-2">
+          {reloadStatus && (
+            <span className={`text-xs font-semibold ${reloadStatus.ok ? "text-success" : "text-danger"}`}>
+              {reloadStatus.msg}
+            </span>
+          )}
+          <Button variant="secondary" size="sm" onClick={() => reloadMutation.mutate()} isLoading={reloadMutation.isPending}>
+            <RefreshCw className="w-3 h-3 mr-1.5" />
+            {t("config.reload", "Reload")}
+          </Button>
+        </div>
       </div>
 
       <div className="flex flex-col gap-4">

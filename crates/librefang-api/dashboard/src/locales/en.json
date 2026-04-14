@@ -1081,7 +1081,8 @@
     "cat_infra": "Infrastructure",
     "saved_restart": "Saved (restart required)",
     "saved_reload_failed": "Saved but reload failed",
-    "load_error": "Failed to load configuration"
+    "load_error": "Failed to load configuration",
+    "reload_success": "Config reloaded"
   },
   "chat": {
     "title": "Chat",
