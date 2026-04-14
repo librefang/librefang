@@ -13,6 +13,7 @@ import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles,
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
+import { copyToClipboard } from "../lib/clipboard";
 import { ToolCallCard } from "../components/ui/ToolCallCard";
 import { filterVisible } from "../lib/hiddenModels";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
@@ -1229,6 +1230,7 @@ export function ChatPage() {
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const addToast = useUIStore((s) => s.addToast);
 
   // Sync agent selection to URL search params
   const selectAgent = useCallback((id: string) => {
@@ -1248,14 +1250,13 @@ export function ChatPage() {
   );
 
   const handleCopy = useCallback(async (messageId: string, content: string) => {
-    try {
-      await navigator.clipboard.writeText(content);
+    if (await copyToClipboard(content)) {
       setCopiedMessageId(messageId);
       setTimeout(() => setCopiedMessageId(null), 1500);
-    } catch {
-      // Clipboard API not available
+    } else {
+      addToast(t("common.copy_failed"), "error");
     }
-  }, []);
+  }, [addToast, t]);
 
   const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
   const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "full";

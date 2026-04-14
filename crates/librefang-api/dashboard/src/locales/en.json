@@ -44,6 +44,8 @@
     "skip_to_content": "Skip to content"
   },
   "common": {
+    "copied": "Copied",
+    "copy_failed": "Copy failed",
     "refresh": "Refresh",
     "status": "Status",
     "daemon_online": "Daemon Online",
