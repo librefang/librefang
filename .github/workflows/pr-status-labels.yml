@@ -104,18 +104,45 @@ jobs:
   ci-status:
     name: CI Status Check
     runs-on: ubuntu-latest
-    if: github.event_name == 'check_suite'
+    if: github.event_name == 'check_suite' || (github.event_name == 'pull_request_target' && github.event.action == 'synchronize')
     steps:
       - name: Label PRs with failed CI
         uses: actions/github-script@v7
         with:
           script: |
             const LABEL = 'ci-failed';
-            const suite = context.payload.check_suite;
 
-            if (!suite.pull_requests || suite.pull_requests.length === 0) {
-              core.info('No PRs associated with this check suite');
+            // On synchronize (new push), the old CI results are stale — clear
+            // ci-failed immediately. The check_suite.completed event will re-add
+            // it if the new run fails.
+            if (context.eventName === 'pull_request_target') {
+              const pr = context.payload.pull_request;
+              const labels = pr.labels.map(l => l.name);
+              if (labels.includes(LABEL)) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: pr.number, name: LABEL,
+                }).catch(() => {});
+                core.info(`#${pr.number}: -${LABEL} (new push invalidates old CI result)`);
+              }
               return;
+            }
+
+            // check_suite.completed path
+            const suite = context.payload.check_suite;
+            if (!suite.pull_requests || suite.pull_requests.length === 0) {
+              // check_suite may not list PRs — fall back to searching by SHA
+              const { data: searchResult } = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${context.repo.owner}/${context.repo.repo} is:pr is:open ${suite.head_sha}`,
+              });
+              if (searchResult.total_count === 0) {
+                core.info('No PRs associated with this check suite');
+                return;
+              }
+              for (const item of searchResult.items) {
+                suite.pull_requests = suite.pull_requests || [];
+                suite.pull_requests.push({ number: item.number });
+              }
             }
 
             for (const pr of suite.pull_requests) {
