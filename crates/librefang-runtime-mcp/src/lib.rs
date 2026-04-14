@@ -540,21 +540,24 @@ impl McpConnection {
                 Ok((McpInner::Rmcp(client), Some(tools), auth_state))
             }
             Err(e) => {
-                // Attempt structured extraction first: walk the source() chain and
-                // downcast to StreamableHttpError::AuthRequired to get the
-                // www_authenticate_header without fragile string parsing.
+                // Extract the WWW-Authenticate header directly from the
+                // underlying `StreamableHttpError::AuthRequired` variant.
                 //
-                // TODO(rmcp): ClientInitializeError::TransportError does not annotate
-                // its `error: DynamicTransportError` field with #[source], so the
-                // source() chain is broken at that boundary — the downcast always
-                // returns None in practice. The fallback substring check below is the
-                // effective working path until rmcp adds #[source] to that field.
-                let err_dyn: &(dyn std::error::Error + 'static) = &e;
-                let www_authenticate = Self::extract_auth_required(err_dyn);
+                // rmcp's `ClientInitializeError::TransportError` wraps the
+                // transport error in a `DynamicTransportError`, which
+                // type-erases the inner error into a `Box<dyn Error>`.
+                // `std::error::Error::source()` traversal does not reach
+                // inside that box because the outer field is not annotated
+                // with `#[source]`, so we match on the variant by hand and
+                // `downcast_ref` the box contents.
+                //
+                // If anything in the chain ever changes we fall through to
+                // a substring check so we don't regress on plain 401 /
+                // "Unauthorized" / "Auth required" errors from future rmcp
+                // versions or alternative transports.
+                let www_authenticate = Self::extract_auth_header_from_error(&e);
 
                 if www_authenticate.is_none() {
-                    // Fall back to substring check so we don't regress if rmcp ever
-                    // changes its Display output to not include these markers.
                     let error_str = e.to_string();
                     let is_auth_error = error_str.contains("401")
                         || error_str.contains("Unauthorized")
@@ -566,17 +569,12 @@ impl McpConnection {
                     }
                     debug!(
                         url = %url,
-                        "401 detected via fallback string match — structured downcast did not reach"
+                        "401 detected via Display match — structured extraction did not reach the \
+                         AuthRequired variant (rmcp chain layout may have changed)"
                     );
                 }
 
                 debug!(url = %url, "MCP server returned auth error, attempting OAuth discovery");
-
-                // Use the structured header if we got one; otherwise scrape from
-                // the error Display output (fallback-only — see extract_www_authenticate).
-                let error_str = e.to_string();
-                let www_authenticate =
-                    www_authenticate.or_else(|| Self::extract_www_authenticate(&error_str));
 
                 // Discover OAuth metadata using three-tier resolution.
                 let metadata = crate::mcp_oauth::discover_oauth_metadata(
@@ -604,45 +602,36 @@ impl McpConnection {
         }
     }
 
-    /// Walk the `std::error::Error::source()` chain and attempt to downcast each
-    /// node to `StreamableHttpError<reqwest::Error>`. Returns the
-    /// `www_authenticate_header` string if an `AuthRequired` variant is found.
+    /// Extract the `www_authenticate_header` from a
+    /// `ClientInitializeError::TransportError` whose underlying error is a
+    /// `StreamableHttpError::AuthRequired`.
     ///
-    /// In practice this returns `None` today because
-    /// `ClientInitializeError::TransportError` does not annotate its inner
-    /// `DynamicTransportError` with `#[source]`, breaking the chain at that
-    /// boundary (see TODO(rmcp) at the call site). The helper is correct and
-    /// will work once rmcp adds the annotation.
-    fn extract_auth_required(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    /// Implementation note: walking `std::error::Error::source()` does not
+    /// reach the inner variant because rmcp's
+    /// `ClientInitializeError::TransportError` field is not annotated with
+    /// `#[source]`, so the chain stops at `DynamicTransportError`. We match
+    /// on the outer variant directly, then downcast the `Box<dyn Error>`
+    /// inside `DynamicTransportError` to the concrete
+    /// `StreamableHttpError<reqwest::Error>`.
+    fn extract_auth_header_from_error(e: &rmcp::service::ClientInitializeError) -> Option<String> {
+        use rmcp::service::ClientInitializeError;
         use rmcp::transport::streamable_http_client::{AuthRequiredError, StreamableHttpError};
 
-        let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
-        while let Some(e) = cur {
-            if let Some(StreamableHttpError::AuthRequired(AuthRequiredError {
-                www_authenticate_header,
-                ..
-            })) = e.downcast_ref::<StreamableHttpError<reqwest::Error>>()
-            {
-                return Some(www_authenticate_header.clone());
-            }
-            cur = e.source();
+        let ClientInitializeError::TransportError { error: dyn_err, .. } = e else {
+            return None;
+        };
+        let streamable = dyn_err
+            .error
+            .downcast_ref::<StreamableHttpError<reqwest::Error>>()?;
+        if let StreamableHttpError::AuthRequired(AuthRequiredError {
+            www_authenticate_header,
+            ..
+        }) = streamable
+        {
+            Some(www_authenticate_header.clone())
+        } else {
+            None
         }
-        None
-    }
-
-    /// **Fallback only.** Try to extract a WWW-Authenticate header value from
-    /// an error's `Display` output.
-    ///
-    /// rmcp's `StreamableHttpError` embeds the header in its `Debug`/`Display`
-    /// format as `www_authenticate_header: "..."`. This helper scrapes that
-    /// pattern out. It is kept as a fallback for when the structured downcast
-    /// via [`Self::extract_auth_required`] cannot traverse the error chain.
-    fn extract_www_authenticate(error: &str) -> Option<String> {
-        let marker = "www_authenticate_header: \"";
-        let start = error.find(marker)? + marker.len();
-        let rest = &error[start..];
-        let end = rest.find('"')?;
-        Some(rest[..end].to_string())
     }
 
     /// Send the MCP `initialize` handshake over SSE transport.
@@ -1829,38 +1818,19 @@ mod tests {
         assert!(McpConnection::check_ssrf("https://api.example.com/mcp", "test").is_ok());
     }
 
-    /// Verify that `extract_auth_required` returns None for a non-AuthRequired
-    /// `StreamableHttpError` variant (e.g. TransportChannelClosed).
-    ///
-    /// Note: `AuthRequiredError` is `#[non_exhaustive]` in rmcp, so we cannot
-    /// construct `StreamableHttpError::AuthRequired(...)` from outside the crate.
-    /// The positive case (returning `Some(header)`) is exercised by the fallback
-    /// substring path in production; this test verifies the downcast logic
-    /// correctly skips non-matching variants and returns None.
+    /// `extract_auth_header_from_error` returns `None` for any
+    /// `ClientInitializeError` variant that isn't `TransportError`. The
+    /// positive path (returning `Some(header)`) requires constructing a
+    /// `DynamicTransportError` holding a `StreamableHttpError::AuthRequired`,
+    /// which can't be built from outside rmcp because `AuthRequiredError`
+    /// is `#[non_exhaustive]`. This negative-path test pins the "bail out
+    /// early on the wrong variant" invariant so the downcast chain stays
+    /// correct under future rmcp shape changes.
     #[test]
-    fn test_extract_auth_required_returns_none_for_non_auth_error() {
-        use rmcp::transport::streamable_http_client::StreamableHttpError;
+    fn test_extract_auth_header_from_error_returns_none_for_non_transport_variant() {
+        use rmcp::service::ClientInitializeError;
 
-        let err = StreamableHttpError::<reqwest::Error>::TransportChannelClosed;
-        let dyn_err: &(dyn std::error::Error + 'static) = &err;
-        assert!(McpConnection::extract_auth_required(dyn_err).is_none());
-    }
-
-    /// Verify that `extract_auth_required` returns None for a completely
-    /// unrelated error type (not a StreamableHttpError at all).
-    #[test]
-    fn test_extract_auth_required_returns_none_for_unrelated_type() {
-        #[derive(Debug)]
-        struct DummyError;
-        impl std::fmt::Display for DummyError {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "dummy")
-            }
-        }
-        impl std::error::Error for DummyError {}
-
-        let err = DummyError;
-        let dyn_err: &(dyn std::error::Error + 'static) = &err;
-        assert!(McpConnection::extract_auth_required(dyn_err).is_none());
+        let err = ClientInitializeError::ConnectionClosed("simulated".to_string());
+        assert!(McpConnection::extract_auth_header_from_error(&err).is_none());
     }
 }
