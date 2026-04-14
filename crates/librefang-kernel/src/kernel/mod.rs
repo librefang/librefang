@@ -1369,6 +1369,15 @@ impl LibreFangKernel {
 
         let memory = Arc::new(substrate);
 
+        // Check if Ollama is reachable on localhost:11434 (TCP probe, 500ms timeout).
+        fn is_ollama_reachable() -> bool {
+            std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], 11434)),
+                std::time::Duration::from_millis(500),
+            )
+            .is_ok()
+        }
+
         // Resolve "auto" provider: scan environment for the first available API key.
         if config.default_model.provider == "auto" || config.default_model.provider.is_empty() {
             if let Some((provider, model_hint, env_var)) = drivers::detect_available_provider() {
@@ -1394,7 +1403,10 @@ impl LibreFangKernel {
                 // Ollama is running locally — use the catalog's default model, not a hardcoded one.
                 let model = librefang_runtime::model_catalog::ModelCatalog::default()
                     .default_model_for_provider("ollama")
-                    .unwrap_or_else(|| "llama3.2".to_string());
+                    .unwrap_or_else(|| {
+                        warn!("Model catalog has no default for ollama — falling back to gemma4");
+                        "gemma4".to_string()
+                    });
                 info!(
                     model = %model,
                     "No API keys detected — Ollama is running locally, using as default"
