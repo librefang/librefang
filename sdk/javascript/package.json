@@ -1,6 +1,6 @@
 {
   "name": "@librefang/sdk",
-  "version": "2026.4.13-beta19",
+  "version": "2026.4.14-beta20",
   "description": "Official JavaScript/TypeScript client for the LibreFang Agent OS REST API",
   "main": "index.js",
   "types": "index.d.ts",
