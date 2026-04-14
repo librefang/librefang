@@ -4180,7 +4180,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-metering"
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 dependencies = [
  "librefang-memory",
  "librefang-runtime",

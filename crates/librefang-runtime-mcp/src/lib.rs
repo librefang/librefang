@@ -15,14 +15,14 @@ use librefang_types::tool::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // Configuration types
 // ---------------------------------------------------------------------------
 
 /// Configuration for an MCP server connection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Display name for this server (used in tool namespacing).
     pub name: String,
@@ -47,6 +47,43 @@ pub struct McpServerConfig {
     /// or any custom headers required by a remote MCP server.
     #[serde(default)]
     pub headers: Vec<String>,
+    /// Optional OAuth provider for automatic authentication.
+    #[serde(skip)]
+    pub oauth_provider: Option<std::sync::Arc<dyn crate::mcp_oauth::McpOAuthProvider>>,
+    /// Optional OAuth config from config.toml (discovery fallback).
+    #[serde(default)]
+    pub oauth_config: Option<librefang_types::config::McpOAuthConfig>,
+}
+
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("transport", &self.transport)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("env", &self.env)
+            .field("headers", &self.headers)
+            .field(
+                "oauth_provider",
+                &self.oauth_provider.as_ref().map(|_| "..."),
+            )
+            .field("oauth_config", &self.oauth_config)
+            .finish()
+    }
+}
+
+impl Clone for McpServerConfig {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            transport: self.transport.clone(),
+            timeout_secs: self.timeout_secs,
+            env: self.env.clone(),
+            headers: self.headers.clone(),
+            oauth_provider: self.oauth_provider.clone(),
+            oauth_config: self.oauth_config.clone(),
+        }
+    }
 }
 
 fn default_timeout() -> u64 {
@@ -99,6 +136,8 @@ pub struct McpConnection {
     original_names: HashMap<String, String>,
     /// Transport-specific connection state.
     inner: McpInner,
+    /// Current OAuth authentication state for this connection.
+    auth_state: crate::mcp_oauth::McpAuthState,
 }
 
 /// Transport-specific connection handle.
@@ -213,13 +252,23 @@ const SAFE_ENV_VARS: &[&str] = &[
 impl McpConnection {
     /// Connect to an MCP server, perform handshake, and discover tools.
     pub async fn connect(config: McpServerConfig) -> Result<Self, String> {
+        let mut initial_auth_state: Option<crate::mcp_oauth::McpAuthState> = None;
+
         let (inner, discovered_tools) = match &config.transport {
             McpTransport::Stdio { command, args } => {
                 Self::connect_stdio(command, args, &config.env).await?
             }
             McpTransport::Sse { url } => Self::connect_sse(url).await?,
             McpTransport::Http { url } => {
-                Self::connect_streamable_http(url, &config.headers).await?
+                let (inner, tools, auth_state) = Self::connect_streamable_http(
+                    url,
+                    &config.headers,
+                    config.oauth_provider.as_ref(),
+                    config.oauth_config.as_ref(),
+                )
+                .await?;
+                initial_auth_state = Some(auth_state);
+                (inner, tools)
             }
             McpTransport::HttpCompat {
                 base_url,
@@ -236,6 +285,7 @@ impl McpConnection {
             tools: Vec::new(),
             original_names: HashMap::new(),
             inner,
+            auth_state: initial_auth_state.unwrap_or(crate::mcp_oauth::McpAuthState::NotRequired),
         };
 
         match discovered_tools {
@@ -413,7 +463,16 @@ impl McpConnection {
     async fn connect_streamable_http(
         url: &str,
         headers: &[String],
-    ) -> Result<(McpInner, Option<Vec<rmcp::model::Tool>>), String> {
+        oauth_provider: Option<&std::sync::Arc<dyn crate::mcp_oauth::McpOAuthProvider>>,
+        oauth_config: Option<&librefang_types::config::McpOAuthConfig>,
+    ) -> Result<
+        (
+            McpInner,
+            Option<Vec<rmcp::model::Tool>>,
+            crate::mcp_oauth::McpAuthState,
+        ),
+        String,
+    > {
         use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
         use rmcp::transport::StreamableHttpClientTransport;
         use rmcp::ServiceExt;
@@ -435,26 +494,153 @@ impl McpConnection {
             }
         }
 
+        // Try loading a cached OAuth token and inject as Authorization header.
+        let mut used_oauth_token = false;
+        if let Some(provider) = oauth_provider {
+            if let Some(token) = provider.load_token(url).await {
+                debug!(url = %url, "Injecting cached OAuth token for MCP connection");
+                if let (Ok(hn), Ok(hv)) = (
+                    HeaderName::from_bytes(b"authorization"),
+                    HeaderValue::from_str(&format!("Bearer {token}")),
+                ) {
+                    custom_headers.insert(hn, hv);
+                    used_oauth_token = true;
+                }
+            }
+        }
+
         let mut config = StreamableHttpClientTransportConfig::default();
         config.uri = Arc::from(url);
         config.custom_headers = custom_headers;
 
         let transport = StreamableHttpClientTransport::from_config(config);
 
-        let client = ()
-            .into_dyn()
-            .serve(transport)
-            .await
-            .map_err(|e| format!("MCP Streamable HTTP connection failed: {e}"))?;
+        match ().into_dyn().serve(transport).await {
+            Ok(client) => {
+                // Discover tools via rmcp (with timeout)
+                let timeout = std::time::Duration::from_secs(60);
+                let tools = tokio::time::timeout(timeout, client.list_all_tools())
+                    .await
+                    .map_err(|_| {
+                        "MCP tools/list timed out after 60s for Streamable HTTP".to_string()
+                    })?
+                    .map_err(|e| format!("MCP tools/list failed: {e}"))?;
 
-        // Discover tools via rmcp (with timeout)
-        let timeout = std::time::Duration::from_secs(60);
-        let tools = tokio::time::timeout(timeout, client.list_all_tools())
-            .await
-            .map_err(|_| "MCP tools/list timed out after 60s for Streamable HTTP".to_string())?
-            .map_err(|e| format!("MCP tools/list failed: {e}"))?;
+                let auth_state = if used_oauth_token {
+                    crate::mcp_oauth::McpAuthState::Authorized {
+                        expires_at: None,
+                        tokens: None,
+                    }
+                } else {
+                    crate::mcp_oauth::McpAuthState::NotRequired
+                };
 
-        Ok((McpInner::Rmcp(client), Some(tools)))
+                Ok((McpInner::Rmcp(client), Some(tools), auth_state))
+            }
+            Err(e) => {
+                // Attempt structured extraction first: walk the source() chain and
+                // downcast to StreamableHttpError::AuthRequired to get the
+                // www_authenticate_header without fragile string parsing.
+                //
+                // TODO(rmcp): ClientInitializeError::TransportError does not annotate
+                // its `error: DynamicTransportError` field with #[source], so the
+                // source() chain is broken at that boundary — the downcast always
+                // returns None in practice. The fallback substring check below is the
+                // effective working path until rmcp adds #[source] to that field.
+                let err_dyn: &(dyn std::error::Error + 'static) = &e;
+                let www_authenticate = Self::extract_auth_required(err_dyn);
+
+                if www_authenticate.is_none() {
+                    // Fall back to substring check so we don't regress if rmcp ever
+                    // changes its Display output to not include these markers.
+                    let error_str = e.to_string();
+                    let is_auth_error = error_str.contains("401")
+                        || error_str.contains("Unauthorized")
+                        || error_str.contains("Auth required");
+                    if !is_auth_error {
+                        return Err(format!(
+                            "MCP Streamable HTTP connection failed: {error_str}"
+                        ));
+                    }
+                    debug!(
+                        url = %url,
+                        "401 detected via fallback string match — structured downcast did not reach"
+                    );
+                }
+
+                debug!(url = %url, "MCP server returned auth error, attempting OAuth discovery");
+
+                // Use the structured header if we got one; otherwise scrape from
+                // the error Display output (fallback-only — see extract_www_authenticate).
+                let error_str = e.to_string();
+                let www_authenticate =
+                    www_authenticate.or_else(|| Self::extract_www_authenticate(&error_str));
+
+                // Discover OAuth metadata using three-tier resolution.
+                let metadata = crate::mcp_oauth::discover_oauth_metadata(
+                    url,
+                    www_authenticate.as_deref(),
+                    oauth_config,
+                )
+                .await
+                .map_err(|discovery_err| {
+                    format!(
+                        "MCP Streamable HTTP connection failed (auth required but OAuth \
+                         discovery failed): {discovery_err}"
+                    )
+                })?;
+
+                // Signal that auth is needed — the API layer will drive the
+                // PKCE flow via the UI instead of the daemon opening a browser.
+                warn!(
+                    url = %url,
+                    auth_endpoint = %metadata.authorization_endpoint,
+                    "MCP server requires OAuth — deferring to API layer"
+                );
+                Err("OAUTH_NEEDS_AUTH".to_string())
+            }
+        }
+    }
+
+    /// Walk the `std::error::Error::source()` chain and attempt to downcast each
+    /// node to `StreamableHttpError<reqwest::Error>`. Returns the
+    /// `www_authenticate_header` string if an `AuthRequired` variant is found.
+    ///
+    /// In practice this returns `None` today because
+    /// `ClientInitializeError::TransportError` does not annotate its inner
+    /// `DynamicTransportError` with `#[source]`, breaking the chain at that
+    /// boundary (see TODO(rmcp) at the call site). The helper is correct and
+    /// will work once rmcp adds the annotation.
+    fn extract_auth_required(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+        use rmcp::transport::streamable_http_client::{AuthRequiredError, StreamableHttpError};
+
+        let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+        while let Some(e) = cur {
+            if let Some(StreamableHttpError::AuthRequired(AuthRequiredError {
+                www_authenticate_header,
+                ..
+            })) = e.downcast_ref::<StreamableHttpError<reqwest::Error>>()
+            {
+                return Some(www_authenticate_header.clone());
+            }
+            cur = e.source();
+        }
+        None
+    }
+
+    /// **Fallback only.** Try to extract a WWW-Authenticate header value from
+    /// an error's `Display` output.
+    ///
+    /// rmcp's `StreamableHttpError` embeds the header in its `Debug`/`Display`
+    /// format as `www_authenticate_header: "..."`. This helper scrapes that
+    /// pattern out. It is kept as a fallback for when the structured downcast
+    /// via [`Self::extract_auth_required`] cannot traverse the error chain.
+    fn extract_www_authenticate(error: &str) -> Option<String> {
+        let marker = "www_authenticate_header: \"";
+        let start = error.find(marker)? + marker.len();
+        let rest = &error[start..];
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
     }
 
     /// Send the MCP `initialize` handshake over SSE transport.
@@ -820,6 +1006,11 @@ impl McpConnection {
     /// Get the server name.
     pub fn name(&self) -> &str {
         &self.config.name
+    }
+
+    /// Get the current OAuth authentication state.
+    pub fn auth_state(&self) -> &crate::mcp_oauth::McpAuthState {
+        &self.auth_state
     }
 
     // --- HttpCompat tool execution (unchanged) ---
@@ -1297,6 +1488,8 @@ mod tests {
                 "LEGACY_NAME_ONLY".to_string(),
             ],
             headers: vec![],
+            oauth_provider: None,
+            oauth_config: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1324,6 +1517,8 @@ mod tests {
             timeout_secs: 60,
             env: vec![],
             headers: vec![],
+            oauth_provider: None,
+            oauth_config: None,
         };
         let json = serde_json::to_string(&sse_config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1355,6 +1550,8 @@ mod tests {
             timeout_secs: 45,
             env: vec![],
             headers: vec![],
+            oauth_provider: None,
+            oauth_config: None,
         };
         let json = serde_json::to_string(&http_compat_config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1381,6 +1578,8 @@ mod tests {
             timeout_secs: 120,
             env: vec![],
             headers: vec!["Authorization: Bearer test-token-456".to_string()],
+            oauth_provider: None,
+            oauth_config: None,
         };
         let json = serde_json::to_string(&http_config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1423,12 +1622,15 @@ mod tests {
                 timeout_secs: 30,
                 env: vec![],
                 headers: vec![],
+                oauth_provider: None,
+                oauth_config: None,
             },
             tools: Vec::new(),
             original_names: HashMap::new(),
             inner: McpInner::HttpCompat {
                 client: librefang_http::proxied_client(),
             },
+            auth_state: crate::mcp_oauth::McpAuthState::NotRequired,
         };
 
         conn.register_http_compat_tools(&[
@@ -1585,6 +1787,8 @@ mod tests {
             timeout_secs: 5,
             env: vec![],
             headers: vec![],
+            oauth_provider: None,
+            oauth_config: None,
         })
         .await
         .unwrap();
@@ -1621,5 +1825,40 @@ mod tests {
         );
         assert!(McpConnection::check_ssrf("http://metadata.google.internal/v1/", "test").is_err());
         assert!(McpConnection::check_ssrf("https://api.example.com/mcp", "test").is_ok());
+    }
+
+    /// Verify that `extract_auth_required` returns None for a non-AuthRequired
+    /// `StreamableHttpError` variant (e.g. TransportChannelClosed).
+    ///
+    /// Note: `AuthRequiredError` is `#[non_exhaustive]` in rmcp, so we cannot
+    /// construct `StreamableHttpError::AuthRequired(...)` from outside the crate.
+    /// The positive case (returning `Some(header)`) is exercised by the fallback
+    /// substring path in production; this test verifies the downcast logic
+    /// correctly skips non-matching variants and returns None.
+    #[test]
+    fn test_extract_auth_required_returns_none_for_non_auth_error() {
+        use rmcp::transport::streamable_http_client::StreamableHttpError;
+
+        let err = StreamableHttpError::<reqwest::Error>::TransportChannelClosed;
+        let dyn_err: &(dyn std::error::Error + 'static) = &err;
+        assert!(McpConnection::extract_auth_required(dyn_err).is_none());
+    }
+
+    /// Verify that `extract_auth_required` returns None for a completely
+    /// unrelated error type (not a StreamableHttpError at all).
+    #[test]
+    fn test_extract_auth_required_returns_none_for_unrelated_type() {
+        #[derive(Debug)]
+        struct DummyError;
+        impl std::fmt::Display for DummyError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "dummy")
+            }
+        }
+        impl std::error::Error for DummyError {}
+
+        let err = DummyError;
+        let dyn_err: &(dyn std::error::Error + 'static) = &err;
+        assert!(McpConnection::extract_auth_required(dyn_err).is_none());
     }
 }
