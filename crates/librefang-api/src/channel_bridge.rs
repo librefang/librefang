@@ -339,14 +339,24 @@ fn start_stream_text_bridge(
                     iter_buf.push_str(&text);
                 }
                 StreamEvent::ContentComplete { .. } => {
-                    // Flush buffered text. Only suppress when ToolUseStart
-                    // was seen in this iteration (the text is the tool call
-                    // echoed as content). Do NOT apply heuristic filtering
-                    // here — normal replies that demonstrate tool syntax
-                    // (e.g. "use `web_search {…}`") must not be discarded.
+                    // Flush buffered text. Suppress when ToolUseStart was
+                    // seen in this iteration (the text is the tool call
+                    // echoed as content). Also suppress when the buffer
+                    // looks like a raw tool call emitted as plain text —
+                    // some providers (e.g. Groq/Llama, DeepSeek) stream
+                    // `<function=name>{…}</function>` or bare JSON tool
+                    // calls that `agent_loop::recover_text_tool_calls`
+                    // promotes to real tool_use blocks afterwards. Without
+                    // this filter the raw JSON leaks into the channel
+                    // before recovery runs (issue #2379, agent_send).
                     if !iter_buf.is_empty() {
                         if saw_tool_use {
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
+                        } else if looks_like_tool_call(&iter_buf) {
+                            debug!(
+                                "Streaming bridge: filtered leaked tool call text at ContentComplete"
+                            );
+                            iter_buf.clear();
                         } else if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
                             break;
                         }
@@ -3142,6 +3152,70 @@ mod tests {
     fn test_looks_like_tool_call_allows_non_tool_json_object() {
         let text = "Profile payload: {\"name\":\"Alice\",\"role\":\"admin\"}";
         assert!(!looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_detects_agent_send_bare_json() {
+        // Issue #2379: agent_send tool call leaked as raw JSON into Telegram.
+        let text = "{\"name\": \"agent_send\", \"parameters\": {\"agent_id\": \"AgentB\", \"message\": \"Hello from A\"}}";
+        assert!(looks_like_tool_call(text));
+    }
+
+    #[tokio::test]
+    async fn test_stream_bridge_filters_leaked_tool_call_at_content_complete() {
+        // Issue #2379: ensure the streaming bridge suppresses raw tool-call
+        // JSON emitted as plain text BEFORE recovery promotes it to a real
+        // tool_use block. Previously only the final flush filtered, so the
+        // first iteration's leaked JSON reached the channel.
+        use librefang_runtime::llm_driver::StreamEvent;
+        let (event_tx, mut event_rx) = mpsc::channel::<StreamEvent>(16);
+        // Drive the bridge logic directly (no kernel handle needed).
+        let (tx, mut rx) = mpsc::channel::<String>(16);
+        let bridge = tokio::spawn(async move {
+            let mut iter_buf = String::new();
+            let mut saw_tool_use = false;
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    StreamEvent::TextDelta { text } => iter_buf.push_str(&text),
+                    StreamEvent::ContentComplete { .. } => {
+                        if !iter_buf.is_empty() {
+                            if saw_tool_use {
+                                // suppressed
+                            } else if looks_like_tool_call(&iter_buf) {
+                                iter_buf.clear();
+                            } else if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
+                                break;
+                            }
+                        }
+                        iter_buf.clear();
+                        saw_tool_use = false;
+                    }
+                    StreamEvent::ToolUseStart { .. } => saw_tool_use = true,
+                    _ => {}
+                }
+            }
+        });
+
+        event_tx
+            .send(StreamEvent::TextDelta {
+                text: "{\"name\": \"agent_send\", \"parameters\": {\"agent_id\": \"AgentB\", \"message\": \"Hello\"}}".to_string(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::ContentComplete {
+                stop_reason: librefang_types::message::StopReason::EndTurn,
+                usage: librefang_types::message::TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+        drop(event_tx);
+        bridge.await.unwrap();
+
+        assert!(
+            rx.try_recv().is_err(),
+            "raw agent_send tool-call JSON must not be forwarded to the channel"
+        );
     }
 
     #[tokio::test]
