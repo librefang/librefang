@@ -155,6 +155,111 @@ impl TaintSink {
             blocked_labels: blocked,
         }
     }
+
+    /// Sink for MCP tool calls into an external MCP server — blocks
+    /// secrets and PII since the arguments are shipped verbatim to a
+    /// process outside the kernel's control.
+    pub fn mcp_tool_call() -> Self {
+        let mut blocked = HashSet::new();
+        blocked.insert(TaintLabel::Secret);
+        blocked.insert(TaintLabel::Pii);
+        Self {
+            name: "mcp_tool_call".to_string(),
+            blocked_labels: blocked,
+        }
+    }
+}
+
+/// Best-effort pattern match for obvious credential exfiltration in a
+/// free-form outbound string (tool-call argument, webhook body, MCP
+/// argument value, channel send text, …). Trips when the payload
+/// contains a `<common-secret-key>=<value>` / `key:value` / JSON
+/// `"key":` fragment, an `Authorization:` header prefix, a
+/// well-known credential prefix (`sk-`, `ghp_`, `xoxb-`, `AKIA`,
+/// `AIza`, …), or a long opaque token-looking blob.
+///
+/// Hits are wrapped in a [`TaintedValue`] and routed through
+/// [`TaintedValue::check_sink`] so rejection errors stay consistent
+/// across sinks. Prose that merely *mentions* "token" / "passwd" is
+/// left alone — the shape has to actually look like a credential
+/// assignment.
+///
+/// This is the same conservative denylist shape documented in
+/// SECURITY.md's taint section: a best-effort filter, **not** a
+/// full information-flow tracker. Copy-pasted obfuscation
+/// (homoglyph, base64, zero-width splits, …) still bypasses it.
+/// The goal is to catch the obvious "LLM stuffs an API key into a
+/// tool call" shape on the way out.
+pub fn check_outbound_text_violation(payload: &str, sink: &TaintSink) -> Option<String> {
+    const SECRET_KEYS: &[&str] = &[
+        "api_key",
+        "apikey",
+        "api-key",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "bearer",
+        "x-api-key",
+    ];
+
+    let lower = payload.to_lowercase();
+
+    // 1. `Authorization:` header literal — unambiguous.
+    let mut hit = lower.contains("authorization:");
+
+    // 2. `key=value` / `key: value` / `"key":` / `'key':` shapes.
+    //    The separator gate keeps natural-language ("a token of
+    //    appreciation") from tripping the filter.
+    if !hit {
+        for k in SECRET_KEYS {
+            for sep in ["=", ":", "\":", "':"] {
+                if lower.contains(&format!("{k}{sep}")) {
+                    hit = true;
+                    break;
+                }
+            }
+            if hit {
+                break;
+            }
+        }
+    }
+
+    // 3. Long opaque token OR well-known credential prefix.
+    if !hit {
+        let trimmed = payload.trim();
+        let looks_opaque = trimmed.len() >= 32
+            && !trimmed.chars().any(char::is_whitespace)
+            && trimmed.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || c == '-'
+                    || c == '_'
+                    || c == '.'
+                    || c == '/'
+                    || c == '+'
+                    || c == '='
+            });
+        let well_known = trimmed.starts_with("sk-")
+            || trimmed.starts_with("ghp_")
+            || trimmed.starts_with("github_pat_")
+            || trimmed.starts_with("xoxp-")
+            || trimmed.starts_with("xoxb-")
+            || trimmed.starts_with("AKIA")
+            || trimmed.starts_with("AIza");
+        if looks_opaque || well_known {
+            hit = true;
+        }
+    }
+
+    if hit {
+        let mut labels = HashSet::new();
+        labels.insert(TaintLabel::Secret);
+        let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
+        if let Err(violation) = tainted.check_sink(sink) {
+            return Some(violation.to_string());
+        }
+    }
+    None
 }
 
 /// Describes a taint policy violation: a labelled value tried to reach a

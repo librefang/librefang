@@ -13,11 +13,46 @@ use librefang_types::config::{
     HttpCompatHeaderConfig, HttpCompatMethod, HttpCompatRequestMode, HttpCompatResponseMode,
     HttpCompatToolConfig,
 };
+use librefang_types::taint::{check_outbound_text_violation, TaintSink};
 use librefang_types::tool::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+/// Walk every string leaf in a JSON argument tree and run
+/// [`check_outbound_text_violation`] against it with the
+/// `TaintSink::mcp_tool_call` sink. Returns the first violation
+/// string if any leaf trips the denylist, otherwise `None`.
+///
+/// Non-string leaves (numbers, bools, null) can't carry plaintext
+/// credentials in any meaningful way, so they are skipped.
+fn scan_mcp_arguments_for_taint(value: &serde_json::Value) -> Option<String> {
+    let sink = TaintSink::mcp_tool_call();
+    fn walk(v: &serde_json::Value, sink: &TaintSink) -> Option<String> {
+        match v {
+            serde_json::Value::String(s) => check_outbound_text_violation(s, sink),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    if let Some(violation) = walk(item, sink) {
+                        return Some(violation);
+                    }
+                }
+                None
+            }
+            serde_json::Value::Object(obj) => {
+                for (_k, v) in obj {
+                    if let Some(violation) = walk(v, sink) {
+                        return Some(violation);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+    walk(value, &sink)
+}
 
 // ---------------------------------------------------------------------------
 // Configuration types
@@ -852,6 +887,24 @@ impl McpConnection {
         name: &str,
         arguments: &serde_json::Value,
     ) -> Result<String, String> {
+        // SECURITY: best-effort taint filter before shipping arguments
+        // to an out-of-process MCP server. An LLM that has been pushed
+        // into smuggling credentials into tool-call arguments would
+        // otherwise exfiltrate them straight through this call — the
+        // MCP transport hands the JSON to whoever implements the server.
+        // Walk every string leaf in the arguments tree and refuse the
+        // call if anything trips `check_outbound_text_violation`. Non-
+        // string leaves (numbers, bools, null) can't carry plaintext
+        // credentials in any meaningful way, so they are left alone.
+        //
+        // This is still a best-effort pattern match (see
+        // `librefang_types::taint::check_outbound_text_violation` for
+        // exactly which patterns trip it) — not a full information-
+        // flow tracker. Copy-pasted obfuscation still bypasses it.
+        if let Some(violation) = scan_mcp_arguments_for_taint(arguments) {
+            return Err(format!("Taint violation: {violation}"));
+        }
+
         // Resolve to an owned String immediately so the borrow of self.original_names
         // and self.config.name ends before any mutable operations below.
         let raw_name: String = self
@@ -1330,6 +1383,58 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    // ── MCP outbound taint scanning ──────────────────────────────────────
+
+    #[test]
+    fn test_scan_mcp_arguments_rejects_secret_string_leaf() {
+        let args = serde_json::json!({
+            "repo": "libre/librefang",
+            "token": "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_some());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_walks_nested_trees() {
+        let args = serde_json::json!({
+            "filter": {
+                "headers": {
+                    "Authorization": "Bearer sk-live-secret",
+                }
+            }
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_some());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_rejects_secret_inside_array() {
+        let args = serde_json::json!({
+            "env": ["PATH=/usr/bin", "api_key=sk-00000"],
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_some());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_allows_plain_strings() {
+        let args = serde_json::json!({
+            "query": "What tokens does this crate use?",
+            "limit": 10,
+            "include_drafts": false,
+            "tags": ["rust", "security"],
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_none());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_allows_null_and_numbers() {
+        let args = serde_json::json!({
+            "cursor": null,
+            "page": 3,
+            "rate": 1.5,
+        });
+        assert!(scan_mcp_arguments_for_taint(&args).is_none());
+    }
 
     #[test]
     fn test_mcp_tool_namespacing() {
