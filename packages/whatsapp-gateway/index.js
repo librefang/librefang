@@ -108,6 +108,13 @@ function dbSaveMessage({ id, jid, senderJid, pushName, phone, text, direction, t
 /**
  * Mark a message as processed (1) or failed (-1).
  */
+// CS-01 iter 2: a catchup journal row with null/empty jid is orphan — cannot
+// be scoped to any WhatsApp chat. Pure predicate so tests can exercise it
+// without spinning up the full catchup loop / socket / DB.
+function shouldSkipCatchupForMissingJid(msg) {
+  return !msg || !msg.jid;
+}
+
 function dbMarkProcessed(msgId, status) {
   try {
     stmtMarkProcessed.run(status, msgId);
@@ -261,6 +268,43 @@ let ownJid = null;
 //                       owner is recognised, even before any senderPn event.
 const lidToPnJid = new Map();    // '<digits>@lid' → '<digits>@s.whatsapp.net'
 const ownerLidJids = new Set();  // '<digits>@lid'
+
+// CS-02: proactive LID→PN resolution for first-seen LIDs. Races
+// sock.onWhatsApp([lid]) against a timeout; on success, populates the cache
+// so subsequent messages in the same burst find it synchronously. On
+// timeout or empty response, falls back to degraded-but-no-block behaviour
+// (the caller proceeds with the LID as-is; a later senderPn event may
+// still populate the cache naturally).
+//
+// Returns a string tag for observability: 'resolved' | 'empty' | 'timeout'
+// | 'skipped' | 'error'. Side-effect: writes to `cache` on 'resolved'.
+async function resolveLidProactively(sock, lid, cache, timeoutMs = 5000) {
+  if (!sock || !lid || !cache || typeof sock.onWhatsApp !== 'function') return 'skipped';
+  if (cache.has(lid)) return 'skipped';
+  let timer;
+  try {
+    const lookup = await Promise.race([
+      Promise.resolve(sock.onWhatsApp([lid])),
+      new Promise((_, r) => { timer = setTimeout(() => r(new Error('timeout')), timeoutMs); }),
+    ]);
+    if (Array.isArray(lookup) && lookup[0] && lookup[0].jid) {
+      cache.set(lid, lookup[0].jid);
+      console.log(`[gateway] lid_resolved lid=${lid} pn=${lookup[0].jid}`);
+      return 'resolved';
+    }
+    console.warn(`[gateway] lid_resolve_empty lid=${lid}`);
+    return 'empty';
+  } catch (e) {
+    if (e && e.message === 'timeout') {
+      console.warn(`[gateway] lid_resolve_timeout lid=${lid}`);
+      return 'timeout';
+    }
+    console.warn(`[gateway] lid_resolve_error lid=${lid} err=${e && e.message}`);
+    return 'error';
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Message store for Baileys retry mechanism
@@ -759,89 +803,7 @@ async function startConnection() {
   const QRCode = (await import('qrcode')).default || await import('qrcode');
   const pino = (await import('pino')).default || await import('pino');
 
-  // Tracks per-JID Signal session-recovery attempts so we don't spam
-  // assertSessions() in a tight loop when a peer is genuinely unreachable.
-  //   remoteJid → { attempts, lastAttemptAt, lastMsgId, notified }
-  const sessionRecoveryMap = new Map();
-  const SESSION_RECOVERY_COOLDOWN_MS = 20_000;
-  const SESSION_RECOVERY_MAX_ATTEMPTS = 3;
-
-  // Called whenever Baileys' internal decrypt path logs a SessionError for
-  // an incoming message. The default retry-request path re-asks the sender
-  // to resend the same ciphertext, which is useless when the root cause is
-  // a missing Signal session for a new device — we force a full session
-  // renegotiation via assertSessions(..., true) and back off if the peer
-  // stays silent.
-  const handleDecryptFailure = async (remoteJid, msgId) => {
-    if (!remoteJid || !sock || typeof sock.assertSessions !== 'function') {
-      return;
-    }
-    const baseJid = remoteJid.replace(/:\d+@/, '@');
-    const now = Date.now();
-    const entry = sessionRecoveryMap.get(baseJid) || {
-      attempts: 0,
-      lastAttemptAt: 0,
-      lastMsgId: null,
-      notified: false,
-    };
-    if (now - entry.lastAttemptAt < SESSION_RECOVERY_COOLDOWN_MS) {
-      return;
-    }
-    if (entry.attempts >= SESSION_RECOVERY_MAX_ATTEMPTS) {
-      if (!entry.notified && OWNER_JID) {
-        entry.notified = true;
-        sessionRecoveryMap.set(baseJid, entry);
-        const body = [
-          `⚠️ Unable to decrypt messages from ${baseJid.replace(/@.*/, '')}`,
-          `Tried ${entry.attempts} session renegotiations — peer hasn't resent with a fresh Signal session.`,
-          `Last failed message id: ${entry.lastMsgId || 'unknown'}`,
-          `Hint: ask the contact to send a new message, or unlink/relink this device if it's you.`,
-        ].join('\n');
-        try {
-          await sock.sendMessage(OWNER_JID, { text: body });
-          console.warn(`[gateway][decrypt-session] Notified owner about persistent decrypt failure from ${baseJid}`);
-        } catch (e) {
-          console.warn(`[gateway][decrypt-session] Could not notify owner: ${e?.message || e}`);
-        }
-      }
-      return;
-    }
-    entry.attempts += 1;
-    entry.lastAttemptAt = now;
-    entry.lastMsgId = msgId || entry.lastMsgId;
-    sessionRecoveryMap.set(baseJid, entry);
-    console.warn(`[gateway][decrypt-session] SessionError for ${remoteJid} (msgId=${msgId || 'n/a'}) — forcing session renegotiation, attempt ${entry.attempts}/${SESSION_RECOVERY_MAX_ATTEMPTS}`);
-    try {
-      await sock.assertSessions([baseJid], true);
-    } catch (e) {
-      console.warn(`[gateway][decrypt-session] assertSessions(${baseJid}) failed: ${e?.message || e}`);
-    }
-  };
-
-  const basePinoLogger = pino({ level: 'warn' });
-  // Wrap pino's error sink so we catch Baileys' SessionError log without
-  // having to fork the library — the log line is the only signal Baileys
-  // emits when a signal-cipher decrypt fails, messages.upsert arrives with
-  // msg.message=null and the default handler silently continues.
-  const logger = new Proxy(basePinoLogger, {
-    get(target, prop, receiver) {
-      if (prop !== 'error') {
-        return Reflect.get(target, prop, receiver);
-      }
-      return function wrappedError(obj, msg, ...rest) {
-        target.error.call(target, obj, msg, ...rest);
-        try {
-          const errMsg = (obj && (obj.err?.message || obj.message)) || (typeof msg === 'string' ? msg : '') || '';
-          const remoteJid = obj?.key?.remoteJid;
-          if (remoteJid && /No matching sessions|failed to decrypt message|MessageCounterError/i.test(errMsg)) {
-            handleDecryptFailure(remoteJid, obj.key.id);
-          }
-        } catch (_) {
-          // Never let the hook throw — logging must stay fire-and-forget.
-        }
-      };
-    },
-  });
+  const logger = pino({ level: 'warn' });
 
   const { state, saveCreds } = await useMultiFileAuthState(
     require('node:path').join(__dirname, 'auth_store')
@@ -1098,6 +1060,13 @@ async function startConnection() {
       // Cache LID → phone-number JID when we see both on the same message.
       if (isLidJid && senderPnRaw) {
         lidToPnJid.set(sender, senderPnRaw);
+      }
+
+      // CS-02: first-seen LID without senderPn AND not in cache — proactively
+      // ask Baileys for the PN mapping with a 5s timeout. Populates cache so
+      // the next message in the burst resolves synchronously.
+      if (isLidJid && !senderPnRaw && !lidToPnJid.has(sender)) {
+        await resolveLidProactively(sock, sender, lidToPnJid, 5000);
       }
 
       // Resolve to a phone-number JID (or empty string if we cannot).
@@ -1654,18 +1623,8 @@ async function downloadMedia(fullMsg) {
 /**
  * Upload a buffer to LibreFang via POST /api/agents/{id}/upload.
  * Returns { file_id, filename, content_type, size, transcription? } or throws.
- *
- * The backend's `MediaAttachment::validate` (crates/librefang-types/src/media.rs)
- * does an exact string match against its MIME allowlist, so a Content-Type
- * with RFC 2045 parameters — e.g. WhatsApp's `audio/ogg; codecs=opus` — is
- * rejected even though `audio/ogg` is allowed. Upstream fix lives in PR #2362
- * (MIME-param normalisation in the validator); until that binary ships, we
- * strip the parameters here so uploads are accepted by the current server.
  */
 async function uploadToLibreFang(agentId, buffer, contentType, filename) {
-  const normalizedContentType = typeof contentType === 'string'
-    ? contentType.split(';')[0].trim() || 'application/octet-stream'
-    : 'application/octet-stream';
   async function attempt() {
     return new Promise((resolve, reject) => {
       const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(agentId)}/upload`);
@@ -1676,7 +1635,7 @@ async function uploadToLibreFang(agentId, buffer, contentType, filename) {
           path: url.pathname,
           method: 'POST',
           headers: {
-            'Content-Type': normalizedContentType,
+            'Content-Type': contentType,
             'X-Filename': filename,
             'Content-Length': buffer.length,
           },
@@ -1785,6 +1744,16 @@ function buildRelaySystemInstruction() {
 const MAX_FORWARD_RETRIES = 1;
 
 async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false, chatJid = '' } = {}, retryCount = 0) {
+  // CS-01: fail-fast — refuse to forward with an empty chatJid. A bare
+  // `whatsapp` channel loses per-conversation session isolation; the kernel
+  // would merge unrelated chats into the same session.
+  if (!chatJid) {
+    const err = new Error(`[gateway] chatJid empty — refusing to forward to bare whatsapp channel (phone=${phone} pushName=${pushName} isGroup=${isGroup})`);
+    err.code = 'CHATJID_EMPTY';
+    console.error(err.message);
+    throw err;
+  }
+
   // Resolve agent UUID if not cached (or if invalidated on reconnect)
   if (!cachedAgentId) {
     try {
@@ -1799,7 +1768,8 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
 
   // Per-conversation session isolation: include chat JID in channel_type
   // so the kernel creates separate sessions for each WhatsApp conversation.
-  const channelType = chatJid ? `whatsapp:${chatJid}` : 'whatsapp';
+  // CS-01: chatJid has already been validated non-empty at function entry.
+  const channelType = `whatsapp:${chatJid}`;
   const payload = {
     message: fullMessage,
     channel_type: channelType,
@@ -1904,6 +1874,15 @@ const STREAMING_EDIT_INTERVAL_MS = 2000;
  * @returns {Promise<string>} complete response
  */
 async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress, chatJid = '', { isGroup = false, wasMentioned = false } = {}) {
+  // CS-01: fail-fast — refuse to forward with an empty chatJid (same
+  // rationale as `forwardToLibreFang`). Keeps streaming parity.
+  if (!chatJid) {
+    const err = new Error(`[gateway] chatJid empty — refusing to forward to bare whatsapp channel (phone=${phone} pushName=${pushName} isGroup=${isGroup})`);
+    err.code = 'CHATJID_EMPTY';
+    console.error(err.message);
+    throw err;
+  }
+
   // Resolve agent UUID if not cached
   if (!cachedAgentId) {
     try {
@@ -1916,7 +1895,8 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
 
   const fullMessage = systemPrefix ? systemPrefix + text : text;
 
-  const channelType = chatJid ? `whatsapp:${chatJid}` : 'whatsapp';
+  // CS-01: chatJid has already been validated non-empty at function entry.
+  const channelType = `whatsapp:${chatJid}`;
   const payload = {
     message: fullMessage,
     channel_type: channelType,
@@ -2080,6 +2060,17 @@ async function runCatchUpSweep() {
     // Skip messages already at max retries (they'll be marked failed by dbIncrRetryOrFail)
     if (msg.retry_count >= CATCHUP_MAX_RETRIES) {
       dbIncrRetryOrFail(msg.id, CATCHUP_MAX_RETRIES);
+      continue;
+    }
+
+    // CS-01 iter 2 guard: a journal row with null/empty jid has no meaningful
+    // chat scope to replay to (orphan from pre-scoping baseline). Mark it
+    // processed explicitly so the CS-01 throw inside forwardToLibreFang
+    // doesn't land inside our catch-block and inflate retry_count up to
+    // CATCHUP_MAX_RETRIES before eventually giving up.
+    if (shouldSkipCatchupForMissingJid(msg)) {
+      dbMarkProcessed(msg.id, 1);
+      console.log(`[gateway][catchup] catchup_skip_no_jid id=${msg.id} — journal row has null jid, cannot scope replay`);
       continue;
     }
 
@@ -2586,4 +2577,8 @@ module.exports = {
   isAllowedOrigin,
   parseBody,
   MAX_BODY_SIZE,
+  forwardToLibreFang,
+  forwardToLibreFangStreaming,
+  shouldSkipCatchupForMissingJid,
+  resolveLidProactively,
 };

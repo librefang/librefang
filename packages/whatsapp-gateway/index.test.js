@@ -7,6 +7,11 @@ const { Readable } = require('node:stream');
 
 // Override DB path to temp location before requiring the module
 process.env.WHATSAPP_DB_PATH = '/tmp/test-wa-gateway-' + process.pid + '.db';
+// Bind a mock LibreFang HTTP server on a fixed port BEFORE requiring the
+// module — `LIBREFANG_URL` is captured at module load. Using a dedicated
+// loopback port (4547) avoids clashing with a real daemon on 4545.
+const MOCK_LIBREFANG_PORT = 24547;
+process.env.LIBREFANG_URL = `http://127.0.0.1:${MOCK_LIBREFANG_PORT}`;
 
 const {
   markdownToWhatsApp,
@@ -18,6 +23,10 @@ const {
   isAllowedOrigin,
   parseBody,
   MAX_BODY_SIZE,
+  forwardToLibreFang,
+  forwardToLibreFangStreaming,
+  shouldSkipCatchupForMissingJid,
+  resolveLidProactively,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -338,6 +347,142 @@ describe('parseBody', () => {
 describe('MAX_BODY_SIZE', () => {
   it('is 64KB', () => {
     assert.equal(MAX_BODY_SIZE, 64 * 1024);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CS-01: forwardToLibreFang* throw on empty chatJid + catchup guard
+// ---------------------------------------------------------------------------
+describe('CS-01 forwardToLibreFang chatJid enforcement', () => {
+  let mockServer;
+  const lastRequests = [];
+
+  before(async () => {
+    mockServer = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        const parsed = body ? JSON.parse(body) : null;
+        lastRequests.push({ url: req.url, method: req.method, body: parsed });
+        if (req.url === '/api/agents' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify([{ id: 'test-agent-id', name: 'TestAgent' }]));
+          return;
+        }
+        if (req.url && req.url.startsWith('/api/agents/') && req.url.endsWith('/message')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ response: 'mock reply' }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+    await new Promise((resolve) => mockServer.listen(MOCK_LIBREFANG_PORT, '127.0.0.1', resolve));
+  });
+
+  after(async () => {
+    if (mockServer) await new Promise((r) => mockServer.close(r));
+  });
+
+  it('Test 1: forwardToLibreFang throws when chatJid is empty', async () => {
+    await assert.rejects(
+      () => forwardToLibreFang('hi', '', '+39123', 'Alice', false, [], { isGroup: false, wasMentioned: false, chatJid: '' }),
+      (err) => {
+        assert.equal(err.code, 'CHATJID_EMPTY');
+        assert.match(err.message, /chatJid empty/);
+        assert.match(err.message, /phone=\+39123/);
+        assert.match(err.message, /pushName=Alice/);
+        assert.match(err.message, /isGroup=false/);
+        return true;
+      }
+    );
+  });
+
+  it('Test 2: forwardToLibreFangStreaming throws when chatJid is empty', async () => {
+    await assert.rejects(
+      () => forwardToLibreFangStreaming('hi', '', '+39123', 'Alice', false, [], () => {}, '', { isGroup: true, wasMentioned: false }),
+      (err) => {
+        assert.equal(err.code, 'CHATJID_EMPTY');
+        assert.match(err.message, /isGroup=true/);
+        return true;
+      }
+    );
+  });
+
+  it('Test 3: forwardToLibreFang proceeds with valid chatJid and sends channel_type=whatsapp:<jid>', async () => {
+    lastRequests.length = 0;
+    const jid = '39123@s.whatsapp.net';
+    const reply = await forwardToLibreFang('hello', '', '+39123', 'Alice', false, [], { isGroup: false, wasMentioned: false, chatJid: jid });
+    assert.equal(reply, 'mock reply');
+    const msgReq = lastRequests.find((r) => r.url && r.url.endsWith('/message'));
+    assert.ok(msgReq, 'expected /message POST to have fired');
+    assert.equal(msgReq.body.channel_type, `whatsapp:${jid}`);
+  });
+
+  it('Test 4: no code path produces bare channel_type "whatsapp"', () => {
+    // Source-level invariant: the only channelType assignments are
+    // `whatsapp:${chatJid}`, and entry is guarded by the CS-01 throw.
+    const fs = require('node:fs');
+    const src = fs.readFileSync(__dirname + '/index.js', 'utf8');
+    assert.equal(src.includes("chatJid ? `whatsapp:"), false, 'ternary fallback must be removed');
+    assert.equal(/channelType\s*=\s*'whatsapp'\s*;/.test(src), false, 'bare whatsapp assignment must not exist');
+  });
+
+  it('Test 5 (catchup guard): shouldSkipCatchupForMissingJid returns true for null/empty jid rows', () => {
+    assert.equal(shouldSkipCatchupForMissingJid({ id: 1, jid: null }), true);
+    assert.equal(shouldSkipCatchupForMissingJid({ id: 2, jid: '' }), true);
+    assert.equal(shouldSkipCatchupForMissingJid({ id: 3, jid: undefined }), true);
+    assert.equal(shouldSkipCatchupForMissingJid({ id: 4, jid: '39123@s.whatsapp.net' }), false);
+    assert.equal(shouldSkipCatchupForMissingJid(null), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CS-02: proactive LID → PN resolution for first-seen LIDs
+// ---------------------------------------------------------------------------
+describe('CS-02 resolveLidProactively', () => {
+  it('Test 1: first-seen LID triggers onWhatsApp and populates cache', async () => {
+    const cache = new Map();
+    let calls = 0;
+    const sock = {
+      onWhatsApp: (lids) => {
+        calls += 1;
+        return Promise.resolve([{ jid: '39123@s.whatsapp.net', lid: lids[0] }]);
+      },
+    };
+    const result = await resolveLidProactively(sock, '999@lid', cache, 500);
+    assert.equal(result, 'resolved');
+    assert.equal(calls, 1);
+    assert.equal(cache.get('999@lid'), '39123@s.whatsapp.net');
+  });
+
+  it('Test 2: cached LID is NOT re-queried', async () => {
+    const cache = new Map([['999@lid', '39123@s.whatsapp.net']]);
+    let calls = 0;
+    const sock = { onWhatsApp: () => { calls += 1; return Promise.resolve([]); } };
+    const result = await resolveLidProactively(sock, '999@lid', cache, 500);
+    assert.equal(result, 'skipped');
+    assert.equal(calls, 0);
+  });
+
+  it('Test 3: onWhatsApp timeout does NOT block and does NOT populate cache', async () => {
+    const cache = new Map();
+    const sock = { onWhatsApp: () => new Promise(() => {}) }; // never resolves
+    const t0 = Date.now();
+    const result = await resolveLidProactively(sock, '999@lid', cache, 80);
+    const elapsed = Date.now() - t0;
+    assert.equal(result, 'timeout');
+    assert.ok(elapsed >= 70 && elapsed < 500, `elapsed=${elapsed}`);
+    assert.equal(cache.has('999@lid'), false);
+  });
+
+  it('Test 4: onWhatsApp returns [] → lid_resolve_empty tag, cache untouched', async () => {
+    const cache = new Map();
+    const sock = { onWhatsApp: () => Promise.resolve([]) };
+    const result = await resolveLidProactively(sock, '999@lid', cache, 500);
+    assert.equal(result, 'empty');
+    assert.equal(cache.has('999@lid'), false);
   });
 });
 
