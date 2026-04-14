@@ -1613,7 +1613,7 @@ export function ChatPage() {
 
           {/* Message area */}
           <div className="flex-1 overflow-y-auto p-3 sm:p-6 scrollbar-thin">
-            <div className="w-full space-y-4 sm:space-y-6">
+            <div className="mx-auto w-full space-y-4 sm:space-y-6 max-w-4xl xl:max-w-5xl 2xl:max-w-6xl 3xl:max-w-[1600px] 4xl:max-w-[2000px]">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
                 <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-main/50" />
@@ -1661,13 +1661,15 @@ export function ChatPage() {
 
           {/* Input area */}
           <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
-            <ChatInput
-              onSend={sendMessage}
-              disabled={isLoading}
-              placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
-              authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
-              providerName={selectedAgent?.model_provider}
-            />
+            <div className="mx-auto w-full max-w-4xl xl:max-w-5xl 2xl:max-w-6xl 3xl:max-w-[1600px] 4xl:max-w-[2000px]">
+              <ChatInput
+                onSend={sendMessage}
+                disabled={isLoading}
+                placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
+                authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
+                providerName={selectedAgent?.model_provider}
+              />
+            </div>
           </div>
         </main>
       </div>
