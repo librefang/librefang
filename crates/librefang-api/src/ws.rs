@@ -1428,6 +1428,46 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_think_content_none_when_absent() {
+        assert!(extract_think_content("plain answer").is_none());
+        assert!(extract_think_content("").is_none());
+    }
+
+    #[test]
+    fn test_extract_think_content_single_block() {
+        let raw = "before<think>reasoning here</think>after";
+        assert_eq!(
+            extract_think_content(raw).as_deref(),
+            Some("reasoning here")
+        );
+    }
+
+    #[test]
+    fn test_extract_think_content_multiple_blocks() {
+        let raw = "<think>step one</think>mid<think>step two</think>end";
+        assert_eq!(
+            extract_think_content(raw).as_deref(),
+            Some("step one\n\nstep two")
+        );
+    }
+
+    #[test]
+    fn test_extract_think_content_unclosed_tag() {
+        let raw = "intro<think>tail thoughts never closed";
+        assert_eq!(
+            extract_think_content(raw).as_deref(),
+            Some("tail thoughts never closed")
+        );
+    }
+
+    #[test]
+    fn test_extract_and_strip_are_complementary() {
+        let raw = "hello <think>secret</think> world";
+        assert_eq!(strip_think_tags(raw), "hello  world");
+        assert_eq!(extract_think_content(raw).as_deref(), Some("secret"));
+    }
+
+    #[test]
     fn test_verbose_level_cycle() {
         assert_eq!(VerboseLevel::Off.next(), VerboseLevel::On);
         assert_eq!(VerboseLevel::On.next(), VerboseLevel::Full);

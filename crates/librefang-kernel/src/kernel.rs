@@ -13806,4 +13806,49 @@ mod tests {
         assert_eq!(peer_scoped_key("car", None), "car");
         assert_eq!(peer_scoped_key("global_setting", None), "global_setting");
     }
+
+    #[test]
+    fn test_apply_thinking_override_none_leaves_manifest_untouched() {
+        let mut manifest = librefang_types::agent::AgentManifest::default();
+        manifest.thinking = Some(librefang_types::config::ThinkingConfig {
+            budget_tokens: 4242,
+            stream_thinking: true,
+        });
+        apply_thinking_override(&mut manifest, None);
+        let cfg = manifest.thinking.as_ref().expect("thinking preserved");
+        assert_eq!(cfg.budget_tokens, 4242);
+        assert!(cfg.stream_thinking);
+    }
+
+    #[test]
+    fn test_apply_thinking_override_force_off_clears_thinking() {
+        let mut manifest = librefang_types::agent::AgentManifest::default();
+        manifest.thinking = Some(librefang_types::config::ThinkingConfig::default());
+        apply_thinking_override(&mut manifest, Some(false));
+        assert!(manifest.thinking.is_none());
+    }
+
+    #[test]
+    fn test_apply_thinking_override_force_on_inserts_default() {
+        let mut manifest = librefang_types::agent::AgentManifest::default();
+        assert!(manifest.thinking.is_none());
+        apply_thinking_override(&mut manifest, Some(true));
+        let cfg = manifest.thinking.as_ref().expect("thinking inserted");
+        assert_eq!(
+            cfg.budget_tokens,
+            librefang_types::config::ThinkingConfig::default().budget_tokens
+        );
+    }
+
+    #[test]
+    fn test_apply_thinking_override_force_on_keeps_existing_budget() {
+        let mut manifest = librefang_types::agent::AgentManifest::default();
+        manifest.thinking = Some(librefang_types::config::ThinkingConfig {
+            budget_tokens: 1234,
+            stream_thinking: false,
+        });
+        apply_thinking_override(&mut manifest, Some(true));
+        let cfg = manifest.thinking.as_ref().expect("thinking preserved");
+        assert_eq!(cfg.budget_tokens, 1234);
+    }
 }

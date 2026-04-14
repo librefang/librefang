@@ -1697,6 +1697,96 @@ mod tests {
     }
 
     #[test]
+    fn test_is_ollama_like_detects_default_port() {
+        let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
+        assert!(driver.is_ollama_like());
+    }
+
+    #[test]
+    fn test_is_ollama_like_detects_hostname() {
+        let driver = OpenAIDriver::new("".to_string(), "http://ollama.local/v1".to_string());
+        assert!(driver.is_ollama_like());
+    }
+
+    #[test]
+    fn test_is_ollama_like_rejects_openai() {
+        let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
+        assert!(!driver.is_ollama_like());
+    }
+
+    #[test]
+    fn test_build_request_sets_think_true_for_ollama_when_thinking_enabled() {
+        let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
+        let request = CompletionRequest {
+            model: "qwen3:8b".to_string(),
+            messages: vec![librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Text("hi".to_string()),
+            }],
+            tools: vec![],
+            max_tokens: 256,
+            temperature: 0.7,
+            system: None,
+            thinking: Some(librefang_types::config::ThinkingConfig::default()),
+            prompt_caching: false,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+        };
+        let oai = driver.build_request(&request).expect("build request");
+        let extra = oai.extra_body.as_ref().expect("extra_body present");
+        assert_eq!(extra.get("think"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_build_request_sets_think_false_for_ollama_when_thinking_disabled() {
+        let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
+        let request = CompletionRequest {
+            model: "qwen3:8b".to_string(),
+            messages: vec![librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Text("hi".to_string()),
+            }],
+            tools: vec![],
+            max_tokens: 256,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+        };
+        let oai = driver.build_request(&request).expect("build request");
+        let extra = oai.extra_body.as_ref().expect("extra_body present");
+        assert_eq!(extra.get("think"), Some(&serde_json::Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_build_request_omits_think_for_non_ollama() {
+        let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
+        let request = CompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Text("hi".to_string()),
+            }],
+            tools: vec![],
+            max_tokens: 256,
+            temperature: 0.7,
+            system: None,
+            thinking: Some(librefang_types::config::ThinkingConfig::default()),
+            prompt_caching: false,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+        };
+        let oai = driver.build_request(&request).expect("build request");
+        // Non-ollama: extra_body should mirror the (None) request.extra_body.
+        assert!(oai.extra_body.is_none());
+    }
+
+    #[test]
     fn test_parse_groq_failed_tool_call() {
         let body = r#"{"error":{"message":"Failed to call a function.","type":"invalid_request_error","code":"tool_use_failed","failed_generation":"<function=web_fetch{\"url\": \"https://example.com\"}></function>\n"}}"#;
         let result = parse_groq_failed_tool_call(body);
