@@ -13,6 +13,7 @@ import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles,
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
+import { copyToClipboard } from "../lib/clipboard";
 import { ToolCallCard } from "../components/ui/ToolCallCard";
 import { filterVisible } from "../lib/hiddenModels";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
@@ -591,12 +592,12 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
   }, [message.content, isUser]);
 
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className={`flex flex-col max-w-[90%] sm:max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
+    <div className={`flex animate-message-in ${isUser ? "justify-end" : "justify-start"}`}>
+      <div className={`flex flex-col w-fit max-w-[90%] sm:max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
           <div className={`h-7 w-7 rounded-lg flex items-center justify-center ${
-            isUser ? "bg-gradient-to-br from-brand to-accent text-white shadow-md" : "bg-surface border border-border-subtle"
+            isUser ? "bg-brand text-white shadow-sm" : "bg-surface border border-border-subtle"
           }`}>
             {isUser ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5 text-brand" />}
           </div>
@@ -616,9 +617,9 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 
         {/* Message content */}
         {(displayContent || isUser || message.isStreaming || message.error) && (
-        <div className={`relative px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-colors ${
+        <div className={`relative px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm ${
           isUser
-            ? "bg-gradient-to-br from-brand to-brand/90 text-white rounded-tr-md"
+            ? "bg-brand text-white rounded-tr-md"
             : message.error
               ? "bg-error/10 border border-error/20 text-error rounded-tl-md"
               : "bg-surface border border-border-subtle rounded-tl-md"
@@ -627,7 +628,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             displayContent ? (
               <Typewriter_v2 text={displayContent} speed={10} />
             ) : (
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 py-0.5">
                 <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
                 <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
                 <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
@@ -639,7 +640,12 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               <span>{message.error}</span>
             </div>
           ) : isUser ? (
-            <p className="whitespace-pre-line break-words">{displayContent}</p>
+            // `break-words` only splits on spaces, so a bare URL/token
+            // long enough to overflow its parent used to push the whole
+            // 75%-wide bubble out of frame. `overflow-wrap: anywhere` is
+            // the standard safe-wrap value that only kicks in when the
+            // word would otherwise overflow, so normal text is untouched.
+            <p className="whitespace-pre-line [overflow-wrap:anywhere]">{displayContent}</p>
           ) : (
             <MarkdownContent
               remarkPlugins={[remarkMath]}
@@ -677,11 +683,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             {!message.isStreaming && !message.error && message.role === "assistant" && ttsAvailable && onSpeak && (
               <button
                 onClick={() => onSpeak(message.id, message.content)}
-                className={`h-6 w-6 rounded-md flex items-center justify-center transition-colors ${
-                  isUser
-                    ? "bg-gradient-to-br from-brand to-accent text-white shadow-sm hover:shadow-md"
-                    : "bg-surface border border-border-subtle text-brand hover:bg-surface-hover"
-                }`}
+                className="h-6 w-6 rounded-md flex items-center justify-center text-text-dim/60 hover:text-brand hover:bg-surface-hover transition-colors"
                 title={
                   ttsStatus === "loading" ? t("chat.tts_generating") :
                   isSpeaking && ttsStatus === "playing" ? t("chat.pause") :
@@ -703,9 +705,9 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               <button
                 onClick={() => onCopy(message.id, message.content)}
                 className={`h-6 w-6 rounded-md flex items-center justify-center transition-colors ${
-                  isUser
-                    ? "bg-gradient-to-br from-brand to-accent text-white shadow-sm hover:shadow-md"
-                    : "bg-surface border border-border-subtle text-brand hover:bg-surface-hover"
+                  copied
+                    ? "text-success"
+                    : "text-text-dim/60 hover:text-brand hover:bg-surface-hover"
                 }`}
                 title={copied ? t("chat.copied") : t("chat.copy")}
               >
@@ -1229,6 +1231,7 @@ export function ChatPage() {
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const addToast = useUIStore((s) => s.addToast);
 
   // Sync agent selection to URL search params
   const selectAgent = useCallback((id: string) => {
@@ -1248,14 +1251,13 @@ export function ChatPage() {
   );
 
   const handleCopy = useCallback(async (messageId: string, content: string) => {
-    try {
-      await navigator.clipboard.writeText(content);
+    if (await copyToClipboard(content)) {
       setCopiedMessageId(messageId);
       setTimeout(() => setCopiedMessageId(null), 1500);
-    } catch {
-      // Clipboard API not available
+    } else {
+      addToast(t("common.copy_failed"), "error");
     }
-  }, []);
+  }, [addToast, t]);
 
   const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
   const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "full";

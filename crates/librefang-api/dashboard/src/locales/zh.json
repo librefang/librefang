@@ -44,6 +44,8 @@
     "skip_to_content": "跳转到内容"
   },
   "common": {
+    "copied": "已复制",
+    "copy_failed": "复制失败",
     "refresh": "刷新",
     "status": "状态",
     "daemon_online": "守护进程在线",
