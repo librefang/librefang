@@ -1778,32 +1778,51 @@ pub async fn config_set(
         Err(_) => toml_edit::DocumentMut::new(),
     };
 
-    // Convert JSON value to toml_edit::Value
-    let edit_val = json_to_toml_edit_value(&value);
+    // null → remove key instead of writing empty string
+    let is_remove = value.is_null();
 
-    // Parse "section.key" path and set value
+    // Parse "section.key" path and set/remove value
     let parts: Vec<&str> = path.split('.').collect();
     match parts.len() {
         1 => {
-            doc[parts[0]] = toml_edit::Item::Value(edit_val);
+            if is_remove {
+                doc.remove(parts[0]);
+            } else {
+                doc[parts[0]] = toml_edit::Item::Value(json_to_toml_edit_value(&value));
+            }
         }
         2 => {
-            if !doc.contains_table(parts[0]) {
-                doc[parts[0]] = toml_edit::Item::Table(toml_edit::Table::new());
+            if is_remove {
+                if let Some(t) = doc[parts[0]].as_table_mut() {
+                    t.remove(parts[1]);
+                }
+            } else {
+                if !doc.contains_table(parts[0]) {
+                    doc[parts[0]] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                doc[parts[0]][parts[1]] = toml_edit::Item::Value(json_to_toml_edit_value(&value));
             }
-            doc[parts[0]][parts[1]] = toml_edit::Item::Value(edit_val);
         }
         3 => {
-            if !doc.contains_table(parts[0]) {
-                doc[parts[0]] = toml_edit::Item::Table(toml_edit::Table::new());
+            if is_remove {
+                if let Some(t) = doc[parts[0]].as_table_mut() {
+                    if let Some(t2) = t.get_mut(parts[1]).and_then(|i| i.as_table_mut()) {
+                        t2.remove(parts[2]);
+                    }
+                }
+            } else {
+                if !doc.contains_table(parts[0]) {
+                    doc[parts[0]] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                if doc[parts[0]]
+                    .as_table()
+                    .map_or(true, |t| !t.contains_table(parts[1]))
+                {
+                    doc[parts[0]][parts[1]] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                doc[parts[0]][parts[1]][parts[2]] =
+                    toml_edit::Item::Value(json_to_toml_edit_value(&value));
             }
-            if doc[parts[0]]
-                .as_table()
-                .map_or(true, |t| !t.contains_table(parts[1]))
-            {
-                doc[parts[0]][parts[1]] = toml_edit::Item::Table(toml_edit::Table::new());
-            }
-            doc[parts[0]][parts[1]][parts[2]] = toml_edit::Item::Value(edit_val);
         }
         _ => {
             return (
@@ -1815,8 +1834,26 @@ pub async fn config_set(
         }
     }
 
+    // Validate by parsing the result as KernelConfig before writing
+    let new_toml_str = doc.to_string();
+    if let Err(e) = toml::from_str::<librefang_types::config::KernelConfig>(&new_toml_str) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!("invalid config after edit: {e}")
+            })),
+        );
+    }
+
+    // Backup before write
+    let backup_path = config_path.with_extension("toml.bak");
+    if config_path.exists() {
+        let _ = std::fs::copy(&config_path, &backup_path);
+    }
+
     // Write back — preserves comments, whitespace, and key ordering
-    if let Err(e) = std::fs::write(&config_path, doc.to_string()) {
+    if let Err(e) = std::fs::write(&config_path, &new_toml_str) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"status": "error", "error": format!("write failed: {e}")})),
@@ -1876,6 +1913,7 @@ fn json_to_toml_edit_value(value: &serde_json::Value) -> toml_edit::Value {
             }
             toml_edit::Value::InlineTable(t)
         }
+        // null is handled by the caller (remove key) — fallback to empty string
         serde_json::Value::Null => "".into(),
     }
 }
