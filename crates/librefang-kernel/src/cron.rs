@@ -470,7 +470,18 @@ pub fn compute_next_run_after(
     after: chrono::DateTime<Utc>,
 ) -> chrono::DateTime<Utc> {
     match schedule {
-        CronSchedule::At { at } => *at,
+        // For `at` schedules, return the original time only if it's still
+        // in the future. Otherwise the scheduler would see `next_run <= now`
+        // forever and fire the job on every tick (every 15s) until the
+        // process restarts. Push it to the far future so the job never
+        // fires again. Issue #2337.
+        CronSchedule::At { at } => {
+            if *at > after {
+                *at
+            } else {
+                after + Duration::days(36500)
+            }
+        }
         CronSchedule::Every { every_secs } => after + Duration::seconds(*every_secs as i64),
         CronSchedule::Cron { expr, tz } => {
             // Convert standard 5/6-field cron to 7-field for the `cron` crate.
@@ -858,6 +869,28 @@ mod tests {
         let schedule = CronSchedule::At { at: target };
         let next = compute_next_run(&schedule);
         assert_eq!(next, target);
+    }
+
+    /// Regression: #2337 — `compute_next_run_after` for an `at` schedule
+    /// in the past must NOT return the past time, otherwise the scheduler
+    /// re-fires the job on every tick forever.
+    #[test]
+    fn test_compute_next_run_after_at_in_past_returns_far_future() {
+        let now = Utc::now();
+        let past = now - Duration::hours(1);
+        let schedule = CronSchedule::At { at: past };
+        let next = compute_next_run_after(&schedule, now);
+        // Should be far future, not the original past time.
+        assert!(next > now + Duration::days(1000));
+    }
+
+    #[test]
+    fn test_compute_next_run_after_at_in_future_unchanged() {
+        let now = Utc::now();
+        let future = now + Duration::hours(1);
+        let schedule = CronSchedule::At { at: future };
+        let next = compute_next_run_after(&schedule, now);
+        assert_eq!(next, future);
     }
 
     #[test]

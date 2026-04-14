@@ -226,6 +226,20 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// How sessions are resolved for non-channel (automated) invocations.
+///
+/// Controls whether background ticks, triggers, and `agent_send` calls
+/// reuse the agent's persistent session or create a fresh one each time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    /// Reuse the agent's persistent session (default, backward-compatible).
+    #[default]
+    Persistent,
+    /// Create a fresh session for each invocation.
+    New,
+}
+
 /// The current lifecycle state of an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -383,6 +397,7 @@ impl ToolProfile {
             Self::Messaging => vec![
                 "agent_send",
                 "agent_list",
+                "channel_send",
                 "memory_store",
                 "memory_list",
                 "memory_recall",
@@ -396,6 +411,7 @@ impl ToolProfile {
                 "web_search",
                 "agent_send",
                 "agent_list",
+                "channel_send",
                 "memory_store",
                 "memory_list",
                 "memory_recall",
@@ -517,6 +533,11 @@ pub struct AgentManifest {
     pub module: String,
     /// Scheduling mode.
     pub schedule: ScheduleMode,
+    /// Session mode for automated (non-channel) invocations.
+    /// Controls whether background ticks, triggers, and `agent_send` calls
+    /// reuse the agent's persistent session or create a fresh one.
+    #[serde(default)]
+    pub session_mode: SessionMode,
     /// LLM model configuration.
     pub model: ModelConfig,
     /// Fallback model chain — tried in order if the primary model fails.
@@ -625,6 +646,7 @@ impl Default for AgentManifest {
             author: String::new(),
             module: "builtin:chat".to_string(),
             schedule: ScheduleMode::default(),
+            session_mode: SessionMode::default(),
             model: ModelConfig::default(),
             fallback_models: Vec::new(),
             resources: ResourceQuota::default(),
@@ -1053,14 +1075,16 @@ mod tests {
     fn test_tool_profile_messaging() {
         let tools = ToolProfile::Messaging.tools();
         assert!(tools.contains(&"agent_send".to_string()));
+        assert!(tools.contains(&"channel_send".to_string()));
         assert!(tools.contains(&"memory_recall".to_string()));
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 6);
     }
 
     #[test]
     fn test_tool_profile_automation() {
         let tools = ToolProfile::Automation.tools();
-        assert_eq!(tools.len(), 11);
+        assert!(tools.contains(&"channel_send".to_string()));
+        assert_eq!(tools.len(), 12);
     }
 
     #[test]

@@ -129,49 +129,73 @@ pub async fn terminal_ws(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
-    let provided_token = ws_auth_token(&headers, &uri);
-
-    // No token at all → immediate reject.
-    let token_str = match provided_token.as_deref() {
-        Some(t) => t,
-        None => {
-            warn!("Terminal WebSocket rejected — no auth token provided");
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
-        }
-    };
-
-    // 1. Check against configured API tokens (constant-time compare).
+    // Match `agent_ws` (`ws.rs::agent_ws`): when no authentication source is
+    // configured on the daemon at all — no `api_key`, no `user_api_keys`, no
+    // dashboard credentials — let the upgrade through. A local-dev daemon
+    // without an `api_key` cannot teach the dashboard to send a token, so
+    // every terminal WS upgrade used to be rejected with 401 before any of
+    // these code paths even ran. That broke the dashboard terminal page
+    // completely for anyone running `librefang start` without configuring
+    // auth, and diverged from how every other WS endpoint in this crate
+    // handles the same situation.
+    //
+    // When auth IS configured, the rejection semantics are unchanged:
+    // missing token → 401, mismatched token → 401. The terminal is no more
+    // or less sensitive than `agent_ws`, which can already invoke arbitrary
+    // tools including shell, so keeping the two in lock-step is the sane
+    // default. Operators who want a stricter stance for the terminal
+    // specifically can configure `api_key` or dashboard credentials.
     let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
     let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
-    let api_auth = {
-        use subtle::ConstantTimeEq;
-        valid_tokens.iter().any(|key| {
-            token_str.len() == key.len() && token_str.as_bytes().ct_eq(key.as_bytes()).into()
-        })
-    };
+    let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
+    let auth_required = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
 
-    // 2. Check against active dashboard sessions (handles the case where
-    //    no api_key is configured but the user logged in via dashboard).
-    let session_auth = {
-        let mut sessions = state.active_sessions.write().await;
-        sessions.retain(|_, st| {
-            !crate::password_hash::is_token_expired(
-                st,
-                crate::password_hash::DEFAULT_SESSION_TTL_SECS,
-            )
-        });
-        sessions.contains_key(token_str)
-    };
-    let mut user_key_auth = false;
-    if !session_auth {
-        user_key_auth = user_api_keys
-            .iter()
-            .any(|user| crate::password_hash::verify_password(token_str, &user.api_key_hash));
-    }
+    if auth_required {
+        let provided_token = ws_auth_token(&headers, &uri);
+        let token_str = match provided_token.as_deref() {
+            Some(t) => t,
+            None => {
+                warn!("Terminal WebSocket rejected — no auth token provided");
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            }
+        };
 
-    if !api_auth && !session_auth && !user_key_auth {
-        warn!("Terminal WebSocket upgrade rejected: invalid auth");
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        // 1. Check against configured API tokens (constant-time compare).
+        let api_auth = {
+            use subtle::ConstantTimeEq;
+            valid_tokens.iter().any(|key| {
+                token_str.len() == key.len() && token_str.as_bytes().ct_eq(key.as_bytes()).into()
+            })
+        };
+
+        // 2. Check against active dashboard sessions (handles the case where
+        //    no api_key is configured but the user logged in via dashboard).
+        let session_auth = {
+            let mut sessions = state.active_sessions.write().await;
+            sessions.retain(|_, st| {
+                !crate::password_hash::is_token_expired(
+                    st,
+                    crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+                )
+            });
+            sessions.contains_key(token_str)
+        };
+        let mut user_key_auth = false;
+        if !session_auth {
+            user_key_auth = user_api_keys
+                .iter()
+                .any(|user| crate::password_hash::verify_password(token_str, &user.api_key_hash));
+        }
+
+        if !api_auth && !session_auth && !user_key_auth {
+            warn!("Terminal WebSocket upgrade rejected: invalid auth");
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+    } else {
+        warn!(
+            ip = %addr.ip(),
+            "Terminal WebSocket upgrade allowed without auth — no api_key, user_api_keys, or dashboard credentials configured"
+        );
     }
 
     let ip = addr.ip();
@@ -275,7 +299,12 @@ async fn handle_terminal_ws(
 
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     let ws_idle_timeout = Duration::from_secs(rl_cfg.ws_idle_timeout_secs);
-    let max_input_per_min: usize = rl_cfg.ws_messages_per_minute as usize;
+    // Use the terminal-specific input budget: PTY sessions send one WS
+    // message per keystroke, so the generic `ws_messages_per_minute` (sized
+    // for chat where a "message" is a whole utterance) was two orders of
+    // magnitude too low and made interactive programs like vim appear to
+    // freeze after ~10 keys.
+    let max_input_per_min: usize = rl_cfg.ws_terminal_messages_per_minute as usize;
     let mut input_times: Vec<std::time::Instant> = Vec::new();
     let input_window: Duration = Duration::from_secs(60);
 

@@ -219,7 +219,7 @@ export function TelemetryPage() {
               <Badge variant="brand" className="ml-2">v{parsed.system.version}</Badge>
             )}
           </div>
-          <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4 xl:grid-cols-8 stagger-children">
+          <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4 xl:grid-cols-8 stagger-children">
             <Card hover padding="md">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.uptime")}</span>
@@ -295,7 +295,7 @@ export function TelemetryPage() {
             <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.llm_usage")}</h2>
             <Badge variant="default" className="ml-2">{t("telemetry.tokens_1h")}</Badge>
           </div>
-          <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-5 stagger-children">
+          <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5 stagger-children">
             <Card hover padding="md">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.total_tokens")}</span>
@@ -334,7 +334,7 @@ export function TelemetryPage() {
           </div>
 
           {/* ── Per-Agent Table + HTTP Endpoints ── */}
-          <div className="grid gap-6 lg:grid-cols-2 stagger-children">
+          <div className="grid gap-6 md:grid-cols-2 stagger-children">
             {/* Per-Agent Token Usage */}
             <Card padding="lg">
               <div className="flex items-center gap-2 mb-5">

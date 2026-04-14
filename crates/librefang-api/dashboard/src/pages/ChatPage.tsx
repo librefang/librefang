@@ -9,10 +9,11 @@ import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgent
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
+import { copyToClipboard } from "../lib/clipboard";
 import { ToolCallCard } from "../components/ui/ToolCallCard";
 import { filterVisible } from "../lib/hiddenModels";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
@@ -37,6 +38,10 @@ interface ChatMessage {
   memories_saved?: string[];
   memories_used?: string[];
   tools?: ChatToolCall[];
+  /** Accumulated reasoning trace streamed via `thinking_delta` events. */
+  thinking?: string;
+  /** Whether the thinking block is collapsed in the UI. */
+  thinkingCollapsed?: boolean;
 }
 
 // Slash commands
@@ -144,9 +149,60 @@ const sessionCache = new Map<string, ChatMessage[]>();
 // sessionVersion: bump to force reload after session switch
 function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  // Per-agent loading state. A single shared `isLoading` would freeze the
+  // ChatInput on every agent while one of them is streaming (#2322). Keyed
+  // by agentId so switching away from a busy agent unblocks the new one,
+  // and coming back still reflects the in-flight status of the original.
+  const [loadingAgents, setLoadingAgents] = useState<Record<string, boolean>>({});
+  const isLoading = agentId ? loadingAgents[agentId] === true : false;
+  const setAgentLoading = useCallback((id: string, on: boolean) => {
+    setLoadingAgents(prev => {
+      if ((prev[id] ?? false) === on) return prev;
+      const next = { ...prev };
+      if (on) next[id] = true; else delete next[id];
+      return next;
+    });
+  }, []);
+  // Garbage-collect loading flags for agents that no longer exist so the
+  // map doesn't accumulate dead entries over a long session.
+  useEffect(() => {
+    const alive = new Set(agents.map(a => a.id));
+    setLoadingAgents(prev => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+      for (const [id, on] of Object.entries(prev)) {
+        if (alive.has(id)) next[id] = on; else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [agents]);
   const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
+  const deepThinking = useUIStore((s) => s.deepThinking);
+  const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
+
+  // Track the currently-viewed agent in a ref so async handlers registered
+  // during a previous render can tell whether their target is still on screen.
+  const currentAgentRef = useRef<string | null>(agentId);
+  useEffect(() => { currentAgentRef.current = agentId; }, [agentId]);
+
+  // Route a message update to either live React state (when the target agent
+  // is on screen) or straight to the session cache (when the user has
+  // switched away). Without this, updates against a swapped-out agent fall
+  // into `setMessages(prev => prev.map(...))` whose `prev` is the OTHER
+  // agent's array — the update becomes a silent no-op and the in-flight
+  // response is lost once the user switches back.
+  const updateAgentMessages = useCallback((
+    id: string,
+    updater: (msgs: ChatMessage[]) => ChatMessage[],
+  ) => {
+    if (id === currentAgentRef.current) {
+      setMessages(updater);
+    } else {
+      const current = sessionCache.get(id) ?? [];
+      sessionCache.set(id, updater(current));
+    }
+  }, []);
 
   // Save current messages to cache when switching away. The cleanup must
   // read the LATEST messages at unmount/agent-swap time, so we keep a
@@ -180,8 +236,9 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     }
 
     setMessages([]);
-    setIsLoading(true);
-    loadAgentSession(agentId)
+    const loadId = agentId;
+    setAgentLoading(loadId, true);
+    loadAgentSession(loadId)
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
@@ -213,12 +270,18 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               tools: msg.tools,
             }];
           });
-          setMessages(historical);
-          sessionCache.set(agentId, historical);
+          // Refresh the cache unconditionally — the data is still correct
+          // for loadId. Only touch live React state when the user is still
+          // viewing loadId; otherwise a slow A load resolving after the
+          // user has swapped to B would overwrite B's displayed messages.
+          sessionCache.set(loadId, historical);
+          if (loadId === currentAgentRef.current) {
+            setMessages(historical);
+          }
         }
       })
       .catch(() => {})
-      .finally(() => setIsLoading(false));
+      .finally(() => setAgentLoading(loadId, false));
   }, [agentId, sessionVersion]);
 
   // Send message - WS first, HTTP fallback
@@ -288,6 +351,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     }
 
     if (!agentId) return;
+    // Snapshot the agent at send time. The user may switch agents before
+    // the response finishes; all completion/cleanup paths must still target
+    // the original sender so we don't flip loading state / HTTP routes on
+    // the agent the user is now looking at.
+    const sendAgentId = agentId;
 
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
@@ -305,14 +373,17 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     };
 
     setMessages(prev => [...prev, userMsg, botMsg]);
-    setIsLoading(true);
+    setAgentLoading(sendAgentId, true);
 
     // Helper: send via HTTP (used as primary fallback and WS drop recovery)
     const sendViaHttp = async () => {
       try {
-        const response = await sendAgentMessage(agentId, trimmed);
+        const response = await sendAgentMessage(sendAgentId, trimmed, {
+          thinking: deepThinking,
+          show_thinking: showThinkingProcess,
+        });
         const fullContent = response.response || "";
-        setMessages(prev => prev.map(m =>
+        updateAgentMessages(sendAgentId, prev => prev.map(m =>
           m.id === botMsg.id
             ? {
                 ...m, content: fullContent, isStreaming: false,
@@ -320,22 +391,24 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                 cost_usd: response.cost_usd,
                 memories_saved: response.memories_saved,
                 memories_used: response.memories_used,
+                thinking: response.thinking ?? m.thinking,
+                thinkingCollapsed: m.thinkingCollapsed ?? true,
               }
             : m
         ));
         if (response.memories_saved?.length) {
-          const agentName = agents.find(a => a.id === agentId)?.name;
+          const agentName = agents.find(a => a.id === sendAgentId)?.name;
           response.memories_saved.forEach((mem: string) => {
-            addSkillOutput({ skillName: "memory", agentId: agentId || undefined, agentName, content: mem });
+            addSkillOutput({ skillName: "memory", agentId: sendAgentId, agentName, content: mem });
           });
         }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : "Unknown error";
-        setMessages(prev => prev.map(m =>
+        updateAgentMessages(sendAgentId, prev => prev.map(m =>
           m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg } : m
         ));
       } finally {
-        setIsLoading(false);
+        setAgentLoading(sendAgentId, false);
       }
     };
 
@@ -370,12 +443,23 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
             const data = JSON.parse(event.data as string);
             if (data.type === "text_delta") {
               const chunk = data.content || "";
-              setMessages(prev => prev.map(m =>
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, content: m.content + chunk, error: undefined } : m
+              ));
+            } else if (data.type === "thinking_delta") {
+              const chunk = data.content || "";
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
+                m.id === botMsg.id
+                  ? {
+                      ...m,
+                      thinking: (m.thinking ?? "") + chunk,
+                      thinkingCollapsed: m.thinkingCollapsed ?? false,
+                    }
+                  : m
               ));
             } else if (data.type === "typing") {
               if (data.state === "stop") {
-                setMessages(prev => prev.map(m =>
+                updateAgentMessages(sendAgentId, prev => prev.map(m =>
                   m.id === botMsg.id ? { ...m, isStreaming: false } : m
                 ));
               }
@@ -383,7 +467,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               // Agent started a tool call — add a running tool entry
               const toolName = typeof data.tool === "string" ? data.tool : "unknown";
               const toolId = data.id || `tool-${Date.now()}`;
-              setMessages(prev => prev.map(m =>
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id
                   ? { ...m, tools: [...(m.tools || []), { name: toolName, running: true, expanded: false, is_error: false, input: undefined, result: undefined, _call_id: toolId }] }
                   : m
@@ -395,7 +479,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               const toolId = data.id;
               let parsedInput: unknown;
               try { parsedInput = typeof data.input === "string" ? JSON.parse(data.input) : data.input; } catch { parsedInput = data.input; }
-              setMessages(prev => prev.map(m => {
+              updateAgentMessages(sendAgentId, prev => prev.map(m => {
                 if (m.id !== botMsg.id) return m;
                 const tools = (m.tools || []).map(t =>
                   t._call_id === toolId ? { ...t, input: parsedInput } : t
@@ -407,7 +491,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               const toolName = typeof data.tool === "string" ? data.tool : "";
               const isError = Boolean(data.is_error);
               const result = typeof data.result === "string" ? data.result : data.result != null ? JSON.stringify(data.result) : "";
-              setMessages(prev => prev.map(m => {
+              updateAgentMessages(sendAgentId, prev => prev.map(m => {
                 if (m.id !== botMsg.id) return m;
                 const tools = [...(m.tools || [])];
                 // Find last tool with this name that has no result yet
@@ -422,15 +506,15 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               // Also keep the skill output panel behavior
               const entry = normalizeToolOutput(data);
               if (entry) {
-                addSkillOutput({ skillName: entry.tool, agentId: agentId || undefined, content: entry.content });
+                addSkillOutput({ skillName: entry.tool, agentId: sendAgentId, content: entry.content });
               }
             } else if (data.type === "silent_complete") {
-              setMessages(prev => prev.filter(m => m.id !== botMsg.id));
-              setIsLoading(false);
+              updateAgentMessages(sendAgentId, prev => prev.filter(m => m.id !== botMsg.id));
+              setAgentLoading(sendAgentId, false);
               cleanup();
             } else if (data.type === "error") {
               const error = data.content || "WebSocket error";
-              setMessages(prev => prev.map(m =>
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
               ));
               // Don't cleanup immediately — the agent may recover and send a final
@@ -441,7 +525,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                 if (!responded) { cleanup(); sendViaHttp(); }
               }, 30_000);
             } else if (data.type === "response") {
-              setMessages(prev => prev.map(m =>
+              updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id
                   ? {
                       ...m, content: data.content || m.content, isStreaming: false,
@@ -449,15 +533,17 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                       cost_usd: data.cost_usd,
                       memories_saved: data.memories_saved,
                       memories_used: data.memories_used,
+                      thinking: typeof data.thinking === "string" ? data.thinking : m.thinking,
+                      thinkingCollapsed: m.thinkingCollapsed ?? true,
                     }
                   : m
               ));
-              setIsLoading(false);
+              setAgentLoading(sendAgentId, false);
               cleanup();
             }
           } catch {
             // Non-JSON text chunk
-            setMessages(prev => prev.map(m =>
+            updateAgentMessages(sendAgentId, prev => prev.map(m =>
               m.id === botMsg.id ? { ...m, content: m.content + event.data } : m
             ));
           }
@@ -472,7 +558,12 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         };
 
         ws.current.addEventListener("message", handleMessage);
-        ws.current.send(JSON.stringify({ type: "message", content: trimmed }));
+        ws.current.send(JSON.stringify({
+          type: "message",
+          content: trimmed,
+          thinking: deepThinking,
+          show_thinking: showThinkingProcess,
+        }));
 
         // Start inactivity timeout — resets on every received event
         resetFallbackTimer();
@@ -485,7 +576,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [agentId, agents, wsConnected, ws]);
+  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess]);
 
   const clearHistory = useCallback(() => setMessages([]), []);
 
@@ -507,6 +598,7 @@ interface MessageBubbleProps {
 const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
+  const [thinkingExpanded, setThinkingExpanded] = useState(() => !(message.thinkingCollapsed ?? false));
 
   if (message.role === "system") {
     return (
@@ -530,12 +622,12 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
   }, [message.content, isUser]);
 
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className={`flex flex-col max-w-[90%] sm:max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
+    <div className={`flex animate-message-in ${isUser ? "justify-end" : "justify-start"}`}>
+      <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
           <div className={`h-7 w-7 rounded-lg flex items-center justify-center ${
-            isUser ? "bg-gradient-to-br from-brand to-accent text-white shadow-md" : "bg-surface border border-border-subtle"
+            isUser ? "bg-brand text-white shadow-sm" : "bg-surface border border-border-subtle"
           }`}>
             {isUser ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5 text-brand" />}
           </div>
@@ -543,6 +635,28 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             {isUser ? t("chat.you") : t("chat.bot")}
           </span>
         </div>
+
+        {/* Thinking trace — collapsible, above tools */}
+        {!isUser && message.thinking && message.thinking.trim().length > 0 && (
+          <div className="w-full mb-1.5">
+            <button
+              type="button"
+              onClick={() => setThinkingExpanded((v) => !v)}
+              className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border-subtle bg-surface text-[10px] font-medium text-text-dim hover:text-text hover:border-border transition-colors"
+            >
+              <Brain className="h-3 w-3" />
+              <span>{t("chat.thinking_label")}</span>
+              <ChevronDown
+                className={`h-3 w-3 transition-transform ${thinkingExpanded ? "rotate-180" : ""}`}
+              />
+            </button>
+            {thinkingExpanded && (
+              <div className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim whitespace-pre-wrap break-words">
+                {message.thinking}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Tool calls — rendered above text for assistant messages */}
         {!isUser && message.tools && message.tools.length > 0 && (
@@ -555,9 +669,9 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 
         {/* Message content */}
         {(displayContent || isUser || message.isStreaming || message.error) && (
-        <div className={`relative px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-colors ${
+        <div className={`relative px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm min-w-0 [overflow-wrap:anywhere] ${
           isUser
-            ? "bg-gradient-to-br from-brand to-brand/90 text-white rounded-tr-md"
+            ? "bg-brand text-white rounded-tr-md"
             : message.error
               ? "bg-error/10 border border-error/20 text-error rounded-tl-md"
               : "bg-surface border border-border-subtle rounded-tl-md"
@@ -566,7 +680,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             displayContent ? (
               <Typewriter_v2 text={displayContent} speed={10} />
             ) : (
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 py-0.5">
                 <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
                 <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
                 <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
@@ -578,7 +692,12 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               <span>{message.error}</span>
             </div>
           ) : isUser ? (
-            <p className="whitespace-pre-line break-words">{displayContent}</p>
+            // `break-words` only splits on spaces, so a bare URL/token
+            // long enough to overflow its parent used to push the whole
+            // 75%-wide bubble out of frame. `overflow-wrap: anywhere` is
+            // the standard safe-wrap value that only kicks in when the
+            // word would otherwise overflow, so normal text is untouched.
+            <p className="whitespace-pre-line [overflow-wrap:anywhere]">{displayContent}</p>
           ) : (
             <MarkdownContent
               remarkPlugins={[remarkMath]}
@@ -616,11 +735,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             {!message.isStreaming && !message.error && message.role === "assistant" && ttsAvailable && onSpeak && (
               <button
                 onClick={() => onSpeak(message.id, message.content)}
-                className={`h-6 w-6 rounded-md flex items-center justify-center transition-colors ${
-                  isUser
-                    ? "bg-gradient-to-br from-brand to-accent text-white shadow-sm hover:shadow-md"
-                    : "bg-surface border border-border-subtle text-brand hover:bg-surface-hover"
-                }`}
+                className="h-6 w-6 rounded-md flex items-center justify-center text-text-dim/60 hover:text-brand hover:bg-surface-hover transition-colors"
                 title={
                   ttsStatus === "loading" ? t("chat.tts_generating") :
                   isSpeaking && ttsStatus === "playing" ? t("chat.pause") :
@@ -642,9 +757,9 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               <button
                 onClick={() => onCopy(message.id, message.content)}
                 className={`h-6 w-6 rounded-md flex items-center justify-center transition-colors ${
-                  isUser
-                    ? "bg-gradient-to-br from-brand to-accent text-white shadow-sm hover:shadow-md"
-                    : "bg-surface border border-border-subtle text-brand hover:bg-surface-hover"
+                  copied
+                    ? "text-success"
+                    : "text-text-dim/60 hover:text-brand hover:bg-surface-hover"
                 }`}
                 title={copied ? t("chat.copied") : t("chat.copy")}
               >
@@ -672,6 +787,10 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const deepThinking = useUIStore((s) => s.deepThinking);
+  const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
+  const setDeepThinking = useUIStore((s) => s.setDeepThinking);
+  const setShowThinkingProcess = useUIStore((s) => s.setShowThinkingProcess);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -715,6 +834,35 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
           ))}
         </div>
       )}
+      {/* Thinking mode toggles */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          type="button"
+          onClick={() => setDeepThinking(!deepThinking)}
+          title={t("chat.deep_thinking_hint")}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-medium transition-colors ${
+            deepThinking
+              ? "border-brand/40 bg-brand/10 text-brand"
+              : "border-border-subtle bg-surface text-text-dim hover:text-text hover:border-border"
+          }`}
+        >
+          <Brain className="h-3 w-3" />
+          <span>{t("chat.deep_thinking")}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowThinkingProcess(!showThinkingProcess)}
+          title={t("chat.show_thinking_hint")}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-medium transition-colors ${
+            showThinkingProcess
+              ? "border-brand/40 bg-brand/10 text-brand"
+              : "border-border-subtle bg-surface text-text-dim hover:text-text hover:border-border"
+          }`}
+        >
+          {showThinkingProcess ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
+          <span>{t("chat.show_thinking")}</span>
+        </button>
+      </div>
       <div className="flex gap-2 sm:gap-3 items-end">
         <div className="flex-1">
           <textarea
@@ -1168,6 +1316,7 @@ export function ChatPage() {
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const addToast = useUIStore((s) => s.addToast);
 
   // Sync agent selection to URL search params
   const selectAgent = useCallback((id: string) => {
@@ -1187,14 +1336,13 @@ export function ChatPage() {
   );
 
   const handleCopy = useCallback(async (messageId: string, content: string) => {
-    try {
-      await navigator.clipboard.writeText(content);
+    if (await copyToClipboard(content)) {
       setCopiedMessageId(messageId);
       setTimeout(() => setCopiedMessageId(null), 1500);
-    } catch {
-      // Clipboard API not available
+    } else {
+      addToast(t("common.copy_failed"), "error");
     }
-  }, []);
+  }, [addToast, t]);
 
   const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
   const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "full";
@@ -1464,7 +1612,8 @@ export function ChatPage() {
           )}
 
           {/* Message area */}
-          <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-4 sm:space-y-6 scrollbar-thin">
+          <div className="flex-1 overflow-y-auto p-3 sm:p-6 scrollbar-thin">
+            <div className="w-full space-y-4 sm:space-y-6">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
                 <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-main/50" />
@@ -1507,6 +1656,7 @@ export function ChatPage() {
                 <div ref={messagesEndRef} />
               </div>
             )}
+            </div>
           </div>
 
           {/* Input area */}

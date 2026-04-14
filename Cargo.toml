@@ -4,9 +4,18 @@ members = [
     "crates/librefang-types",
     "crates/librefang-memory",
     "crates/librefang-runtime",
+    "crates/librefang-runtime-mcp",
+    "crates/librefang-runtime-oauth",
+    "crates/librefang-runtime-drivers",
+    "crates/librefang-runtime-wasm",
+    "crates/librefang-llm-driver",
+    "crates/librefang-kernel-handle",
+    "crates/librefang-http",
     "crates/librefang-wire",
     "crates/librefang-api",
     "crates/librefang-kernel",
+    "crates/librefang-kernel-router",
+    "crates/librefang-kernel-metering",
     "crates/librefang-cli",
     "crates/librefang-channels",
     "crates/librefang-migrate",
@@ -20,7 +29,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.4.11-beta18"
+version = "2026.4.13-beta19"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -49,7 +58,7 @@ arc-swap = "1"
 
 # Logging / Tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # OpenTelemetry
 opentelemetry = "0.31"
@@ -199,12 +208,18 @@ smallvec = "1"
 
 [profile.dev]
 split-debuginfo = "unpacked" # Speeds up incremental linking on macOS
+# Shrinks debug test binaries by ~60% to relieve Ubuntu CI memory pressure
+# (#1805, #1807, #2117). Panics and backtraces still carry file:line; only
+# interactive debugger (lldb/gdb) variable inspection is lost.
+debug = "line-tables-only"
 
 [profile.release]
-lto = true
+lto = "fat"
 codegen-units = 1
-strip = true
-opt-level = 3
+strip = "symbols"
+# Size-optimized: daemon bottleneck is network I/O (LLM calls), not CPU.
+# "s" trims ~5-15% binary vs opt-level=3 with negligible runtime impact.
+opt-level = "s"
 
 [profile.release-local]
 inherits = "release"

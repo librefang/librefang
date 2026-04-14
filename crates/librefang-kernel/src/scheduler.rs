@@ -129,6 +129,14 @@ impl AgentScheduler {
         self.usage.insert(agent_id, UsageTracker::default());
     }
 
+    /// Update an agent's resource quota **without** resetting its usage
+    /// tracker. Use this when hot-reloading `agent.toml` so accumulated
+    /// LLM-token / tool-call counts stay accurate but the new limits
+    /// take effect immediately. Issue #2317.
+    pub fn update_quota(&self, agent_id: AgentId, quota: ResourceQuota) {
+        self.quotas.insert(agent_id, quota);
+    }
+
     /// Record token usage for an agent.
     pub fn record_usage(&self, agent_id: AgentId, usage: &TokenUsage) {
         if let Some(mut tracker) = self.usage.get_mut(&agent_id) {

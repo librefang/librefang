@@ -62,6 +62,9 @@
   description: "New or updated LLM provider driver"
 
 # Status
+- name: "needs-triage"
+  color: "ededed"
+  description: "Auto-applied when the issue title/body matched no area label — needs maintainer review"
 - name: "needs-rfc"
   color: "d876e3"
   description: "Requires an RFC before implementation"

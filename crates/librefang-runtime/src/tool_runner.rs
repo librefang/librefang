@@ -95,6 +95,190 @@ fn check_taint_net_fetch(url: &str) -> Option<String> {
     None
 }
 
+/// Check if a free-form string carries an obvious secret shape. Used by
+/// exfiltration sinks that don't have a URL query-string structure to
+/// parse — `web_fetch` request bodies, `agent_send` message payloads,
+/// and (via shared helper) outbound channel / webhook bodies.
+///
+/// The check is a best-effort denylist: it trips when the text contains
+/// an `<assignment-style-key>=<value>` fragment using one of the common
+/// secret parameter names (`api_key`, `token`, `secret`, `password`,
+/// …), or when it carries an `Authorization:` header prefix, or when it
+/// looks like a long contiguous token (e.g. a raw bearer token dropped
+/// in as the whole body). Hits are wrapped in a `TaintedValue` and run
+/// through the given sink so the rejection message stays consistent
+/// with the URL-side checks.
+///
+/// This is the same "two-sink pattern match" shape described in the
+/// SECURITY.md taint section — it is **not** a full information-flow
+/// tracker, and copy-pasted obfuscation will still bypass it. The goal
+/// is to catch the obvious "the LLM is stuffing OPENAI_API_KEY into an
+/// agent_send" shape on the way out, not to prove a data-flow theorem.
+const SECRET_KEYS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "api-key",
+    "authorization",
+    "proxy-authorization",
+    "access_token",
+    "refresh_token",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "bearer",
+    "x-api-key",
+];
+
+/// Header names whose mere presence implies the value is a credential,
+/// regardless of what the value looks like. `Authorization: Bearer sk-…`
+/// has a space between the scheme and the token, which would otherwise
+/// defeat the contiguous-token heuristic in `check_taint_outbound_text`.
+const SECRET_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "api-key",
+    "apikey",
+    "x-auth-token",
+    "cookie",
+    "set-cookie",
+];
+
+/// Check if an HTTP header (name + value) should be blocked. Headers
+/// whose name identifies them as credential carriers are rejected
+/// unconditionally; everything else falls through to the text-level
+/// scanner used for bodies.
+fn check_taint_outbound_header(name: &str, value: &str, sink: &TaintSink) -> Option<String> {
+    let name_lower = name.to_ascii_lowercase();
+    if SECRET_HEADER_NAMES.iter().any(|h| *h == name_lower)
+        || SECRET_KEYS.iter().any(|k| *k == name_lower)
+    {
+        let mut labels = HashSet::new();
+        labels.insert(TaintLabel::Secret);
+        let tainted = TaintedValue::new(value, labels, "llm_tool_call");
+        if let Err(violation) = tainted.check_sink(sink) {
+            warn!(
+                sink = %sink.name,
+                header = %name_lower,
+                value_len = value.len(),
+                %violation,
+                "Outbound taint check failed (credential header)"
+            );
+            return Some(violation.to_string());
+        }
+    }
+    // Fall through to the regular body-level scan so e.g. a custom
+    // `X-Forwarded-Debug: api_key=sk-…` still gets caught.
+    check_taint_outbound_text(value, sink)
+}
+
+/// Decide whether a contiguous string "smells like" a raw secret token.
+/// Returns false for pure-hex / pure-decimal / single-case alnum blobs
+/// so that git commit SHAs, UUIDs-without-dashes, and sha256 digests —
+/// which agents legitimately exchange — don't trip the filter. Genuine
+/// API tokens tend to include mixed case and/or punctuation
+/// (`sk-…`, `ghp_…`, base64 with `+/=`).
+fn looks_like_opaque_token(trimmed: &str) -> bool {
+    if trimmed.len() < 32 || trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let charset_ok = trimmed.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || c == '-'
+            || c == '_'
+            || c == '.'
+            || c == '/'
+            || c == '+'
+            || c == '='
+    });
+    if !charset_ok {
+        return false;
+    }
+    // Require mixed character classes: either (a) at least one
+    // uppercase AND one lowercase letter, or (b) at least one of the
+    // token-ish punctuation characters. Pure hex (git SHAs, sha256),
+    // pure decimal, and pure single-case alphanumeric all fail this.
+    let has_upper = trimmed.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = trimmed.chars().any(|c| c.is_ascii_lowercase());
+    let has_punct = trimmed
+        .chars()
+        .any(|c| matches!(c, '-' | '_' | '.' | '/' | '+' | '='));
+    (has_upper && has_lower) || has_punct
+}
+
+fn check_taint_outbound_text(payload: &str, sink: &TaintSink) -> Option<String> {
+    let lower = payload.to_lowercase();
+
+    // Fast path 1: `Authorization:` header literal — unambiguous
+    // signal that the LLM is trying to ship credentials in-band.
+    let mut hit = lower.contains("authorization:");
+
+    // Fast path 2: `key=value` / `key: value` / `key":` / `'key':`
+    // shapes. We match on the key name plus one of a handful of
+    // assignment separators so plain prose ("a token of appreciation")
+    // doesn't trip the filter.
+    if !hit {
+        let normalized = lower
+            .replace(" = ", "=")
+            .replace(" =", "=")
+            .replace("= ", "=")
+            .replace(" : ", ":")
+            .replace(" :", ":")
+            .replace(": ", ":");
+        for k in SECRET_KEYS {
+            for sep in ["=", ":", "\":", "':"] {
+                if normalized.contains(&format!("{k}{sep}")) {
+                    hit = true;
+                    break;
+                }
+            }
+            if hit {
+                break;
+            }
+        }
+    }
+
+    // Fast path 3: the payload *is* a long opaque token. Covers the
+    // case where the LLM shoves a raw credential into the message
+    // without any key/value framing. Matches conservatively — long
+    // strings with only base64/hex characters and no whitespace, so
+    // natural-language messages don't false-positive. Well-known
+    // prefixes (`sk-`, `ghp_`, `xoxp-`) are also flagged regardless
+    // of length.
+    if !hit {
+        let trimmed = payload.trim();
+        let well_known_prefix = trimmed.starts_with("sk-")
+            || trimmed.starts_with("ghp_")
+            || trimmed.starts_with("github_pat_")
+            || trimmed.starts_with("xoxp-")
+            || trimmed.starts_with("xoxb-")
+            || trimmed.starts_with("AKIA")
+            || trimmed.starts_with("AIza");
+        if looks_like_opaque_token(trimmed) || well_known_prefix {
+            hit = true;
+        }
+    }
+
+    if hit {
+        let mut labels = HashSet::new();
+        labels.insert(TaintLabel::Secret);
+        let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
+        if let Err(violation) = tainted.check_sink(sink) {
+            // Never log the payload itself: if the heuristic fired, the
+            // payload IS the secret we are trying to contain.
+            warn!(
+                sink = %sink.name,
+                payload_len = payload.len(),
+                %violation,
+                "Outbound taint check failed"
+            );
+            return Some(violation.to_string());
+        }
+    }
+    None
+}
+
 tokio::task_local! {
     /// Tracks the current inter-agent call depth within a task.
     static AGENT_CALL_DEPTH: std::cell::Cell<u32>;
@@ -191,6 +375,40 @@ pub async fn execute_tool_raw(
                 let method = input["method"].as_str().unwrap_or("GET");
                 let headers = input.get("headers").and_then(|v| v.as_object());
                 let body = input["body"].as_str();
+                // Body-side taint check: the URL scan handles query
+                // strings, but POST/PUT callers can stuff credentials
+                // into the request body instead.
+                if let Some(body_text) = body {
+                    if let Some(violation) =
+                        check_taint_outbound_text(body_text, &TaintSink::net_fetch())
+                    {
+                        return ToolResult {
+                            tool_use_id: tool_use_id.to_string(),
+                            content: format!("Taint violation: {violation}"),
+                            is_error: true,
+                            ..Default::default()
+                        };
+                    }
+                }
+                // Header values, too — an LLM that knows the filter
+                // blocks `body` might fall back to stuffing the token
+                // into `Authorization:` via `headers`.
+                if let Some(headers_map) = headers {
+                    for (name, value) in headers_map {
+                        if let Some(vs) = value.as_str() {
+                            if let Some(violation) =
+                                check_taint_outbound_header(name, vs, &TaintSink::net_fetch())
+                            {
+                                return ToolResult {
+                                    tool_use_id: tool_use_id.to_string(),
+                                    content: format!("Taint violation: {violation}"),
+                                    is_error: true,
+                                    ..Default::default()
+                                };
+                            }
+                        }
+                    }
+                }
                 if let Some(ctx) = web_ctx {
                     ctx.fetch
                         .fetch_with_options(url, method, headers, body)
@@ -1365,7 +1583,12 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "file_url": { "type": "string", "description": "URL of a file to send as attachment" },
                     "file_path": { "type": "string", "description": "Local file path to send as attachment (reads from disk; use instead of file_url for local files)" },
                     "filename": { "type": "string", "description": "Filename for file attachments (defaults to the basename of file_path, or 'file')" },
-                    "thread_id": { "type": "string", "description": "Thread/topic ID to reply in (e.g., Telegram message_thread_id, Slack thread_ts)" }
+                    "thread_id": { "type": "string", "description": "Thread/topic ID to reply in (e.g., Telegram message_thread_id, Slack thread_ts)" },
+                    "poll_question": { "type": "string", "description": "Question for a poll (starts a poll, mutually exclusive with image_url/file_url/file_path)" },
+                    "poll_options": { "type": "array", "items": { "type": "string" }, "description": "Answer options for the poll (2-10 items, required with poll_question)" },
+                    "poll_is_quiz": { "type": "boolean", "description": "Set to true for a quiz mode (one correct answer)" },
+                    "poll_correct_option": { "type": "integer", "description": "Index of the correct answer (0-based, for quiz mode)" },
+                    "poll_explanation": { "type": "string", "description": "Explanation shown after answering (quiz mode)" }
                 },
                 "required": ["channel", "recipient"]
             }),
@@ -1939,6 +2162,18 @@ async fn tool_agent_send(
     let message = input["message"]
         .as_str()
         .ok_or("Missing 'message' parameter")?;
+
+    // Taint check: refuse to pass obvious credential payloads across
+    // the agent boundary. `tool_agent_send` is the entry point for
+    // both in-process delegation *and* external A2A peers, so an LLM
+    // that stuffs `OPENAI_API_KEY=sk-…` into its own tool-call
+    // arguments would otherwise exfiltrate the secret to whoever is
+    // on the receiving side. Uses `TaintSink::agent_message` so the
+    // rejection message matches the shape documented in the taint
+    // module.
+    if let Some(violation) = check_taint_outbound_text(message, &TaintSink::agent_message()) {
+        return Err(format!("Taint violation: {violation}"));
+    }
 
     // Check + increment inter-agent call depth
     let max_depth = kh.max_agent_call_depth();
@@ -2757,6 +2992,46 @@ async fn tool_cron_cancel(
 // Channel send tool (proactive outbound messaging via configured adapters)
 // ---------------------------------------------------------------------------
 
+/// Parse and validate `poll_options` for the `channel_send` tool.
+///
+/// Telegram requires 2–10 string options per poll. A previous version used
+/// `filter_map(as_str)` which silently dropped non-string entries — e.g.
+/// `["a", 42, "c"]` became `["a", "c"]`, slipped past the min-2 check, and
+/// sent a poll missing the user's third option. This helper fails fast
+/// when any entry is the wrong type so the agent can surface the mistake
+/// instead of producing a malformed poll.
+fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
+    let arr = raw
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "poll_options must be an array of strings".to_string())?;
+    let mut out: Vec<String> = Vec::with_capacity(arr.len());
+    for (idx, v) in arr.iter().enumerate() {
+        match v.as_str() {
+            Some(s) => out.push(s.to_string()),
+            None => {
+                return Err(format!(
+                    "poll_options[{idx}] must be a string, got {}",
+                    match v {
+                        serde_json::Value::Null => "null",
+                        serde_json::Value::Bool(_) => "boolean",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::Object(_) => "object",
+                        serde_json::Value::String(_) => unreachable!(),
+                    }
+                ));
+            }
+        }
+    }
+    if !(2..=10).contains(&out.len()) {
+        return Err(format!(
+            "poll_options must have between 2 and 10 options, got {}",
+            out.len()
+        ));
+    }
+    Ok(out)
+}
+
 async fn tool_channel_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
@@ -2787,6 +3062,11 @@ async fn tool_channel_send(
 
     if let Some(url) = image_url {
         let caption = input["message"].as_str().filter(|s| !s.is_empty());
+        if let Some(c) = caption {
+            if let Some(violation) = check_taint_outbound_text(c, &TaintSink::agent_message()) {
+                return Err(violation);
+            }
+        }
         return kh
             .send_channel_media(&channel, recipient, "image", url, caption, None, thread_id)
             .await;
@@ -2795,6 +3075,11 @@ async fn tool_channel_send(
     if let Some(url) = file_url {
         let caption = input["message"].as_str().filter(|s| !s.is_empty());
         let filename = input["filename"].as_str();
+        if let Some(c) = caption {
+            if let Some(violation) = check_taint_outbound_text(c, &TaintSink::agent_message()) {
+                return Err(violation);
+            }
+        }
         return kh
             .send_channel_media(
                 &channel, recipient, "file", url, caption, filename, thread_id,
@@ -2857,6 +3142,80 @@ async fn tool_channel_send(
             .await;
     }
 
+    if let Some(poll_question) = input.get("poll_question").and_then(|v| v.as_str()) {
+        for key in ["image_url", "image_path", "file_url", "file_path"] {
+            if input
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+            {
+                return Err(format!(
+                    "poll_question cannot be combined with media/file attachments (got {key})"
+                ));
+            }
+        }
+
+        let poll_options = parse_poll_options(input.get("poll_options"))?;
+
+        if let Some(violation) =
+            check_taint_outbound_text(poll_question, &TaintSink::agent_message())
+        {
+            return Err(violation);
+        }
+        for opt in &poll_options {
+            if let Some(violation) = check_taint_outbound_text(opt, &TaintSink::agent_message()) {
+                return Err(violation);
+            }
+        }
+
+        let is_quiz = input
+            .get("poll_is_quiz")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let correct_option_id = input
+            .get("poll_correct_option")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u8);
+        let explanation = input.get("poll_explanation").and_then(|v| v.as_str());
+        if let Some(exp) = explanation {
+            if let Some(violation) = check_taint_outbound_text(exp, &TaintSink::agent_message()) {
+                return Err(violation);
+            }
+        }
+
+        // Validate quiz mode requirements
+        if is_quiz {
+            let id = correct_option_id.ok_or_else(|| {
+                "poll_correct_option is required when poll_is_quiz is true".to_string()
+            })?;
+            if id as usize >= poll_options.len() {
+                return Err(format!(
+                    "poll_correct_option {} is out of bounds (must be between 0 and {})",
+                    id,
+                    poll_options.len() - 1
+                ));
+            }
+        }
+
+        kh.send_channel_poll(
+            &channel,
+            recipient,
+            poll_question,
+            &poll_options,
+            is_quiz,
+            correct_option_id,
+            explanation,
+        )
+        .await?;
+
+        let mut result = format!("Poll sent to {recipient} on {channel}: {poll_question}");
+        if is_quiz {
+            result.push_str(" (quiz mode)");
+        }
+        return Ok(result);
+    }
+
     // Text-only message
     let message = input["message"]
         .as_str()
@@ -2883,6 +3242,11 @@ async fn tool_channel_send(
     } else {
         message.to_string()
     };
+
+    if let Some(violation) = check_taint_outbound_text(&final_message, &TaintSink::agent_message())
+    {
+        return Err(violation);
+    }
 
     kh.send_channel_message(&channel, recipient, &final_message, thread_id)
         .await
@@ -3034,6 +3398,15 @@ async fn tool_a2a_send(
     } else {
         return Err("Missing 'agent_url' or 'agent_name' parameter".to_string());
     };
+
+    // Taint sink: block secrets from being exfiltrated to an external A2A peer.
+    if let Some(violation) = check_taint_outbound_text(message, &TaintSink::agent_message()) {
+        return Err(violation);
+    }
+    // Also gate the URL itself against query-string credential leaks.
+    if let Some(violation) = check_taint_net_fetch(&url) {
+        return Err(violation);
+    }
 
     let session_id = input["session_id"].as_str();
     let client = crate::a2a::A2aClient::new();
@@ -4360,6 +4733,246 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    // ── check_taint_outbound_text ────────────────────────────────────────
+
+    #[test]
+    fn test_taint_outbound_text_blocks_key_value_pairs() {
+        let sink = TaintSink::agent_message();
+        for body in [
+            "here is my api_key=sk-123",
+            "x-api-key: abcdef",
+            "{\"token\":\"mytoken\"}",
+            "{\"authorization\": \"Bearer sk-live-secret\"}",
+            "{\"proxy-authorization\": \"Basic Zm9vOmJhcg==\"}",
+            "api_key = sk-123",
+            "'password': 'hunter2'",
+            "Authorization: Bearer abc",
+            "some text bearer=abc",
+        ] {
+            assert!(
+                check_taint_outbound_text(body, &sink).is_some(),
+                "outbound taint check must reject {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_taint_outbound_text_blocks_well_known_prefixes() {
+        let sink = TaintSink::agent_message();
+        for tok in [
+            "sk-12345678901234567890123456789012",
+            "ghp_1234567890123456789012345678901234567890",
+            "xoxb-0000-0000-xxxxxxxxxxxx",
+            "AKIAIOSFODNN7EXAMPLE",
+            "AIzaSyDummyGoogleKeyLooksLikeThis00",
+        ] {
+            assert!(
+                check_taint_outbound_text(tok, &sink).is_some(),
+                "outbound taint check must reject well-known prefix {tok:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_taint_outbound_text_blocks_long_opaque_tokens() {
+        let sink = TaintSink::agent_message();
+        // 40-char mixed-case base64-ish payload with no whitespace or
+        // prose: smells like a raw bearer token.
+        let payload = "AbCdEf0123456789AbCdEf0123456789AbCdEf01";
+        assert!(
+            check_taint_outbound_text(payload, &sink).is_some(),
+            "outbound taint check must reject long opaque token"
+        );
+        // Same length but with punctuation — also looks tokenish.
+        let payload_punct = "abcdef0123456789-abcdef0123456789-abcdef";
+        assert!(
+            check_taint_outbound_text(payload_punct, &sink).is_some(),
+            "outbound taint check must reject punctuated token"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_text_allows_git_sha() {
+        // 40-char lowercase hex commit SHA — legitimate inter-agent
+        // payload, must not be blocked.
+        let sink = TaintSink::agent_message();
+        let sha = "18060f6401234567890abcdef0123456789abcde";
+        assert!(
+            check_taint_outbound_text(sha, &sink).is_none(),
+            "git commit SHA must not be treated as a secret"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_text_allows_sha256_hex() {
+        // 64-char lowercase hex sha256 digest — also legitimate.
+        let sink = TaintSink::agent_message();
+        let digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert!(
+            check_taint_outbound_text(digest, &sink).is_none(),
+            "sha256 hex digest must not be treated as a secret"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_text_allows_uuid_hex() {
+        // 32-char UUID-without-dashes (hex) — allowed.
+        let sink = TaintSink::agent_message();
+        let uuid = "550e8400e29b41d4a716446655440000";
+        assert!(
+            check_taint_outbound_text(uuid, &sink).is_none(),
+            "undashed UUID must not be treated as a secret"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_header_blocks_authorization_bearer() {
+        // Regression for the header-name-bypass bug: a Bearer token
+        // with a space between scheme and value defeats every
+        // content-based heuristic, so we must trip on the header name.
+        let sink = TaintSink::net_fetch();
+        assert!(
+            check_taint_outbound_header("Authorization", "Bearer sk-x", &sink).is_some(),
+            "Authorization: Bearer <anything> must be blocked"
+        );
+        assert!(
+            check_taint_outbound_header("authorization", "Token abc", &sink).is_some(),
+            "lowercased authorization header must also be blocked"
+        );
+        assert!(
+            check_taint_outbound_header("Proxy-Authorization", "Basic Zm9vOmJhcg==", &sink)
+                .is_some(),
+            "Proxy-Authorization header must be blocked"
+        );
+        assert!(
+            check_taint_outbound_header("X-Api-Key", "hunter2", &sink).is_some(),
+            "X-Api-Key header must be blocked"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_header_allows_benign_headers() {
+        let sink = TaintSink::net_fetch();
+        assert!(
+            check_taint_outbound_header("Accept", "application/json", &sink).is_none(),
+            "benign Accept header must pass"
+        );
+        assert!(
+            check_taint_outbound_header("User-Agent", "librefang/1.0", &sink).is_none(),
+            "benign User-Agent header must pass"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_text_allows_prose() {
+        let sink = TaintSink::agent_message();
+        for benign in [
+            "Please summarise this article about encryption.",
+            "Could you check whether our token economy works?",
+            "The passwd file lives at /etc/passwd on Linux — explain it.",
+            "Write a haiku about secret gardens.",
+            "",
+        ] {
+            assert!(
+                check_taint_outbound_text(benign, &sink).is_none(),
+                "outbound taint check must allow prose: {benign:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_taint_outbound_text_allows_short_identifiers() {
+        // A 16-char id is below the 32-char opaque-token threshold and
+        // doesn't match any key=value shape, so it should pass even
+        // though it looks alphanumeric.
+        let sink = TaintSink::agent_message();
+        let id = "req_0123456789ab";
+        assert!(check_taint_outbound_text(id, &sink).is_none());
+    }
+
+    // ── tool_a2a_send / tool_channel_send taint integration ─────────────
+    //
+    // Regression: prior to this patch the taint sink was only enforced
+    // on agent_send and web_fetch. tool_a2a_send and tool_channel_send
+    // were exfiltration sinks with NO check at all.
+
+    #[tokio::test]
+    async fn test_tool_a2a_send_blocks_secret_in_message() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::new(AtomicUsize::new(0)),
+        });
+        let input = serde_json::json!({
+            "agent_url": "https://example.com/a2a",
+            "message": "leaking api_key=sk-abcdefghijklmnop now",
+        });
+        let err = tool_a2a_send(&input, Some(&kernel))
+            .await
+            .expect_err("a2a_send must reject tainted message");
+        assert!(
+            err.contains("taint") || err.contains("violation"),
+            "expected taint violation, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_channel_send_blocks_secret_in_text_message() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::new(AtomicUsize::new(0)),
+        });
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "@user",
+            "message": "here is the api_key=sk-abcdefghijklmnop",
+        });
+        let err = tool_channel_send(&input, Some(&kernel), None)
+            .await
+            .expect_err("channel_send must reject tainted message");
+        assert!(
+            err.contains("taint") || err.contains("violation"),
+            "expected taint violation, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_channel_send_blocks_secret_in_image_caption() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::new(AtomicUsize::new(0)),
+        });
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "@user",
+            "image_url": "https://example.com/cat.png",
+            "message": "see attached. token=sk-abcdefghijklmnop",
+        });
+        let err = tool_channel_send(&input, Some(&kernel), None)
+            .await
+            .expect_err("image caption must be sink-checked");
+        assert!(
+            err.contains("taint") || err.contains("violation"),
+            "expected taint violation, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_channel_send_blocks_secret_in_poll_question() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::new(AtomicUsize::new(0)),
+        });
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "@user",
+            "poll_question": "guess my api_key=sk-abcdefghijklmnop",
+            "poll_options": ["yes", "no"],
+        });
+        let err = tool_channel_send(&input, Some(&kernel), None)
+            .await
+            .expect_err("poll question must be sink-checked");
+        assert!(
+            err.contains("taint") || err.contains("violation"),
+            "expected taint violation, got: {err}"
+        );
+    }
 
     struct ApprovalKernel {
         approval_requests: Arc<AtomicUsize>,
@@ -6241,5 +6854,69 @@ mod tests {
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
         }
+    }
+
+    #[test]
+    fn parse_poll_options_accepts_2_to_10_strings() {
+        let raw = serde_json::json!(["red", "green", "blue"]);
+        let opts = parse_poll_options(Some(&raw)).expect("valid options");
+        assert_eq!(opts, vec!["red", "green", "blue"]);
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_non_string_entry() {
+        // Regression: a previous version used filter_map(as_str) which
+        // silently dropped non-string entries, letting a malformed poll
+        // slip past the min-2 validation.
+        let raw = serde_json::json!(["a", 42, "c"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject number");
+        assert!(
+            err.contains("poll_options[1]"),
+            "error mentions index: {err}"
+        );
+        assert!(err.contains("number"), "error mentions type: {err}");
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_bool_entry() {
+        let raw = serde_json::json!(["a", true]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject bool");
+        assert!(err.contains("poll_options[1]"));
+        assert!(err.contains("boolean"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_null_entry() {
+        let raw = serde_json::json!(["a", null, "c"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject null");
+        assert!(err.contains("poll_options[1]"));
+        assert!(err.contains("null"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_too_few() {
+        let raw = serde_json::json!(["only one"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject single option");
+        assert!(err.contains("between 2 and 10"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_too_many() {
+        let raw = serde_json::json!(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]);
+        let err = parse_poll_options(Some(&raw)).expect_err("should reject 11 options");
+        assert!(err.contains("between 2 and 10"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_missing() {
+        let err = parse_poll_options(None).expect_err("None should fail");
+        assert!(err.contains("must be an array"));
+    }
+
+    #[test]
+    fn parse_poll_options_rejects_non_array() {
+        let raw = serde_json::json!("not an array");
+        let err = parse_poll_options(Some(&raw)).expect_err("string should fail");
+        assert!(err.contains("must be an array"));
     }
 }

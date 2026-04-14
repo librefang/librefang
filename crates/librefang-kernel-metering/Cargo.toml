@@ -1,0 +1,12 @@
+[package]
+name = "librefang-kernel-metering"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cost metering and quota enforcement for the LibreFang kernel"
+
+[dependencies]
+librefang-types = { path = "../librefang-types" }
+librefang-memory = { path = "../librefang-memory" }
+librefang-runtime = { path = "../librefang-runtime" }
+serde = { workspace = true }

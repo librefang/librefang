@@ -1,0 +1,14 @@
+[package]
+name = "librefang-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared HTTP client builder with proxy and TLS fallback for LibreFang"
+
+[dependencies]
+librefang-types = { path = "../librefang-types" }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-native-certs = { workspace = true }
+tracing = { workspace = true }

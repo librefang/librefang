@@ -137,6 +137,7 @@ pub enum MetricFormat {
     Bytes,
     Percentage,
     Text,
+    Date,
 }
 
 /// A metric displayed on the Hand dashboard.
@@ -523,10 +524,15 @@ fn default_module() -> String {
     "builtin:chat".to_string()
 }
 fn default_provider() -> String {
-    "anthropic".to_string()
+    // "default" is the sentinel the kernel resolves to the effective
+    // config.default_model.provider at driver-build time. Using a concrete
+    // provider here would pin every hand that omits `provider = ...` to
+    // whatever the author baked in, ignoring the user's global default.
+    "default".to_string()
 }
 fn default_model() -> String {
-    "claude-sonnet-4-20250514".to_string()
+    // Same sentinel story as default_provider — see the comment above.
+    "default".to_string()
 }
 fn default_max_tokens() -> u32 {
     4096

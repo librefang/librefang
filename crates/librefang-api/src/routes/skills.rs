@@ -117,6 +117,23 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
                 .put(update_mcp_server)
                 .delete(delete_mcp_server),
         )
+        // MCP OAuth auth endpoints
+        .route(
+            "/mcp/servers/{name}/auth/status",
+            axum::routing::get(super::mcp_auth::auth_status),
+        )
+        .route(
+            "/mcp/servers/{name}/auth/start",
+            axum::routing::post(super::mcp_auth::auth_start),
+        )
+        .route(
+            "/mcp/servers/{name}/auth/callback",
+            axum::routing::get(super::mcp_auth::auth_callback),
+        )
+        .route(
+            "/mcp/servers/{name}/auth/revoke",
+            axum::routing::delete(super::mcp_auth::auth_revoke),
+        )
         // Integrations
         .route("/integrations", axum::routing::get(list_integrations))
         .route(
@@ -1810,12 +1827,10 @@ pub async fn uninstall_hand(
         Err(librefang_hands::HandError::NotFound(id)) => {
             ApiErrorResponse::not_found(format!("Hand not found: {id}")).into_json_tuple()
         }
-        Err(librefang_hands::HandError::BuiltinHand(id)) => {
-            ApiErrorResponse::not_found(format!(
-                "Hand '{id}' is a built-in and cannot be uninstalled"
-            ))
-            .into_json_tuple()
-        }
+        Err(librefang_hands::HandError::BuiltinHand(id)) => ApiErrorResponse::not_found(format!(
+            "Hand '{id}' is a built-in and cannot be uninstalled"
+        ))
+        .into_json_tuple(),
         Err(librefang_hands::HandError::AlreadyActive(msg)) => {
             ApiErrorResponse::conflict(msg).into_json_tuple()
         }
@@ -2485,6 +2500,7 @@ pub async fn hand_send_message(
                     memories_saved: result.memories_saved,
                     memories_used: result.memories_used,
                     memory_conflicts: result.memory_conflicts,
+                    thinking: None,
                 })),
             )
         }
@@ -2754,6 +2770,19 @@ fn serialize_mcp_transport(
     )
 )]
 pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Snapshot auth states so we can include them in the response
+    let auth_states = state.kernel.mcp_auth_states_ref().lock().await;
+    let auth_snapshot: std::collections::HashMap<String, serde_json::Value> = auth_states
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                serde_json::to_value(v).unwrap_or(serde_json::json!({"state": "not_required"})),
+            )
+        })
+        .collect();
+    drop(auth_states);
+
     // Get configured servers from config
     let config_servers: Vec<serde_json::Value> = state
         .kernel
@@ -2762,11 +2791,16 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         .iter()
         .map(|s| {
             let transport = s.transport.as_ref().map(serialize_mcp_transport);
+            let auth_state = auth_snapshot
+                .get(&s.name)
+                .cloned()
+                .unwrap_or(serde_json::json!({"state": "not_required"}));
             serde_json::json!({
                 "name": s.name,
                 "transport": transport,
                 "timeout_secs": s.timeout_secs,
                 "env": s.env,
+                "auth_state": auth_state,
             })
         })
         .collect();
@@ -3088,6 +3122,19 @@ pub async fn delete_mcp_server(
         .into_json_tuple();
     }
 
+    // Resolve server URL before removing config (needed for vault cleanup)
+    let server_url = state
+        .kernel
+        .config_ref()
+        .mcp_servers
+        .iter()
+        .find(|s| s.name == name)
+        .and_then(|s| match &s.transport {
+            Some(librefang_types::config::McpTransportEntry::Http { url }) => Some(url.clone()),
+            Some(librefang_types::config::McpTransportEntry::Sse { url }) => Some(url.clone()),
+            _ => None,
+        });
+
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = remove_mcp_server_config(&config_path, &name) {
         return ApiErrorResponse::internal(t.t_args(
@@ -3097,6 +3144,39 @@ pub async fn delete_mcp_server(
         .into_json_tuple();
     }
     drop(t);
+
+    // Clean up OAuth vault tokens, auth state, and live connections
+    if let Some(ref url) = server_url {
+        let provider = librefang_kernel::mcp_oauth_provider::KernelOAuthProvider::new(
+            state.kernel.home_dir().to_path_buf(),
+        );
+        for field in &[
+            "access_token",
+            "refresh_token",
+            "expires_at",
+            "token_endpoint",
+            "client_id",
+            "pkce_verifier",
+            "pkce_state",
+            "redirect_uri",
+        ] {
+            let _ = provider.vault_remove(
+                &librefang_kernel::mcp_oauth_provider::KernelOAuthProvider::vault_key(url, field),
+            );
+        }
+    }
+    state
+        .kernel
+        .mcp_auth_states_ref()
+        .lock()
+        .await
+        .remove(&name);
+    state
+        .kernel
+        .mcp_connections_ref()
+        .lock()
+        .await
+        .retain(|c| c.name() != name);
 
     let reload_status = match state.kernel.reload_config().await {
         Ok(plan) => {
@@ -4208,4 +4288,121 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librefang_types::config::{McpServerConfigEntry, McpTransportEntry};
+
+    /// Regression for #2319: adding an MCP server through the UI wrote each
+    /// entry as a JSON-stringified blob inside `mcp_servers = ['{"name":...}']`
+    /// instead of a `[[mcp_servers]]` TOML table, because the top-level object
+    /// hit the catch-all in `json_to_toml_value` and got stringified. After
+    /// the fix, the on-disk file must round-trip back into a real
+    /// `McpServerConfigEntry` via `toml::from_str`.
+    #[test]
+    fn upsert_mcp_server_writes_inline_table_not_stringified_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        let entry = McpServerConfigEntry {
+            name: "nocodb".to_string(),
+            transport: Some(McpTransportEntry::Stdio {
+                command: "npx".to_string(),
+                args: vec![
+                    "-y".to_string(),
+                    "mcp-remote".to_string(),
+                    "http://nocodb:8080/mcp/abc".to_string(),
+                ],
+            }),
+            timeout_secs: 30,
+            env: vec![],
+            headers: vec!["xc-mcp-token: secret".to_string()],
+            oauth: None,
+        };
+
+        upsert_mcp_server_config(&config_path, &entry).expect("upsert should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !raw.contains("mcp_servers = ['{"),
+            "mcp_servers must not be written as stringified JSON — got:\n{raw}"
+        );
+        assert!(
+            !raw.contains("mcp_servers = [\"{"),
+            "mcp_servers must not be written as stringified JSON — got:\n{raw}"
+        );
+
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            mcp_servers: Vec<McpServerConfigEntry>,
+        }
+        let parsed: Wrapper =
+            toml::from_str(&raw).expect("config.toml must deserialize into McpServerConfigEntry");
+        assert_eq!(parsed.mcp_servers.len(), 1);
+        let roundtripped = &parsed.mcp_servers[0];
+        assert_eq!(roundtripped.name, "nocodb");
+        assert_eq!(roundtripped.timeout_secs, 30);
+        assert_eq!(roundtripped.headers, vec!["xc-mcp-token: secret"]);
+        match &roundtripped.transport {
+            Some(McpTransportEntry::Stdio { command, args }) => {
+                assert_eq!(command, "npx");
+                assert_eq!(args, &["-y", "mcp-remote", "http://nocodb:8080/mcp/abc"]);
+            }
+            other => panic!("expected stdio transport, got {other:?}"),
+        }
+    }
+
+    /// A second upsert for the same name must replace the entry in-place,
+    /// not produce a second row — this is how the user ended up with three
+    /// stale duplicate blobs in the bug report.
+    #[test]
+    fn upsert_mcp_server_replaces_existing_entry_with_same_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        let v1 = McpServerConfigEntry {
+            name: "nocodb".to_string(),
+            transport: Some(McpTransportEntry::Http {
+                url: "http://old:8080/mcp".to_string(),
+            }),
+            timeout_secs: 10,
+            env: vec![],
+            headers: vec![],
+            oauth: None,
+        };
+        upsert_mcp_server_config(&config_path, &v1).unwrap();
+
+        let v2 = McpServerConfigEntry {
+            name: "nocodb".to_string(),
+            transport: Some(McpTransportEntry::Http {
+                url: "http://new:9090/mcp".to_string(),
+            }),
+            timeout_secs: 60,
+            env: vec![],
+            headers: vec![],
+            oauth: None,
+        };
+        upsert_mcp_server_config(&config_path, &v2).unwrap();
+
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            mcp_servers: Vec<McpServerConfigEntry>,
+        }
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        let parsed: Wrapper = toml::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed.mcp_servers.len(),
+            1,
+            "upsert must replace, not append"
+        );
+        assert_eq!(parsed.mcp_servers[0].timeout_secs, 60);
+        match &parsed.mcp_servers[0].transport {
+            Some(McpTransportEntry::Http { url }) => assert_eq!(url, "http://new:9090/mcp"),
+            other => panic!("expected http transport, got {other:?}"),
+        }
+    }
 }

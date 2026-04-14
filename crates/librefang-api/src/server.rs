@@ -322,9 +322,15 @@ async fn dashboard_auth_check(
         "none"
     };
 
+    // Intentionally do NOT echo the configured dashboard username here: the
+    // endpoint is unauthenticated (the SPA calls it before the user has
+    // logged in) and returning the username would hand an anonymous remote
+    // caller one half of the credential pair, enabling targeted credential
+    // stuffing. The `mode` field is enough for the SPA to pick the right
+    // login form; the user already knows their own username.
     axum::response::Json(serde_json::json!({
         "mode": mode,
-        "username": if has_credentials { du.trim().to_string() } else { String::new() },
+        "username": "",
     }))
 }
 
@@ -683,11 +689,48 @@ pub async fn build_router(
     };
 
     // AuthState shares api_key_lock with AppState so change_password can update it live.
+    let user_api_keys_vec = configured_user_api_keys(state.kernel.as_ref());
+    let dashboard_auth_enabled = has_dashboard_credentials(state.kernel.as_ref());
+    let api_key_set = !state.kernel.config_ref().api_key.trim().is_empty();
+    let any_auth = api_key_set || !user_api_keys_vec.is_empty() || dashboard_auth_enabled;
+
+    // Resolve the effective value of `require_auth_for_reads`.
+    // - Explicit `Some(true)`  → operators are forcing the allowlist
+    //   closed even if auth is misconfigured (catches an accidental
+    //   `api_key = ""` redeploy).
+    // - Explicit `Some(false)` → operators are deliberately keeping the
+    //   reads allowlist open even when an `api_key` is set; typical
+    //   for deployments fronted by an external auth proxy.
+    // - `None` (default)       → derive from whether *any* authentication
+    //   is configured. This makes the safe default "set an api_key and
+    //   the reads allowlist closes automatically", instead of forcing
+    //   operators to remember a separate flag before reads stop leaking
+    //   agent IDs to the LAN.
+    let configured_require_auth_for_reads = state.kernel.config_ref().require_auth_for_reads;
+    let require_auth_for_reads =
+        derive_require_auth_for_reads(configured_require_auth_for_reads, any_auth);
+    if require_auth_for_reads && !any_auth {
+        tracing::warn!(
+            "require_auth_for_reads = true but no authentication is configured \
+             (api_key, user_api_keys, and dashboard credentials are all empty). \
+             The flag will have no effect — set an api_key or configure dashboard \
+             credentials to lock down read endpoints."
+        );
+    }
+    if require_auth_for_reads && configured_require_auth_for_reads.is_none() {
+        tracing::info!(
+            "require_auth_for_reads auto-enabled because authentication is configured \
+             (api_key / user_api_keys / dashboard credentials). Dashboard reads now \
+             require a bearer token. Set `require_auth_for_reads = false` in config.toml \
+             to restore the legacy public reads allowlist."
+        );
+    }
     let auth_state = middleware::AuthState {
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),
-        dashboard_auth_enabled: has_dashboard_credentials(state.kernel.as_ref()),
-        user_api_keys: Arc::new(configured_user_api_keys(state.kernel.as_ref())),
+        dashboard_auth_enabled,
+        user_api_keys: Arc::new(user_api_keys_vec),
+        require_auth_for_reads,
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     let gcra_limiter = rate_limiter::GcraState {
@@ -1295,6 +1338,20 @@ fn is_process_alive(pid: u32) -> bool {
     }
 }
 
+/// Resolve the effective value of `require_auth_for_reads` from the explicit
+/// config option and whether any authentication method is configured.
+///
+/// - `Some(explicit)` preserves the operator's stated intent verbatim.
+/// - `None` derives the value from `any_auth` so that setting any form of
+///   auth (api_key / user keys / dashboard credentials) automatically closes
+///   the dashboard reads allowlist.
+fn derive_require_auth_for_reads(configured: Option<bool>, any_auth: bool) -> bool {
+    match configured {
+        Some(explicit) => explicit,
+        None => any_auth,
+    }
+}
+
 /// Check if an LibreFang daemon is actually responding at the given address.
 /// This avoids false positives where a different process reused the same PID
 /// after a system reboot.
@@ -1312,5 +1369,30 @@ fn is_daemon_responding(addr: &str) -> bool {
         std::net::TcpStream::connect(addr_only)
             .map(|_| true)
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod derive_require_auth_for_reads_tests {
+    use super::derive_require_auth_for_reads;
+
+    #[test]
+    fn none_with_auth_enables() {
+        assert!(derive_require_auth_for_reads(None, true));
+    }
+
+    #[test]
+    fn none_without_auth_disables() {
+        assert!(!derive_require_auth_for_reads(None, false));
+    }
+
+    #[test]
+    fn some_false_is_preserved_even_when_auth_configured() {
+        assert!(!derive_require_auth_for_reads(Some(false), true));
+    }
+
+    #[test]
+    fn some_true_is_preserved_even_when_no_auth_configured() {
+        assert!(derive_require_auth_for_reads(Some(true), false));
     }
 }

@@ -876,21 +876,123 @@ async fn install_from_registry(
 }
 
 /// Lightweight entry returned when browsing a registry.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// Populated from each plugin's `plugin.toml` when available. Fields beyond
+/// `name`/`registry` are optional so that registries that fail to serve a
+/// manifest still degrade gracefully to a name-only listing.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RegistryPluginEntry {
     pub name: String,
     pub registry: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// Hook names declared by the plugin (e.g. `ingest`, `after_turn`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<String>,
 }
 
-/// List available plugin directory names from a GitHub registry.
+/// Disk cache file for an enriched registry listing.
+///
+/// Stored separately from the `index.json` cache so that listings built from
+/// the GitHub Contents API + per-plugin manifest fetches do not clobber a
+/// signed index cache.
+fn registry_listing_cache_path(registry: &str) -> std::path::PathBuf {
+    let cache_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".librefang")
+        .join("registry_cache");
+    let safe_name: String = registry
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    cache_dir.join(format!("{safe_name}__listing.json"))
+}
+
+/// Fetch and parse `plugins/<name>/plugin.toml` from a registry, extracting the
+/// fields we care about for a browse-listing card. Network and parse errors
+/// degrade to `None` so a single bad plugin does not sink the whole listing.
+async fn fetch_registry_plugin_meta(
+    client: &reqwest::Client,
+    github_repo: &str,
+    name: &str,
+) -> RegistryPluginEntry {
+    let mut entry = RegistryPluginEntry {
+        name: name.to_string(),
+        registry: github_repo.to_string(),
+        ..Default::default()
+    };
+
+    let url =
+        format!("https://raw.githubusercontent.com/{github_repo}/main/plugins/{name}/plugin.toml");
+    let text = match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => resp.text().await.ok(),
+        _ => None,
+    };
+    let Some(text) = text else { return entry };
+
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return entry;
+    };
+    if let Some(v) = value.get("version").and_then(|v| v.as_str()) {
+        entry.version = Some(v.to_string());
+    }
+    if let Some(v) = value.get("description").and_then(|v| v.as_str()) {
+        entry.description = Some(v.to_string());
+    }
+    if let Some(v) = value.get("author").and_then(|v| v.as_str()) {
+        entry.author = Some(v.to_string());
+    }
+    if let Some(hooks) = value.get("hooks").and_then(|v| v.as_table()) {
+        entry.hooks = hooks.keys().cloned().collect();
+        entry.hooks.sort();
+    }
+    entry
+}
+
+/// List available plugins in a GitHub registry, enriched with manifest metadata.
+///
+/// Lists `plugins/` via the GitHub Contents API, then fetches each plugin's
+/// `plugin.toml` concurrently to populate `version/description/author/hooks`.
+/// Results are cached to disk with the same TTL as the signed index cache
+/// to avoid hammering GitHub on every dashboard reload.
 pub async fn list_registry_plugins(github_repo: &str) -> Result<Vec<RegistryPluginEntry>, String> {
     validate_github_repo(github_repo)?;
-    let url = format!("https://api.github.com/repos/{github_repo}/contents/plugins");
+
+    let ttl = std::env::var("LIBREFANG_REGISTRY_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(default_registry_cache_ttl_secs);
+    let skip_cache = std::env::var("LIBREFANG_REGISTRY_NO_CACHE").as_deref() == Ok("1");
+    let cache_path = registry_listing_cache_path(github_repo);
+
+    if !skip_cache {
+        if let Some(bytes) = load_registry_cache(&cache_path, ttl) {
+            if let Ok(cached) = serde_json::from_slice::<Vec<RegistryPluginEntry>>(&bytes) {
+                debug!(
+                    "Using cached registry listing for {github_repo} ({} plugins)",
+                    cached.len()
+                );
+                return Ok(cached);
+            }
+        }
+    }
+
     let client = crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
+    let url = format!("https://api.github.com/repos/{github_repo}/contents/plugins");
     let resp = client
         .get(&url)
         .header("Accept", "application/vnd.github.v3+json")
@@ -910,14 +1012,25 @@ pub async fn list_registry_plugins(github_repo: &str) -> Result<Vec<RegistryPlug
         .await
         .map_err(|e| format!("Failed to parse registry listing: {e}"))?;
 
-    Ok(entries
+    let names: Vec<String> = entries
         .into_iter()
         .filter(|e| e.content_type == "dir")
-        .map(|e| RegistryPluginEntry {
-            name: e.name,
-            registry: github_repo.to_string(),
-        })
-        .collect())
+        .map(|e| e.name)
+        .collect();
+
+    let futs = names
+        .iter()
+        .map(|n| fetch_registry_plugin_meta(&client, github_repo, n));
+    let mut plugins: Vec<RegistryPluginEntry> = futures::future::join_all(futs).await;
+    plugins.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if !skip_cache {
+        if let Ok(bytes) = serde_json::to_vec(&plugins) {
+            save_registry_cache(&cache_path, &bytes);
+        }
+    }
+
+    Ok(plugins)
 }
 
 /// Install from a git URL by cloning.
@@ -4017,6 +4130,33 @@ after_turn = "hooks/after_turn.py"
             ..Default::default()
         };
         assert!(!check_hooks_exist(&plugin_dir, &manifest_escape));
+    }
+
+    /// Live listing smoke test — ensures the enriched listing populates
+    /// `description`/`version`/`hooks` from at least one plugin's `plugin.toml`.
+    /// Ignored by default — requires network access to GitHub.
+    #[tokio::test]
+    #[ignore]
+    async fn test_list_registry_plugins_enriched() {
+        // Skip disk cache so a cached name-only listing from a previous run
+        // cannot mask a regression.
+        std::env::set_var("LIBREFANG_REGISTRY_NO_CACHE", "1");
+        let entries = list_registry_plugins("librefang/librefang-registry")
+            .await
+            .expect("registry listing should succeed");
+        assert!(!entries.is_empty(), "expected at least one plugin");
+        assert!(
+            entries.iter().any(|e| e.description.is_some()),
+            "expected at least one plugin with a description"
+        );
+        assert!(
+            entries.iter().any(|e| e.version.is_some()),
+            "expected at least one plugin with a version"
+        );
+        assert!(
+            entries.iter().any(|e| !e.hooks.is_empty()),
+            "expected at least one plugin declaring hooks"
+        );
     }
 
     /// Integration test: install from GitHub registry, run hook, then remove.

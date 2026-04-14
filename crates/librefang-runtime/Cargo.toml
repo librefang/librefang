@@ -7,6 +7,13 @@ description = "Agent runtime and execution environment for LibreFang"
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
+librefang-http = { path = "../librefang-http" }
+librefang-kernel-handle = { path = "../librefang-kernel-handle" }
+librefang-runtime-mcp = { path = "../librefang-runtime-mcp" }
+librefang-runtime-oauth = { path = "../librefang-runtime-oauth" }
+librefang-runtime-drivers = { path = "../librefang-runtime-drivers" }
+librefang-runtime-wasm = { path = "../librefang-runtime-wasm" }
+librefang-llm-driver = { path = "../librefang-llm-driver" }
 librefang-channels = { path = "../librefang-channels" }
 librefang-memory = { path = "../librefang-memory" }
 librefang-skills = { path = "../librefang-skills" }

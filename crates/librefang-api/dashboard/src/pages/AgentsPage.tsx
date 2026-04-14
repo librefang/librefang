@@ -50,6 +50,7 @@ export function AgentsPage() {
     onConfirm: () => void;
     tone?: "default" | "destructive";
   } | null>(null);
+  const [showHandAgents, setShowHandAgents] = useState(false);
   const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
   const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
   const addToast = useUIStore((s) => s.addToast);
@@ -106,6 +107,10 @@ export function AgentsPage() {
     },
     onError: (e: any) => addToast(e?.message || t("agents.model_save_failed", { defaultValue: "Failed to update model" }), "error"),
   });
+
+  function mergeHandFlag(agent: AgentDetail, fallback?: boolean) {
+    return { ...agent, is_hand: agent.is_hand ?? fallback };
+  }
 
   function startModelEdit() {
     setModelDraft({
@@ -194,16 +199,19 @@ export function AgentsPage() {
   );
 
   const agents = agentsQuery.data?.agents ?? [];
+  const visibleAgents = useMemo(
+    () => showHandAgents ? agents : agents.filter(a => !a.is_hand),
+    [agents, showHandAgents],
+  );
   // Counts for the filter chips so operators can see "5 running / 2
   // suspended" without running through the filter first.
   const agentCounts = useMemo(() => {
-    const visible = agents.filter(a => !a.is_hand);
+    const visible = visibleAgents;
     const running = visible.filter(a => (a.state || "").toLowerCase() === "running").length;
     const suspended = visible.filter(a => (a.state || "").toLowerCase() === "suspended").length;
     return { all: visible.length, running, suspended };
-  }, [agents]);
-  const filteredAgents = useMemo(() => agents
-    .filter(a => !a.is_hand)
+  }, [visibleAgents]);
+  const filteredAgents = useMemo(() => visibleAgents
     .filter(a => {
       if (stateFilter === "all") return true;
       return (a.state || "").toLowerCase() === stateFilter;
@@ -227,7 +235,7 @@ export function AgentsPage() {
         return bT - aT; // newest first
       }
       return a.name.localeCompare(b.name);
-    }), [agents, search, stateFilter, sortBy]);
+    }), [visibleAgents, search, stateFilter, sortBy]);
 
   const coreAgents = filteredAgents;
 
@@ -236,7 +244,7 @@ export function AgentsPage() {
     return (
       <Card key={agent.id} hover padding="lg" className={`cursor-pointer ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
         setDetailLoading(true);
-        try { const d = await getAgentDetail(agent.id); setDetailAgent(d); } catch { setDetailAgent({ name: agent.name, id: agent.id }); }
+        try { const d = await getAgentDetail(agent.id); setDetailAgent(mergeHandFlag(d, agent.is_hand)); } catch { setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand }); }
         setDetailLoading(false);
       }}>
         <div className="flex items-start justify-between gap-4 mb-5">
@@ -246,7 +254,10 @@ export function AgentsPage() {
               {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" />}
             </div>
             <div className="min-w-0">
-              <h2 className="text-base font-black tracking-tight truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</h2>
+              <div className="flex items-center gap-2 min-w-0">
+                <h2 className="text-base font-black tracking-tight truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</h2>
+                {agent.is_hand && <Badge variant="info">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
+              </div>
               <p className="text-[10px] font-mono text-text-dim/50 truncate mt-0.5">{truncateId(agent.id)}</p>
             </div>
           </div>
@@ -284,21 +295,23 @@ export function AgentsPage() {
           <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
             <MessageCircle className="h-3.5 w-3.5 mr-1" /> {t("common.interact")}
           </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={(e) => {
-              e.stopPropagation();
-              setConfirmDialog({
-                title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
-                message: t("agents.delete_confirm", { name: agent.name }),
-                tone: "destructive",
-                onConfirm: () => deleteMutation.mutate(agent.id),
-              });
-            }}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
+          {!agent.is_hand && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                setConfirmDialog({
+                  title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
+                  message: t("agents.delete_confirm", { name: agent.name }),
+                  tone: "destructive",
+                  onConfirm: () => deleteMutation.mutate(agent.id),
+                });
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          )}
         </div>
       </Card>
     );
@@ -332,6 +345,17 @@ export function AgentsPage() {
       />
 
       <div className="flex items-center gap-2 -mt-2 flex-wrap">
+        <button
+          onClick={() => setShowHandAgents((value) => !value)}
+          aria-pressed={showHandAgents}
+          className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
+            showHandAgents
+              ? "border-brand/30 bg-brand/10 text-brand"
+              : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+          }`}
+        >
+          <span>{t("agents.show_hand_agents", { defaultValue: "Show hand agents" })}</span>
+        </button>
         {(["all", "running", "suspended"] as const).map((key) => {
           const isActive = stateFilter === key;
           const count = agentCounts[key];
@@ -376,22 +400,23 @@ export function AgentsPage() {
       </div>
 
       {agentsQuery.isLoading ? (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : filteredAgents.length === 0 ? (
-        search || stateFilter !== "all" ? (
+        search || stateFilter !== "all" || showHandAgents ? (
           <EmptyState
             title={t("agents.no_matching")}
             icon={<Search className="h-6 w-6" />}
             action={
-              (search || stateFilter !== "all") && (
+              (search || stateFilter !== "all" || showHandAgents) && (
                 <Button
                   variant="secondary"
                   size="sm"
                   onClick={() => {
                     setSearch("");
                     setStateFilter("all");
+                    setShowHandAgents(false);
                   }}
                 >
                   {t("common.clear_filters", { defaultValue: "Clear filters" })}
@@ -406,7 +431,7 @@ export function AgentsPage() {
           />
         )
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 stagger-children">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6 stagger-children">
           {coreAgents.map(agent => renderAgentCard(agent))}
         </div>
       )}
@@ -430,6 +455,7 @@ export function AgentsPage() {
                     <h3 className="text-lg font-black tracking-tight">{t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}</h3>
                     <div className="flex items-center gap-2 mt-0.5">
                       <p className="text-[10px] text-text-dim font-mono">{truncateId(detailAgent.id, 16)}</p>
+                      {detailAgent.is_hand && <Badge variant="info">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
                       <Badge variant={isDetailSuspended ? "warning" : "success"} dot>
                         {(detailAgent as any).state ? t(`common.${detailState}`, { defaultValue: (detailAgent as any).state }) : t("common.running")}
                       </Badge>
@@ -453,6 +479,11 @@ export function AgentsPage() {
                     {t("agents.model")}
                   </h4>
                   <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 space-y-2.5 text-xs">
+                    {detailAgent.is_hand && (
+                      <p className="rounded-lg border border-brand/15 bg-brand/5 px-3 py-2 text-[11px] leading-relaxed text-text-dim">
+                        {t("agents.hand_agent_hint", { defaultValue: "You are editing the active runtime agent created by a hand." })}
+                      </p>
+                    )}
                     {editingModel ? (
                       <>
                         <div className="flex justify-between items-center gap-2">
@@ -647,12 +678,12 @@ export function AgentsPage() {
                 {/* Management actions */}
                 <div className="grid grid-cols-4 gap-2">
                   {isDetailSuspended ? (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await resumeAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await resumeAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(mergeHandFlag(d, detailAgent.is_hand)); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
                       <Play className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.resume")}</span>
                     </Button>
                   ) : (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await suspendAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await suspendAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(mergeHandFlag(d, detailAgent.is_hand)); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
                       <Pause className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.suspend")}</span>
                     </Button>
@@ -672,7 +703,7 @@ export function AgentsPage() {
                         onConfirm: async () => {
                           await resetAgentSession(detailAgent.id);
                           const d = await getAgentDetail(detailAgent.id);
-                          setDetailAgent(d);
+                          setDetailAgent(mergeHandFlag(d, detailAgent.is_hand));
                         },
                       })
                     }
@@ -680,22 +711,24 @@ export function AgentsPage() {
                     <RotateCcw className="w-4 h-4" />
                     <span className="text-[9px]">{t("agents.reset")}</span>
                   </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="flex-col gap-1 py-2.5 h-auto text-error/70 hover:text-error"
-                    onClick={() =>
-                      setConfirmDialog({
-                        title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
-                        message: t("agents.delete_confirm", { name: detailAgent.name }),
-                        tone: "destructive",
-                        onConfirm: () => deleteMutation.mutate(detailAgent.id),
-                      })
-                    }
-                  >
-                    <Trash2 className="w-4 h-4" />
-                    <span className="text-[9px]">{t("common.delete")}</span>
-                  </Button>
+                  {!detailAgent.is_hand && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="flex-col gap-1 py-2.5 h-auto text-error/70 hover:text-error"
+                      onClick={() =>
+                        setConfirmDialog({
+                          title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
+                          message: t("agents.delete_confirm", { name: detailAgent.name }),
+                          tone: "destructive",
+                          onConfirm: () => deleteMutation.mutate(detailAgent.id),
+                        })
+                      }
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      <span className="text-[9px]">{t("common.delete")}</span>
+                    </Button>
+                  )}
                 </div>
 
                 {/* Prompts link */}

@@ -1096,7 +1096,7 @@ function ActiveHandChip({
 
   return (
     <div
-      className={`group relative flex flex-col gap-2 p-3 rounded-2xl border cursor-pointer transition-colors shrink-0 w-[260px] ${
+      className={`group relative flex flex-col gap-2 p-3 rounded-2xl border cursor-pointer transition-colors shrink-0 w-[320px] sm:w-[360px] ${
         warnState
           ? "border-warning/40 bg-warning/[0.06] hover:border-warning/60"
           : "border-success/40 bg-success/[0.06] hover:border-success/60"
@@ -1158,7 +1158,7 @@ function ActiveHandChip({
 
 function HandCardGridSkeleton() {
   return (
-    <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
+    <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
       {Array.from({ length: 6 }).map((_, i) => (
         <div key={i} className="flex flex-col rounded-2xl border border-border-subtle bg-surface">
           <div className="flex items-start gap-3 p-4 pb-3">
@@ -1692,7 +1692,7 @@ export function HandsPage() {
           }
         />
       ) : (
-        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 stagger-children">
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6 stagger-children">
           {filtered.map((h) => {
             const isActive = activeHandIds.has(h.id);
             const instance = instanceByHandId.get(h.id);

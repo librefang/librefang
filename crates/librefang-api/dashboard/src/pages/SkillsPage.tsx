@@ -247,7 +247,7 @@ function DetailsModal({ skill, onClose, onInstall, pendingId, source = "clawhub"
                 <p className="text-xs font-black uppercase tracking-widest text-text-dim/60">v{skill.version || "1.0.0"}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}>
+            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close")}>
               <X className="w-5 h-5 text-text-dim" />
             </button>
           </div>
@@ -715,13 +715,13 @@ export function SkillsPage() {
       {/* Content */}
       {viewMode === "installed" ? (
         skillsQuery.isLoading ? (
-          <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
             {[1, 2, 3, 4, 5, 6].map(i => <CardSkeleton key={i} />)}
           </div>
         ) : installedSkills.length === 0 ? (
           <EmptyState title={t("skills.no_skills")} icon={<Package className="h-6 w-6" />} />
         ) : (
-          <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
             {installedSkills.map(s => (
               <InstalledSkillCard key={s.name} skill={s} onUninstall={handleUninstall} t={t} />
             ))}
@@ -729,7 +729,7 @@ export function SkillsPage() {
         )
       ) : viewMode === "marketplace" ? (
         isMarketplaceLoading ? (
-          <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
             {[1, 2, 3, 4, 5, 6].map(i => <CardSkeleton key={i} />)}
           </div>
         ) : isRateLimited ? (
@@ -740,7 +740,7 @@ export function SkillsPage() {
           <EmptyState title={t("skills.no_results")} description={search ? t("skills.try_different_search", { defaultValue: "Try a different search term." }) : t("skills.browse_unavailable", { defaultValue: "Browse is temporarily unavailable. Try searching above." })} icon={<Search className="h-6 w-6" />} />
         ) : (
           <div className="overflow-y-auto max-h-[600px] pr-1">
-            <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
               {filteredMarketplace.map(s => (
                 <MarketplaceSkillCard key={s.slug} skill={s} pendingId={installingId}
                   onInstall={(slug) => handleInstall(slug, "clawhub")}
@@ -752,7 +752,7 @@ export function SkillsPage() {
         )
       ) : viewMode === "skillhub" ? (
         isSkillhubLoading ? (
-          <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
             {[1, 2, 3, 4, 5, 6].map(i => <CardSkeleton key={i} />)}
           </div>
         ) : isSkillhubRateLimited ? (
@@ -763,7 +763,7 @@ export function SkillsPage() {
           <EmptyState title={t("skills.no_results")} icon={<Search className="h-6 w-6" />} />
         ) : (
           <div className="overflow-y-auto max-h-[600px] pr-1">
-            <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
               {filteredSkillhub.map(s => (
                 <MarketplaceSkillCard key={s.slug} skill={s} pendingId={installingId}
                   onInstall={(slug) => handleInstall(slug, "skillhub")}
@@ -776,12 +776,12 @@ export function SkillsPage() {
       ) : (
         /* viewMode === "fanghub" — official LibreFang registry skills */
         fanghubQuery.isLoading ? (
-          <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">{[1, 2, 3].map(i => <CardSkeleton key={i} />)}</div>
+          <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">{[1, 2, 3].map(i => <CardSkeleton key={i} />)}</div>
         ) : filteredFanghub.length === 0 ? (
           <EmptyState title={t("skills.no_results")} icon={<Zap className="h-6 w-6" />} />
         ) : (
           <div className="overflow-y-auto max-h-[600px] pr-1">
-          <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
             {filteredFanghub.map((skill: FangHubSkill) => (
               <FangHubSkillCard
                 key={skill.name}

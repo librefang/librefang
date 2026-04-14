@@ -289,13 +289,13 @@ function TotpSection() {
         {/* Setup flow */}
         <div className="py-4">
           {showResetPrompt && !setupData ? (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
               <input
                 type="text"
                 value={resetCode}
                 onChange={(e) => setResetCode(e.target.value)}
                 placeholder={t("settings.totp_reset_placeholder", "Current TOTP or recovery code")}
-                className="w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
                 onKeyDown={(e) => e.key === "Enter" && resetCode && handleSetup(resetCode)}
               />
               <Button
@@ -312,13 +312,13 @@ function TotpSection() {
               </Button>
             </div>
           ) : showRevokePrompt && !setupData ? (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
               <input
                 type="text"
                 value={revokeCode}
                 onChange={(e) => setRevokeCode(e.target.value)}
                 placeholder={t("settings.totp_revoke_placeholder", "TOTP or recovery code")}
-                className="w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
                 onKeyDown={(e) => e.key === "Enter" && revokeCode && handleRevoke()}
               />
               <Button variant="danger" size="sm" onClick={handleRevoke} disabled={!revokeCode || loading} isLoading={loading}>
@@ -357,7 +357,7 @@ function TotpSection() {
               </p>
               {setupData.qr_code && (
                 <div className="flex justify-center p-4 bg-white rounded-xl border border-border-subtle">
-                  <img src={setupData.qr_code} alt="TOTP QR Code" className="w-48 h-48" />
+                  <img src={setupData.qr_code} alt="TOTP QR Code" className="w-40 h-40 sm:w-48 sm:h-48" />
                 </div>
               )}
               <code className="block text-sm font-mono bg-main border border-border-subtle rounded-lg px-3 py-2 break-all select-all">

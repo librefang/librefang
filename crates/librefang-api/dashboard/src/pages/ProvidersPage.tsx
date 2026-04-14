@@ -391,7 +391,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
                 <p className="text-xs font-black uppercase tracking-widest text-text-dim/60">{provider.id}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}>
+            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close")}>
               <X className="w-5 h-5 text-text-dim" />
             </button>
           </div>
@@ -896,7 +896,7 @@ export function ProvidersPage() {
       </div>
 
       {providersQuery.isLoading ? (
-        <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-2"}>
+        <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : providers.length === 0 ? (
@@ -924,7 +924,7 @@ export function ProvidersPage() {
             )}
           </div>
 
-          <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-2"}>
+          <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
             {paginatedProviders.map((p) => (
               <ProviderCard
                 key={p.id}
