@@ -6212,11 +6212,16 @@ system_prompt = "You are a helpful assistant."
         if let Some(refreshed) = self.registry.get(agent_id) {
             // Re-grant capabilities in case caps/profile changed in the TOML.
             // Uses insert() so it replaces any existing grants for this agent.
-            // NOTE: we deliberately do NOT re-register with the scheduler,
-            // because that would wipe the agent's accumulated usage tracker.
-            // If resource quotas change, they take effect at next window reset.
             let caps = manifest_to_capabilities(&refreshed.manifest);
             self.capabilities.grant(agent_id, caps);
+            // Refresh the scheduler's quota cache so changes to
+            // `max_llm_tokens_per_hour` and friends take effect on the
+            // next message instead of waiting for daemon restart.
+            // Uses `update_quota` (not `register`) to preserve the
+            // accumulated usage tracker — switching the limit shouldn't
+            // wipe the running window. Issue #2317.
+            self.scheduler
+                .update_quota(agent_id, refreshed.manifest.resources.clone());
             let _ = self.memory.save_agent(&refreshed);
         }
 
