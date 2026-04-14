@@ -116,8 +116,12 @@ taskkill //PID <pid> //F
 - `KernelHandle` trait avoids circular deps between runtime and kernel
 - `AppState` in `server.rs` bridges kernel to API routes
 - New routes must be registered in `server.rs` router AND implemented in `routes.rs`
-- Dashboard is Alpine.js SPA in `static/index_body.html` — new tabs need both HTML and JS data/methods
+- Dashboard is React+TanStack Query SPA (not Alpine.js) in `crates/librefang-api/dashboard/`
 - Config fields need: struct field + `#[serde(default)]` + Default impl entry + Serialize/Deserialize derives
+- **Trait injection pattern**: When runtime needs functionality from extensions/kernel, define a trait in runtime and implement it in kernel (e.g., `McpOAuthProvider`). Never make runtime depend on extensions (circular dep).
+- **Auth middleware allowlist**: Unauthenticated endpoints must be added to the `is_public` allowlist in `middleware.rs` — NOT by reordering routes in `server.rs`. The auth layer applies to all routes.
+- **Docker callback URLs**: Never bind ephemeral localhost ports for OAuth callbacks in daemon code — the port is unreachable from outside Docker. Route callbacks through the API server's existing port instead.
+- **MCP OAuth flow**: Entirely UI-driven — daemon only detects 401 and sets `NeedsAuth` state. PKCE + callback handled by API layer (`routes/mcp_auth.rs`). Dynamic Client Registration (RFC 7591) used when server has `registration_endpoint` but no `client_id`.
 - `session_mode` in `AgentManifest` controls whether automated invocations (cron, triggers, agent_send) reuse the persistent session (`"persistent"`, default) or create a fresh one (`"new"`). Per-trigger overrides via `Trigger.session_mode: Option<SessionMode>`. Session resolution in `execute_llm_agent` (kernel.rs). Channel-derived sessions are unaffected.
 
 ## Git Conventions
@@ -131,4 +135,8 @@ taskkill //PID <pid> //F
 - Config fields added to `KernelConfig` struct MUST also be added to the `Default` impl or build fails
 - `AgentLoopResult` field is `.response` not `.response_text`
 - CLI command to start daemon is `start` not `daemon`
+- When adding `Option<Arc<dyn Trait>>` fields to structs that derive `Serialize`/`Deserialize`/`Clone`/`Debug`, mark them `#[serde(skip)]` and implement the affected traits manually
+- `ErrorTranslator` (from `RequestLanguage`) is `!Send` — any `.await` must happen AFTER `drop(t)`, or the axum handler will fail with a cryptic `Handler<_, _>` trait bound error
+- `LIBREFANG_VAULT_KEY` env var must base64-decode to exactly 32 bytes (use `openssl rand -base64 32` which gives 44 chars). 32 ASCII chars ≠ 32 bytes.
+- When parallel agents modify the same crate, `Option::None` defaults for new fields will silently compile but disable features. Always write integration tests at the injection site, not just the implementation site.
 - On Windows: use `taskkill //PID <pid> //F` (double slashes in MSYS2/Git Bash)

@@ -1760,6 +1760,16 @@ pub struct KernelConfig {
     /// like `"https://dash.example.com"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cors_origin: Vec<String>,
+    /// Hostnames allowed to drive the OAuth `redirect_uri` when starting an
+    /// MCP auth flow. The MCP auth-start handler derives the callback URL
+    /// from the incoming request's `Origin` / `X-Forwarded-Host` / `Host`
+    /// headers; without an allowlist a spoofed Host header could redirect
+    /// the authorization code to an attacker-controlled origin. Loopback
+    /// addresses (`localhost`, `127.0.0.1`, `::1`) are always accepted so
+    /// local development keeps working with an empty list. Entries are
+    /// hostnames without port, e.g. `"dash.example.com"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_hosts: Vec<String>,
     /// Whether to enable the OFP network layer.
     pub network_enabled: bool,
     /// Default LLM provider configuration.
@@ -1774,6 +1784,17 @@ pub struct KernelConfig {
     /// require a `Authorization: Bearer <key>` header.
     /// If empty, the API is unauthenticated (local development only).
     pub api_key: String,
+    /// When `true` AND `api_key` is configured, the dashboard read-endpoint
+    /// allowlist is collapsed to just static assets, OAuth entry points, and
+    /// `/api/health*`. Every other GET (agents, config, budget, sessions,
+    /// approvals, hands, skills, workflows, …) requires a valid bearer token.
+    ///
+    /// Default is `false` to preserve the pre-flag behaviour where the
+    /// unauthenticated dashboard SPA could render before the user supplied
+    /// credentials. Operators exposing the daemon beyond loopback should
+    /// enable this to stop remote enumeration of agents, config, and spend.
+    #[serde(default)]
+    pub require_auth_for_reads: bool,
     /// Hex-encoded Ed25519 public keys (32 bytes → 64 hex chars) allowed to
     /// sign agent manifests. `verify_signed_manifest` requires the envelope's
     /// `signer_public_key` to be on this list before accepting a signature —
@@ -3158,6 +3179,12 @@ pub struct McpServerConfigEntry {
     /// Each entry is `"Header-Name: value"` (e.g., `"Authorization: Bearer <token>"`).
     #[serde(default)]
     pub headers: Vec<String>,
+    /// Optional OAuth configuration for this MCP server.
+    // `skip_serializing_if` is load-bearing: `upsert_mcp_server_config` goes
+    // serde_json → TOML, and the null round-trip writes `oauth = ""` which
+    // fails to deserialize back into `Option<McpOAuthConfig>` on reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
 }
 
 fn default_mcp_timeout() -> u64 {
@@ -3250,6 +3277,41 @@ pub enum McpTransportEntry {
     },
 }
 
+/// Optional OAuth configuration for an MCP server.
+///
+/// Used as fallback when the server doesn't support `.well-known` discovery,
+/// or to override specific values from discovery. All fields are optional —
+/// discovery results fill gaps, config values take precedence.
+///
+/// # Example (config.toml)
+///
+/// ```toml
+/// [[mcp_servers]]
+/// name = "custom-server"
+/// transport = { type = "http", url = "https://my-server.com/mcp" }
+///
+/// [mcp_servers.oauth]
+/// auth_url = "https://my-server.com/oauth/authorize"
+/// token_url = "https://my-server.com/oauth/token"
+/// client_id = "my-client-id"
+/// scopes = ["read", "write"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpOAuthConfig {
+    #[serde(default)]
+    pub auth_url: Option<String>,
+    #[serde(default)]
+    pub token_url: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Slack-style user scopes, appended to the authorization URL as
+    /// `&user_scope=...`. Most OAuth servers don't use this.
+    #[serde(default)]
+    pub user_scopes: Vec<String>,
+}
+
 /// A2A (Agent-to-Agent) protocol configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -3337,6 +3399,7 @@ impl Default for KernelConfig {
             network: NetworkConfig::default(),
             channels: ChannelsConfig::default(),
             api_key: String::new(),
+            require_auth_for_reads: false,
             trusted_manifest_signers: Vec::new(),
             dashboard_user: String::new(),
             dashboard_pass: String::new(),
@@ -3398,6 +3461,7 @@ impl Default for KernelConfig {
             plugins: PluginsConfig::default(),
             registry: RegistryConfig::default(),
             cors_origin: Vec::new(),
+            trusted_hosts: Vec::new(),
             privacy: PrivacyConfig::default(),
             strict_config: false,
             qwen_code_path: None,

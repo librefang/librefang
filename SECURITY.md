@@ -59,7 +59,17 @@ LibreFang implements defense-in-depth with the following security controls:
 - **Path traversal protection**: `safe_resolve_path()` / `safe_resolve_parent()` on all file operations
 - **SSRF protection**: Private IP blocking, DNS resolution checks, cloud metadata endpoint filtering
 - **Image validation**: Media type whitelist (png/jpeg/gif/webp), 5MB size limit
-- **Prompt injection scanning**: Skill content scanned for override attempts and data exfiltration
+- **Prompt injection heuristics** *(best-effort, not a security boundary)*: Skill content is
+  scanned for a short hard-coded list of English override phrases and exfiltration keywords
+  (`ignore previous instructions`, `exfiltrate`, `post to https`, …) via case-insensitive
+  substring match. Matches emit warnings and block installation of ClawHub skills whose
+  `prompt_context` contains a *critical* pattern. This is a warning layer for obviously
+  malicious content, **not** a defence against a motivated attacker: Unicode homoglyphs,
+  zero-width separators, line-split keywords, Base64/other encodings, markdown/link
+  obfuscation, and non-English phrasing all bypass it. The actual runtime safety of
+  installed skills comes from the capability system and the WASM / subprocess sandbox
+  (see **Runtime Isolation**), which bound what a skill can do regardless of what its
+  prompt text says.
 
 ### Cryptographic Security
 - **Ed25519 signed manifests**: Agent identity verification
