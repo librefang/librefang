@@ -4447,16 +4447,18 @@ mod tests {
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
         let allow = [
-            "silent_response.rs",  // canonical detector + tests
-            "agent_loop.rs",       // heartbeat back-write [no reply needed]
-            "session_repair.rs",   // delegates to canonical detector
-            "reply_directives.rs", // back-compat parse-through test
-            "prompt_builder.rs",   // post-rewrite prompt mentions internal token
-            "claude_code.rs",      // driver-side stream suppression (cycle barrier)
-            "agent.rs",            // librefang-types: doc comment only
-            "channel_bridge.rs",   // librefang-api: doc comment, consumes silent flag
-            "agents.rs",           // librefang-api routes: doc comment only
-            "ws.rs",               // librefang-api ws: doc comment only
+            "silent_response.rs",      // canonical detector + tests
+            "agent_loop.rs",           // heartbeat back-write [no reply needed]
+            "session_repair.rs",       // delegates to canonical detector
+            "reply_directives.rs",     // back-compat parse-through test
+            "prompt_builder.rs",       // post-rewrite prompt mentions internal token
+            "claude_code.rs",          // driver-side stream suppression (cycle barrier)
+            "agent.rs",                // librefang-types: doc comment only
+            "channel_bridge.rs",       // librefang-api: doc comment, consumes silent flag
+            "agents.rs",               // librefang-api routes: doc comment only
+            "ws.rs",                   // librefang-api ws: doc comment only
+            "purge_sentinels.rs", // CLI binary that *removes* the literal — delegates to canonical detector
+            "purge_sentinels_test.rs", // fixtures for the CLI
         ];
         let offenders: Vec<&str> = stdout
             .lines()
