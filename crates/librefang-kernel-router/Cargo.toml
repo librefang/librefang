@@ -14,3 +14,7 @@ regex-lite = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
 toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+librefang-runtime = { path = "../librefang-runtime" }
