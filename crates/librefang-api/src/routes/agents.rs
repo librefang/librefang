@@ -1264,6 +1264,7 @@ pub async fn send_message(
                     memories_used: result.memories_used,
                     memory_conflicts: result.memory_conflicts,
                     thinking: thinking_trace,
+                    owner_notice: result.owner_notice,
                 })),
             )
         }
@@ -1895,6 +1896,10 @@ pub async fn send_message_stream(
                             "phase": phase,
                             "detail": detail,
                         }))
+                        .unwrap_or_else(|_| Event::default().data("error")),
+                    StreamEvent::OwnerNotice { text } => Event::default()
+                        .event("owner_notice")
+                        .json_data(serde_json::json!({ "text": text }))
                         .unwrap_or_else(|_| Event::default().data("error")),
                     _ => Event::default().comment("skip"),
                 });

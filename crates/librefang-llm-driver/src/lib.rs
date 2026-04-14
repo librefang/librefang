@@ -164,6 +164,11 @@ pub enum StreamEvent {
         result_preview: String,
         is_error: bool,
     },
+    /// §A — Owner-side private notice produced by the `notify_owner` tool
+    /// during a streaming turn. Emitted by the agent loop (not LLM drivers).
+    /// Channel-bridge consumers route this to the owner's DM (e.g. WhatsApp
+    /// gateway → OWNER_JID) instead of the source chat.
+    OwnerNotice { text: String },
 }
 
 /// Trait for LLM drivers.
