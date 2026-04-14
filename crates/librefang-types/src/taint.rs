@@ -528,6 +528,57 @@ mod tests {
     }
 
     #[test]
+    fn test_check_outbound_text_blocks_credit_card_for_mcp_sink() {
+        // Cover the credit_card_regex path that was previously untested.
+        // Sample numbers are well-known test BINs (Visa/MC/Amex/Discover
+        // test numbers from Stripe docs) so they match the brand BIN
+        // ranges in the regex but are not real cards.
+        let sink = TaintSink::mcp_tool_call();
+        for cc in [
+            "4111 1111 1111 1111", // Visa, spaced
+            "4111-1111-1111-1111", // Visa, dashed
+            "5500 0000 0000 0004", // Mastercard
+            "340000000000009",     // Amex (15 digits)
+            "6011 0000 0000 0004", // Discover
+        ] {
+            assert!(
+                check_outbound_text_violation(cc, &sink).is_some(),
+                "credit card payload must be blocked for mcp sink: {cc:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_outbound_text_blocks_ssn_for_mcp_sink() {
+        // Cover the ssn_regex path. Note the regex is intentionally
+        // permissive (any 9-digit run with optional dashes/spaces) —
+        // that's a documented false-positive trade-off, not a bug.
+        let sink = TaintSink::mcp_tool_call();
+        for ssn in ["123-45-6789", "123 45 6789", "123456789"] {
+            assert!(
+                check_outbound_text_violation(ssn, &sink).is_some(),
+                "ssn-shaped payload must be blocked for mcp sink: {ssn:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_outbound_text_tokenish_mixed_skips_pii_check() {
+        // Long mixed-alnum tokens (without '@', without whitespace) are
+        // excluded from PII regex evaluation by the tokenish_mixed
+        // early-out, so a benign opaque ID that happens to embed a
+        // 9-digit run must NOT trip the SSN regex.
+        // The input is shorter than 32 chars so it doesn't trip the
+        // looks_opaque secret heuristic either — just plain identifier.
+        let sink = TaintSink::mcp_tool_call();
+        let id = "req_abc123456789xyz";
+        assert!(
+            check_outbound_text_violation(id, &sink).is_none(),
+            "tokenish mixed-alnum id must not be PII-flagged"
+        );
+    }
+
+    #[test]
     fn test_declassify_allows_flow() {
         let mut labels = HashSet::new();
         labels.insert(TaintLabel::ExternalNetwork);
