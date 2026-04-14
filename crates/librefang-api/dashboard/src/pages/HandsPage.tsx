@@ -1096,7 +1096,7 @@ function ActiveHandChip({
 
   return (
     <div
-      className={`group relative flex flex-col gap-2 p-3 rounded-2xl border cursor-pointer transition-colors shrink-0 w-[260px] ${
+      className={`group relative flex flex-col gap-2 p-3 rounded-2xl border cursor-pointer transition-colors shrink-0 w-[320px] sm:w-[360px] ${
         warnState
           ? "border-warning/40 bg-warning/[0.06] hover:border-warning/60"
           : "border-success/40 bg-success/[0.06] hover:border-success/60"
