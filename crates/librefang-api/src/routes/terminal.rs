@@ -106,7 +106,8 @@ impl fmt::Display for ServerMessage {
             }
             ServerMessage::Output { data, binary } => {
                 let preview = if data.len() > 32 {
-                    format!("{}...", &data[..32])
+                    let truncated: String = data.chars().take(32).collect();
+                    format!("{truncated}...")
                 } else {
                     data.clone()
                 };
@@ -165,7 +166,12 @@ pub async fn terminal_ws(
 
     let trust_proxy_headers = cfg.terminal.trust_proxy_headers;
     let listen_port = cfg.listen_port();
-    if let Err(reason) = validate_ws_origin(&headers, listen_port, &cfg.terminal.allowed_origins) {
+    if let Err(reason) = validate_ws_origin(
+        &headers,
+        listen_port,
+        &cfg.terminal.allowed_origins,
+        cfg.terminal.allow_remote,
+    ) {
         if !cfg.terminal.allow_remote {
             warn!(
                 ip = %locality.source_ip,
@@ -231,12 +237,13 @@ pub async fn terminal_ws(
             );
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         } else if locality.is_local() {
-            if trust_proxy_headers {
+            if trust_proxy_headers && !locality.is_proxied {
                 warn!(
                     ip = %locality.source_ip,
                     proxied = locality.is_proxied,
-                    "Terminal local_bypass granted despite trust_proxy_headers being enabled — connection may be proxied"
+                    "Terminal WebSocket rejected — loopback connection without proxy headers but trust_proxy_headers is enabled; refusing local_bypass"
                 );
+                return axum::http::StatusCode::FORBIDDEN.into_response();
             }
             auth_method = "local_bypass";
         } else {
@@ -257,12 +264,13 @@ pub async fn terminal_ws(
         );
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     } else if locality.is_local() {
-        if trust_proxy_headers {
+        if trust_proxy_headers && !locality.is_proxied {
             warn!(
                 ip = %locality.source_ip,
                 proxied = locality.is_proxied,
-                "Terminal local_bypass granted despite trust_proxy_headers being enabled — connection may be proxied"
+                "Terminal WebSocket rejected — loopback connection without proxy headers but trust_proxy_headers is enabled; refusing local_bypass"
             );
+            return axum::http::StatusCode::FORBIDDEN.into_response();
         }
         auth_method = "local_bypass";
     } else if cfg.terminal.allow_remote {
@@ -708,33 +716,39 @@ mod tests {
 
 #[cfg(test)]
 mod terminal_ws_auth_tests {
-    use crate::ws::validate_ws_origin;
+    use std::net::SocketAddr;
+
+    use crate::ws::{detect_connection_locality, validate_ws_origin};
     use axum::http::HeaderMap;
 
     #[test]
     fn validate_ws_origin_allows_matching_port_on_localhost() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://localhost:4545".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &[]).is_ok());
+        assert!(validate_ws_origin(&headers, 4545, &[], false).is_ok());
     }
 
     #[test]
     fn validate_ws_origin_rejects_mismatched_port() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://localhost:8080".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &[]).is_err());
+        assert!(validate_ws_origin(&headers, 4545, &[], false).is_err());
     }
 
     #[test]
-    fn validate_ws_origin_wildcard_allows_any_origin() {
+    fn validate_ws_origin_wildcard_requires_allow_remote() {
+        // Wildcard + allow_remote=false → rejected
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://evil.example:9999".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &["*".to_string()]).is_ok());
+        assert!(validate_ws_origin(&headers, 4545, &["*".to_string()], false).is_err());
+
+        // Wildcard + allow_remote=true → allowed
+        assert!(validate_ws_origin(&headers, 4545, &["*".to_string()], true).is_ok());
 
         // Also works with https
         let mut headers2 = HeaderMap::new();
         headers2.insert("origin", "https://other.host:1234".parse().unwrap());
-        assert!(validate_ws_origin(&headers2, 4545, &["*".to_string()]).is_ok());
+        assert!(validate_ws_origin(&headers2, 4545, &["*".to_string()], true).is_ok());
     }
 
     #[test]
@@ -742,7 +756,7 @@ mod terminal_ws_auth_tests {
         let allowed = vec!["https://my.domain.com".to_string()];
         let mut headers = HeaderMap::new();
         headers.insert("origin", "https://my.domain.com".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &allowed).is_ok());
+        assert!(validate_ws_origin(&headers, 4545, &allowed, false).is_ok());
     }
 
     #[test]
@@ -750,6 +764,102 @@ mod terminal_ws_auth_tests {
         let allowed = vec!["https://my.domain.com".to_string()];
         let mut headers = HeaderMap::new();
         headers.insert("origin", "https://evil.example".parse().unwrap());
-        assert!(validate_ws_origin(&headers, 4545, &allowed).is_err());
+        assert!(validate_ws_origin(&headers, 4545, &allowed, false).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Combined auth decision chain tests
+    // These test the locality + auth decision logic that mirrors terminal_ws.
+    // The handler itself is hard to unit-test without full AppState, so we test
+    // the decision primitives in combination.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn locality_local_no_proxy_is_local() {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = HeaderMap::new();
+        let locality = detect_connection_locality(&addr, &headers);
+        assert!(locality.is_local());
+        assert!(locality.is_loopback);
+        assert!(!locality.is_proxied);
+    }
+
+    #[test]
+    fn locality_loopback_with_proxy_header_not_local() {
+        // trust_proxy_headers=true scenario: loopback + XFF = not local → denied local_bypass
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "8.8.8.8".parse().unwrap());
+        let locality = detect_connection_locality(&addr, &headers);
+        assert!(!locality.is_local()); // loopback but proxied → not local
+        assert!(locality.is_loopback);
+        assert!(locality.is_proxied);
+    }
+
+    #[test]
+    fn origin_localhost_same_port_passes() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://localhost:4545".parse().unwrap());
+        assert!(validate_ws_origin(&headers, 4545, &[], false).is_ok());
+    }
+
+    #[test]
+    fn origin_external_same_port_rejected_without_allowed() {
+        // This is the CSRF fix: external host on same port → rejected
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://attacker.example:4545".parse().unwrap());
+        assert!(validate_ws_origin(&headers, 4545, &[], false).is_err());
+    }
+
+    #[test]
+    fn origin_external_allowed_via_explicit_entry() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://myserver.lan:4545".parse().unwrap());
+        assert!(validate_ws_origin(
+            &headers,
+            4545,
+            &["http://myserver.lan:4545".to_string()],
+            false
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn wildcard_origin_rejected_without_allow_remote() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://evil.example:9999".parse().unwrap());
+        // wildcard + allow_remote=false → rejected
+        assert!(validate_ws_origin(&headers, 4545, &["*".to_string()], false).is_err());
+    }
+
+    #[test]
+    fn wildcard_origin_allowed_with_allow_remote() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://evil.example:9999".parse().unwrap());
+        // wildcard + allow_remote=true → allowed
+        assert!(validate_ws_origin(&headers, 4545, &["*".to_string()], true).is_ok());
+    }
+
+    #[test]
+    fn locality_remote_no_proxy_not_local() {
+        let addr: SocketAddr = "8.8.8.8:12345".parse().unwrap();
+        let headers = HeaderMap::new();
+        let locality = detect_connection_locality(&addr, &headers);
+        assert!(!locality.is_local());
+        assert!(!locality.is_loopback);
+    }
+
+    #[test]
+    fn origin_ipv6_loopback_same_port_passes() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://[::1]:4545".parse().unwrap());
+        assert!(validate_ws_origin(&headers, 4545, &[], false).is_ok());
+    }
+
+    #[test]
+    fn origin_127_0_0_1_same_port_passes() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://127.0.0.1:4545".parse().unwrap());
+        assert!(validate_ws_origin(&headers, 4545, &[], false).is_ok());
     }
 }

@@ -5656,11 +5656,11 @@ impl Default for LinkedInConfig {
 ///
 /// Controls which clients may connect to the interactive terminal (WebSocket)
 /// and how locality is determined.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
     /// Master switch — set to false to disable the terminal entirely.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enabled: bool,
 
     /// Additional allowed WebSocket origins beyond auto-detected localhost.
@@ -5678,17 +5678,6 @@ pub struct TerminalConfig {
     /// a reverse proxy. Default: false.
     #[serde(default)]
     pub trust_proxy_headers: bool,
-}
-
-impl Default for TerminalConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            allowed_origins: Vec::new(),
-            allow_remote: false,
-            trust_proxy_headers: false,
-        }
-    }
 }
 
 #[cfg(test)]
