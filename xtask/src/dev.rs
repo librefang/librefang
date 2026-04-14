@@ -414,8 +414,27 @@ fn run_watch(
         let _ = Command::new("stty").arg("sane").status();
     });
 
+    // Watch the Rust workspace only. The dashboard lives under
+    // `crates/librefang-api/dashboard/` but has its own vite HMR via
+    // `pnpm dev`, so changes there must NOT trigger a Rust rebuild +
+    // daemon restart. Ignore the dashboard directory and any editor
+    // scratch files that could otherwise bounce cargo-watch in a loop.
     let cargo_watch_status = Command::new("cargo")
-        .args(["watch", "--watch", "crates", "-s", &rebuild_and_restart])
+        .args([
+            "watch",
+            "--watch",
+            "crates",
+            "--ignore",
+            "crates/librefang-api/dashboard/**",
+            "--ignore",
+            "**/node_modules/**",
+            "--ignore",
+            "**/target/**",
+            "--ignore",
+            "**/*.md",
+            "-s",
+            &rebuild_and_restart,
+        ])
         .current_dir(root)
         .status()?;
 
