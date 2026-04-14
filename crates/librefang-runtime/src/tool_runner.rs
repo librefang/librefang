@@ -3051,6 +3051,11 @@ async fn tool_channel_send(
 
     if let Some(url) = image_url {
         let caption = input["message"].as_str().filter(|s| !s.is_empty());
+        if let Some(c) = caption {
+            if let Some(violation) = check_taint_outbound_text(c, &TaintSink::agent_message()) {
+                return Err(violation);
+            }
+        }
         return kh
             .send_channel_media(&channel, recipient, "image", url, caption, None, thread_id)
             .await;
@@ -3059,6 +3064,11 @@ async fn tool_channel_send(
     if let Some(url) = file_url {
         let caption = input["message"].as_str().filter(|s| !s.is_empty());
         let filename = input["filename"].as_str();
+        if let Some(c) = caption {
+            if let Some(violation) = check_taint_outbound_text(c, &TaintSink::agent_message()) {
+                return Err(violation);
+            }
+        }
         return kh
             .send_channel_media(
                 &channel, recipient, "file", url, caption, filename, thread_id,
@@ -3137,6 +3147,17 @@ async fn tool_channel_send(
 
         let poll_options = parse_poll_options(input.get("poll_options"))?;
 
+        if let Some(violation) =
+            check_taint_outbound_text(poll_question, &TaintSink::agent_message())
+        {
+            return Err(violation);
+        }
+        for opt in &poll_options {
+            if let Some(violation) = check_taint_outbound_text(opt, &TaintSink::agent_message()) {
+                return Err(violation);
+            }
+        }
+
         let is_quiz = input
             .get("poll_is_quiz")
             .and_then(|v| v.as_bool())
@@ -3146,6 +3167,11 @@ async fn tool_channel_send(
             .and_then(|v| v.as_u64())
             .map(|n| n as u8);
         let explanation = input.get("poll_explanation").and_then(|v| v.as_str());
+        if let Some(exp) = explanation {
+            if let Some(violation) = check_taint_outbound_text(exp, &TaintSink::agent_message()) {
+                return Err(violation);
+            }
+        }
 
         // Validate quiz mode requirements
         if is_quiz {
@@ -3205,6 +3231,11 @@ async fn tool_channel_send(
     } else {
         message.to_string()
     };
+
+    if let Some(violation) = check_taint_outbound_text(&final_message, &TaintSink::agent_message())
+    {
+        return Err(violation);
+    }
 
     kh.send_channel_message(&channel, recipient, &final_message, thread_id)
         .await
@@ -3356,6 +3387,15 @@ async fn tool_a2a_send(
     } else {
         return Err("Missing 'agent_url' or 'agent_name' parameter".to_string());
     };
+
+    // Taint sink: block secrets from being exfiltrated to an external A2A peer.
+    if let Some(violation) = check_taint_outbound_text(message, &TaintSink::agent_message()) {
+        return Err(violation);
+    }
+    // Also gate the URL itself against query-string credential leaks.
+    if let Some(violation) = check_taint_net_fetch(&url) {
+        return Err(violation);
+    }
 
     let session_id = input["session_id"].as_str();
     let client = crate::a2a::A2aClient::new();
@@ -4835,6 +4875,89 @@ mod tests {
         let sink = TaintSink::agent_message();
         let id = "req_0123456789ab";
         assert!(check_taint_outbound_text(id, &sink).is_none());
+    }
+
+    // ── tool_a2a_send / tool_channel_send taint integration ─────────────
+    //
+    // Regression: prior to this patch the taint sink was only enforced
+    // on agent_send and web_fetch. tool_a2a_send and tool_channel_send
+    // were exfiltration sinks with NO check at all.
+
+    #[tokio::test]
+    async fn test_tool_a2a_send_blocks_secret_in_message() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::new(AtomicUsize::new(0)),
+        });
+        let input = serde_json::json!({
+            "agent_url": "https://example.com/a2a",
+            "message": "leaking api_key=sk-abcdefghijklmnop now",
+        });
+        let err = tool_a2a_send(&input, Some(&kernel))
+            .await
+            .expect_err("a2a_send must reject tainted message");
+        assert!(
+            err.contains("taint") || err.contains("violation"),
+            "expected taint violation, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_channel_send_blocks_secret_in_text_message() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::new(AtomicUsize::new(0)),
+        });
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "@user",
+            "message": "here is the api_key=sk-abcdefghijklmnop",
+        });
+        let err = tool_channel_send(&input, Some(&kernel), None)
+            .await
+            .expect_err("channel_send must reject tainted message");
+        assert!(
+            err.contains("taint") || err.contains("violation"),
+            "expected taint violation, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_channel_send_blocks_secret_in_image_caption() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::new(AtomicUsize::new(0)),
+        });
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "@user",
+            "image_url": "https://example.com/cat.png",
+            "message": "see attached. token=sk-abcdefghijklmnop",
+        });
+        let err = tool_channel_send(&input, Some(&kernel), None)
+            .await
+            .expect_err("image caption must be sink-checked");
+        assert!(
+            err.contains("taint") || err.contains("violation"),
+            "expected taint violation, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_channel_send_blocks_secret_in_poll_question() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::new(AtomicUsize::new(0)),
+        });
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "@user",
+            "poll_question": "guess my api_key=sk-abcdefghijklmnop",
+            "poll_options": ["yes", "no"],
+        });
+        let err = tool_channel_send(&input, Some(&kernel), None)
+            .await
+            .expect_err("poll question must be sink-checked");
+        assert!(
+            err.contains("taint") || err.contains("violation"),
+            "expected taint violation, got: {err}"
+        );
     }
 
     struct ApprovalKernel {
