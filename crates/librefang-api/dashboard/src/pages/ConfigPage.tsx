@@ -72,9 +72,11 @@ function ConfigFieldInput({
 
   if (fieldType === "select" && options) {
     const strOptions = options.map((o) => (typeof o === "string" ? o : o.id));
+    // Backend may return enum values in different casing (e.g. "Stable" vs "stable")
+    const rawValue = String(value ?? "");
+    const matched = strOptions.find((o) => o.toLowerCase() === rawValue.toLowerCase()) ?? "";
     return (
-      <select value={String(value ?? "")} onChange={(e) => onChange(e.target.value)} className={inputClass}>
-        <option value="">—</option>
+      <select value={matched} onChange={(e) => onChange(e.target.value)} className={inputClass}>
         {strOptions.map((o) => <option key={o} value={o}>{o}</option>)}
       </select>
     );
@@ -83,7 +85,12 @@ function ConfigFieldInput({
   if (fieldType === "number") {
     return (
       <input type="number" value={value != null ? String(value) : ""}
-        onChange={(e) => { const v = e.target.value; onChange(v === "" ? null : Number(v)); }}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === "") { onChange(null); return; }
+          const n = Number(v);
+          if (!Number.isNaN(n)) onChange(n);
+        }}
         className={inputClass} />
     );
   }
@@ -133,9 +140,22 @@ function SectionCard({
   const saveMutation = useMutation({
     mutationFn: ({ path, value }: { path: string; value: unknown }) => setConfigValue(path, value),
     onSuccess: (data, variables) => {
+      // Check for reload failure (backend returns 200 with non-"ok" status)
+      const reloadFailed = data.status !== "ok" && data.status !== "saved";
+      if (reloadFailed) {
+        setSaveStatus({ path: variables.path, ok: false, msg: t("config.saved_reload_failed", "Saved but reload failed") });
+        setTimeout(() => setSaveStatus(null), 5000);
+        return;
+      }
       const msg = data.restart_required ? t("config.saved_restart", "Saved (restart required)") : t("common.saved", "Saved");
       setSaveStatus({ path: variables.path, ok: true, msg });
-      setPendingChanges((p) => { const next = { ...p }; delete next[variables.path]; return next; });
+      // Only clear pending if user hasn't made a newer edit while save was in-flight
+      setPendingChanges((p) => {
+        if (!(variables.path in p) || p[variables.path] === variables.value) {
+          const next = { ...p }; delete next[variables.path]; return next;
+        }
+        return p; // newer edit exists, keep it
+      });
       queryClient.invalidateQueries({ queryKey: ["config", "full"] });
       setTimeout(() => setSaveStatus(null), data.restart_required ? 5000 : 2000);
     },

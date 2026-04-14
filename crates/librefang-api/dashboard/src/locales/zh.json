@@ -1054,7 +1054,8 @@
     "cat_security": "安全",
     "cat_network": "网络",
     "cat_infra": "基础设施",
-    "saved_restart": "已保存（需要重启）"
+    "saved_restart": "已保存（需要重启）",
+    "saved_reload_failed": "已保存但重载失败"
   },
   "chat": {
     "title": "对话",

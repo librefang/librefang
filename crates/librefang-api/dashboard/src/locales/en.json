@@ -1079,7 +1079,8 @@
     "cat_security": "Security",
     "cat_network": "Network",
     "cat_infra": "Infrastructure",
-    "saved_restart": "Saved (restart required)"
+    "saved_restart": "Saved (restart required)",
+    "saved_reload_failed": "Saved but reload failed"
   },
   "chat": {
     "title": "Chat",
