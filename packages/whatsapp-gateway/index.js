@@ -19,6 +19,7 @@ const {
   resolvePeerId,
   deriveOwnerJids,
 } = require('./lib/identity');
+const { buildSessionKey, channelTypeForChat } = require('./lib/session-key');
 
 // ---------------------------------------------------------------------------
 // Persisted LID cache (ID-02, Phase 4 §B)
@@ -41,6 +42,25 @@ const LID_PERSIST_ENABLED = process.env.LIBREFANG_LID_PERSIST !== 'off';
 // librefang. Flag `LIBREFANG_ECHO_TRACKER=off` disables end-to-end (no-op).
 const ECHO_TRACKER_ENABLED = process.env.LIBREFANG_ECHO_TRACKER !== 'off';
 const echoTracker = new EchoTracker(100);
+
+// Phase 3 §B (EB-02) — gate the `forward_dispatch` structured log.
+// Default ON ('verbose'); set LIBREFANG_DISPATCH_LOG to any other value
+// (e.g. 'off') to silence the diagnostic line without redeploy.
+const DISPATCH_LOG_VERBOSE = (process.env.LIBREFANG_DISPATCH_LOG || 'verbose') === 'verbose';
+
+// Phase 3 §B — CS-01 regression guard. Runs once at boot (and is exported
+// for unit tests). Two distinct chatJids must yield two distinct
+// channel_type strings; otherwise the gateway-to-kernel per-conversation
+// isolation contract is broken and we refuse to boot.
+function runDispatchSelfTest(channelTypeFn) {
+  const fn = channelTypeFn || channelTypeForChat;
+  const a = fn('111@s.whatsapp.net');
+  const b = fn('222@s.whatsapp.net');
+  if (a === b || !a.startsWith('whatsapp:') || !b.startsWith('whatsapp:')) {
+    return { ok: false, reason: `channel_type regression: a=${a} b=${b}` };
+  }
+  return { ok: true };
+}
 
 // ---------------------------------------------------------------------------
 // SQLite Message Store (better-sqlite3)
@@ -2343,7 +2363,24 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
   // Per-conversation session isolation: include chat JID in channel_type
   // so the kernel creates separate sessions for each WhatsApp conversation.
   // CS-01: chatJid has already been validated non-empty at function entry.
-  const channelType = `whatsapp:${chatJid}`;
+  // Phase 3 §B — centralized in channelTypeForChat for single-sourcing.
+  const channelType = channelTypeForChat(chatJid);
+
+  // Phase 3 §B (EB-02) — single structured log per dispatch; allows
+  // reconstructing (agent, peer, chat) tuple from logs alone. Retry recursion
+  // re-enters this function, which is the desired diagnostic behavior.
+  if (DISPATCH_LOG_VERBOSE) {
+    console.log(JSON.stringify({
+      event: 'forward_dispatch',
+      session_key: buildSessionKey(cachedAgentId, phone, chatJid),
+      channel_type: channelType,
+      phone,
+      push_name: pushName,
+      is_group: !!isGroup,
+      was_mentioned: !!wasMentioned,
+    }));
+  }
+
   const payload = {
     message: fullMessage,
     channel_type: channelType,
@@ -2486,7 +2523,22 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
   const fullMessage = systemPrefix ? systemPrefix + text : text;
 
   // CS-01: chatJid has already been validated non-empty at function entry.
-  const channelType = `whatsapp:${chatJid}`;
+  // Phase 3 §B — centralized in channelTypeForChat for single-sourcing.
+  const channelType = channelTypeForChat(chatJid);
+
+  // Phase 3 §B (EB-02) — streaming-path dispatch log parity.
+  if (DISPATCH_LOG_VERBOSE) {
+    console.log(JSON.stringify({
+      event: 'forward_dispatch',
+      session_key: buildSessionKey(cachedAgentId, phone, chatJid),
+      channel_type: channelType,
+      phone,
+      push_name: pushName,
+      is_group: !!isGroup,
+      was_mentioned: !!wasMentioned,
+    }));
+  }
+
   const payload = {
     message: fullMessage,
     channel_type: channelType,
@@ -3102,6 +3154,19 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (require.main === module) {
+// Phase 3 §B — CS-01 regression guard. Fail fast if the chatJid-to-
+// channel_type contract has silently degraded (e.g. future refactor
+// collapses both chats to bare `whatsapp`). Runs before we accept any
+// socket traffic.
+{
+  const _selfTest = runDispatchSelfTest();
+  if (!_selfTest.ok) {
+    console.error('[gateway] FATAL dispatch_self_test failed:', _selfTest.reason);
+    process.exit(1);
+  }
+  console.log(JSON.stringify({ event: 'dispatch_self_test', ok: true }));
+}
+
 server.listen(PORT, '127.0.0.1', async () => {
   console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
   console.log(`[gateway] LibreFang URL: ${LIBREFANG_URL}`);
@@ -3213,4 +3278,7 @@ module.exports = {
   sessionRecoveryMap,
   SESSION_RECOVERY_COOLDOWN_MS,
   SESSION_RECOVERY_MAX_ATTEMPTS,
+  runDispatchSelfTest,
+  channelTypeForChat,
+  buildSessionKey,
 };
