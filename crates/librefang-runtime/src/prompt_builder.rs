@@ -299,9 +299,9 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         sections.push(build_peer_agents_section(&ctx.agent_name, &ctx.peer_agents));
     }
 
-    // Section 9.6 — Canali di uscita (§A — only when notify_owner granted)
+    // Section 9.6 — Output Channels (§A — only when notify_owner granted)
     if ctx.granted_tools.iter().any(|t| t == "notify_owner") {
-        sections.push(CANALI_DI_USCITA_SECTION.to_string());
+        sections.push(OUTPUT_CHANNELS_SECTION.to_string());
     }
 
     // Section 10 — Safety & Oversight (skip for subagents)
@@ -916,16 +916,14 @@ const SAFETY_SECTION: &str = "\
 - When in doubt, ask the user.";
 
 /// §A — Output channels section, injected only when the `notify_owner` tool
-/// is granted to the agent. Italian copy because the primary deployment
-/// (whatsapp-gateway / Beeper) speaks Italian; safe to translate later.
-/// The wording explicitly forbids the historic Beeper-leak pattern
-/// ("Signore, ..." in a group) that motivated phase 02.
-const CANALI_DI_USCITA_SECTION: &str = "\
-## Canali di uscita
-- Risposta pubblica: il testo che scrivi nel turno corrente va alla chat sorgente (DM o gruppo).
-- Messaggio privato al Signore: chiama lo strumento `notify_owner(reason, summary)`. Il contenuto NON apparirà nella chat sorgente.
-- In un gruppo, NON scrivere mai \"Signore, ...\" o frasi rivolte direttamente al proprietario come risposta pubblica: usa `notify_owner` invece.
-- Quando hai inviato una `notify_owner` non ripetere il `summary` nella risposta pubblica.";
+/// is granted to the agent. The wording explicitly forbids the historic
+/// owner-narrative-in-group leak pattern that motivated phase 02.
+const OUTPUT_CHANNELS_SECTION: &str = "\
+## Output Channels
+- Public reply: the text you write in the current turn goes to the source chat (DM or group).
+- Private message to the owner: call the `notify_owner(reason, summary)` tool. The content will NOT appear in the source chat.
+- In a group, NEVER write narrative addressed directly to the owner (by honorific or name) as a public reply: use `notify_owner` instead.
+- When you have sent a `notify_owner`, do not repeat the `summary` in the public reply.";
 
 /// Static operational guidelines (replaces STABILITY_GUIDELINES).
 const OPERATIONAL_GUIDELINES: &str = "\
@@ -1885,7 +1883,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // §A — Canali di uscita injection
+    // §A — Output Channels injection
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1893,13 +1891,13 @@ mod tests {
         let mut ctx = basic_ctx();
         ctx.granted_tools.push("notify_owner".to_string());
         let prompt = build_system_prompt(&ctx);
-        assert!(prompt.contains("## Canali di uscita"));
+        assert!(prompt.contains("## Output Channels"));
         assert!(prompt.contains("notify_owner"));
     }
 
     #[test]
     fn prompt_builder_canali_uscita_absent_without_notify_owner() {
         let prompt = build_system_prompt(&basic_ctx());
-        assert!(!prompt.contains("## Canali di uscita"));
+        assert!(!prompt.contains("## Output Channels"));
     }
 }
