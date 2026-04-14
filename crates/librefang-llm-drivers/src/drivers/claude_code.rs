@@ -295,8 +295,8 @@ impl ClaudeCodeDriver {
     /// daemon's existing `/mcp` endpoint (see
     /// `librefang-api/src/routes/network.rs::mcp_http`).
     fn write_mcp_config(bridge: &McpBridgeConfig) -> std::io::Result<PathBuf> {
-        let path = std::env::temp_dir()
-            .join(format!("librefang-mcp-{}.json", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("librefang-mcp-{}.json", uuid::Uuid::new_v4()));
         let base = bridge.base_url.trim_end_matches('/');
         let url = format!("{base}/mcp");
 
