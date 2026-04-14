@@ -1395,8 +1395,6 @@ export function ChatPage() {
       showHandAgents ? "1" : "0",
     );
   }, [showHandAgents]);
-  // Toggle setter is wired into the sidebar toggle pill in the next commit.
-  void setShowHandAgents;
 
   const agentsQuery = useQuery({
     queryKey: ["agents", "list", "chat", showHandAgents],
@@ -1616,8 +1614,19 @@ export function ChatPage() {
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
         {/* Left sidebar - Agent list */}
         <aside className="hidden md:flex w-64 flex-shrink-0 border-r border-border-subtle bg-main flex-col">
-          <div className="p-4 border-b border-border-subtle">
+          <div className="p-4 border-b border-border-subtle space-y-2">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
+            <button
+              onClick={() => setShowHandAgents((value) => !value)}
+              aria-pressed={showHandAgents}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
+                showHandAgents
+                  ? "border-brand/30 bg-brand/10 text-brand"
+                  : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+              }`}
+            >
+              <span>{t("agents.show_hand_agents", { defaultValue: "Show hand agents" })}</span>
+            </button>
           </div>
           <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-thin">
             {picker.standalone.length === 0 && picker.handGroups.length === 0 ? (
