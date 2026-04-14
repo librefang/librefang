@@ -71,6 +71,18 @@ impl OpenAIDriver {
         self.base_url.contains("moonshot") || model.to_lowercase().contains("kimi")
     }
 
+    /// True if this driver instance is pointed at an Ollama-compatible endpoint.
+    ///
+    /// Ollama's OpenAI-compatible `/v1/chat/completions` endpoint accepts a
+    /// top-level `think` boolean (as an extra body param) that controls whether
+    /// reasoning models (qwen3, gpt-oss, deepseek-r1, …) run their chain-of-thought
+    /// phase before answering. Detecting by base_url keeps the mapping local
+    /// without requiring kernel plumbing.
+    fn is_ollama_like(&self) -> bool {
+        let u = self.base_url.to_ascii_lowercase();
+        u.contains("ollama") || u.contains("11434")
+    }
+
     /// True if this model is DeepSeek-reasoner (R1).
     ///
     /// DeepSeek-reasoner returns `reasoning_content` in assistant responses, but
@@ -511,6 +523,23 @@ impl OpenAIDriver {
             (Some(request.max_tokens), None)
         };
 
+        // Ollama-compatible endpoints read a top-level `think: bool` field on the
+        // OpenAI-compat chat completions call. Drive it from the per-call
+        // `thinking` config so the chat UI deep-thinking toggle works end-to-end.
+        // Leave existing caller-supplied `think` values alone.
+        let extra_body = if self.is_ollama_like() {
+            let mut merged = request.extra_body.clone().unwrap_or_default();
+            if !merged.contains_key("think") {
+                merged.insert(
+                    "think".to_string(),
+                    serde_json::Value::Bool(request.thinking.is_some()),
+                );
+            }
+            Some(merged)
+        } else {
+            request.extra_body.clone()
+        };
+
         Ok(OaiRequest {
             model: request.model.clone(),
             messages: oai_messages,
@@ -539,7 +568,7 @@ impl OpenAIDriver {
                 .response_format
                 .as_ref()
                 .and_then(oai_response_format),
-            extra_body: request.extra_body.clone(),
+            extra_body,
         })
     }
 }

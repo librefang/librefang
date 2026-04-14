@@ -449,6 +449,12 @@ async fn handle_text_message(
                 }
             };
 
+            // Per-message toggles from the chat UI.
+            // `thinking`: override deep-thinking for this call (None = manifest default).
+            // `show_thinking`: whether to surface thinking deltas/content to the UI.
+            let thinking_override: Option<bool> = parsed["thinking"].as_bool();
+            let show_thinking: bool = parsed["show_thinking"].as_bool().unwrap_or(true);
+
             // Sanitize inbound user input
             let content = sanitize_user_input(&raw_content);
             if content.is_empty() {
@@ -586,11 +592,12 @@ async fn handle_text_message(
             };
             match state
                 .kernel
-                .send_message_streaming_with_sender_context_and_routing(
+                .send_message_streaming_with_sender_context_routing_and_thinking(
                     agent_id,
                     &content,
                     Some(kernel_handle),
                     &sender_ctx,
+                    thinking_override,
                 )
                 .await
             {
@@ -601,6 +608,7 @@ async fn handle_text_message(
                     let rl = state.kernel.config_ref();
                     let debounce_chars = rl.rate_limit.ws_debounce_chars;
                     let debounce_ms = rl.rate_limit.ws_debounce_ms;
+                    let show_thinking_stream = show_thinking;
                     let stream_task = tokio::spawn(async move {
                         let mut text_buffer = String::new();
                         let far_future = tokio::time::Instant::now() + Duration::from_secs(86400);
@@ -666,9 +674,11 @@ async fn handle_text_message(
                                                 }
 
                                                 // Map event to JSON with verbose filtering
-                                                if let Some(json) =
-                                                    map_stream_event(&ev, vlevel)
-                                                {
+                                                if let Some(json) = map_stream_event(
+                                                    &ev,
+                                                    vlevel,
+                                                    show_thinking_stream,
+                                                ) {
                                                     if send_json(&sender_stream, &json)
                                                         .await
                                                         .is_err()
@@ -732,8 +742,14 @@ async fn handle_text_message(
                                 return;
                             }
 
-                            // Strip <think>...</think> blocks from model output
-                            // (e.g. MiniMax, DeepSeek reasoning tokens)
+                            // Extract reasoning trace (optional) and strip
+                            // <think>...</think> blocks from model output
+                            // (e.g. MiniMax, DeepSeek reasoning tokens).
+                            let thinking_trace = if show_thinking {
+                                extract_think_content(&result.response)
+                            } else {
+                                None
+                            };
                             let cleaned_response = strip_think_tags(&result.response);
 
                             // Guard: ensure we never send an empty response
@@ -785,6 +801,9 @@ async fn handle_text_message(
                             if !result.memory_conflicts.is_empty() {
                                 resp_json["memory_conflicts"] =
                                     serde_json::json!(result.memory_conflicts);
+                            }
+                            if let Some(ref t) = thinking_trace {
+                                resp_json["thinking"] = serde_json::json!(t);
                             }
                             let _ = send_json(sender, &resp_json).await;
                         }
@@ -1079,9 +1098,23 @@ async fn handle_command(
 // ---------------------------------------------------------------------------
 
 /// Map a stream event to a JSON value, applying verbose filtering.
-fn map_stream_event(event: &StreamEvent, verbose: VerboseLevel) -> Option<serde_json::Value> {
+fn map_stream_event(
+    event: &StreamEvent,
+    verbose: VerboseLevel,
+    show_thinking: bool,
+) -> Option<serde_json::Value> {
     match event {
         StreamEvent::TextDelta { .. } => None, // Handled by debounce buffer
+        StreamEvent::ThinkingDelta { text } => {
+            if show_thinking {
+                Some(serde_json::json!({
+                    "type": "thinking_delta",
+                    "content": text,
+                }))
+            } else {
+                None
+            }
+        }
         StreamEvent::ToolUseStart { id, name } => Some(serde_json::json!({
             "type": "tool_start",
             "id": id,
@@ -1346,6 +1379,38 @@ pub fn strip_think_tags(text: &str) -> String {
     }
     result.push_str(remaining);
     result
+}
+
+/// Extract the concatenated content of all `<think>...</think>` blocks from
+/// a model response. Returns `None` when no thinking blocks are present.
+///
+/// Paired with [`strip_think_tags`] so callers can surface the reasoning to
+/// the UI separately from the final answer.
+pub fn extract_think_content(text: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut remaining = text;
+    while let Some(start) = remaining.find("<think>") {
+        let after_open = &remaining[start + 7..]; // 7 = "<think>".len()
+        if let Some(end) = after_open.find("</think>") {
+            let thought = after_open[..end].trim();
+            if !thought.is_empty() {
+                parts.push(thought);
+            }
+            remaining = &after_open[end + 8..]; // 8 = "</think>".len()
+        } else {
+            // Unclosed — take everything after the opener as the thought.
+            let thought = after_open.trim();
+            if !thought.is_empty() {
+                parts.push(thought);
+            }
+            break;
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
 }
 
 // ---------------------------------------------------------------------------

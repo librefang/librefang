@@ -243,6 +243,14 @@ export interface AgentMessageResponse {
   silent?: boolean;
   memories_saved?: string[];
   memories_used?: string[];
+  thinking?: string;
+}
+
+export interface SendAgentMessageOptions {
+  /** Force deep-thinking on/off for this call. Omitted = manifest default. */
+  thinking?: boolean;
+  /** Whether to receive the model's reasoning trace. Defaults to true. */
+  show_thinking?: boolean;
 }
 
 export interface ApiActionResponse {
@@ -823,11 +831,17 @@ export async function loadAgentSession(agentId: string): Promise<AgentSessionRes
 
 export async function sendAgentMessage(
   agentId: string,
-  message: string
+  message: string,
+  options?: SendAgentMessageOptions,
 ): Promise<AgentMessageResponse> {
-  return post<AgentMessageResponse>(`/api/agents/${encodeURIComponent(agentId)}/message`, {
-    message
-  }, LONG_RUNNING_TIMEOUT_MS);
+  const body: Record<string, unknown> = { message };
+  if (options?.thinking !== undefined) body.thinking = options.thinking;
+  if (options?.show_thinking !== undefined) body.show_thinking = options.show_thinking;
+  return post<AgentMessageResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/message`,
+    body,
+    LONG_RUNNING_TIMEOUT_MS,
+  );
 }
 
 export async function listProviders(): Promise<ProviderItem[]> {
