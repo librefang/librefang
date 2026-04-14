@@ -1504,6 +1504,14 @@
     "auth_reauthorize": "Re-authorize",
     "auth_revoke": "Revoke",
     "auth_started": "Authorization started — complete in the new tab",
-    "auth_revoked": "Authorization revoked"
+    "auth_revoked": "Authorization revoked",
+    "tab_my_servers": "My Servers",
+    "tab_registry": "Registry",
+    "registry_subtitle": "Pre-configured MCP server templates from the registry",
+    "registry_empty": "No integration templates available",
+    "registry_empty_desc": "Integration templates will appear after a registry sync.",
+    "registry_installed": "Installed",
+    "registry_add": "Add",
+    "registry_add_success": "Integration added as MCP server"
   }
 }

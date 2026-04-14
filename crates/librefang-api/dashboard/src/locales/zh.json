@@ -1511,6 +1511,14 @@
     "auth_reauthorize": "重新授权",
     "auth_revoke": "撤销",
     "auth_started": "授权已开始 — 请在新标签页中完成",
-    "auth_revoked": "授权已撤销"
+    "auth_revoked": "授权已撤销",
+    "tab_my_servers": "我的服务器",
+    "tab_registry": "Registry",
+    "registry_subtitle": "来自 Registry 的预配置 MCP 服务器模板",
+    "registry_empty": "无可用集成模板",
+    "registry_empty_desc": "集成模板将在 Registry 同步后显示。",
+    "registry_installed": "已安装",
+    "registry_add": "添加",
+    "registry_add_success": "集成已添加为 MCP 服务器"
   }
 }

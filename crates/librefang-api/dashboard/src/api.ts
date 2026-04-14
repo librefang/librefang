@@ -2445,6 +2445,38 @@ export async function listMcpServers(): Promise<McpServersResponse> {
   return get<McpServersResponse>("/api/mcp/servers");
 }
 
+// ── Registry Integrations (available MCP server templates) ────────
+
+export interface IntegrationRequiredEnv {
+  name: string;
+  label: string;
+  help?: string;
+  is_secret?: boolean;
+  get_url?: string;
+}
+
+export interface IntegrationTemplate {
+  id: string;
+  name: string;
+  description: string;
+  icon?: string;
+  category?: string;
+  installed: boolean;
+  tags?: string[];
+  required_env?: IntegrationRequiredEnv[];
+  has_oauth?: boolean;
+  setup_instructions?: string;
+}
+
+export interface AvailableIntegrationsResponse {
+  integrations: IntegrationTemplate[];
+  count: number;
+}
+
+export async function listAvailableIntegrations(): Promise<AvailableIntegrationsResponse> {
+  return get<AvailableIntegrationsResponse>("/api/integrations/available");
+}
+
 export async function addMcpServer(server: Omit<McpServerConfigured, "name"> & { name: string }): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/mcp/servers", server);
 }

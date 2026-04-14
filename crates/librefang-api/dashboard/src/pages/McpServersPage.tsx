@@ -4,7 +4,9 @@ import { useTranslation } from "react-i18next";
 import {
   listMcpServers, addMcpServer, updateMcpServer, deleteMcpServer,
   getMcpAuthStatus, startMcpAuth, revokeMcpAuth,
+  listAvailableIntegrations,
   type McpServerConfigured, type McpServerConnected, type McpServerTransport,
+  type IntegrationTemplate,
 } from "../api";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
@@ -19,7 +21,7 @@ import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Plug, Plus, Trash2, Settings, ChevronDown, ChevronUp, Wrench, Terminal, Globe, Radio,
-  Shield, ShieldCheck, ShieldAlert, ShieldX,
+  Shield, ShieldCheck, ShieldAlert, ShieldX, Package, Check, ExternalLink,
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -251,6 +253,7 @@ export function McpServersPage() {
   const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
 
+  const [tab, setTab] = useState<"servers" | "registry">("servers");
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerConfigured | null>(null);
   const [deletingServer, setDeletingServer] = useState<string | null>(null);
@@ -263,6 +266,12 @@ export function McpServersPage() {
     queryKey: ["mcp-servers"],
     queryFn: listMcpServers,
     refetchInterval: REFRESH_MS,
+  });
+
+  const registryQuery = useQuery({
+    queryKey: ["integrations-available"],
+    queryFn: listAvailableIntegrations,
+    enabled: tab === "registry",
   });
 
   const addMutation = useMutation({
@@ -340,15 +349,32 @@ export function McpServersPage() {
   const updateField = <K extends keyof ServerFormState>(key: K, value: ServerFormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
 
+  function installFromTemplate(tpl: IntegrationTemplate) {
+    setForm({
+      name: tpl.id,
+      transportType: "stdio",
+      command: "",
+      args: "",
+      url: "",
+      timeout: 30,
+      env: (tpl.required_env ?? []).map(e => `${e.name}=`).join("\n"),
+      headers: "",
+    });
+    setShowAddModal(true);
+  }
+
+  const registryTemplates = registryQuery.data?.integrations ?? [];
+  const configuredNames = new Set(configured.map(s => s.name));
+
   return (
     <div className="space-y-6">
       <PageHeader
         icon={<Plug className="h-5 w-5" />}
         badge="MCP"
         title={t("mcp.title")}
-        subtitle={t("mcp.subtitle")}
-        isFetching={serversQuery.isFetching}
-        onRefresh={() => serversQuery.refetch()}
+        subtitle={tab === "registry" ? t("mcp.registry_subtitle") : t("mcp.subtitle")}
+        isFetching={serversQuery.isFetching || registryQuery.isFetching}
+        onRefresh={() => { serversQuery.refetch(); if (tab === "registry") registryQuery.refetch(); }}
         helpText={t("mcp.help")}
         actions={
           <Button size="sm" leftIcon={<Plus className="h-3.5 w-3.5" />} onClick={openAdd}>
@@ -357,6 +383,35 @@ export function McpServersPage() {
         }
       />
 
+      {/* Tab switcher */}
+      <div className="flex gap-1 rounded-xl border border-border-subtle bg-surface p-1">
+        <button
+          onClick={() => setTab("servers")}
+          className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
+            tab === "servers" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
+          }`}
+        >
+          <Plug className="h-3.5 w-3.5" />
+          {t("mcp.tab_my_servers")}
+          {configured.length > 0 && (
+            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold ${tab === "servers" ? "bg-brand/20 text-brand" : "bg-border-subtle text-text-dim"}`}>
+              {configured.length}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setTab("registry")}
+          className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
+            tab === "registry" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
+          }`}
+        >
+          <Package className="h-3.5 w-3.5" />
+          {t("mcp.tab_registry")}
+        </button>
+      </div>
+
+      {tab === "servers" && (
+        <>
       {/* Summary badges */}
       {data && (
         <div className="flex items-center gap-3 flex-wrap">
@@ -377,8 +432,8 @@ export function McpServersPage() {
           title={t("mcp.empty")}
           description={t("mcp.empty_desc")}
           action={
-            <Button size="sm" leftIcon={<Plus className="h-3.5 w-3.5" />} onClick={openAdd}>
-              {t("mcp.add_server")}
+            <Button size="sm" leftIcon={<Package className="h-3.5 w-3.5" />} onClick={() => setTab("registry")}>
+              {t("mcp.tab_registry")}
             </Button>
           }
         />
@@ -488,6 +543,87 @@ export function McpServersPage() {
             );
           })}
         </div>
+      )}
+        </>
+      )}
+
+      {/* Registry tab */}
+      {tab === "registry" && (
+        <>
+          {registryQuery.isLoading && <ListSkeleton rows={3} />}
+          {!registryQuery.isLoading && registryTemplates.length === 0 && (
+            <EmptyState
+              icon={<Package className="h-10 w-10" />}
+              title={t("mcp.registry_empty")}
+              description={t("mcp.registry_empty_desc")}
+            />
+          )}
+          {registryTemplates.length > 0 && (
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+              {registryTemplates.map((tpl) => {
+                const alreadyAdded = configuredNames.has(tpl.id);
+                return (
+                  <Card key={tpl.id} padding="none" className="flex flex-col">
+                    <div className="h-1 bg-gradient-to-r from-brand via-brand/60 to-brand/30" />
+                    <div className="p-4 flex flex-col gap-3 flex-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-10 h-10 rounded-lg flex items-center justify-center text-xl bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20">
+                            {tpl.icon || "🔌"}
+                          </div>
+                          <div className="min-w-0">
+                            <h3 className="text-sm font-bold truncate">{tpl.name}</h3>
+                            {tpl.category && (
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-text-dim">{tpl.category}</span>
+                            )}
+                          </div>
+                        </div>
+                        {alreadyAdded && (
+                          <Badge variant="success" dot>
+                            <Check className="h-3 w-3 mr-0.5" />
+                            {t("mcp.registry_installed")}
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-text-dim leading-relaxed line-clamp-2">{tpl.description}</p>
+                      {(tpl.tags ?? []).length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {tpl.tags!.slice(0, 4).map(tag => (
+                            <span key={tag} className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-brand/10 text-brand">{tag}</span>
+                          ))}
+                        </div>
+                      )}
+                      {(tpl.required_env ?? []).length > 0 && (
+                        <div className="text-[10px] text-text-dim">
+                          {(tpl.required_env ?? []).map(e => (
+                            <div key={e.name} className="flex items-center gap-1">
+                              <span className="font-mono font-bold">{e.name}</span>
+                              {e.get_url && <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline"><ExternalLink className="h-2.5 w-2.5 inline" /></a>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className="border-t border-border-subtle">
+                      <button
+                        onClick={() => installFromTemplate(tpl)}
+                        disabled={alreadyAdded}
+                        className={`w-full flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold transition-colors rounded-b-xl sm:rounded-b-2xl ${
+                          alreadyAdded
+                            ? "text-text-dim/30 cursor-not-allowed"
+                            : "text-brand hover:bg-brand/5"
+                        }`}
+                      >
+                        {alreadyAdded ? <Check className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+                        {alreadyAdded ? t("mcp.registry_installed") : t("mcp.registry_add")}
+                      </button>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
 
       {/* Add / Edit Modal */}
