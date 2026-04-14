@@ -6,6 +6,7 @@
     "automate": "Automate",
     "observe": "Observe",
     "advanced": "Advanced",
+    "config": "Configuration",
     "automation": "Automation",
     "resources": "Resources",
     "system": "System",
@@ -1062,12 +1063,22 @@
     "totp_confirm_revoke": "Confirm Revoke",
     "totp_no_recovery": "No recovery codes remaining. Reset TOTP to generate new ones.",
     "totp_low_recovery": "Only {{count}} recovery code(s) remaining.",
-    "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools.",
-    "config_system": "System Configuration",
-    "config_system_desc": "View and edit config.toml settings. Changes are saved immediately.",
-    "reload_config": "Reload",
-    "hot_reload": "Hot",
-    "root_level": "Root"
+    "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools."
+  },
+  "config": {
+    "title": "Configuration",
+    "desc": "System configuration editor",
+    "reload": "Reload",
+    "hot_reload": "Hot Reload",
+    "root_level": "Root Level",
+    "no_section": "Section not found",
+    "cat_general": "General",
+    "cat_memory": "Memory",
+    "cat_tools": "Tools",
+    "cat_channels": "Channels",
+    "cat_security": "Security",
+    "cat_network": "Network",
+    "cat_infra": "Infrastructure"
   },
   "chat": {
     "title": "Chat",

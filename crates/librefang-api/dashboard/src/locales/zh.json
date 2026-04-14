@@ -6,6 +6,7 @@
     "automate": "自动化",
     "observe": "观测",
     "advanced": "高级",
+    "config": "系统配置",
     "automation": "自动化",
     "resources": "资源",
     "system": "系统",
@@ -1037,12 +1038,22 @@
     "totp_confirm_revoke": "确认撤销",
     "totp_no_recovery": "恢复码已用完。请重置 TOTP 以生成新恢复码。",
     "totp_low_recovery": "仅剩 {{count}} 个恢复码。",
-    "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。",
-    "config_system": "系统配置",
-    "config_system_desc": "查看和编辑 config.toml 配置项。修改后立即保存。",
-    "reload_config": "重新加载",
+    "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。"
+  },
+  "config": {
+    "title": "系统配置",
+    "desc": "查看和编辑 config.toml 配置项",
+    "reload": "重新加载",
     "hot_reload": "热加载",
-    "root_level": "根级"
+    "root_level": "根级",
+    "no_section": "未找到配置项",
+    "cat_general": "通用",
+    "cat_memory": "记忆",
+    "cat_tools": "工具",
+    "cat_channels": "频道",
+    "cat_security": "安全",
+    "cat_network": "网络",
+    "cat_infra": "基础设施"
   },
   "chat": {
     "title": "对话",
