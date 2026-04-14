@@ -28,6 +28,7 @@ const {
   shouldSkipCatchupForMissingJid,
   resolveLidProactively,
   checkHeartbeat,
+  computeBackoffDelay,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -570,6 +571,75 @@ describe('ST-01 heartbeat watchdog', () => {
     assert.match(src, /messages\.upsert[\s\S]*?lastInboundAt = Date\.now\(\)/);
     // heartbeat log uses the exact event name
     assert.match(src, /event: 'heartbeat_timeout'/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ST-02: jittered exponential backoff
+// ---------------------------------------------------------------------------
+describe('ST-02 computeBackoffDelay', () => {
+  // Deterministic RNG — Mulberry32 seeded.
+  function mulberry32(seed) {
+    let s = seed >>> 0;
+    return function () {
+      s = (s + 0x6D2B79F5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  it('Test 1: delay stays within [base*0.75, base*1.25] and respects cap', () => {
+    const rng = mulberry32(42);
+    // attempt 1: base = 2000 → [1500, 2500]
+    const d1 = computeBackoffDelay(1, rng);
+    assert.ok(d1 >= 1500 && d1 <= 2500, `attempt 1 delay=${d1}`);
+    // attempt 2: base = 3600 → [2700, 4500]
+    const d2 = computeBackoffDelay(2, rng);
+    assert.ok(d2 >= 2700 && d2 <= 4500, `attempt 2 delay=${d2}`);
+    // attempt 8: base hits 30000 cap → [22500, 37500]
+    const d8 = computeBackoffDelay(8, rng);
+    assert.ok(d8 >= 22500 && d8 <= 37500, `attempt 8 delay=${d8}`);
+    // attempt 20: still capped at 30000 base → [22500, 37500]
+    const d20 = computeBackoffDelay(20, rng);
+    assert.ok(d20 >= 22500 && d20 <= 37500, `attempt 20 delay=${d20}`);
+  });
+
+  it('Test 1b: compound growth factor ≈ 1.8 before cap', () => {
+    // With rng fixed to 0.5 → jitter factor = 1.0 exactly.
+    const noJitter = () => 0.5;
+    assert.equal(computeBackoffDelay(1, noJitter), 2000);
+    assert.equal(computeBackoffDelay(2, noJitter), 3600);   // 2000 * 1.8
+    assert.equal(computeBackoffDelay(3, noJitter), 6480);   // 2000 * 1.8^2
+    assert.equal(computeBackoffDelay(4, noJitter), 11664);
+    assert.equal(computeBackoffDelay(5, noJitter), 20995);
+    assert.equal(computeBackoffDelay(6, noJitter), 30000);  // capped
+    assert.equal(computeBackoffDelay(100, noJitter), 30000);
+  });
+
+  it('Test 2: no hard stop — attempt 100 still produces a finite delay (≤ cap range)', () => {
+    const d = computeBackoffDelay(100, mulberry32(7));
+    assert.ok(Number.isFinite(d) && d > 0 && d <= 37500);
+  });
+
+  it('Test 3: loggedOut / forbidden branches remain untouched (source invariant)', () => {
+    const fs = require('node:fs');
+    const src = fs.readFileSync(__dirname + '/index.js', 'utf8');
+    // The hard-stop check must be gone.
+    assert.equal(
+      /reconnectAttempts\s*>=\s*MAX_RECONNECT_ATTEMPTS/.test(src),
+      false,
+      'hard-stop check must be removed'
+    );
+    // Legacy constants removed — zero remaining references.
+    assert.equal((src.match(/MAX_RECONNECT_ATTEMPTS/g) || []).length, 0);
+    assert.equal((src.match(/MAX_RECONNECT_DELAY/g) || []).length, 0);
+    // loggedOut / forbidden branches preserved.
+    assert.match(src, /DisconnectReason\.loggedOut/);
+    assert.match(src, /DisconnectReason\.forbidden/);
+    // New backoff call site is present.
+    assert.match(src, /computeBackoffDelay\(reconnectAttempts\)/);
   });
 });
 

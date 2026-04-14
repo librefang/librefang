@@ -241,8 +241,8 @@ let qrExpired = false;
 let statusMessage = 'Not started';
 let reconnectAttempts = 0;
 let isConnecting = false;
-const MAX_RECONNECT_DELAY = 60_000;
-const MAX_RECONNECT_ATTEMPTS = 10;
+// ST-02: legacy reconnect-delay/attempt constants removed in favour of the
+// jittered backoff (computeBackoffDelay) with a 30s cap and no hard stop.
 
 // ST-01 heartbeat watchdog: if no inbound messages.upsert event arrives for
 // HEARTBEAT_MS, force-close the socket so the existing reconnect path takes
@@ -255,6 +255,15 @@ let heartbeatInterval = null;
 // Pure predicate — true when we've been silent longer than thresholdMs.
 function checkHeartbeat(now, lastInboundAt, thresholdMs) {
   return (now - lastInboundAt) > thresholdMs;
+}
+
+// ST-02: exponential backoff with ±25% jitter, cap 30s, factor 1.8, NO hard
+// stop. `rng` is injected for deterministic tests (defaults to Math.random).
+// Matches openclaw/extensions/whatsapp/src/reconnect.ts semantics.
+function computeBackoffDelay(attempts, rng = Math.random) {
+  const base = Math.min(2000 * Math.pow(1.8, Math.max(0, attempts - 1)), 30_000);
+  const jitter = 0.75 + rng() * 0.5; // ±25%
+  return Math.round(base * jitter);
 }
 
 // Cached agent UUID — resolved from DEFAULT_AGENT name on first use
@@ -893,24 +902,19 @@ async function startConnection() {
         qrDataUrl = '';
         await cleanupSocket();
       } else {
-        // All other disconnect reasons are treated as recoverable
+        // ST-02: all other disconnect reasons are recoverable. Exponential
+        // backoff 2s → 30s, factor 1.8, ±25% jitter, NO hard stop — a
+        // transient outage longer than 5 attempts (the previous cap) used
+        // to leave the gateway permanently disconnected until manual
+        // restart. We now keep retrying at the capped interval.
         reconnectAttempts += 1;
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-          console.error(`[gateway] Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`);
-          connStatus = 'disconnected';
-          statusMessage = `Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`;
-        } else {
-          const delay = Math.min(
-            2000 * Math.pow(1.5, reconnectAttempts - 1),
-            MAX_RECONNECT_DELAY,
-          );
-          console.log(
-            `[gateway] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`,
-          );
-          connStatus = 'disconnected';
-          statusMessage = `Reconnecting (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
-          setTimeout(() => startConnection(), delay);
-        }
+        const delay = computeBackoffDelay(reconnectAttempts);
+        console.log(
+          `[gateway] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts}, jittered)`,
+        );
+        connStatus = 'disconnected';
+        statusMessage = `Reconnecting (attempt ${reconnectAttempts})...`;
+        setTimeout(() => startConnection(), delay);
       }
     }
 
@@ -2622,4 +2626,5 @@ module.exports = {
   shouldSkipCatchupForMissingJid,
   resolveLidProactively,
   checkHeartbeat,
+  computeBackoffDelay,
 };
