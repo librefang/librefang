@@ -74,14 +74,14 @@ pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut _dashboard_child = None;
     if !args.no_dashboard && dashboard_dir.join("package.json").exists() {
         println!("Installing dashboard dependencies...");
-        let _ = Command::new("pnpm")
-            .arg("install")
+        let _ = Command::new("sh")
+            .args(["-c", "pnpm install"])
             .current_dir(&dashboard_dir)
             .status();
 
         println!("Starting dashboard dev server...");
-        let child = Command::new("pnpm")
-            .arg("dev")
+        let child = Command::new("sh")
+            .args(["-c", "pnpm dev"])
             .current_dir(&dashboard_dir)
             .spawn();
         match child {
