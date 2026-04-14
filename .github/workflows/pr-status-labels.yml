@@ -265,12 +265,7 @@ jobs:
             const READY = 'ready-for-review';
             const NEEDS = 'needs-changes';
 
-            let prNumber;
-            if (context.eventName === 'pull_request_review') {
-              prNumber = context.payload.pull_request.number;
-            } else {
-              prNumber = context.payload.pull_request.number;
-            }
+            const prNumber = context.payload.pull_request.number;
 
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
