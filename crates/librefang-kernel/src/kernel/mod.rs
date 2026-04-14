@@ -7623,29 +7623,30 @@ system_prompt = "You are a helpful assistant."
                 }
             }
         } else if !state_path.exists() {
-            // First boot: activate all registry hands then pause them (pre-install).
-            // This creates full workspace structure (AGENT.json, SOUL.md, memory/, etc.)
-            // without leaving agents running.
+            // First boot: scaffold workspace directories and identity files for all
+            // registry hands without activating them. Activation (DB entries, session
+            // spawning, agent registration) only happens when the user explicitly
+            // enables a hand — not unconditionally on every fresh install.
             let defs = self.hand_registry.list_definitions();
             if !defs.is_empty() {
                 info!(
-                    "First boot — pre-installing {} hand(s) (activate + pause)",
+                    "First boot — scaffolding {} hand workspace(s) (files only, no activation)",
                     defs.len()
                 );
+                let hands_ws_dir = cfg.effective_hands_workspaces_dir();
                 for def in &defs {
-                    match self.activate_hand(&def.id, std::collections::HashMap::new()) {
-                        Ok(inst) => {
-                            if let Err(e) = self.pause_hand(inst.instance_id) {
-                                warn!(hand = %def.id, error = %e, "Failed to pause pre-installed hand");
-                            } else {
-                                info!(hand = %def.id, "Pre-installed hand (paused)");
-                            }
+                    for (role, agent) in &def.agents {
+                        let safe_hand = safe_path_component(&def.id, "hand");
+                        let safe_role = safe_path_component(role, "agent");
+                        let workspace = hands_ws_dir.join(&safe_hand).join(&safe_role);
+                        if let Err(e) = ensure_workspace(&workspace) {
+                            warn!(hand = %def.id, role = %role, error = %e, "Failed to scaffold hand workspace");
+                            continue;
                         }
-                        Err(e) => {
-                            warn!(hand = %def.id, error = %e, "Failed to pre-install hand");
-                        }
+                        generate_identity_files(&workspace, &agent.manifest);
                     }
                 }
+                // Write an empty state file so subsequent boots skip this block.
                 self.persist_hand_state();
             }
         }
