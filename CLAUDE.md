@@ -9,8 +9,8 @@ LibreFang is an open-source Agent Operating System written in Rust (24 crates in
 ### Crate map
 - **Core types & utilities**: `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`, `librefang-testing`, `librefang-migrate`
 - **Kernel**: `librefang-kernel` (orchestration), `librefang-kernel-handle` (trait used by runtime to call kernel without circular dep), `librefang-kernel-router`, `librefang-kernel-metering`
-- **Runtime**: `librefang-runtime` (agent loop, tools, plugins), `librefang-runtime-mcp`, `librefang-runtime-oauth`, `librefang-runtime-drivers` (concrete LLM provider impls), `librefang-runtime-wasm`
-- **LLM driver trait**: `librefang-llm-driver` (interface only — concrete drivers live in `librefang-runtime-drivers`)
+- **Runtime**: `librefang-runtime` (agent loop, tools, plugins), `librefang-runtime-mcp`, `librefang-runtime-oauth`, `librefang-runtime-wasm`
+- **LLM drivers**: `librefang-llm-driver` (trait + error types — interface only) and `librefang-llm-drivers` (concrete provider impls: anthropic, openai, gemini, …)
 - **Memory**: `librefang-memory` (SQLite substrate)
 - **Surface**: `librefang-api` (HTTP server + dashboard SPA bundled at `crates/librefang-api/dashboard/`), `librefang-cli`, `librefang-desktop`
 - **Extensibility**: `librefang-skills`, `librefang-hands`, `librefang-extensions`, `librefang-channels`

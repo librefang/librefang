@@ -89,6 +89,15 @@ impl ProcessManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Put the child in its own process group so `kill_process_tree`
+        // can safely use `kill(-pgid, ...)` to reach the whole subtree.
+        // Without this the child inherits the parent's pgid and the
+        // tree-kill path would target whichever unrelated process group
+        // happens to have the child's PID as its PGID — see
+        // `is_process_group_leader` in subprocess_sandbox.rs for why
+        // that matters on long-lived runners like GitHub Actions.
+        #[cfg(unix)]
+        cmd.process_group(0);
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         let mut child = cmd
@@ -268,11 +277,18 @@ mod tests {
     use super::*;
 
     /// Long-running, IO-quiet placeholder process for tests that need
-    /// "something alive in the registry until we kill it". Using `cat`
-    /// here used to flake the Ubuntu CI job — a stdin-blocked child
-    /// somehow caused the runner to receive SIGTERM mid-test (exit 143).
-    /// `sleep` doesn't touch stdin/stdout, has a bounded lifetime, and
-    /// behaves identically across platforms via Windows' `timeout`.
+    /// "something alive in the registry until we kill it". The earlier
+    /// history of this helper is a cautionary tale: it used `cat`,
+    /// which blocked on stdin and exposed a latent bug where
+    /// `kill_process_tree` sent `kill -TERM -<pid>` to a non-leader
+    /// (because `ProcessManager::start` didn't put the child in its
+    /// own pgid). On Ubuntu CI the resulting signal would occasionally
+    /// land on the actions-runner session leader, killing the whole
+    /// job mid-test. Moving to `sleep` narrowed the window but didn't
+    /// fix the root cause — that took
+    /// (a) spawning children with `process_group(0)` and
+    /// (b) gating the negative-PID kill on `is_process_group_leader`
+    /// in `subprocess_sandbox::kill_tree_unix`.
     fn long_running_proc() -> (&'static str, Vec<String>) {
         if cfg!(windows) {
             (

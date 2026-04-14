@@ -339,14 +339,17 @@ fn start_stream_text_bridge(
                     iter_buf.push_str(&text);
                 }
                 StreamEvent::ContentComplete { .. } => {
-                    // Flush buffered text. Only suppress when ToolUseStart
-                    // was seen in this iteration (the text is the tool call
-                    // echoed as content). Do NOT apply heuristic filtering
-                    // here — normal replies that demonstrate tool syntax
-                    // (e.g. "use `web_search {…}`") must not be discarded.
+                    // Flush buffered text. Suppress when:
+                    // 1. ToolUseStart was seen (the text is the tool call echoed
+                    //    as content by the provider), OR
+                    // 2. The text looks like a raw tool call emitted as text by
+                    //    providers that don't use the tool_use API properly
+                    //    (e.g. agent_send JSON leaked as visible text).
                     if !iter_buf.is_empty() {
                         if saw_tool_use {
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
+                        } else if looks_like_tool_call(&iter_buf) {
+                            debug!("Streaming bridge: filtered leaked tool call text at ContentComplete");
                         } else if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
                             break;
                         }
@@ -3142,6 +3145,51 @@ mod tests {
     fn test_looks_like_tool_call_allows_non_tool_json_object() {
         let text = "Profile payload: {\"name\":\"Alice\",\"role\":\"admin\"}";
         assert!(!looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_detects_agent_send_json() {
+        // agent_send tool call emitted as bare JSON by some providers (#2379)
+        let text = r#"{"name": "agent_send", "parameters": {"agent_id": "AgentB", "message": "Hello from AgentA"}}"#;
+        assert!(looks_like_tool_call(text));
+    }
+
+    /// Verify that tool call JSON emitted as text (without ToolUseStart) is
+    /// filtered at ContentComplete, not forwarded to the channel (#2379).
+    #[tokio::test]
+    async fn test_stream_bridge_filters_agent_send_tool_call_at_content_complete() {
+        use librefang_runtime::agent_loop::AgentLoopResult;
+
+        let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+
+        // Simulate a provider emitting an agent_send tool call as plain text
+        // (no ToolUseStart event) followed by ContentComplete.
+        let tool_json = r#"{"name": "agent_send", "parameters": {"agent_id": "AgentB", "message": "Hello from AgentA"}}"#;
+        event_tx
+            .send(StreamEvent::TextDelta {
+                text: tool_json.to_string(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::ContentComplete {
+                stop_reason: librefang_types::message::StopReason::EndTurn,
+                usage: librefang_types::message::TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+        drop(event_tx);
+
+        // The bridge should filter the tool call text — rx should yield nothing.
+        let msg = rx.recv().await;
+        assert!(
+            msg.is_none(),
+            "Expected tool call JSON to be filtered, but got: {:?}",
+            msg
+        );
     }
 
     #[tokio::test]

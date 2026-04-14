@@ -4231,6 +4231,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "librefang-llm-drivers"
+version = "2026.4.13-beta19"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "futures",
+ "hex",
+ "hmac",
+ "librefang-http",
+ "librefang-llm-driver",
+ "librefang-runtime-oauth",
+ "librefang-types",
+ "rand 0.10.0",
+ "regex-lite",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "librefang-memory"
 version = "2026.4.13-beta19"
 dependencies = [
@@ -4288,12 +4319,13 @@ dependencies = [
  "hmac",
  "http",
  "landlock",
+ "libc",
  "librefang-channels",
  "librefang-http",
  "librefang-kernel-handle",
  "librefang-llm-driver",
+ "librefang-llm-drivers",
  "librefang-memory",
- "librefang-runtime-drivers",
  "librefang-runtime-mcp",
  "librefang-runtime-oauth",
  "librefang-runtime-wasm",
@@ -4326,37 +4358,6 @@ dependencies = [
  "uuid",
  "wasmtime",
  "webpki-roots",
- "zeroize",
-]
-
-[[package]]
-name = "librefang-runtime-drivers"
-version = "2026.4.13-beta19"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "dashmap",
- "futures",
- "hex",
- "hmac",
- "librefang-http",
- "librefang-llm-driver",
- "librefang-runtime-oauth",
- "librefang-types",
- "rand 0.10.0",
- "regex-lite",
- "reqwest 0.13.2",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tracing",
- "url",
- "uuid",
  "zeroize",
 ]
 

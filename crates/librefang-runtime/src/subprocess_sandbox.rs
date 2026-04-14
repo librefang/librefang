@@ -318,21 +318,43 @@ pub async fn kill_process_tree(pid: u32, grace_ms: u64) -> Result<bool, String> 
     }
 }
 
+/// Return true iff `pid` is the leader of its own process group
+/// (i.e. `getpgid(pid) == pid`). Only group leaders are safe targets
+/// for the `kill(-pgid, ...)` syntax — calling it on a non-leader
+/// would blindly send the signal to whatever unrelated process group
+/// happens to have `pid` as its PGID, which on shared runners can be
+/// the actions-runner session itself.
+#[cfg(unix)]
+fn is_process_group_leader(pid: u32) -> bool {
+    // SAFETY: `getpgid` is always safe to call; it only reads kernel
+    // state and returns -1 with errno on error (which we map to false).
+    let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+    pgid >= 0 && pgid as u32 == pid
+}
+
 #[cfg(unix)]
 async fn kill_tree_unix(pid: u32, grace_ms: u64) -> Result<bool, String> {
     use tokio::process::Command;
 
     let pid_i32 = pid as i32;
+    let is_group_leader = is_process_group_leader(pid);
 
-    // Try to kill the process group first (negative PID).
-    // This kills the process and all its children.
-    let group_kill = Command::new("kill")
-        .args(["-TERM", &format!("-{pid_i32}")])
-        .output()
-        .await;
-
-    if group_kill.is_err() {
-        // Fallback: kill just the process.
+    // Send SIGTERM. When `pid` is its own pgid we can safely use the
+    // negative-PID syntax to cover the whole group (the process plus
+    // any children that inherited the pgid). When it isn't, we MUST
+    // NOT use that syntax: `kill -TERM -<pid>` would target whichever
+    // unrelated process group happens to have `pid` as its PGID, which
+    // on long-lived runners (GitHub Actions' ubuntu-latest in
+    // particular) can easily coincide with the actions-runner session
+    // leader and bring the whole job down with a SIGTERM originating
+    // from inside a test. See librefang/librefang#2464 for the
+    // investigation that turned this up.
+    if is_group_leader {
+        let _ = Command::new("kill")
+            .args(["-TERM", &format!("-{pid_i32}")])
+            .output()
+            .await;
+    } else {
         let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .output()
@@ -350,19 +372,21 @@ async fn kill_tree_unix(pid: u32, grace_ms: u64) -> Result<bool, String> {
 
     match check {
         Ok(output) if output.status.success() => {
-            // Still alive — force kill.
+            // Still alive — force kill. Same pgid rule applies: never
+            // SIGKILL by pgid unless we've confirmed the target is the
+            // group leader.
             tracing::warn!(
                 pid,
+                is_group_leader,
                 "Process still alive after grace period, sending SIGKILL"
             );
 
-            // Try group kill first.
-            let _ = Command::new("kill")
-                .args(["-9", &format!("-{pid_i32}")])
-                .output()
-                .await;
-
-            // Also try direct kill.
+            if is_group_leader {
+                let _ = Command::new("kill")
+                    .args(["-9", &format!("-{pid_i32}")])
+                    .output()
+                    .await;
+            }
             let _ = Command::new("kill")
                 .args(["-9", &pid.to_string()])
                 .output()
@@ -686,6 +710,68 @@ mod tests {
         // Now try to kill — should return Ok(false) since already exited.
         let result = kill_child_tree(&mut child, 100).await;
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_is_process_group_leader_distinguishes_own_group_from_inherited_group() {
+        // Regression for the ubuntu-CI flake investigated in
+        // librefang/librefang#2464: `kill_tree_unix` used to blindly
+        // call `kill(-pid, SIGTERM)` which only makes sense for
+        // process-group leaders. When the child inherited the test
+        // binary's pgid, that negative-PID form targeted whichever
+        // unrelated process group happened to be led by a process
+        // whose PID equalled the child's — occasionally the actions-
+        // runner session leader itself, killing the whole job.
+        //
+        // This test exercises both branches of the helper:
+        //  (a) child spawned WITHOUT `process_group(0)` — inherits the
+        //      test binary's pgid, so `pgid != pid` and the helper
+        //      must return false;
+        //  (b) child spawned WITH `process_group(0)` — becomes its own
+        //      group leader, so `pgid == pid` and the helper must
+        //      return true.
+        use tokio::process::Command;
+
+        let mut inherited = Command::new("sleep")
+            .arg("10")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn inherited-pgid sleep");
+        let inherited_pid = inherited.id().expect("inherited pid");
+        assert!(
+            !is_process_group_leader(inherited_pid),
+            "a child that inherits the parent pgid must NOT look like a group leader"
+        );
+        inherited.kill().await.ok();
+        inherited.wait().await.ok();
+
+        let mut owned = Command::new("sleep")
+            .arg("10")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn own-pgid sleep");
+        let owned_pid = owned.id().expect("owned pid");
+        assert!(
+            is_process_group_leader(owned_pid),
+            "a child spawned with process_group(0) must be its own group leader"
+        );
+        owned.kill().await.ok();
+        owned.wait().await.ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_process_group_leader_rejects_nonexistent_pid() {
+        // Very high PID guaranteed not to exist — `getpgid` returns -1,
+        // helper must say "not a leader" so the caller falls back to
+        // the single-PID kill path.
+        assert!(!is_process_group_leader(999_999));
     }
 
     #[tokio::test]
