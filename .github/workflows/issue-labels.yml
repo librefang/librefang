@@ -75,16 +75,41 @@ jobs:
             esac
           }
 
+          is_bot() {
+            case "$1" in
+              *\[bot\]) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
           if [ "${{ github.event_name }}" = "issues" ]; then
             # Issue closed — clean up state labels
             remove_label "$LABEL_WAITING"
             remove_label "$LABEL_ATTENTION"
           elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            COMMENTER="${{ github.event.comment.user.login }}"
             ASSOC="${{ github.event.comment.author_association }}"
+            ISSUE_AUTHOR="${{ github.event.issue.user.login }}"
+
+            # Skip bot comments (stale, github-actions, etc.)
+            if is_bot "$COMMENTER"; then
+              echo "Skipping bot comment from $COMMENTER"
+              exit 0
+            fi
+
             if is_maintainer "$ASSOC"; then
               remove_label "$LABEL_ATTENTION"
               add_label "$LABEL_WAITING"
             else
+              # Skip if the issue author is just adding more context
+              # before any maintainer has responded (no awaiting-response yet)
+              if [ "$COMMENTER" = "$ISSUE_AUTHOR" ]; then
+                gh issue view "$ISSUE" --repo "$REPO" --json labels --jq ".labels[].name" \
+                  | grep -qx "$LABEL_WAITING" 2>/dev/null || {
+                    echo "Issue author adding context before maintainer response — skipping"
+                    exit 0
+                  }
+              fi
               remove_label "$LABEL_WAITING"
               add_label "$LABEL_ATTENTION"
             fi

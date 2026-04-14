@@ -2,7 +2,7 @@ name: PR Labels
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, closed]
+    types: [opened, reopened, synchronize, closed, ready_for_review, converted_to_draft]
   pull_request_review:
     types: [submitted]
   issue_comment:
@@ -57,15 +57,33 @@ jobs:
             esac
           }
 
-          # ── PR opened / reopened / synchronize / closed ───────────
+          is_bot() {
+            case "$1" in
+              *\[bot\]) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # ── PR opened / reopened / synchronize / closed / draft ───
           if [ "${{ github.event_name }}" = "pull_request_target" ]; then
             PR="${{ github.event.pull_request.number }}"
             ACTION="${{ github.event.action }}"
+            DRAFT="${{ github.event.pull_request.draft }}"
 
             case "$ACTION" in
               opened|reopened)
-                add_label "$LABEL_REVIEW"
+                if [ "$DRAFT" = "false" ]; then
+                  add_label "$LABEL_REVIEW"
+                fi
                 remove_label "$LABEL_CHANGES"
+                ;;
+              ready_for_review)
+                # Draft → ready
+                add_label "$LABEL_REVIEW"
+                ;;
+              converted_to_draft)
+                # Ready → draft
+                remove_label "$LABEL_REVIEW"
                 ;;
               synchronize)
                 if has_label "$LABEL_CHANGES"; then
@@ -101,7 +119,14 @@ jobs:
           # ── Comment on a PR ───────────────────────────────────────
           elif [ "${{ github.event_name }}" = "issue_comment" ]; then
             PR="${{ github.event.issue.number }}"
+            COMMENTER="${{ github.event.comment.user.login }}"
             ASSOC="${{ github.event.comment.author_association }}"
+
+            # Skip bot comments (codecov, github-actions, etc.)
+            if is_bot "$COMMENTER"; then
+              echo "Skipping bot comment from $COMMENTER"
+              exit 0
+            fi
 
             if is_maintainer "$ASSOC"; then
               if has_label "$LABEL_REVIEW"; then
