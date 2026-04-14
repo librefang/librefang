@@ -68,6 +68,15 @@ jobs:
               const labels = full.labels.map(l => l.name);
               const hasLabel = labels.includes(LABEL);
 
+              const rmLabel = async (name) => {
+                if (labels.includes(name)) {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner, repo: context.repo.repo,
+                    issue_number: pr.number, name,
+                  }).catch(() => {});
+                }
+              };
+
               if (mergeable === false && !hasLabel) {
                 await github.rest.issues.addLabels({
                   owner: context.repo.owner,
@@ -75,15 +84,11 @@ jobs:
                   issue_number: pr.number,
                   labels: [LABEL],
                 });
-                core.info(`#${pr.number}: added "${LABEL}"`);
+                await rmLabel('ready-for-review');
+                core.info(`#${pr.number}: +${LABEL} -ready-for-review`);
               } else if (mergeable !== false && hasLabel) {
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  name: LABEL,
-                }).catch(() => {});
-                core.info(`#${pr.number}: removed "${LABEL}"`);
+                await rmLabel(LABEL);
+                core.info(`#${pr.number}: -${LABEL}`);
               }
             }
 
@@ -132,6 +137,15 @@ jobs:
               const labels = fullPr.labels.map(l => l.name);
               const hasLabel = labels.includes(LABEL);
 
+              const rmLabel = async (name) => {
+                if (labels.includes(name)) {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner, repo: context.repo.repo,
+                    issue_number: pr.number, name,
+                  }).catch(() => {});
+                }
+              };
+
               if (hasFailure && !hasLabel) {
                 await github.rest.issues.addLabels({
                   owner: context.repo.owner,
@@ -139,15 +153,11 @@ jobs:
                   issue_number: pr.number,
                   labels: [LABEL],
                 });
-                core.info(`#${pr.number}: added "${LABEL}"`);
+                await rmLabel('ready-for-review');
+                core.info(`#${pr.number}: +${LABEL} -ready-for-review`);
               } else if (!hasFailure && hasLabel) {
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  name: LABEL,
-                }).catch(() => {});
-                core.info(`#${pr.number}: removed "${LABEL}"`);
+                await rmLabel(LABEL);
+                core.info(`#${pr.number}: -${LABEL}`);
               }
             }
 
@@ -296,6 +306,9 @@ jobs:
               }
             }
 
+            // Don't add ready-for-review if blocking labels are present
+            const hasBlocker = labels.includes('has-conflicts') || labels.includes('ci-failed');
+
             if (context.eventName === 'pull_request_review') {
               const state = context.payload.review.state;
               if (state === 'changes_requested') {
@@ -304,13 +317,22 @@ jobs:
                 core.info(`#${prNumber}: changes requested → +${NEEDS} -${READY}`);
               } else if (state === 'approved') {
                 await removeLabel(NEEDS);
-                core.info(`#${prNumber}: approved → -${NEEDS}`);
+                if (!hasBlocker) {
+                  await addLabel(READY);
+                  core.info(`#${prNumber}: approved → -${NEEDS} +${READY}`);
+                } else {
+                  core.info(`#${prNumber}: approved but has blockers, skipping ${READY}`);
+                }
               }
             } else if (context.eventName === 'pull_request_target' && context.payload.action === 'synchronize') {
-              // New push after changes_requested → remove needs-changes, add ready-for-review
+              // New push after changes_requested → remove needs-changes, add ready-for-review (if no blockers)
               if (labels.includes(NEEDS)) {
                 await removeLabel(NEEDS);
-                await addLabel(READY);
-                core.info(`#${prNumber}: new push after changes_requested → -${NEEDS} +${READY}`);
+                if (!hasBlocker) {
+                  await addLabel(READY);
+                  core.info(`#${prNumber}: new push → -${NEEDS} +${READY}`);
+                } else {
+                  core.info(`#${prNumber}: new push → -${NEEDS}, skipping ${READY} (blockers)`);
+                }
               }
             }
