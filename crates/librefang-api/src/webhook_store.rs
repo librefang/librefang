@@ -120,30 +120,65 @@ pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
         }
     }
 
-    // Block private/link-local IPs to mitigate SSRF
-    if let Some(host) = parsed.host_str() {
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+    // Block private/link-local IPs to mitigate SSRF.
+    //
+    // Use the typed `url::Host` enum rather than `host_str().parse::<IpAddr>()`:
+    // `host_str()` returns IPv6 literals wrapped in brackets (e.g.
+    // `"[::ffff:7f00:1]"`), which `IpAddr::from_str` rejects — meaning the
+    // string-parse path silently skipped every IPv6 URL. `parsed.host()`
+    // returns `Host::Ipv6(Ipv6Addr)` / `Host::Ipv4(Ipv4Addr)` directly, with
+    // the url crate already having normalised the address.
+    match parsed.host() {
+        Some(url::Host::Ipv4(v4)) => {
+            let ip = std::net::IpAddr::V4(v4);
             if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
                 return Err(
                     "url must not point to a private, loopback, or link-local address".to_string(),
                 );
             }
         }
-        // Also block common internal hostnames
-        let lower = host.to_lowercase();
-        if lower == "localhost"
-            || lower == "metadata.google.internal"
-            || lower.ends_with(".internal")
-        {
-            return Err("url must not point to an internal/localhost address".to_string());
+        Some(url::Host::Ipv6(v6)) => {
+            // Canonicalise IPv4-mapped IPv6 (::ffff:X.X.X.X) so the OS-level
+            // transparent connect to the embedded IPv4 target can't bypass
+            // these checks — ip.is_loopback() and the V6 arms of
+            // is_private_ip / is_link_local do not recognise the mapped form.
+            let ip = canonical_ip(std::net::IpAddr::V6(v6));
+            if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
+                return Err(
+                    "url must not point to a private, loopback, or link-local address".to_string(),
+                );
+            }
         }
+        Some(url::Host::Domain(host)) => {
+            // Also block common internal hostnames
+            let lower = host.to_lowercase();
+            if lower == "localhost"
+                || lower == "metadata.google.internal"
+                || lower.ends_with(".internal")
+            {
+                return Err("url must not point to an internal/localhost address".to_string());
+            }
+        }
+        None => {}
     }
 
     Ok(())
 }
 
-fn is_private_ip(ip: std::net::IpAddr) -> bool {
+/// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) to its IPv4 form. All other
+/// addresses are returned unchanged.
+fn canonical_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
     match ip {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(v6),
+        },
+        std::net::IpAddr::V4(_) => ip,
+    }
+}
+
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match canonical_ip(ip) {
         std::net::IpAddr::V4(v4) => {
             v4.is_private() || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64
             // 100.64.0.0/10
@@ -153,7 +188,7 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 }
 
 fn is_link_local(ip: std::net::IpAddr) -> bool {
-    match ip {
+    match canonical_ip(ip) {
         std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.octets()[0] == 169,
         std::net::IpAddr::V6(_) => false,
     }
@@ -444,6 +479,28 @@ mod tests {
         let wh = store.create(valid_create_req()).unwrap();
         assert_eq!(wh.name, "test-hook");
         assert_eq!(store.list().len(), 1);
+    }
+
+    #[test]
+    fn validate_webhook_url_blocks_ipv4_mapped_ipv6_loopback() {
+        // OS-level transparent connect means ::ffff:127.0.0.1 reaches
+        // loopback, but ip.is_loopback() + the V6 _ => false arms of
+        // is_private_ip / is_link_local miss it. canonical_ip must unwrap
+        // these before the guard runs.
+        assert!(validate_webhook_url("http://[::ffff:127.0.0.1]/hook").is_err());
+        assert!(validate_webhook_url("http://[::ffff:7f00:1]/hook").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_blocks_ipv4_mapped_ipv6_metadata() {
+        assert!(validate_webhook_url("http://[::ffff:169.254.169.254]/hook").is_err());
+        assert!(validate_webhook_url("http://[::ffff:a9fe:a9fe]/hook").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_blocks_ipv4_mapped_ipv6_private() {
+        assert!(validate_webhook_url("http://[::ffff:10.0.0.1]/hook").is_err());
+        assert!(validate_webhook_url("http://[::ffff:192.168.1.1]/hook").is_err());
     }
 
     #[test]

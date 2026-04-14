@@ -157,7 +157,9 @@ fn is_ssrf_target(url: &str) -> Result<SsrfResolved, serde_json::Value> {
     match socket_addr.to_socket_addrs() {
         Ok(addrs) => {
             for addr in addrs {
-                let ip = addr.ip();
+                // Canonicalise IPv4-mapped IPv6 (::ffff:X.X.X.X) before any
+                // safety check — see canonical_ip below.
+                let ip = canonical_ip(&addr.ip());
                 if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
                     return Err(json!({"error": format!(
                         "SSRF blocked: {hostname} resolves to private IP {ip}"
@@ -183,8 +185,21 @@ fn is_ssrf_target(url: &str) -> Result<SsrfResolved, serde_json::Value> {
     })
 }
 
-fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+/// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) to its IPv4 form. All other
+/// addresses are returned unchanged. Keeps downstream IP checks operating on
+/// the address the OS will actually connect to.
+fn canonical_ip(ip: &std::net::IpAddr) -> std::net::IpAddr {
     match ip {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(*v6),
+        },
+        std::net::IpAddr::V4(_) => *ip,
+    }
+}
+
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match canonical_ip(ip) {
         std::net::IpAddr::V4(v4) => {
             let octets = v4.octets();
             matches!(
@@ -318,7 +333,7 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
     state.tokio_handle.block_on(async {
         // Build a DNS-pinned client so the HTTP request connects to the
         // same IPs we already validated (prevents DNS-rebinding TOCTOU).
-        let mut builder = crate::http_client::proxied_client_builder();
+        let mut builder = librefang_http::proxied_client_builder();
         for addr in &ssrf_result.resolved {
             builder = builder.resolve(&ssrf_result.hostname, *addr);
         }
@@ -686,6 +701,25 @@ mod tests {
         assert!(is_private_ip(&"169.254.169.254".parse::<IpAddr>().unwrap()));
         assert!(!is_private_ip(&"8.8.8.8".parse::<IpAddr>().unwrap()));
         assert!(!is_private_ip(&"1.1.1.1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_recognises_ipv4_mapped_v6() {
+        use std::net::IpAddr;
+        // IPv4-mapped IPv6 (::ffff:X.X.X.X) must be canonicalised to its
+        // IPv4 form so the private-range checks actually fire. Without
+        // canonicalisation, the V6 branch only catches fc00::/7 + fe80::/10
+        // and leaves ::ffff:10.0.0.1, ::ffff:169.254.169.254 etc. as
+        // "public" — the exact bypass fixed in web_fetch.rs.
+        assert!(is_private_ip(&"::ffff:10.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(
+            &"::ffff:169.254.169.254".parse::<IpAddr>().unwrap()
+        ));
+        assert!(is_private_ip(
+            &"::ffff:192.168.1.1".parse::<IpAddr>().unwrap()
+        ));
+        // Real IPv6 still takes the V6 branch.
+        assert!(!is_private_ip(&"2001:db8::1".parse::<IpAddr>().unwrap()));
     }
 
     #[test]

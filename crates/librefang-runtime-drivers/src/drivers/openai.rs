@@ -34,7 +34,7 @@ impl OpenAIDriver {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
-            client: crate::http_client::proxied_client(),
+            client: librefang_http::proxied_client(),
             extra_headers: Vec::new(),
             use_api_key_header: false,
             url_query: None,
@@ -59,7 +59,7 @@ impl OpenAIDriver {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
-            client: crate::http_client::proxied_client(),
+            client: librefang_http::proxied_client(),
             extra_headers: Vec::new(),
             use_api_key_header: true,
             url_query: Some(format!("api-version={}", api_version)),
@@ -1634,7 +1634,7 @@ fn ensure_object(v: serde_json::Value) -> serde_json::Value {
 }
 
 /// Marker key embedded in tool input when the LLM's streamed JSON was truncated.
-pub(crate) const TRUNCATED_ARGS_KEY: &str = "__args_truncated";
+pub const TRUNCATED_ARGS_KEY: &str = "__args_truncated";
 
 /// Build a tool input object for truncated/malformed JSON from the LLM.
 ///

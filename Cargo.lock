@@ -4154,6 +4154,7 @@ dependencies = [
  "librefang-extensions",
  "librefang-hands",
  "librefang-kernel-metering",
+ "librefang-kernel-router",
  "librefang-memory",
  "librefang-runtime",
  "librefang-skills",
@@ -4180,6 +4181,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "librefang-kernel-handle"
+version = "2026.4.13-beta19"
+dependencies = [
+ "async-trait",
+ "librefang-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "librefang-kernel-metering"
 version = "2026.4.13-beta19"
 dependencies = [
@@ -4187,6 +4201,32 @@ dependencies = [
  "librefang-runtime",
  "librefang-types",
  "serde",
+]
+
+[[package]]
+name = "librefang-kernel-router"
+version = "2026.4.13-beta19"
+dependencies = [
+ "dirs 6.0.0",
+ "librefang-hands",
+ "librefang-types",
+ "regex-lite",
+ "serde",
+ "serde_json",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
+name = "librefang-llm-driver"
+version = "2026.4.13-beta19"
+dependencies = [
+ "async-trait",
+ "librefang-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -4249,7 +4289,13 @@ dependencies = [
  "landlock",
  "librefang-channels",
  "librefang-http",
+ "librefang-kernel-handle",
+ "librefang-llm-driver",
  "librefang-memory",
+ "librefang-runtime-drivers",
+ "librefang-runtime-mcp",
+ "librefang-runtime-oauth",
+ "librefang-runtime-wasm",
  "librefang-skills",
  "librefang-types",
  "once_cell",
@@ -4280,6 +4326,93 @@ dependencies = [
  "wasmtime",
  "webpki-roots",
  "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-drivers"
+version = "2026.4.13-beta19"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "futures",
+ "hex",
+ "hmac",
+ "librefang-http",
+ "librefang-llm-driver",
+ "librefang-runtime-oauth",
+ "librefang-types",
+ "rand 0.10.0",
+ "regex-lite",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-mcp"
+version = "2026.4.13-beta19"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "http",
+ "librefang-http",
+ "librefang-types",
+ "rand 0.10.0",
+ "reqwest 0.13.2",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "librefang-runtime-oauth"
+version = "2026.4.13-beta19"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "librefang-http",
+ "librefang-types",
+ "rand 0.10.0",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-wasm"
+version = "2026.4.13-beta19"
+dependencies = [
+ "anyhow",
+ "librefang-http",
+ "librefang-kernel-handle",
+ "librefang-types",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wasmtime",
 ]
 
 [[package]]

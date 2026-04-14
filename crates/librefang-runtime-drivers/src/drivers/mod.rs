@@ -670,7 +670,7 @@ fn create_driver_from_entry(
 
     // Special: OpenAI also checks Codex credential
     if api_key.is_empty() && entry.api_format == ApiFormat::OpenAI && entry.name == "openai" {
-        if let Some(codex_key) = crate::model_catalog::read_codex_credential() {
+        if let Some(codex_key) = read_codex_credential() {
             api_key = codex_key;
         }
     }
@@ -1334,4 +1334,50 @@ mod tests {
         cache.clear();
         assert!(cache.is_empty());
     }
+}
+
+/// Read an OpenAI API key from the Codex CLI credential file.
+///
+/// Checks `$CODEX_HOME/auth.json` or `~/.codex/auth.json`.
+/// Returns `Some(api_key)` if the file exists and contains a valid, non-expired token.
+fn read_codex_credential() -> Option<String> {
+    let codex_home = std::env::var("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .ok()
+        .or_else(|| {
+            #[cfg(target_os = "windows")]
+            {
+                std::env::var("USERPROFILE")
+                    .ok()
+                    .map(|h| std::path::PathBuf::from(h).join(".codex"))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| std::path::PathBuf::from(h).join(".codex"))
+            }
+        })?;
+
+    let auth_path = codex_home.join("auth.json");
+    let content = std::fs::read_to_string(&auth_path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    if let Some(expires_at) = parsed.get("expires_at").and_then(|v| v.as_i64()) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        if now >= expires_at {
+            return None;
+        }
+    }
+
+    parsed
+        .get("api_key")
+        .or_else(|| parsed.get("token"))
+        .or_else(|| parsed.get("tokens").and_then(|t| t.get("id_token")))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }

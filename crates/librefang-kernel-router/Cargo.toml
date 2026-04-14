@@ -1,0 +1,16 @@
+[package]
+name = "librefang-kernel-router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hand/Template routing engine for the LibreFang kernel"
+
+[dependencies]
+librefang-types = { path = "../librefang-types" }
+librefang-hands = { path = "../librefang-hands" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex-lite = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }
