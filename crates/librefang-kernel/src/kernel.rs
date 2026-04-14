@@ -10985,9 +10985,40 @@ impl KernelHandle for LibreFangKernel {
     ) -> Result<(), String> {
         let agent_id = shared_memory_agent_id();
         let scoped = peer_scoped_key(key, peer_id);
+        // Check whether key already exists to determine Created vs Updated
+        let had_old = self
+            .memory
+            .structured_get(agent_id, &scoped)
+            .ok()
+            .flatten()
+            .is_some();
         self.memory
             .structured_set(agent_id, &scoped, value)
-            .map_err(|e| format!("Memory store failed: {e}"))
+            .map_err(|e| format!("Memory store failed: {e}"))?;
+
+        // Publish MemoryUpdate event so triggers can react
+        let operation = if had_old {
+            MemoryOperation::Updated
+        } else {
+            MemoryOperation::Created
+        };
+        let event = Event::new(
+            agent_id,
+            EventTarget::Broadcast,
+            EventPayload::MemoryUpdate(MemoryDelta {
+                operation,
+                key: scoped.clone(),
+                agent_id,
+            }),
+        );
+        if let Some(weak) = self.self_handle.get() {
+            if let Some(kernel) = weak.upgrade() {
+                tokio::spawn(async move {
+                    kernel.publish_event(event).await;
+                });
+            }
+        }
+        Ok(())
     }
 
     fn memory_recall(
