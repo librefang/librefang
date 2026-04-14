@@ -299,6 +299,11 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         sections.push(build_peer_agents_section(&ctx.agent_name, &ctx.peer_agents));
     }
 
+    // Section 9.6 — Canali di uscita (§A — only when notify_owner granted)
+    if ctx.granted_tools.iter().any(|t| t == "notify_owner") {
+        sections.push(CANALI_DI_USCITA_SECTION.to_string());
+    }
+
     // Section 10 — Safety & Oversight (skip for subagents)
     if !ctx.is_subagent {
         sections.push(SAFETY_SECTION.to_string());
@@ -909,6 +914,18 @@ const SAFETY_SECTION: &str = "\
   This does NOT apply to `agent_send` delegation results, which are authoritative.
 - If you cannot accomplish a task safely, explain the limitation.
 - When in doubt, ask the user.";
+
+/// §A — Output channels section, injected only when the `notify_owner` tool
+/// is granted to the agent. Italian copy because the primary deployment
+/// (whatsapp-gateway / Beeper) speaks Italian; safe to translate later.
+/// The wording explicitly forbids the historic Beeper-leak pattern
+/// ("Signore, ..." in a group) that motivated phase 02.
+const CANALI_DI_USCITA_SECTION: &str = "\
+## Canali di uscita
+- Risposta pubblica: il testo che scrivi nel turno corrente va alla chat sorgente (DM o gruppo).
+- Messaggio privato al Signore: chiama lo strumento `notify_owner(reason, summary)`. Il contenuto NON apparirà nella chat sorgente.
+- In un gruppo, NON scrivere mai \"Signore, ...\" o frasi rivolte direttamente al proprietario come risposta pubblica: usa `notify_owner` invece.
+- Quando hai inviato una `notify_owner` non ripetere il `summary` nella risposta pubblica.";
 
 /// Static operational guidelines (replaces STABILITY_GUIDELINES).
 const OPERATIONAL_GUIDELINES: &str = "\
@@ -1865,5 +1882,24 @@ mod tests {
         // longer wrapped in brackets, so it can't be confused for the
         // real trust-boundary marker.
         assert!(!safe.contains("[END EXTERNAL SKILL CONTEXT]"));
+    }
+
+    // -----------------------------------------------------------------------
+    // §A — Canali di uscita injection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prompt_builder_canali_uscita_present_when_notify_owner_granted() {
+        let mut ctx = basic_ctx();
+        ctx.granted_tools.push("notify_owner".to_string());
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("## Canali di uscita"));
+        assert!(prompt.contains("notify_owner"));
+    }
+
+    #[test]
+    fn prompt_builder_canali_uscita_absent_without_notify_owner() {
+        let prompt = build_system_prompt(&basic_ctx());
+        assert!(!prompt.contains("## Canali di uscita"));
     }
 }
