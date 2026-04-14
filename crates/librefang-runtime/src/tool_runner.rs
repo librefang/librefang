@@ -95,6 +95,111 @@ fn check_taint_net_fetch(url: &str) -> Option<String> {
     None
 }
 
+/// Check if a free-form string carries an obvious secret shape. Used by
+/// exfiltration sinks that don't have a URL query-string structure to
+/// parse — `web_fetch` request bodies, `agent_send` message payloads,
+/// and (via shared helper) outbound channel / webhook bodies.
+///
+/// The check is a best-effort denylist: it trips when the text contains
+/// an `<assignment-style-key>=<value>` fragment using one of the common
+/// secret parameter names (`api_key`, `token`, `secret`, `password`,
+/// …), or when it carries an `Authorization:` header prefix, or when it
+/// looks like a long contiguous token (e.g. a raw bearer token dropped
+/// in as the whole body). Hits are wrapped in a `TaintedValue` and run
+/// through the given sink so the rejection message stays consistent
+/// with the URL-side checks.
+///
+/// This is the same "two-sink pattern match" shape described in the
+/// SECURITY.md taint section — it is **not** a full information-flow
+/// tracker, and copy-pasted obfuscation will still bypass it. The goal
+/// is to catch the obvious "the LLM is stuffing OPENAI_API_KEY into an
+/// agent_send" shape on the way out, not to prove a data-flow theorem.
+fn check_taint_outbound_text(payload: &str, sink: &TaintSink) -> Option<String> {
+    const SECRET_KEYS: &[&str] = &[
+        "api_key",
+        "apikey",
+        "api-key",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "bearer",
+        "x-api-key",
+    ];
+
+    let lower = payload.to_lowercase();
+
+    // Fast path 1: `Authorization:` header literal — unambiguous
+    // signal that the LLM is trying to ship credentials in-band.
+    let mut hit = lower.contains("authorization:");
+
+    // Fast path 2: `key=value` / `key: value` / `key":` / `'key':`
+    // shapes. We match on the key name plus one of a handful of
+    // assignment separators so plain prose ("a token of appreciation")
+    // doesn't trip the filter.
+    if !hit {
+        for k in SECRET_KEYS {
+            for sep in ["=", ":", "\":", "':"] {
+                if lower.contains(&format!("{k}{sep}")) {
+                    hit = true;
+                    break;
+                }
+            }
+            if hit {
+                break;
+            }
+        }
+    }
+
+    // Fast path 3: the payload *is* a long opaque token. Covers the
+    // case where the LLM shoves a raw credential into the message
+    // without any key/value framing. Matches conservatively — long
+    // strings with only base64/hex characters and no whitespace, so
+    // natural-language messages don't false-positive. Well-known
+    // prefixes (`sk-`, `ghp_`, `xoxp-`) are also flagged regardless
+    // of length.
+    if !hit {
+        let trimmed = payload.trim();
+        let looks_token = trimmed.len() >= 32
+            && !trimmed.chars().any(char::is_whitespace)
+            && trimmed.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || c == '-'
+                    || c == '_'
+                    || c == '.'
+                    || c == '/'
+                    || c == '+'
+                    || c == '='
+            });
+        let well_known_prefix = trimmed.starts_with("sk-")
+            || trimmed.starts_with("ghp_")
+            || trimmed.starts_with("github_pat_")
+            || trimmed.starts_with("xoxp-")
+            || trimmed.starts_with("xoxb-")
+            || trimmed.starts_with("AKIA")
+            || trimmed.starts_with("AIza");
+        if looks_token || well_known_prefix {
+            hit = true;
+        }
+    }
+
+    if hit {
+        let mut labels = HashSet::new();
+        labels.insert(TaintLabel::Secret);
+        let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
+        if let Err(violation) = tainted.check_sink(sink) {
+            warn!(
+                sink = %sink.name,
+                snippet = %crate::str_utils::safe_truncate_str(payload, 80),
+                %violation,
+                "Outbound taint check failed"
+            );
+            return Some(violation.to_string());
+        }
+    }
+    None
+}
+
 tokio::task_local! {
     /// Tracks the current inter-agent call depth within a task.
     static AGENT_CALL_DEPTH: std::cell::Cell<u32>;
@@ -191,6 +296,40 @@ pub async fn execute_tool_raw(
                 let method = input["method"].as_str().unwrap_or("GET");
                 let headers = input.get("headers").and_then(|v| v.as_object());
                 let body = input["body"].as_str();
+                // Body-side taint check: the URL scan handles query
+                // strings, but POST/PUT callers can stuff credentials
+                // into the request body instead.
+                if let Some(body_text) = body {
+                    if let Some(violation) =
+                        check_taint_outbound_text(body_text, &TaintSink::net_fetch())
+                    {
+                        return ToolResult {
+                            tool_use_id: tool_use_id.to_string(),
+                            content: format!("Taint violation: {violation}"),
+                            is_error: true,
+                            ..Default::default()
+                        };
+                    }
+                }
+                // Header values, too — an LLM that knows the filter
+                // blocks `body` might fall back to stuffing the token
+                // into `Authorization:` via `headers`.
+                if let Some(headers_map) = headers {
+                    for (_name, value) in headers_map {
+                        if let Some(vs) = value.as_str() {
+                            if let Some(violation) =
+                                check_taint_outbound_text(vs, &TaintSink::net_fetch())
+                            {
+                                return ToolResult {
+                                    tool_use_id: tool_use_id.to_string(),
+                                    content: format!("Taint violation: {violation}"),
+                                    is_error: true,
+                                    ..Default::default()
+                                };
+                            }
+                        }
+                    }
+                }
                 if let Some(ctx) = web_ctx {
                     ctx.fetch
                         .fetch_with_options(url, method, headers, body)
@@ -1944,6 +2083,18 @@ async fn tool_agent_send(
     let message = input["message"]
         .as_str()
         .ok_or("Missing 'message' parameter")?;
+
+    // Taint check: refuse to pass obvious credential payloads across
+    // the agent boundary. `tool_agent_send` is the entry point for
+    // both in-process delegation *and* external A2A peers, so an LLM
+    // that stuffs `OPENAI_API_KEY=sk-…` into its own tool-call
+    // arguments would otherwise exfiltrate the secret to whoever is
+    // on the receiving side. Uses `TaintSink::agent_message` so the
+    // rejection message matches the shape documented in the taint
+    // module.
+    if let Some(violation) = check_taint_outbound_text(message, &TaintSink::agent_message()) {
+        return Err(format!("Taint violation: {violation}"));
+    }
 
     // Check + increment inter-agent call depth
     let max_depth = kh.max_agent_call_depth();
@@ -4463,6 +4614,82 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    // ── check_taint_outbound_text ────────────────────────────────────────
+
+    #[test]
+    fn test_taint_outbound_text_blocks_key_value_pairs() {
+        let sink = TaintSink::agent_message();
+        for body in [
+            "here is my api_key=sk-123",
+            "x-api-key: abcdef",
+            "{\"token\":\"mytoken\"}",
+            "'password': 'hunter2'",
+            "Authorization: Bearer abc",
+            "some text bearer=abc",
+        ] {
+            assert!(
+                check_taint_outbound_text(body, &sink).is_some(),
+                "outbound taint check must reject {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_taint_outbound_text_blocks_well_known_prefixes() {
+        let sink = TaintSink::agent_message();
+        for tok in [
+            "sk-12345678901234567890123456789012",
+            "ghp_1234567890123456789012345678901234567890",
+            "xoxb-0000-0000-xxxxxxxxxxxx",
+            "AKIAIOSFODNN7EXAMPLE",
+            "AIzaSyDummyGoogleKeyLooksLikeThis00",
+        ] {
+            assert!(
+                check_taint_outbound_text(tok, &sink).is_some(),
+                "outbound taint check must reject well-known prefix {tok:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_taint_outbound_text_blocks_long_opaque_tokens() {
+        let sink = TaintSink::agent_message();
+        // 40-char contiguous base64-ish payload with no whitespace or
+        // prose: smells like a raw bearer token.
+        let payload = "abcdef0123456789abcdef0123456789abcdef01";
+        assert!(
+            check_taint_outbound_text(payload, &sink).is_some(),
+            "outbound taint check must reject long opaque token"
+        );
+    }
+
+    #[test]
+    fn test_taint_outbound_text_allows_prose() {
+        let sink = TaintSink::agent_message();
+        for benign in [
+            "Please summarise this article about encryption.",
+            "Could you check whether our token economy works?",
+            "The passwd file lives at /etc/passwd on Linux — explain it.",
+            "Write a haiku about secret gardens.",
+            "",
+        ] {
+            assert!(
+                check_taint_outbound_text(benign, &sink).is_none(),
+                "outbound taint check must allow prose: {benign:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_taint_outbound_text_allows_short_identifiers() {
+        // A 16-char id is below the 32-char opaque-token threshold and
+        // doesn't match any key=value shape, so it should pass even
+        // though it looks alphanumeric.
+        let sink = TaintSink::agent_message();
+        let id = "req_0123456789ab";
+        assert!(check_taint_outbound_text(id, &sink).is_none());
+    }
 
     struct ApprovalKernel {
         approval_requests: Arc<AtomicUsize>,
