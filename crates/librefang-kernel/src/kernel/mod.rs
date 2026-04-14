@@ -3659,10 +3659,18 @@ system_prompt = "You are a helpful assistant."
         }
 
         // LLM agent: true streaming via agent loop
-        // Derive session ID: channel-specific sessions are always deterministic
-        // per-channel. For non-channel invocations, respect the agent's session_mode.
+        // Derive session ID: channel-specific sessions are deterministic per
+        // (channel, chat_id). Including chat_id prevents context bleed between
+        // a group and a DM that share the same (agent, channel). For non-channel
+        // invocations, respect the agent's session_mode.
         let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
+            Some(ctx) if !ctx.channel.is_empty() => {
+                let scope = match &ctx.chat_id {
+                    Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
+                    _ => ctx.channel.clone(),
+                };
+                SessionId::for_channel(agent_id, &scope)
+            }
             _ => match entry.manifest.session_mode {
                 librefang_types::agent::SessionMode::Persistent => entry.session_id,
                 librefang_types::agent::SessionMode::New => SessionId::new(),
@@ -4773,12 +4781,19 @@ system_prompt = "You are a helpful assistant."
             .check_quota(agent_id, &entry.manifest.resources)
             .map_err(KernelError::LibreFang)?;
 
-        // Derive session ID: channel-specific sessions are always deterministic
-        // per-channel and are not affected by session_mode. For non-channel
+        // Derive session ID: channel-specific sessions are deterministic per
+        // (channel, chat_id). Including chat_id prevents context bleed between
+        // a group and a DM that share the same (agent, channel). For non-channel
         // invocations (background ticks, triggers, agent_send), resolve the
         // effective session mode: per-trigger override > agent manifest default.
         let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
+            Some(ctx) if !ctx.channel.is_empty() => {
+                let scope = match &ctx.chat_id {
+                    Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
+                    _ => ctx.channel.clone(),
+                };
+                SessionId::for_channel(agent_id, &scope)
+            }
             _ => {
                 let mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
                 match mode {

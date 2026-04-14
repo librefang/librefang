@@ -1637,9 +1637,15 @@ fn build_sender_context(
         ),
         None => (AutoRouteStrategy::Off, 0, 0, 0, 0),
     };
+    let chat_id = if message.sender.platform_id.is_empty() {
+        None
+    } else {
+        Some(message.sender.platform_id.clone())
+    };
     SenderContext {
         channel: channel_type_str(&message.channel).to_string(),
         user_id: sender_user_id(message).to_string(),
+        chat_id,
         display_name: message.sender.display_name.clone(),
         is_group: message.is_group,
         was_mentioned: message
