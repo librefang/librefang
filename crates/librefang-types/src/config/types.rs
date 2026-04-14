@@ -591,6 +591,18 @@ pub struct RateLimitConfig {
     /// Maximum WebSocket messages per minute per connection. Default: 10.
     #[serde(default = "default_ws_messages_per_minute")]
     pub ws_messages_per_minute: u32,
+    /// Maximum terminal WebSocket input messages per minute per connection.
+    /// Default: 3600.
+    ///
+    /// Terminal sessions send one WebSocket message per keystroke, so the
+    /// generic `ws_messages_per_minute = 10` (sized for chat WS where a
+    /// "message" is a whole utterance) is two orders of magnitude too low
+    /// for an interactive PTY — typing `vim` + `:wq` in vim already
+    /// exhausts the budget and the session appears to freeze. 3600/min
+    /// (60/sec ≈ 720 WPM) covers any human typing speed plus TUI
+    /// navigation bursts while still capping pathological floods.
+    #[serde(default = "default_ws_terminal_messages_per_minute")]
+    pub ws_terminal_messages_per_minute: u32,
     /// WebSocket idle timeout in seconds (close after inactivity). Default: 1800.
     #[serde(default = "default_ws_idle_timeout_secs")]
     pub ws_idle_timeout_secs: u64,
@@ -614,6 +626,9 @@ fn default_max_ws_per_ip() -> usize {
 fn default_ws_messages_per_minute() -> u32 {
     10
 }
+fn default_ws_terminal_messages_per_minute() -> u32 {
+    3600
+}
 fn default_ws_idle_timeout_secs() -> u64 {
     1800
 }
@@ -631,6 +646,7 @@ impl Default for RateLimitConfig {
             retry_after_secs: default_retry_after_secs(),
             max_ws_per_ip: default_max_ws_per_ip(),
             ws_messages_per_minute: default_ws_messages_per_minute(),
+            ws_terminal_messages_per_minute: default_ws_terminal_messages_per_minute(),
             ws_idle_timeout_secs: default_ws_idle_timeout_secs(),
             ws_debounce_ms: default_ws_debounce_ms(),
             ws_debounce_chars: default_ws_debounce_chars(),
