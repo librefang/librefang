@@ -284,6 +284,17 @@ export function ConfigPage({ category }: { category: string }) {
     );
   }
 
+  if (schemaQuery.isError || configQuery.isError) {
+    return (
+      <div className="flex flex-col gap-6 p-6">
+        <PageHeader badge={t("nav.config")} title={categoryTitle} subtitle={t("config.desc", "System configuration editor")} icon={<Settings className="h-4 w-4" />} />
+        <div className="rounded-2xl border border-danger/30 bg-surface p-8 text-center text-danger text-sm">
+          {t("config.load_error", "Failed to load configuration")}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-6 p-6">
       <div className="flex items-center justify-between">
