@@ -346,11 +346,12 @@ export function ConfigPage({ category }: { category: string }) {
   const saveMutation = useMutation({
     mutationFn: ({ path, value }: { path: string; value: unknown }) => setConfigValue(path, value),
     onSuccess: (data, variables) => {
-      const reloadFailed = data.status !== "ok" && data.status !== "saved";
+      const reloadFailed = data.status === "saved_reload_failed";
+      const restartRequired = data.status === "applied_partial" || data.restart_required;
       if (reloadFailed) {
         setSaveStatus((s) => ({ ...s, [variables.path]: { ok: false, msg: t("config.saved_reload_failed", "Saved but reload failed") } }));
       } else {
-        const msg = data.restart_required ? t("config.saved_restart", "Saved (restart required)") : t("common.saved", "Saved");
+        const msg = restartRequired ? t("config.saved_restart", "Saved (restart required)") : t("common.saved", "Saved");
         setSaveStatus((s) => ({ ...s, [variables.path]: { ok: true, msg } }));
       }
       setPendingChanges((p) => {
@@ -377,10 +378,11 @@ export function ConfigPage({ category }: { category: string }) {
     for (const [path, value] of entries) {
       try {
         const data = await setConfigValue(path, value);
-        const reloadFailed = data.status !== "ok" && data.status !== "saved";
+        const reloadFailed = data.status === "saved_reload_failed";
+        const restartRequired = data.status === "applied_partial" || data.restart_required;
         const msg = reloadFailed
           ? t("config.saved_reload_failed", "Saved but reload failed")
-          : data.restart_required
+          : restartRequired
             ? t("config.saved_restart", "Saved (restart required)")
             : t("common.saved", "Saved");
         setSaveStatus((s) => ({ ...s, [path]: { ok: !reloadFailed, msg } }));
