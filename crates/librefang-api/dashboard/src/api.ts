@@ -917,6 +917,33 @@ export async function removeCustomModel(modelId: string): Promise<ApiActionRespo
   return del<ApiActionResponse>(`/api/models/custom/${encodeURIComponent(modelId)}`);
 }
 
+// ── Per-model overrides ─────────────────────────────────────────
+
+export interface ModelOverrides {
+  model_type?: "chat" | "speech" | "embedding";
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+  frequency_penalty?: number;
+  presence_penalty?: number;
+  reasoning_effort?: string;
+  use_max_completion_tokens?: boolean;
+  no_system_role?: boolean;
+  force_max_tokens?: boolean;
+}
+
+export async function getModelOverrides(modelKey: string): Promise<ModelOverrides> {
+  return get<ModelOverrides>(`/api/models/overrides/${encodeURIComponent(modelKey)}`);
+}
+
+export async function updateModelOverrides(modelKey: string, overrides: ModelOverrides): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/models/overrides/${encodeURIComponent(modelKey)}`, overrides);
+}
+
+export async function deleteModelOverrides(modelKey: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/models/overrides/${encodeURIComponent(modelKey)}`);
+}
+
 export async function setProviderKey(providerId: string, key: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`, { key });
 }

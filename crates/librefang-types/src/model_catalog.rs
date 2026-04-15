@@ -151,6 +151,87 @@ impl Default for ModelCatalogEntry {
     }
 }
 
+/// Model type classification.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelType {
+    /// Conversational / text generation model.
+    #[default]
+    Chat,
+    /// Speech / audio model (TTS, STT).
+    Speech,
+    /// Embedding / vector model.
+    Embedding,
+}
+
+impl fmt::Display for ModelType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ModelType::Chat => write!(f, "chat"),
+            ModelType::Speech => write!(f, "speech"),
+            ModelType::Embedding => write!(f, "embedding"),
+        }
+    }
+}
+
+/// Per-model inference parameter overrides.
+///
+/// Each field is `Option` — `None` means "use the agent's or system default".
+/// These overrides are applied as a fallback layer: agent-level `ModelConfig`
+/// takes precedence, then model overrides, then system defaults.
+///
+/// Persisted to `~/.librefang/model_overrides.json` keyed by `provider:model_id`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelOverrides {
+    /// Model type classification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_type: Option<ModelType>,
+    /// Sampling temperature (0.0–2.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Top-p / nucleus sampling (0.0–1.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    /// Maximum tokens for completion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Frequency penalty (-2.0–2.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    /// Presence penalty (-2.0–2.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+    /// Reasoning effort level ("low", "medium", "high").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Use `max_completion_tokens` instead of `max_tokens` in API requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_max_completion_tokens: Option<bool>,
+    /// Model does NOT support a system role message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_system_role: Option<bool>,
+    /// Force the max_tokens parameter even when the provider doesn't require it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force_max_tokens: Option<bool>,
+}
+
+impl ModelOverrides {
+    /// Returns true if all fields are `None` (no overrides set).
+    pub fn is_empty(&self) -> bool {
+        self.model_type.is_none()
+            && self.temperature.is_none()
+            && self.top_p.is_none()
+            && self.max_tokens.is_none()
+            && self.frequency_penalty.is_none()
+            && self.presence_penalty.is_none()
+            && self.reasoning_effort.is_none()
+            && self.use_max_completion_tokens.is_none()
+            && self.no_system_role.is_none()
+            && self.force_max_tokens.is_none()
+    }
+}
+
 /// Per-region endpoint configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionConfig {

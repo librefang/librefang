@@ -4,7 +4,8 @@
 //! with alias resolution, auth status detection, and pricing lookups.
 
 use librefang_types::model_catalog::{
-    AliasesCatalogFile, AuthStatus, ModelCatalogEntry, ModelCatalogFile, ModelTier, ProviderInfo,
+    AliasesCatalogFile, AuthStatus, ModelCatalogEntry, ModelCatalogFile, ModelOverrides, ModelTier,
+    ProviderInfo,
 };
 use std::collections::{HashMap, HashSet};
 use tracing::warn;
@@ -17,6 +18,8 @@ pub struct ModelCatalog {
     /// Providers whose fallback/CLI detection is suppressed by the user
     /// (i.e. the user explicitly removed the key via the dashboard).
     suppressed_providers: HashSet<String>,
+    /// Per-model inference parameter overrides, keyed by "provider:model_id".
+    overrides: HashMap<String, ModelOverrides>,
 }
 
 impl ModelCatalog {
@@ -155,6 +158,7 @@ impl ModelCatalog {
             aliases,
             providers,
             suppressed_providers: HashSet::new(),
+            overrides: HashMap::new(),
         }
     }
 
@@ -447,6 +451,52 @@ impl ModelCatalog {
         if let Ok(json) = serde_json::to_string_pretty(&list) {
             let _ = std::fs::write(path, json);
         }
+    }
+
+    // ── Per-model overrides ──────────────────────────────────────────
+
+    /// Get inference parameter overrides for a model.
+    /// Key format: "provider:model_id".
+    pub fn get_overrides(&self, key: &str) -> Option<&ModelOverrides> {
+        self.overrides.get(key)
+    }
+
+    /// Set inference parameter overrides for a model.
+    /// Removes the entry if `overrides.is_empty()`.
+    pub fn set_overrides(&mut self, key: String, overrides: ModelOverrides) {
+        if overrides.is_empty() {
+            self.overrides.remove(&key);
+        } else {
+            self.overrides.insert(key, overrides);
+        }
+    }
+
+    /// Remove inference parameter overrides for a model.
+    pub fn remove_overrides(&mut self, key: &str) -> bool {
+        self.overrides.remove(key).is_some()
+    }
+
+    /// Load model overrides from a JSON file.
+    pub fn load_overrides(&mut self, path: &std::path::Path) {
+        if let Ok(data) = std::fs::read_to_string(path) {
+            if let Ok(map) = serde_json::from_str::<HashMap<String, ModelOverrides>>(&data) {
+                self.overrides = map;
+            }
+        }
+    }
+
+    /// Persist model overrides to a JSON file.
+    /// Removes the file when no overrides are set.
+    pub fn save_overrides(&self, path: &std::path::Path) -> Result<(), String> {
+        if self.overrides.is_empty() {
+            let _ = std::fs::remove_file(path);
+            return Ok(());
+        }
+        let json = serde_json::to_string_pretty(&self.overrides)
+            .map_err(|e| format!("Failed to serialize model overrides: {e}"))?;
+        std::fs::write(path, json)
+            .map_err(|e| format!("Failed to write model overrides file: {e}"))?;
+        Ok(())
     }
 
     /// Set a custom base URL for a provider, overriding the default.

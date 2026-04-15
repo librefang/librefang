@@ -17,6 +17,12 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/models/custom/{*id}",
             axum::routing::delete(remove_custom_model),
         )
+        .route(
+            "/models/overrides/{*id}",
+            axum::routing::get(get_model_overrides)
+                .put(set_model_overrides)
+                .delete(delete_model_overrides),
+        )
         .route("/models/{*id}", axum::routing::get(get_model))
         .route("/providers", axum::routing::get(list_providers))
         .route("/catalog/update", axum::routing::post(catalog_update))
@@ -261,6 +267,8 @@ pub async fn get_model(
                 .get_provider(&m.provider)
                 .map(|p| p.auth_status.is_available())
                 .unwrap_or(m.tier == librefang_types::model_catalog::ModelTier::Custom);
+            let override_key = format!("{}:{}", m.provider, m.id);
+            let overrides = catalog.get_overrides(&override_key);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -277,11 +285,70 @@ pub async fn get_model(
                     "supports_streaming": m.supports_streaming,
                     "aliases": m.aliases,
                     "available": available,
+                    "overrides": overrides,
                 })),
             )
         }
         None => ApiErrorResponse::not_found(format!("Model '{}' not found", id)).into_json_tuple(),
     }
+}
+
+// ── Per-model overrides ─────────────────────────────────────────────────────
+
+/// GET /api/models/overrides/{id} — Get inference parameter overrides for a model.
+pub async fn get_model_overrides(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let catalog = state
+        .kernel
+        .model_catalog_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let key = id.clone();
+    match catalog.get_overrides(&key) {
+        Some(o) => (StatusCode::OK, Json(serde_json::to_value(o).unwrap())),
+        None => (StatusCode::OK, Json(serde_json::json!({}))),
+    }
+}
+
+/// PUT /api/models/overrides/{id} — Set inference parameter overrides for a model.
+pub async fn set_model_overrides(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<librefang_types::model_catalog::ModelOverrides>,
+) -> impl IntoResponse {
+    let overrides_path = state.kernel.home_dir().join("model_overrides.json");
+    let mut catalog = state
+        .kernel
+        .model_catalog_ref()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    catalog.set_overrides(id.clone(), body);
+    if let Err(e) = catalog.save_overrides(&overrides_path) {
+        tracing::warn!("Failed to persist model overrides: {e}");
+        return ApiErrorResponse::internal(format!("Failed to persist overrides: {e}"))
+            .into_json_tuple();
+    }
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+}
+
+/// DELETE /api/models/overrides/{id} — Remove inference parameter overrides for a model.
+pub async fn delete_model_overrides(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let overrides_path = state.kernel.home_dir().join("model_overrides.json");
+    let mut catalog = state
+        .kernel
+        .model_catalog_ref()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    catalog.remove_overrides(&id);
+    if let Err(e) = catalog.save_overrides(&overrides_path) {
+        tracing::warn!("Failed to persist model overrides: {e}");
+    }
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
 /// Attach local-provider probe results to a JSON entry and optionally merge
