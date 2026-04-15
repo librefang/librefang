@@ -918,6 +918,8 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "timeout_secs": config.approval.timeout_secs,
         "auto_approve_autonomous": config.approval.auto_approve_autonomous,
         "auto_approve": config.approval.auto_approve,
+        "second_factor": serde_json::to_value(&config.approval.second_factor).unwrap_or(serde_json::json!("none")),
+        "totp_issuer": config.approval.totp_issuer,
     });
 
     set!("exec_policy", {
@@ -1649,7 +1651,9 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }});
     sec!("approval", { "hot_reloadable": true, "fields": {
         "require_approval": "string[]", "timeout_secs": "number",
-        "auto_approve_autonomous": "boolean", "auto_approve": "boolean"
+        "auto_approve_autonomous": "boolean", "auto_approve": "boolean",
+        "second_factor": { "type": "select", "options": ["none", "totp", "login", "both"] },
+        "totp_issuer": "string"
     }});
     sec!("exec_policy", { "fields": {
         "mode": { "type": "select", "options": ["deny", "allowlist", "full"] },
