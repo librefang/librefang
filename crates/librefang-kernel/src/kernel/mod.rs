@@ -4877,54 +4877,6 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Apply per-model inference parameter overrides from the catalog.
-        // Priority: model overrides > agent manifest > system defaults.
-        // Model overrides represent the user's explicit per-model configuration
-        // via the dashboard, so they take precedence over agent defaults.
-        {
-            let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
-            let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(mo) = catalog.get_overrides(&override_key) {
-                // temperature & max_tokens: set directly on the struct so all
-                // drivers (OpenAI, Anthropic, Gemini) pick them up.  These always
-                // override the agent default since there's no way to distinguish
-                // "agent didn't set it" from "agent set the default value".
-                // This is intentional — model overrides are the user's explicit
-                // choice for this specific model.
-                if let Some(t) = mo.temperature {
-                    manifest.model.temperature = t;
-                }
-                if let Some(mt) = mo.max_tokens {
-                    manifest.model.max_tokens = mt;
-                }
-                // Provider-specific params go through extra_params.
-                // insert() overwrites any agent-level value, matching the
-                // priority of the struct-level fields above.
-                let ep = &mut manifest.model.extra_params;
-                if let Some(tp) = mo.top_p {
-                    ep.insert("top_p".to_string(), serde_json::json!(tp));
-                }
-                if let Some(fp) = mo.frequency_penalty {
-                    ep.insert("frequency_penalty".to_string(), serde_json::json!(fp));
-                }
-                if let Some(pp) = mo.presence_penalty {
-                    ep.insert("presence_penalty".to_string(), serde_json::json!(pp));
-                }
-                if let Some(ref re) = mo.reasoning_effort {
-                    ep.insert("reasoning_effort".to_string(), serde_json::json!(re));
-                }
-                if mo.use_max_completion_tokens == Some(true) {
-                    ep.insert(
-                        "use_max_completion_tokens".to_string(),
-                        serde_json::json!(true),
-                    );
-                }
-                if mo.force_max_tokens == Some(true) {
-                    ep.insert("force_max_tokens".to_string(), serde_json::json!(true));
-                }
-            }
-        }
-
         // Backfill thinking config from global config if per-agent is not set
         if manifest.thinking.is_none() {
             manifest.thinking = cfg.thinking.clone();
@@ -5141,6 +5093,45 @@ system_prompt = "You are a helpful assistant."
                             manifest.model.provider = entry.provider.clone();
                         }
                     }
+                }
+            }
+        }
+
+        // Apply per-model inference parameter overrides from the catalog.
+        // Placed AFTER model routing so overrides match the final model, not
+        // the pre-routing one (e.g. routing may switch sonnet → haiku).
+        // Priority: model overrides > agent manifest > system defaults.
+        {
+            let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
+            let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(mo) = catalog.get_overrides(&override_key) {
+                if let Some(t) = mo.temperature {
+                    manifest.model.temperature = t;
+                }
+                if let Some(mt) = mo.max_tokens {
+                    manifest.model.max_tokens = mt;
+                }
+                let ep = &mut manifest.model.extra_params;
+                if let Some(tp) = mo.top_p {
+                    ep.insert("top_p".to_string(), serde_json::json!(tp));
+                }
+                if let Some(fp) = mo.frequency_penalty {
+                    ep.insert("frequency_penalty".to_string(), serde_json::json!(fp));
+                }
+                if let Some(pp) = mo.presence_penalty {
+                    ep.insert("presence_penalty".to_string(), serde_json::json!(pp));
+                }
+                if let Some(ref re) = mo.reasoning_effort {
+                    ep.insert("reasoning_effort".to_string(), serde_json::json!(re));
+                }
+                if mo.use_max_completion_tokens == Some(true) {
+                    ep.insert(
+                        "use_max_completion_tokens".to_string(),
+                        serde_json::json!(true),
+                    );
+                }
+                if mo.force_max_tokens == Some(true) {
+                    ep.insert("force_max_tokens".to_string(), serde_json::json!(true));
                 }
             }
         }
