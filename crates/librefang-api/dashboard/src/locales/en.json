@@ -1461,6 +1461,10 @@
     "group_standalone": "Standalone",
     "hand_coordinator": "coordinator",
     "web_search_tooltip": "Web Search: {{mode}}. Requires a search API key (Tavily, Brave, Jina, or Perplexity) in config.toml [web] section.",
+    "web_search_key_hint": "Needs search API key in config",
+    "web_search_no_key": "No search API key configured. Click to open settings.",
+    "web_search_setup": "Search",
+    "web_search_configure": "Configure API key",
     "select_agent": "Select Agent",
     "select_agent_desc": "Choose an agent from the list to establish a communication link.",
     "transmit_command": "Transmit neural pulse...",
@@ -1527,15 +1531,7 @@
     "info_model": "Model",
     "info_provider": "Provider",
     "info_state": "State",
-    "ws_not_connected": "WebSocket not connected. Please refresh the page.",
-    "session": "Session",
-    "sessions_title": "Sessions",
-    "new_session": "New session",
-    "delete_session": "Delete session",
-    "export": "Export",
-    "export_markdown": "Export as Markdown",
-    "approval_required": "Approval Required",
-    "approval_tool": "Tool"
+    "ws_not_connected": "WebSocket not connected. Please refresh the page."
   },
   "goals": {
     "title": "Goals",

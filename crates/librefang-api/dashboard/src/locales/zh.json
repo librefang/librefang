@@ -1436,6 +1436,10 @@
     "group_standalone": "独立",
     "hand_coordinator": "协调者",
     "web_search_tooltip": "网络搜索: {{mode}}。需要在 config.toml [web] 中配置搜索 API key（Tavily、Brave、Jina 或 Perplexity）。",
+    "web_search_key_hint": "需要在配置中设置搜索 API key",
+    "web_search_no_key": "未配置搜索 API key，点击打开设置页面",
+    "web_search_setup": "搜索",
+    "web_search_configure": "配置 API key",
     "select_agent": "选择智能体",
     "select_agent_desc": "从列表中选择一个智能体以建立通信链路。",
     "transmit_command": "输入消息...",
@@ -1502,15 +1506,7 @@
     "info_model": "模型",
     "info_provider": "提供商",
     "info_state": "状态",
-    "ws_not_connected": "WebSocket 未连接，请刷新页面。",
-    "session": "会话",
-    "sessions_title": "会话列表",
-    "new_session": "新建会话",
-    "delete_session": "删除会话",
-    "export": "导出",
-    "export_markdown": "导出为 Markdown",
-    "approval_required": "需要审批",
-    "approval_tool": "工具"
+    "ws_not_connected": "WebSocket 未连接，请刷新页面。"
   },
   "goals": {
     "title": "目标",

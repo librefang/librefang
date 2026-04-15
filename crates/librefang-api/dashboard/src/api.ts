@@ -177,6 +177,7 @@ export interface DashboardSnapshot {
   agents: AgentItem[];
   skillCount: number;
   workflowCount: number;
+  webSearchAvailable: boolean;
 }
 
 export interface AgentIdentity {
@@ -748,6 +749,7 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     channels: ChannelItem[];
     skillCount: number;
     workflowCount: number;
+    webSearchAvailable: boolean;
   }>("/api/dashboard/snapshot");
 
   return {
@@ -758,6 +760,7 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     channels: snap.channels ?? [],
     skillCount: snap.skillCount ?? 0,
     workflowCount: snap.workflowCount ?? 0,
+    webSearchAvailable: snap.webSearchAvailable ?? false,
   };
 }
 

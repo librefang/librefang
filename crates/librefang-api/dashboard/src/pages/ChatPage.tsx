@@ -654,10 +654,8 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               />
             </button>
             {thinkingExpanded && (
-              <div className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim prose prose-sm prose-invert max-w-none">
-                <MarkdownContent remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                  {message.thinking}
-                </MarkdownContent>
+              <div className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim whitespace-pre-wrap break-words">
+                {message.thinking}
               </div>
             )}
           </div>
@@ -925,12 +923,13 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
   agentId: string; onModelChange: () => void;
   webSearchAugmentation?: "off" | "auto" | "always"; onWebSearchChange?: (mode: "off" | "auto" | "always") => void;
+  webSearchAvailable?: boolean;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
@@ -1190,26 +1189,52 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
             </div>
           )}
         </div>
-        {/* Web Search toggle (off → auto → always → off) */}
-        {onWebSearchChange && (
-          <button
-            onClick={() => {
-              const cycle: Record<string, "off" | "auto" | "always"> = { off: "auto", auto: "always", always: "off" };
-              onWebSearchChange(cycle[webSearchAugmentation || "auto"] || "auto");
-            }}
-            title={t("chat.web_search_tooltip", { defaultValue: "Web Search: {{mode}}. Requires a search API key (Tavily, Brave, Jina, or Perplexity) configured in config.toml [web] section.", mode: webSearchAugmentation || "auto" })}
-            className={`hidden sm:flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono transition-colors ${
-              webSearchAugmentation === "always"
-                ? "text-brand bg-brand/10 hover:bg-brand/20"
-                : webSearchAugmentation === "auto"
-                  ? "text-text-dim/50 hover:text-text hover:bg-surface-hover"
-                  : "text-text-dim/30 hover:text-text-dim/60 hover:bg-surface-hover"
-            }`}
-          >
-            <Globe className="h-3 w-3" />
-            <span className="hidden lg:inline">{webSearchAugmentation === "always" ? t("common.always", { defaultValue: "Always" }) : webSearchAugmentation === "auto" ? t("common.auto", { defaultValue: "Auto" }) : t("common.off", { defaultValue: "Off" })}</span>
-          </button>
-        )}
+        {/* Web Search toggle (off → auto → always → off) with config check */}
+        {onWebSearchChange && (() => {
+          const mode = webSearchAugmentation || "auto";
+          const isActive = mode !== "off";
+          const noKey = !webSearchAvailable;
+          return (
+            <div className="hidden sm:flex items-center gap-1.5">
+              <button
+                onClick={() => {
+                  if (noKey && mode === "off") {
+                    // No search key configured — navigate to Config page Web section
+                    window.location.href = "/dashboard/config";
+                    return;
+                  }
+                  const cycle: Record<string, "off" | "auto" | "always"> = { off: "auto", auto: "always", always: "off" };
+                  onWebSearchChange(cycle[mode] || "auto");
+                }}
+                title={noKey ? t("chat.web_search_no_key", { defaultValue: "No search API key configured. Click to open settings." }) : undefined}
+                className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono transition-colors ${
+                  noKey && !isActive
+                    ? "text-warning/50 hover:text-warning hover:bg-warning/10"
+                    : mode === "always"
+                      ? "text-brand bg-brand/10 hover:bg-brand/20"
+                      : mode === "auto"
+                        ? "text-text-dim/50 hover:text-text hover:bg-surface-hover"
+                        : "text-text-dim/30 hover:text-text-dim/60 hover:bg-surface-hover"
+                }`}
+              >
+                <Globe className="h-3 w-3" />
+                <span>{noKey && !isActive
+                  ? t("chat.web_search_setup", { defaultValue: "Search" })
+                  : mode === "always" ? t("common.always", { defaultValue: "Always" }) : mode === "auto" ? t("common.auto", { defaultValue: "Auto" }) : t("common.off", { defaultValue: "Off" })
+                }</span>
+                {noKey && !isActive && <AlertCircle className="h-2.5 w-2.5 text-warning" />}
+              </button>
+              {isActive && noKey && (
+                <button
+                  onClick={() => { window.location.href = "/dashboard/config"; }}
+                  className="text-[9px] text-warning hover:text-warning/80 underline hidden xl:inline"
+                >
+                  {t("chat.web_search_configure", { defaultValue: "Configure API key" })}
+                </button>
+              )}
+            </div>
+          );
+        })()}
         {/* Session dropdown */}
         {sessions && sessions.length > 0 && (
           <div className="relative" ref={dropdownRef}>
@@ -1520,6 +1545,16 @@ export function ChatPage() {
     queryFn: () => listAgents({ includeHands: showHandAgents }),
     staleTime: 30000,
   });
+  // Check if web search is available (any search API key configured)
+  const configQuery = useQuery({
+    queryKey: ["config", "web-search-available"],
+    queryFn: async () => {
+      const cfg = await getFullConfig();
+      return (cfg as any)?.web?.search_available === true;
+    },
+    staleTime: 60000,
+  });
+  const webSearchAvailable = configQuery.data ?? false;
   const handsQuery = useQuery({
     queryKey: ["hands", "active", "chat"],
     queryFn: listActiveHands,
@@ -1849,6 +1884,7 @@ export function ChatPage() {
               agentId={selectedAgentId}
               onModelChange={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
               webSearchAugmentation={selectedAgent?.web_search_augmentation}
+              webSearchAvailable={webSearchAvailable}
               onWebSearchChange={async (mode) => {
                 try {
                   await patchAgentConfig(selectedAgentId, { web_search_augmentation: mode });

@@ -812,9 +812,24 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     );
 
     // ── Web ──
+    // Check if at least one search provider has a configured API key
+    let search_available = [
+        &config.web.tavily.api_key_env,
+        &config.web.brave.api_key_env,
+        &config.web.jina.api_key_env,
+        &config.web.perplexity.api_key_env,
+    ]
+    .iter()
+    .any(|env_var| {
+        std::env::var(env_var)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+    });
     set!("web", {
         "search_provider": format!("{:?}", config.web.search_provider),
         "cache_ttl_minutes": config.web.cache_ttl_minutes,
+        "search_available": search_available,
     });
     // Web subsections built separately to avoid recursion limit
     if let Some(web) = out.get_mut("web").and_then(|v| v.as_object_mut()) {
@@ -2089,6 +2104,21 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
     let providers = providers_result.unwrap_or_default();
     let channels = channels_result.unwrap_or_default();
 
+    // Check if at least one web search provider has a configured API key
+    let web_search_available = [
+        &cfg.web.tavily.api_key_env,
+        &cfg.web.brave.api_key_env,
+        &cfg.web.jina.api_key_env,
+        &cfg.web.perplexity.api_key_env,
+    ]
+    .iter()
+    .any(|env_var| {
+        std::env::var(env_var)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+    });
+
     serde_json::json!({
         "health": health,
         "status": status,
@@ -2097,5 +2127,6 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         "channels": channels,
         "skillCount": skill_count,
         "workflowCount": workflow_count,
+        "webSearchAvailable": web_search_available,
     })
 }
