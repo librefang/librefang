@@ -8422,8 +8422,8 @@ mod tests {
 
     #[test]
     fn test_should_augment_web_search_off() {
-        let manifest = AgentManifest::default();
-        // Default is Off
+        let mut manifest = AgentManifest::default();
+        manifest.web_search_augmentation = librefang_types::agent::WebSearchAugmentationMode::Off;
         assert!(!should_augment_web_search(&manifest));
     }
 
@@ -8503,11 +8503,11 @@ mod tests {
     }
 
     #[test]
-    fn test_manifest_default_web_search_augmentation_is_off() {
+    fn test_manifest_default_web_search_augmentation_is_auto() {
         let manifest = AgentManifest::default();
         assert_eq!(
             manifest.web_search_augmentation,
-            librefang_types::agent::WebSearchAugmentationMode::Off,
+            librefang_types::agent::WebSearchAugmentationMode::Auto,
         );
     }
 
@@ -8532,7 +8532,7 @@ mod tests {
         let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
         assert_eq!(
             manifest.web_search_augmentation,
-            librefang_types::agent::WebSearchAugmentationMode::Off,
+            librefang_types::agent::WebSearchAugmentationMode::Auto,
         );
     }
 }
