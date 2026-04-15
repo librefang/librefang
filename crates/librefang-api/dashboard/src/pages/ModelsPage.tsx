@@ -679,6 +679,20 @@ export function ModelsPage() {
   );
 }
 
+// ── Toggle helper (defined outside render to avoid remount) ──────
+
+function SettingsToggle({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <label className="flex items-center justify-between gap-2 py-1.5 cursor-pointer">
+      <span className="text-xs text-text">{label}</span>
+      <button type="button" onClick={() => onChange(!value)}
+        className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${value ? "bg-brand" : "bg-border-subtle"}`}>
+        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value ? "translate-x-4.5" : "translate-x-0.5"}`} />
+      </button>
+    </label>
+  );
+}
+
 // ── Model Settings Modal ──────────────────────────────────────────
 
 function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
@@ -761,20 +775,6 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
       onError(e?.message);
     }
   }, [overrideKey, onReset, onClose, onError]);
-
-  const toggleClass = (on: boolean) =>
-    `relative w-9 h-5 rounded-full transition-colors cursor-pointer ${on ? "bg-brand" : "bg-border-subtle"}`;
-  const toggleDot = (on: boolean) =>
-    `absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${on ? "translate-x-4.5" : "translate-x-0.5"}`;
-
-  const Toggle = ({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label: string }) => (
-    <label className="flex items-center justify-between gap-2 py-1.5 cursor-pointer">
-      <span className="text-xs text-text">{label}</span>
-      <button type="button" onClick={() => onChange(!value)} className={toggleClass(value)}>
-        <span className={toggleDot(value)} />
-      </button>
-    </label>
-  );
 
   if (loading) {
     return (
@@ -863,10 +863,10 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
           <SliderInput
             label={t("models.max_tokens_param")}
             value={maxTokens} onChange={(v) => setMaxTokens(Math.round(v))}
-            min={1} max={1048576} step={1}
+            min={256} max={1048576} step={256}
             enabled={maxTokensEnabled} onToggle={setMaxTokensEnabled}
-            ticks={[32768, 131072, 1048576]}
-            formatTick={(v) => v >= 1048576 ? "1M" : `${Math.round(v/1024)}K`}
+            ticks={[256, 32768, 131072, 1048576]}
+            formatTick={(v) => v >= 1048576 ? "1M" : v >= 1024 ? `${Math.round(v/1024)}K` : String(v)}
           />
 
           <SliderInput
@@ -901,9 +901,9 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
         {/* Flags */}
         <div className="space-y-1">
           <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.flags")}</label>
-          <Toggle value={useMaxCompletionTokens} onChange={setUseMaxCompletionTokens} label={t("models.use_max_completion_tokens")} />
-          <Toggle value={noSystemRole} onChange={setNoSystemRole} label={t("models.no_system_role")} />
-          <Toggle value={forceMaxTokens} onChange={setForceMaxTokens} label={t("models.force_max_tokens")} />
+          <SettingsToggle value={useMaxCompletionTokens} onChange={setUseMaxCompletionTokens} label={t("models.use_max_completion_tokens")} />
+          <SettingsToggle value={noSystemRole} onChange={setNoSystemRole} label={t("models.no_system_role")} />
+          <SettingsToggle value={forceMaxTokens} onChange={setForceMaxTokens} label={t("models.force_max_tokens")} />
         </div>
 
         {/* Actions */}
