@@ -950,6 +950,10 @@ export async function deleteModelOverrides(modelKey: string): Promise<ApiActionR
   return del<ApiActionResponse>(`/api/models/overrides/${encodeURIComponent(modelKey)}`);
 }
 
+export async function setAgentModel(agentId: string, model: string, provider?: string): Promise<{ status: string; model: string; provider: string }> {
+  return put<{ status: string; model: string; provider: string }>(`/api/agents/${encodeURIComponent(agentId)}/model`, { model, provider });
+}
+
 export async function setProviderKey(providerId: string, key: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`, { key });
 }

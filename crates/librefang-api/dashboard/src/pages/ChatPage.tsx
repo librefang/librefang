@@ -5,9 +5,9 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders, listActiveHands } from "../api";
+import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders, listActiveHands, setAgentModel } from "../api";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
-import { groupedPicker } from "../lib/chatPicker";
+import { groupedPicker } from "../lib/chatPicker";)
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe } from "lucide-react";
@@ -150,7 +150,8 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void) {
+// availableModels: passed for /model command to show available models
+function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, availableModels: ModelItem[] = []) {)
   const { t } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Per-agent loading state. A single shared `isLoading` would freeze the
@@ -356,6 +357,23 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
           ws.current.send(JSON.stringify({ type: "command", command: cmd, args: cmdArgs }));
         } else {
           sysMsg(t("chat.ws_not_connected"));
+        }
+        return;
+      }
+      if (trimmed.startsWith("/model")) {
+        const args = trimmed.slice(6).trim();
+        if (!args) {
+          const a = agents.find(a => a.id === agentId);
+          const current = a ? `${a.model_provider || "?"}:${a.model_name || "?"}` : "none";
+          sysMsg(`Current model: **${current}**\n\nAvailable models:\n${availableModels.map(m => `- **${m.provider}:${m.display_name || m.id}**`).join("\n")}`);
+          return;
+        }
+        const [provider, model] = args.includes(":") ? args.split(":") : ["", args];
+        try {
+          const result = await setAgentModel(agentId!, provider && model ? model : args, provider || undefined);
+          sysMsg(`Switched to model: **${result.provider}:${result.model}**`);
+        } catch (e) {
+          sysMsg(`Failed to switch model: ${e instanceof Error ? e.message : "Unknown error"}`);
         }
         return;
       }
@@ -1639,7 +1657,7 @@ export function ChatPage() {
     tts.stop();
   }, [selectedAgentId, tts.stop]);
 
-  const [showHandAgents, setShowHandAgents] = useState<boolean>(() => {
+const [showHandAgents, setShowHandAgents] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem("librefang.chat.show_hand_agents") === "1";
   });
@@ -1656,6 +1674,8 @@ export function ChatPage() {
     queryFn: () => listAgents({ includeHands: showHandAgents }),
     staleTime: 30000,
   });
+  const modelsQuery = useQuery({ queryKey: ["models", "list"], queryFn: () => listModels({ available: true }), staleTime: 60000 });
+  const availableModels = useMemo(() => modelsQuery.data?.models ?? [], [modelsQuery.data]);
   // Check if web search is available (any search API key configured)
   const webSearchAvailable = ((configQuery.data as any)?.web?.search_available === true);
   const handsQuery = useQuery({
@@ -1745,6 +1765,23 @@ export function ChatPage() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, [messages, agents, selectedAgentId]);
+=======
+  const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
+  const modelsQuery = useQuery({ queryKey: ["models", "list"], queryFn: () => listModels({ available: true }), staleTime: 60000 });
+  const availableModels = useMemo(() => modelsQuery.data?.models ?? [], [modelsQuery.data]);
+  const agents = useMemo(() => [...(agentsQuery.data ?? [])].sort((a, b) => {
+    // Auth missing → sort to bottom
+    const aNoAuth = isAuthUnavailable(a.auth_status) ? 1 : 0;
+    const bNoAuth = isAuthUnavailable(b.auth_status) ? 1 : 0;
+    if (aNoAuth !== bNoAuth) return aNoAuth - bNoAuth;
+    const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
+    const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
+    if (aSusp !== bSusp) return aSusp - bSusp;
+    return a.name.localeCompare(b.name);
+  }), [agentsQuery.data]);
+  // Session state — bump version to force message reload after switch
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents, sessionVersion, availableModels);
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 

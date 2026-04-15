@@ -9,6 +9,7 @@
     },
     "version": "2026.4.15-beta22"
   },
+  },
   "paths": {
     "/.well-known/agent.json": {
       "get": {
