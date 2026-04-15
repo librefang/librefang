@@ -72,7 +72,7 @@ impl MediaEngine {
             .as_deref()
             .or_else(|| detect_audio_provider())
             .ok_or(
-                "No audio transcription provider configured. Set GROQ_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, ELEVENLABS_API_KEY, or MINIMAX_API_KEY",
+                "No audio transcription provider configured. Set one of: GROQ_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, ELEVENLABS_API_KEY, MINIMAX_API_KEY, FIREWORKS_API_KEY, TOGETHER_API_KEY, SILICONFLOW_API_KEY",
             )?;
 
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
@@ -139,24 +139,8 @@ impl MediaEngine {
 
         let transcription = match provider {
             // Whisper-compatible providers (OpenAI multipart protocol)
-            "groq" | "openai" | "minimax" => {
-                let (api_url, api_key) = match provider {
-                    "groq" => (
-                        "https://api.groq.com/openai/v1/audio/transcriptions",
-                        std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set")?,
-                    ),
-                    "openai" => (
-                        "https://api.openai.com/v1/audio/transcriptions",
-                        std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?,
-                    ),
-                    "minimax" => (
-                        "https://api.minimax.io/v1/audio/transcriptions",
-                        std::env::var("MINIMAX_API_KEY")
-                            .or_else(|_| std::env::var("MINIMAX_CN_API_KEY"))
-                            .map_err(|_| "MINIMAX_API_KEY not set")?,
-                    ),
-                    _ => unreachable!(),
-                };
+            "groq" | "openai" | "minimax" | "fireworks" | "together" | "siliconflow" => {
+                let (api_url, api_key) = whisper_provider_config(provider)?;
                 whisper_transcribe(&api_url, &api_key, model, audio_bytes, &filename, &mime).await?
             }
             // Gemini — multimodal content generation with audio input
@@ -281,7 +265,40 @@ fn detect_vision_provider() -> Option<&'static str> {
 /// Returns `None` for MIME types that aren't in Whisper's supported set so
 // ── STT provider helpers ──────────────────────────────────────────────
 
-/// Transcribe using an OpenAI-compatible Whisper endpoint (Groq, OpenAI).
+/// Resolve Whisper-compatible API URL and key for a provider.
+fn whisper_provider_config(provider: &str) -> Result<(String, String), String> {
+    match provider {
+        "groq" => Ok((
+            "https://api.groq.com/openai/v1/audio/transcriptions".into(),
+            std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set")?,
+        )),
+        "openai" => Ok((
+            "https://api.openai.com/v1/audio/transcriptions".into(),
+            std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?,
+        )),
+        "minimax" => Ok((
+            "https://api.minimax.io/v1/audio/transcriptions".into(),
+            std::env::var("MINIMAX_API_KEY")
+                .or_else(|_| std::env::var("MINIMAX_CN_API_KEY"))
+                .map_err(|_| "MINIMAX_API_KEY not set")?,
+        )),
+        "fireworks" => Ok((
+            "https://api.fireworks.ai/inference/v1/audio/transcriptions".into(),
+            std::env::var("FIREWORKS_API_KEY").map_err(|_| "FIREWORKS_API_KEY not set")?,
+        )),
+        "together" => Ok((
+            "https://api.together.xyz/v1/audio/transcriptions".into(),
+            std::env::var("TOGETHER_API_KEY").map_err(|_| "TOGETHER_API_KEY not set")?,
+        )),
+        "siliconflow" => Ok((
+            "https://api.siliconflow.cn/v1/audio/transcriptions".into(),
+            std::env::var("SILICONFLOW_API_KEY").map_err(|_| "SILICONFLOW_API_KEY not set")?,
+        )),
+        other => Err(format!("Unknown Whisper-compatible provider: {other}")),
+    }
+}
+
+/// Transcribe using an OpenAI-compatible Whisper endpoint.
 async fn whisper_transcribe(
     api_url: &str,
     api_key: &str,
@@ -551,6 +568,15 @@ fn detect_audio_provider() -> Option<&'static str> {
     if has_key("MINIMAX_API_KEY") || has_key("MINIMAX_CN_API_KEY") {
         return Some("minimax");
     }
+    if has_key("FIREWORKS_API_KEY") {
+        return Some("fireworks");
+    }
+    if has_key("TOGETHER_API_KEY") {
+        return Some("together");
+    }
+    if has_key("SILICONFLOW_API_KEY") {
+        return Some("siliconflow");
+    }
     None
 }
 
@@ -572,6 +598,9 @@ fn default_audio_model(provider: &str) -> &str {
         "gemini" => "gemini-2.0-flash",
         "elevenlabs" => "scribe_v1",
         "minimax" => "speech-01-turbo",
+        "fireworks" => "whisper-v3-turbo",
+        "together" => "whisper-large-v3-turbo",
+        "siliconflow" => "FunAudioLLM/SenseVoiceSmall",
         _ => "unknown",
     }
 }

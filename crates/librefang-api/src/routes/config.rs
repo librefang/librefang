@@ -888,6 +888,9 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             || has_key("ELEVENLABS_API_KEY")
             || has_key("MINIMAX_API_KEY")
             || has_key("MINIMAX_CN_API_KEY")
+            || has_key("FIREWORKS_API_KEY")
+            || has_key("TOGETHER_API_KEY")
+            || has_key("SILICONFLOW_API_KEY")
     };
     set!("media", {
         "image_description": config.media.image_description,
