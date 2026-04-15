@@ -216,7 +216,21 @@ pub async fn react_asset(
             data,
         )
             .into_response(),
-        None => (StatusCode::NOT_FOUND, "asset not found").into_response(),
+        None => {
+            // SPA fallback: if the path has no file extension, serve index.html
+            // so that browser-history routing works (e.g. /dashboard/config/general).
+            let has_ext = asset_path
+                .rsplit('/')
+                .next()
+                .is_some_and(|s| s.contains('.'));
+            if !has_ext {
+                if let Some(index) = resolve_dashboard_file(home_dir.as_deref(), "index.html") {
+                    return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], index)
+                        .into_response();
+                }
+            }
+            (StatusCode::NOT_FOUND, "asset not found").into_response()
+        }
     }
 }
 

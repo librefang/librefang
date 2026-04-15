@@ -5,6 +5,36 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.15] - 2026-04-15
+
+### Added
+
+- Add terminal websocket access controls and documentation (Terminal Phase 2) (#2332) (@leszek3737)
+- Show hand agents in chat picker, grouped by hand (#2458) (@neo-wanderer)
+- Group models by provider when showing all providers (#2509) (@houko)
+- Conditionally show thinking toggles based on model capability (#2511) (@houko)
+- Add Registry tab to MCP Servers page (#2515) (@houko)
+- Add TOTP second-factor verification to dashboard login (#2517) (@houko)
+
+### Fixed
+
+- Atomic tool-use turn commit — closes #2381 (follow-up to #2065) (#2387) (@DaBlitzStein)
+- Spawn pnpm via sh to resolve mise shim PATH (#2504) (@houko)
+- Retry mergeability check on synchronize to clear stale conflict label (#2505) (@houko)
+- Always strip ready-for-review when conflicts exist (#2506) (@houko)
+- Scaffold hand workspaces on first boot instead of activate+pause (#2507) (@houko)
+- Probe ollama before fallback, default to gemma4 (#2508) (@houko)
+- Collapsible provider groups in models page (#2510) (@houko)
+- Read SKILL.md for FangHub registry listing (#2512) (@houko)
+- Clear ci-failed label on new push and fallback PR lookup (#2513) (@houko)
+- Complete i18n for config page + switch to browser history routing (#2514) (@houko)
+- I18n remaining hardcoded strings across all pages (#2516) (@houko)
+
+### Changed
+
+- Centralize JID normalization in lib/identity.js (#2503) (@f-liva)
+
+
 ## [2026.4.14] - 2026-04-14
 
 ### Added

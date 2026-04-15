@@ -2104,6 +2104,9 @@ pub struct KernelConfig {
     /// Individual endpoints may enforce tighter limits.
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// Terminal / CLI access control configuration.
+    #[serde(default)]
+    pub terminal: TerminalConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -3556,6 +3559,7 @@ impl Default for KernelConfig {
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
+            terminal: TerminalConfig::default(),
         }
     }
 }
@@ -3576,6 +3580,18 @@ impl KernelConfig {
     /// Resolved directory for hand workspaces.
     pub fn effective_hands_workspaces_dir(&self) -> PathBuf {
         self.effective_workspaces_dir().join("hands")
+    }
+
+    /// Parse the TCP port number from `api_listen`.
+    ///
+    /// Returns `None` when the address string is malformed. Callers that rely
+    /// on the port for security-relevant decisions (e.g. Origin validation)
+    /// MUST fail closed in the `None` case rather than assume a default.
+    pub fn listen_port(&self) -> Option<u16> {
+        self.api_listen
+            .rsplit(':')
+            .next()
+            .and_then(|s| s.parse::<u16>().ok())
     }
 
     /// Resolve the API key env var name for a provider.
@@ -5786,6 +5802,64 @@ impl Default for LinkedInConfig {
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Terminal / CLI access control configuration.
+///
+/// Controls which clients may connect to the interactive terminal (WebSocket)
+/// and how locality is determined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Master switch — set to false to disable the terminal entirely.
+    #[serde(default = "default_terminal_enabled")]
+    pub enabled: bool,
+
+    /// Additional allowed WebSocket origins beyond auto-detected localhost.
+    /// Use when the dashboard is served from a custom domain (e.g. "https://my.domain.com").
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+
+    /// Allow terminal access from remote/proxied connections when no auth is configured.
+    /// Default: false (local-only when unauthenticated).
+    #[serde(default)]
+    pub allow_remote: bool,
+
+    /// When true, bare-loopback connections (127.0.0.1 / ::1 with no proxy
+    /// headers) are rejected at auth time — only connections that arrived via
+    /// a reverse proxy (carrying X-Forwarded-For / X-Real-IP) are considered
+    /// "local". Enable only when running behind a reverse proxy that strips
+    /// direct loopback access. Default: false.
+    ///
+    /// (Historically named `trust_proxy_headers`; the old name is still
+    /// accepted for backward compatibility via `serde(alias)`.)
+    #[serde(default, alias = "trust_proxy_headers")]
+    pub require_proxy_headers: bool,
+
+    /// Hard-override for the "remote + no authentication" combination.
+    /// When `allow_remote` is true and no auth is configured, the terminal
+    /// will still refuse every connection unless this flag is explicitly
+    /// set to `true`. Intended as a foot-gun guard: enabling `allow_remote`
+    /// alone is not enough to expose an unauthenticated shell to the network.
+    /// Default: false.
+    #[serde(default)]
+    pub allow_unauthenticated_remote: bool,
+}
+
+fn default_terminal_enabled() -> bool {
+    true
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowed_origins: Vec::new(),
+            allow_remote: false,
+            require_proxy_headers: false,
+            allow_unauthenticated_remote: false,
         }
     }
 }

@@ -5,8 +5,9 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders } from "../api";
-import type { ApprovalItem, SessionListItem, ModelItem, AgentTool } from "../api";
+import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders, listActiveHands } from "../api";
+import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
+import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff } from "lucide-react";
@@ -44,25 +45,25 @@ interface ChatMessage {
   thinkingCollapsed?: boolean;
 }
 
-// Slash commands
+// Slash commands — desc is an i18n key under "chat.cmd_*"
 const SLASH_COMMANDS = [
-  { cmd: "/help", desc: "Show available commands" },
-  { cmd: "/clear", desc: "Clear chat history" },
-  { cmd: "/agents", desc: "List available agents" },
-  { cmd: "/info", desc: "Show current agent info" },
-  { cmd: "/new", desc: "Reset session (clear history)" },
-  { cmd: "/compact", desc: "Compress context to save space" },
-  { cmd: "/reset", desc: "Reset session (clear history)" },
-  { cmd: "/reboot", desc: "Reboot session (clear context)" },
-  { cmd: "/stop", desc: "Cancel current run" },
-  { cmd: "/model", desc: "Show or switch model" },
-  { cmd: "/usage", desc: "Show session token usage" },
-  { cmd: "/context", desc: "Show context pressure" },
-  { cmd: "/verbose", desc: "Toggle verbose level" },
-  { cmd: "/budget", desc: "Show budget status" },
-  { cmd: "/peers", desc: "Show connected peers" },
-  { cmd: "/a2a", desc: "Show A2A agents" },
-  { cmd: "/queue", desc: "Show agent queue status" },
+  { cmd: "/help", descKey: "cmd_help" },
+  { cmd: "/clear", descKey: "cmd_clear" },
+  { cmd: "/agents", descKey: "cmd_agents" },
+  { cmd: "/info", descKey: "cmd_info" },
+  { cmd: "/new", descKey: "cmd_new" },
+  { cmd: "/compact", descKey: "cmd_compact" },
+  { cmd: "/reset", descKey: "cmd_reset" },
+  { cmd: "/reboot", descKey: "cmd_reboot" },
+  { cmd: "/stop", descKey: "cmd_stop" },
+  { cmd: "/model", descKey: "cmd_model" },
+  { cmd: "/usage", descKey: "cmd_usage" },
+  { cmd: "/context", descKey: "cmd_context" },
+  { cmd: "/verbose", descKey: "cmd_verbose" },
+  { cmd: "/budget", descKey: "cmd_budget" },
+  { cmd: "/peers", descKey: "cmd_peers" },
+  { cmd: "/a2a", descKey: "cmd_a2a" },
+  { cmd: "/queue", descKey: "cmd_queue" },
 ];
 
 // Commands that require backend processing via WebSocket command protocol
@@ -298,18 +299,18 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         ]);
       };
       if (trimmed === "/help") {
-        sysMsg(SLASH_COMMANDS.map(c => `**${c.cmd}** — ${c.desc}`).join("\n"));
+        sysMsg(SLASH_COMMANDS.map(c => `**${c.cmd}** — ${t(`chat.${c.descKey}`)}`).join("\n"));
         return;
       }
       if (trimmed === "/clear") { setMessages([]); return; }
       if (trimmed === "/agents") {
         const names = agents.map(a => `- **${a.name}** (${a.state || "unknown"})`).join("\n");
-        sysMsg(names || "No agents available.");
+        sysMsg(names || t("chat.no_agents_available"));
         return;
       }
       if (trimmed === "/info") {
         const a = agents.find(a => a.id === agentId);
-        sysMsg(a ? `**${a.name}**\nModel: ${a.model_name || "-"}\nProvider: ${a.model_provider || "-"}\nState: ${a.state}` : "No agent selected.");
+        sysMsg(a ? `**${a.name}**\n${t("chat.info_model")}: ${a.model_name || "-"}\n${t("chat.info_provider")}: ${a.model_provider || "-"}\n${t("chat.info_state")}: ${a.state}` : t("chat.no_agent_selected"));
         return;
       }
 
@@ -344,7 +345,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
           ws.current.addEventListener("message", handleCmdResponse);
           ws.current.send(JSON.stringify({ type: "command", command: cmd, args: cmdArgs }));
         } else {
-          sysMsg("WebSocket not connected. Please refresh the page.");
+          sysMsg(t("chat.ws_not_connected"));
         }
         return;
       }
@@ -783,7 +784,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 });
 
 // Input box - with shortcut hints
-function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string }) {
+function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, supportsThinking }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string; supportsThinking?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -829,12 +830,13 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
               onClick={() => { setMessage(c.cmd); onSend(c.cmd); setMessage(""); }}
               className="w-full flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-main text-left transition-colors">
               <span className="text-xs font-mono font-bold text-brand">{c.cmd}</span>
-              <span className="text-[10px] text-text-dim">{c.desc}</span>
+              <span className="text-[10px] text-text-dim">{t(`chat.${c.descKey}`)}</span>
             </button>
           ))}
         </div>
       )}
-      {/* Thinking mode toggles */}
+      {/* Thinking mode toggles — only shown when the model supports thinking */}
+      {supportsThinking && (
       <div className="flex items-center gap-2 flex-wrap">
         <button
           type="button"
@@ -863,6 +865,7 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
           <span>{t("chat.show_thinking")}</span>
         </button>
       </div>
+      )}
       <div className="flex gap-2 sm:gap-3 items-end">
         <div className="flex-1">
           <textarea
@@ -1013,7 +1016,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
           <button
             onClick={() => setModelOpen(v => !v)}
             className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono text-text-dim/50 hover:text-text hover:bg-surface-hover transition-colors truncate max-w-[200px]"
-            title="Switch model"
+            title={t("chat.switch_model")}
           >
             <span className="truncate">{optimisticModel ?? modelName ?? t("chat.no_model")}</span>
             <ChevronDown className={`h-2.5 w-2.5 shrink-0 transition-transform ${modelOpen ? "rotate-180" : ""}`} />
@@ -1383,17 +1386,61 @@ export function ChatPage() {
     tts.stop();
   }, [selectedAgentId, tts.stop]);
 
-  const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
-  const agents = useMemo(() => [...(agentsQuery.data ?? [])].sort((a, b) => {
-    // Auth missing → sort to bottom
-    const aNoAuth = isAuthUnavailable(a.auth_status) ? 1 : 0;
-    const bNoAuth = isAuthUnavailable(b.auth_status) ? 1 : 0;
-    if (aNoAuth !== bNoAuth) return aNoAuth - bNoAuth;
-    const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
-    const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
-    if (aSusp !== bSusp) return aSusp - bSusp;
-    return a.name.localeCompare(b.name);
-  }), [agentsQuery.data]);
+  const [showHandAgents, setShowHandAgents] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("librefang.chat.show_hand_agents") === "1";
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(
+      "librefang.chat.show_hand_agents",
+      showHandAgents ? "1" : "0",
+    );
+  }, [showHandAgents]);
+
+  const agentsQuery = useQuery({
+    queryKey: ["agents", "list", "chat", showHandAgents],
+    queryFn: () => listAgents({ includeHands: showHandAgents }),
+    staleTime: 30000,
+  });
+  const handsQuery = useQuery({
+    queryKey: ["hands", "active", "chat"],
+    queryFn: listActiveHands,
+    enabled: showHandAgents,
+    staleTime: 30000,
+    refetchInterval: 30000,
+  });
+
+  const sortedAgents = useMemo(
+    () =>
+      [...(agentsQuery.data ?? [])].sort((a, b) => {
+        // Auth missing → sort to bottom
+        const aNoAuth = isAuthUnavailable(a.auth_status) ? 1 : 0;
+        const bNoAuth = isAuthUnavailable(b.auth_status) ? 1 : 0;
+        if (aNoAuth !== bNoAuth) return aNoAuth - bNoAuth;
+        const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
+        const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
+        if (aSusp !== bSusp) return aSusp - bSusp;
+        return a.name.localeCompare(b.name);
+      }),
+    [agentsQuery.data],
+  );
+
+  const picker = useMemo(
+    () =>
+      groupedPicker(sortedAgents, handsQuery.data, showHandAgents),
+    [sortedAgents, handsQuery.data, showHandAgents],
+  );
+
+  // Flat view used by downstream consumers (default-selection logic,
+  // selectedAgent lookup, export). Standalone first, then groups in order.
+  const agents = useMemo(
+    () => [
+      ...picker.standalone,
+      ...picker.handGroups.flatMap((g) => g.agents),
+    ],
+    [picker],
+  );
   // Session state — bump version to force message reload after switch
   const [sessionVersion, setSessionVersion] = useState(0);
   const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents, sessionVersion);
@@ -1475,6 +1522,18 @@ export function ChatPage() {
     queryClient.invalidateQueries({ queryKey: ["agent-sessions", selectedAgentId] });
   }, [selectedAgentId, queryClient]);
 
+  // If the current selection is no longer visible (e.g. hand agents toggled
+  // off while a hand-spawned agent was selected), clear it so the auto-select
+  // effect below picks a new one instead of leaving the chat pane in a broken
+  // state with selectedAgent === undefined.
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    if (agentsQuery.data === undefined) return;
+    if (!agents.some(a => a.id === selectedAgentId)) {
+      setSelectedAgentId("");
+    }
+  }, [agents, selectedAgentId, agentsQuery.data]);
+
   useEffect(() => {
     // Auto-select first running agent
     if (!selectedAgentId && agents.length > 0) {
@@ -1494,6 +1553,55 @@ export function ChatPage() {
     }
     prevMsgCountRef.current = messages.length;
   }, [messages]);
+
+  const renderAgentButton = (
+    agent: AgentItem,
+    role?: string,
+    isCoordinator?: boolean,
+  ) => (
+    <button
+      key={agent.id}
+      onClick={() => selectAgent(agent.id)}
+      className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors text-left group ${
+        selectedAgentId === agent.id
+          ? "bg-brand text-white shadow-lg shadow-brand/20"
+          : "hover:bg-surface-hover"
+      }`}
+    >
+      <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
+        selectedAgentId === agent.id ? "bg-white/20"
+        : (agent.state || "").toLowerCase() === "running" ? "bg-gradient-to-br from-brand/20 to-accent/20 text-brand"
+        : "bg-main text-text-dim/40"
+      }`}>
+        {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name }).charAt(0).toUpperCase()}
+        {(agent.state || "").toLowerCase() === "running" ? (
+          <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
+        ) : (
+          <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-text-dim/30 border-2 border-white dark:border-surface" />
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>
+            {role ?? t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
+          </p>
+          {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
+          {agent.auth_status === "configured_cli" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
+          {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning flex-shrink-0" />}
+        </div>
+        {isCoordinator ? (
+          <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
+            {t("chat.hand_coordinator", { defaultValue: "coordinator" })}
+          </p>
+        ) : (
+          <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
+            {agent.model_provider || t("common.unknown")}
+          </p>
+        )}
+      </div>
+      <ArrowRight className={`h-4 w-4 flex-shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
+    </button>
+  );
 
   return (
     <div className="flex h-[calc(100vh-100px)] sm:h-[calc(100vh-140px)] flex-col">
@@ -1521,49 +1629,47 @@ export function ChatPage() {
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
         {/* Left sidebar - Agent list */}
         <aside className="hidden md:flex w-64 flex-shrink-0 border-r border-border-subtle bg-main flex-col">
-          <div className="p-4 border-b border-border-subtle">
+          <div className="p-4 border-b border-border-subtle space-y-2">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
+            <button
+              onClick={() => setShowHandAgents((value) => !value)}
+              aria-pressed={showHandAgents}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
+                showHandAgents
+                  ? "border-brand/30 bg-brand/10 text-brand"
+                  : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+              }`}
+            >
+              <span>{t("agents.show_hand_agents", { defaultValue: "Show hand agents" })}</span>
+            </button>
           </div>
           <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-thin">
-            {agents.length === 0 ? (
+            {picker.standalone.length === 0 && picker.handGroups.length === 0 ? (
               <div className="p-4 text-center text-text-dim text-sm">{t("common.no_data")}</div>
             ) : (
-              agents.map(agent => (
-                <button
-                  key={agent.id}
-                  onClick={() => selectAgent(agent.id)}
-                  className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors text-left group ${
-                    selectedAgentId === agent.id
-                      ? "bg-brand text-white shadow-lg shadow-brand/20"
-                      : "hover:bg-surface-hover"
-                  }`}
-                >
-                  <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
-                    selectedAgentId === agent.id ? "bg-white/20"
-                    : (agent.state || "").toLowerCase() === "running" ? "bg-gradient-to-br from-brand/20 to-accent/20 text-brand"
-                    : "bg-main text-text-dim/40"
-                  }`}>
-                    {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name }).charAt(0).toUpperCase()}
-                    {(agent.state || "").toLowerCase() === "running" ? (
-                      <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
-                    ) : (
-                      <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-text-dim/30 border-2 border-white dark:border-surface" />
+              <>
+                {picker.standalone.length > 0 && (
+                  <div className="space-y-2">
+                    {picker.handGroups.length > 0 && (
+                      <h4 className="px-1 pt-1 text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">
+                        {t("chat.group_standalone", { defaultValue: "Standalone" })}
+                      </h4>
+                    )}
+                    {picker.standalone.map((agent) => renderAgentButton(agent))}
+                  </div>
+                )}
+                {picker.handGroups.map((group) => (
+                  <div key={group.hand_id} className="space-y-2 pt-3">
+                    <h4 className="px-1 text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60 flex items-center gap-1.5">
+                      {group.hand_icon && <span aria-hidden="true">{group.hand_icon}</span>}
+                      <span>{group.hand_name}</span>
+                    </h4>
+                    {group.agents.map((agent) =>
+                      renderAgentButton(agent, agent.role, agent.isCoordinator),
                     )}
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</p>
-                      {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
-                      {agent.auth_status === "configured_cli" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
-                      {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning flex-shrink-0" />}
-                    </div>
-                    <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
-                      {agent.model_provider || t("common.unknown")}
-                    </p>
-                  </div>
-                  <ArrowRight className={`h-4 w-4 flex-shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
-                </button>
-              ))
+                ))}
+              </>
             )}
           </div>
         </aside>
@@ -1584,10 +1690,25 @@ export function ChatPage() {
               className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-bold outline-none focus:border-brand"
             >
               <option value="">{t("chat.select_agent")}</option>
-              {agents.map(agent => (
+              {picker.standalone.map((agent) => (
                 <option key={agent.id} value={agent.id}>
                   {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })} ({agent.state || "unknown"})
                 </option>
+              ))}
+              {picker.handGroups.map((group) => (
+                <optgroup
+                  key={group.hand_id}
+                  label={`${group.hand_icon ?? ""} ${group.hand_name}`.trim()}
+                >
+                  {group.agents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.role}
+                      {agent.isCoordinator
+                        ? ` (${t("chat.hand_coordinator", { defaultValue: "coordinator" })})`
+                        : ""}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
           </div>
@@ -1667,6 +1788,7 @@ export function ChatPage() {
               placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
               authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
               providerName={selectedAgent?.model_provider}
+              supportsThinking={selectedAgent?.supports_thinking}
             />
           </div>
         </main>

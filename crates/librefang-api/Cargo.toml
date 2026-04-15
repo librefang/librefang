@@ -141,6 +141,9 @@ mini = [
     "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
 ]
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "0.38", features = ["process"] }
+
 [dev-dependencies]
 tokio-test = { workspace = true }
 tempfile = { workspace = true }

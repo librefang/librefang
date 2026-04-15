@@ -150,3 +150,16 @@ pub fn shell_for_current_os() -> (String, &'static str) {
         (shell, "-c")
     }
 }
+
+/// Check if the daemon is running as root (Unix only).
+/// Always returns false on Windows.
+pub fn is_running_as_root() -> bool {
+    #[cfg(unix)]
+    {
+        rustix::process::geteuid().is_root()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}

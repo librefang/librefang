@@ -26,7 +26,7 @@ export function SessionsPage() {
   const addToast = useUIStore((s) => s.addToast);
 
   const sessionsQuery = useQuery({ queryKey: ["sessions", "list"], queryFn: listSessions, refetchInterval: REFRESH_MS });
-  const agentsQuery = useQuery({ queryKey: ["agents", "list", "sessions"], queryFn: listAgents });
+  const agentsQuery = useQuery({ queryKey: ["agents", "list", "sessions"], queryFn: () => listAgents() });
 
   const switchMutation = useMutation({ mutationFn: ({ agentId, sessionId }: any) => switchAgentSession(agentId, sessionId) });
   const deleteMutation = useMutation({ mutationFn: (id: string) => deleteSession(id) });

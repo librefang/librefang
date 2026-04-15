@@ -552,6 +552,7 @@ impl ModelCatalog {
                 supports_tools: true,
                 supports_vision: false,
                 supports_streaming: true,
+                supports_thinking: false,
                 aliases: Vec::new(),
             });
             added += 1;
@@ -1240,6 +1241,7 @@ id = "acme"
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
+            supports_thinking: false,
             aliases: vec!["custom-qwen".to_string()],
         });
 
@@ -1267,6 +1269,7 @@ id = "acme"
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
+            supports_thinking: false,
             aliases: Vec::new(),
         }));
 
@@ -1282,6 +1285,7 @@ id = "acme"
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
+            supports_thinking: false,
             aliases: Vec::new(),
         }));
 
@@ -1324,6 +1328,7 @@ id = "acme"
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
+            supports_thinking: false,
             aliases: Vec::new(),
         }));
 

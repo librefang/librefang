@@ -104,43 +104,83 @@ jobs:
   ci-status:
     name: CI Status Check
     runs-on: ubuntu-latest
-    if: github.event_name == 'check_suite'
+    if: github.event_name == 'check_suite' || (github.event_name == 'pull_request_target' && github.event.action == 'synchronize')
     steps:
       - name: Label PRs with failed CI
         uses: actions/github-script@v7
         with:
           script: |
             const LABEL = 'ci-failed';
-            const suite = context.payload.check_suite;
 
-            if (!suite.pull_requests || suite.pull_requests.length === 0) {
-              core.info('No PRs associated with this check suite');
+            // On synchronize (new push), the old CI results are stale — clear
+            // ci-failed immediately. The check_suite.completed event will re-add
+            // it if the new run fails.
+            if (context.eventName === 'pull_request_target') {
+              const pr = context.payload.pull_request;
+              const labels = pr.labels.map(l => l.name);
+              if (labels.includes(LABEL)) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: pr.number, name: LABEL,
+                }).catch(() => {});
+                core.info(`#${pr.number}: -${LABEL} (new push invalidates old CI result)`);
+              }
               return;
             }
 
-            for (const pr of suite.pull_requests) {
-              const { data: checks } = await github.rest.checks.listForRef({
+            // check_suite.completed path
+            const suite = context.payload.check_suite;
+            let prNumbers = (suite.pull_requests || []).map(pr => pr.number);
+
+            if (prNumbers.length === 0) {
+              // check_suite may not list PRs after rebase/force-push.
+              // Fall back to the commits → PR association API.
+              const { data: associated } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                ref: suite.head_sha,
+                commit_sha: suite.head_sha,
               });
-
-              const hasFailure = checks.check_runs.some(
-                cr => cr.conclusion === 'failure' || cr.conclusion === 'timed_out'
-              );
-              const allDone = checks.check_runs.every(
-                cr => cr.status === 'completed'
-              );
-
-              if (!allDone) {
-                core.info(`#${pr.number}: checks still running, skipping`);
-                continue;
+              prNumbers = associated
+                .filter(pr => pr.state === 'open')
+                .map(pr => pr.number);
+              if (prNumbers.length === 0) {
+                core.info('No open PRs associated with this check suite');
+                return;
               }
+            }
 
+            // Fetch all check runs for the SHA (paginated)
+            const allCheckRuns = await github.paginate(
+              github.rest.checks.listForRef,
+              { owner: context.repo.owner, repo: context.repo.repo, ref: suite.head_sha, per_page: 100 },
+              (response) => response.data.check_runs,
+            );
+
+            // Exclude this workflow's own check runs so a failure in label
+            // management (e.g. rate limit) doesn't mark the PR as ci-failed.
+            const SELF_JOBS = new Set([
+              'Conflict Check', 'CI Status Check', 'PR Size',
+              'Docs/CI Check', 'Review State',
+            ]);
+            const externalRuns = allCheckRuns.filter(cr => !SELF_JOBS.has(cr.name));
+
+            const hasFailure = externalRuns.some(
+              cr => cr.conclusion === 'failure' || cr.conclusion === 'timed_out'
+            );
+            const allDone = externalRuns.every(
+              cr => cr.status === 'completed'
+            );
+
+            if (!allDone) {
+              core.info(`checks still running for ${suite.head_sha}, skipping`);
+              return;
+            }
+
+            for (const prNumber of prNumbers) {
               const { data: fullPr } = await github.rest.pulls.get({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                pull_number: pr.number,
+                pull_number: prNumber,
               });
               const labels = fullPr.labels.map(l => l.name);
               const hasLabel = labels.includes(LABEL);
@@ -149,7 +189,7 @@ jobs:
                 if (labels.includes(name)) {
                   await github.rest.issues.removeLabel({
                     owner: context.repo.owner, repo: context.repo.repo,
-                    issue_number: pr.number, name,
+                    issue_number: prNumber, name,
                   }).catch(() => {});
                 }
               };
@@ -158,14 +198,14 @@ jobs:
                 await github.rest.issues.addLabels({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  issue_number: pr.number,
+                  issue_number: prNumber,
                   labels: [LABEL],
                 });
                 await rmLabel('ready-for-review');
-                core.info(`#${pr.number}: +${LABEL} -ready-for-review`);
+                core.info(`#${prNumber}: +${LABEL} -ready-for-review`);
               } else if (!hasFailure && hasLabel) {
                 await rmLabel(LABEL);
-                core.info(`#${pr.number}: -${LABEL}`);
+                core.info(`#${prNumber}: -${LABEL}`);
               }
             }
 

@@ -611,6 +611,7 @@ mod tests {
                 supports_tools: true,
                 supports_vision: false,
                 supports_streaming: true,
+                supports_thinking: false,
                 aliases: vec![],
             }],
         });

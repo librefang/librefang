@@ -118,6 +118,9 @@ pub struct ModelCatalogEntry {
     /// Whether the model supports streaming responses.
     #[serde(default)]
     pub supports_streaming: bool,
+    /// Whether the model supports extended thinking / reasoning.
+    #[serde(default)]
+    pub supports_thinking: bool,
     /// Aliases for this model (e.g. ["sonnet", "claude-sonnet"]).
     #[serde(default)]
     pub aliases: Vec<String>,
@@ -137,6 +140,7 @@ impl Default for ModelCatalogEntry {
             supports_tools: false,
             supports_vision: false,
             supports_streaming: false,
+            supports_thinking: false,
             aliases: Vec::new(),
         }
     }
@@ -403,6 +407,7 @@ mod tests {
             supports_tools: true,
             supports_vision: true,
             supports_streaming: true,
+            supports_thinking: true,
             aliases: vec!["sonnet".to_string(), "claude-sonnet".to_string()],
         };
         let json = serde_json::to_string(&entry).unwrap();

@@ -723,20 +723,21 @@ pub(crate) fn enrich_agent_json(
         e.manifest.model.model.as_str()
     };
 
-    let (tier, auth_status) = catalog
+    let (tier, auth_status, supports_thinking) = catalog
         .as_ref()
         .map(|cat| {
-            let tier = cat
-                .find_model(model)
+            let model_entry = cat.find_model(model);
+            let tier = model_entry
                 .map(|m| format!("{:?}", m.tier).to_lowercase())
                 .unwrap_or_else(|| "unknown".to_string());
+            let thinking = model_entry.map(|m| m.supports_thinking).unwrap_or(false);
             let auth = cat
                 .get_provider(provider)
                 .map(|p| p.auth_status.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            (tier, auth)
+            (tier, auth, thinking)
         })
-        .unwrap_or(("unknown".to_string(), "unknown".to_string()));
+        .unwrap_or(("unknown".to_string(), "unknown".to_string(), false));
 
     let ready =
         matches!(e.state, librefang_types::agent::AgentState::Running) && auth_status != "missing";
@@ -753,6 +754,7 @@ pub(crate) fn enrich_agent_json(
         "model_name": model,
         "model_tier": tier,
         "auth_status": auth_status,
+        "supports_thinking": supports_thinking,
         "ready": ready,
         "profile": e.manifest.profile,
         "identity": {

@@ -1604,3 +1604,112 @@ async fn test_get_tool_not_found() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["error"].as_str().unwrap().contains("not found"));
 }
+
+// ---------------------------------------------------------------------------
+// Test: /api/hands/active enriched response (Task 1 of chat-picker plan)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_active_hands_includes_definition_metadata() {
+    use std::collections::{BTreeMap, HashMap};
+
+    let harness = start_full_router("").await;
+
+    // Install a fresh hand definition with a known name + icon.
+    let toml_content = r#"
+id = "test-grouping-hand"
+name = "Test Grouping Hand"
+description = "Hand fixture for chat picker grouping integration test"
+category = "productivity"
+icon = "🧪"
+
+[agent]
+name = "test-agent"
+description = "Coordinator role for the test grouping hand"
+system_prompt = "You are a test agent."
+
+[dashboard]
+metrics = []
+"#;
+    harness
+        .state
+        .kernel
+        .hands()
+        .install_from_content(toml_content, "")
+        .expect("install_from_content should succeed");
+
+    // Activate the hand to get an instance, then attach two roles by hand.
+    // (The kernel normally spawns agents; here we simulate that with set_agents
+    // so the test does not depend on the spawner subsystem.)
+    let instance = harness
+        .state
+        .kernel
+        .hands()
+        .activate("test-grouping-hand", HashMap::new())
+        .expect("activate should succeed");
+
+    let main_id = librefang_types::agent::AgentId::new();
+    let linter_id = librefang_types::agent::AgentId::new();
+    let mut agent_ids = BTreeMap::new();
+    agent_ids.insert("main".to_string(), main_id);
+    agent_ids.insert("linter".to_string(), linter_id);
+    harness
+        .state
+        .kernel
+        .hands()
+        .set_agents(instance.instance_id, agent_ids, Some("main".to_string()))
+        .expect("set_agents should succeed");
+
+    // Hit the endpoint via the in-process router.
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/hands/active")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router.oneshot should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let instances = json["instances"].as_array().expect("instances array");
+    let hand = instances
+        .iter()
+        .find(|i| i["hand_id"] == "test-grouping-hand")
+        .expect("our hand must appear in the active list");
+
+    // Existing fields — regression guard.
+    assert_eq!(hand["hand_id"], "test-grouping-hand");
+    assert!(hand["agent_id"].is_string(), "legacy agent_id must remain");
+    assert!(
+        hand["agent_name"].is_string(),
+        "legacy agent_name must remain"
+    );
+
+    // NEW fields from this plan.
+    assert_eq!(
+        hand["hand_name"], "Test Grouping Hand",
+        "hand_name must be exposed from definition"
+    );
+    assert_eq!(
+        hand["hand_icon"], "🧪",
+        "hand_icon must be exposed from definition"
+    );
+    assert_eq!(
+        hand["coordinator_role"], "main",
+        "coordinator_role must be exposed"
+    );
+
+    let agent_ids_obj = hand["agent_ids"]
+        .as_object()
+        .expect("agent_ids must be a JSON object");
+    assert_eq!(agent_ids_obj.len(), 2, "agent_ids must contain both roles");
+    assert_eq!(agent_ids_obj["main"], main_id.to_string());
+    assert_eq!(agent_ids_obj["linter"], linter_id.to_string());
+}

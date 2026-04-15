@@ -91,6 +91,7 @@ impl KernelConfig {
             "max_concurrent_bg_llm",
             "max_agent_call_depth",
             "max_request_body_bytes",
+            "terminal",
         ]
     }
 
@@ -654,6 +655,60 @@ impl KernelConfig {
         // Validate network config: shared_secret must be set if network is enabled
         if self.network_enabled && self.network.shared_secret.is_empty() {
             warnings.push("network_enabled is true but network.shared_secret is empty".to_string());
+        }
+
+        // --- Terminal access control validation ---
+
+        if self.terminal.enabled {
+            // Validate each allowed_origins entry is a valid http(s) URL
+            for origin in &self.terminal.allowed_origins {
+                if origin == "*" {
+                    // Wildcard is valid syntax but requires allow_remote
+                    if !self.terminal.allow_remote {
+                        warnings.push(
+                            "terminal.allowed_origins contains \"*\" (wildcard) but terminal.allow_remote is false — \
+                             wildcard is incoherent without allow_remote, set allow_remote = true or remove \"*\""
+                                .to_string(),
+                        );
+                    }
+                    continue;
+                }
+                let looks_like_url = (origin.starts_with("http://")
+                    || origin.starts_with("https://"))
+                    && origin.contains("://");
+                if !looks_like_url {
+                    warnings.push(format!(
+                        "terminal.allowed_origins entry '{}' is not a valid URL (must use http:// or https:// scheme)",
+                        origin
+                    ));
+                }
+            }
+
+            // Warn if allow_remote is true without any authentication
+            if self.terminal.allow_remote {
+                // We can't check auth_configured here (requires runtime state),
+                // but warn about the risk
+                warnings.push(
+                    "terminal.allow_remote is true — the terminal WebSocket will accept connections from \
+                     non-local origins; ensure authentication is configured (api_key, dashboard credentials, or users)"
+                        .to_string(),
+                );
+            }
+
+            // Warn if require_proxy_headers is set but api_listen is loopback-only
+            if self.terminal.require_proxy_headers {
+                let listen = &self.api_listen;
+                if listen.starts_with("127.0.0.1:")
+                    || listen.starts_with("localhost:")
+                    || listen.starts_with("[::1]:")
+                {
+                    warnings.push(
+                        "terminal.require_proxy_headers is true but api_listen is loopback-only — \
+                         proxy headers have no effect when only local connections can reach the server"
+                            .to_string(),
+                    );
+                }
+            }
         }
 
         warnings
