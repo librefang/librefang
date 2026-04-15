@@ -199,6 +199,7 @@ export function ConfigPage({ category }: { category: string }) {
   const [saveStatus, setSaveStatus] = useState<Record<string, { ok: boolean; msg: string }>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [reloadStatus, setReloadStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [activeSection, setActiveSection] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   const hasPendingChanges = Object.keys(pendingChanges).length > 0;
@@ -323,10 +324,16 @@ export function ConfigPage({ category }: { category: string }) {
   const categoryTitle = t(`config.cat_${category}`, sectionLabelFallback(category));
   const q = searchQuery.toLowerCase();
 
-  // Filter sections & fields by search
+  // Resolve active tab: default to first section, reset when category changes
+  const effectiveTab = q
+    ? null  // searching: show all matching, no tab filter
+    : (activeSection && sectionKeys.includes(activeSection) ? activeSection : sectionKeys[0] ?? null);
+
+  // Filter sections & fields by search OR by active tab
   const filteredSections = useMemo(() => {
-    if (!q) return sectionKeys.map((sKey) => ({ sKey, fields: Object.keys(allSections[sKey]?.fields ?? {}) }));
-    return sectionKeys
+    const keysToShow = effectiveTab ? [effectiveTab] : sectionKeys;
+    if (!q) return keysToShow.map((sKey) => ({ sKey, fields: Object.keys(allSections[sKey]?.fields ?? {}) }));
+    return keysToShow
       .map((sKey) => {
         const sec = allSections[sKey];
         if (!sec) return null;
@@ -337,7 +344,7 @@ export function ConfigPage({ category }: { category: string }) {
         return matchedFields.length > 0 ? { sKey, fields: matchedFields } : null;
       })
       .filter((x): x is { sKey: string; fields: string[] } => x !== null);
-  }, [sectionKeys, allSections, q]);
+  }, [sectionKeys, allSections, q, effectiveTab]);
 
   // ── Loading / error states ─────────────────────────────────────────
   if (schemaQuery.isLoading || configQuery.isLoading) {
@@ -365,18 +372,38 @@ export function ConfigPage({ category }: { category: string }) {
   // ── Render ─────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-6 p-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-4">
         <PageHeader badge={t("nav.config")} title={categoryTitle} subtitle={t("config.desc", "System configuration editor")} icon={<Settings className="h-4 w-4" />} />
-        <div className="flex items-center gap-2">
-          {reloadStatus && (
-            <span className={`text-xs font-semibold ${reloadStatus.ok ? "text-success" : "text-danger"}`}>
-              {reloadStatus.msg}
-            </span>
+        <div className="flex flex-col items-end gap-2 shrink-0">
+          {/* Section tabs — only shown when multiple sections exist */}
+          {sectionKeys.length > 1 && !q && (
+            <div className="flex items-center gap-1 bg-surface border border-border-subtle rounded-xl p-1">
+              {sectionKeys.map((sKey) => (
+                <button
+                  key={sKey}
+                  onClick={() => setActiveSection(sKey)}
+                  className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                    effectiveTab === sKey
+                      ? "bg-brand text-white shadow-sm"
+                      : "text-text-dim hover:text-text hover:bg-surface-hover"
+                  }`}
+                >
+                  {t(`config.sec_${sKey}`, sectionLabelFallback(sKey))}
+                </button>
+              ))}
+            </div>
           )}
-          <Button variant="secondary" size="sm" onClick={() => reloadMutation.mutate()} isLoading={reloadMutation.isPending}>
-            <RefreshCw className="w-3 h-3 mr-1.5" />
-            {t("config.reload", "Reload")}
-          </Button>
+          <div className="flex items-center gap-2">
+            {reloadStatus && (
+              <span className={`text-xs font-semibold ${reloadStatus.ok ? "text-success" : "text-danger"}`}>
+                {reloadStatus.msg}
+              </span>
+            )}
+            <Button variant="secondary" size="sm" onClick={() => reloadMutation.mutate()} isLoading={reloadMutation.isPending}>
+              <RefreshCw className="w-3 h-3 mr-1.5" />
+              {t("config.reload", "Reload")}
+            </Button>
+          </div>
         </div>
       </div>
 
