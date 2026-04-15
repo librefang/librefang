@@ -580,8 +580,6 @@ export function ConfigPage({ category }: { category: string }) {
           const hasBadges = sec.hot_reloadable || sec.root_level;
           const showSectionHeader = isSearching || hasBadges;
 
-          // Check whether any field in this section has a description (to show desc column)
-          const hasAnyDesc = fieldsToShow.some(([fKey]) => !!t(`config.desc_${fKey}`, ""));
 
           return (
             <div key={sKey} className="rounded-2xl border border-border-subtle bg-surface overflow-hidden">
@@ -635,9 +633,9 @@ export function ConfigPage({ category }: { category: string }) {
                   const fieldLabel = t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey));
 
                   return (
-                    <div key={fieldKey} className="flex items-center gap-4 px-5 py-3 group">
-                      {/* Label + key + type badge */}
-                      <div className="w-44 shrink-0">
+                    <div key={fieldKey} className="flex items-start gap-4 px-5 py-3 group">
+                      {/* Label + key + type badge + description */}
+                      <div className="w-52 shrink-0 pt-1">
                         <p className="text-xs font-semibold leading-tight">
                           <Highlight text={fieldLabel} query={q} />
                         </p>
@@ -650,9 +648,12 @@ export function ConfigPage({ category }: { category: string }) {
                         <div className="mt-0.5">
                           <FieldTypeBadge type={fieldType} />
                         </div>
+                        {fieldDesc && (
+                          <p className="text-[10px] text-text-dim leading-relaxed mt-1">{fieldDesc}</p>
+                        )}
                       </div>
                       {/* Input */}
-                      <div className="flex-1 min-w-0">
+                      <div className="flex-1 min-w-0 pt-1">
                         <ConfigFieldInput
                           fieldKey={fieldKey}
                           fieldType={fieldType}
@@ -661,14 +662,6 @@ export function ConfigPage({ category }: { category: string }) {
                           onChange={(v) => handleFieldChange(sKey, fieldKey, v, sec.root_level)}
                         />
                       </div>
-                      {/* Description — right of input, only rendered if section has any descriptions */}
-                      {hasAnyDesc && (
-                        <div className="w-52 shrink-0 hidden xl:block">
-                          {fieldDesc && (
-                            <p className="text-[10px] text-text-dim leading-relaxed">{fieldDesc}</p>
-                          )}
-                        </div>
-                      )}
                       {/* Actions */}
                       <div className="w-24 shrink-0 flex items-center justify-end gap-1">
                         {statusForField ? (
