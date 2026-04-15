@@ -2,7 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl, createRegistryContent, setDefaultProvider } from "../api";
+import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl, createRegistryContent, setDefaultProvider, getStatus } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -977,7 +977,7 @@ export function ProvidersPage() {
   const addToast = useUIStore((s) => s.addToast);
 
   const providersQuery = useQuery({ queryKey: ["providers", "list"], queryFn: listProviders, refetchInterval: REFRESH_MS });
-  const statusQuery = useQuery({ queryKey: ["status"], queryFn: () => fetch("/api/status").then(r => r.json()) as Promise<{ default_provider?: string }>, refetchInterval: REFRESH_MS });
+  const statusQuery = useQuery({ queryKey: ["status"], queryFn: getStatus, refetchInterval: REFRESH_MS });
   const testMutation = useMutation({ mutationFn: testProvider });
   const defaultProviderMutation = useMutation({ mutationFn: setDefaultProvider });
 
