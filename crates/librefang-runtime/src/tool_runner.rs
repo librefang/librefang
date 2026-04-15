@@ -1248,6 +1248,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "description": { "type": "string", "description": "What this schedule does (e.g., 'Check for new emails')" },
                     "schedule": { "type": "string", "description": "Natural language or cron expression (e.g., 'every 5 minutes', 'daily at 9am', '0 */5 * * *')" },
+                    "tz": { "type": "string", "description": "IANA timezone for time-of-day schedules (e.g., 'Asia/Shanghai', 'US/Eastern'). Omit for UTC. Always set this for schedules like 'daily at 9am' so they run in the user's local time." },
                     "agent": { "type": "string", "description": "Agent name or ID to run this task (optional, defaults to self)" }
                 },
                 "required": ["description", "schedule"]
@@ -1534,7 +1535,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "name": { "type": "string", "description": "Job name (max 128 chars, alphanumeric + spaces/hyphens/underscores)" },
                     "schedule": {
                         "type": "object",
-                        "description": "Schedule: {\"kind\":\"at\",\"at\":\"2025-01-01T00:00:00Z\"} or {\"kind\":\"every\",\"every_secs\":300} or {\"kind\":\"cron\",\"expr\":\"0 */6 * * *\"}"
+                        "description": "Schedule: {\"kind\":\"at\",\"at\":\"2025-01-01T00:00:00Z\"} or {\"kind\":\"every\",\"every_secs\":300} or {\"kind\":\"cron\",\"expr\":\"0 */6 * * *\",\"tz\":\"America/New_York\"}. For cron schedules, always include \"tz\" (IANA timezone, e.g. \"Asia/Shanghai\", \"Europe/London\") so the schedule runs in the user's local time. Omitting tz defaults to UTC."
                     },
                     "action": {
                         "type": "object",
@@ -2876,9 +2877,15 @@ async fn tool_schedule_create(
     };
 
     // Build CronJob JSON compatible with kh.cron_create()
+    let tz = input["tz"].as_str();
+    let schedule = if let Some(tz_str) = tz {
+        serde_json::json!({ "kind": "cron", "expr": cron_expr, "tz": tz_str })
+    } else {
+        serde_json::json!({ "kind": "cron", "expr": cron_expr })
+    };
     let job_json = serde_json::json!({
         "name": name,
-        "schedule": { "kind": "cron", "expr": cron_expr },
+        "schedule": schedule,
         "action": { "kind": "agent_turn", "message": message },
         "delivery": { "kind": "none" },
     });
