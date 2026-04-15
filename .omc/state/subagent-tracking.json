@@ -1,0 +1,68 @@
+{
+  "agents": [
+    {
+      "agent_id": "aa7c29d352ecfde7a",
+      "agent_type": "github-checker",
+      "started_at": "2026-04-15T09:24:16.541Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-04-15T09:24:34.651Z",
+      "duration_ms": 18110
+    },
+    {
+      "agent_id": "a9dcb27b8d6baeaa6",
+      "agent_type": "github-checker",
+      "started_at": "2026-04-15T09:24:34.836Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-04-15T09:24:51.876Z",
+      "duration_ms": 17040
+    },
+    {
+      "agent_id": "a4b04a661606ccd84",
+      "agent_type": "session-repair-resolver",
+      "started_at": "2026-04-15T09:26:34.640Z",
+      "parent_mode": "none",
+      "status": "running"
+    },
+    {
+      "agent_id": "a7489eb00111c6f0e",
+      "agent_type": "bridge-resolver",
+      "started_at": "2026-04-15T09:26:34.679Z",
+      "parent_mode": "none",
+      "status": "running"
+    },
+    {
+      "agent_id": "ab811a64e4059b1f1",
+      "agent_type": "tool-runner-resolver",
+      "started_at": "2026-04-15T09:26:34.710Z",
+      "parent_mode": "none",
+      "status": "running"
+    },
+    {
+      "agent_id": "a62c173515ccc2cd9",
+      "agent_type": "types-resolver",
+      "started_at": "2026-04-15T09:26:34.760Z",
+      "parent_mode": "none",
+      "status": "running"
+    },
+    {
+      "agent_id": "a1b87259268c04f7f",
+      "agent_type": "agent-loop-resolver",
+      "started_at": "2026-04-15T09:26:34.862Z",
+      "parent_mode": "none",
+      "status": "running"
+    },
+    {
+      "agent_id": "ac8581101ad61477a",
+      "agent_type": "merge-master",
+      "started_at": "2026-04-15T09:28:30.346Z",
+      "parent_mode": "none",
+      "status": "running"
+    }
+  ],
+  "total_spawned": 6,
+  "total_completed": 2,
+  "total_failed": 0,
+  "last_updated": "2026-04-15T09:28:30.448Z"
+}

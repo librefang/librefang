@@ -46,6 +46,9 @@ pub enum AuthStatus {
     Configured,
     /// No API key, but a CLI tool (e.g. claude-code) is available as fallback.
     ConfiguredCli,
+    /// Key detected via fallback env var — may not match the actual provider.
+    /// Functionally usable but user should verify.
+    AutoDetected,
     /// API key is present but was rejected by the provider (HTTP 401/403).
     InvalidKey,
     /// API key is missing.
@@ -66,6 +69,7 @@ impl AuthStatus {
             self,
             AuthStatus::ValidatedKey
                 | AuthStatus::Configured
+                | AuthStatus::AutoDetected
                 | AuthStatus::ConfiguredCli
                 | AuthStatus::NotRequired
         )
@@ -78,6 +82,7 @@ impl fmt::Display for AuthStatus {
             AuthStatus::ValidatedKey => write!(f, "validated_key"),
             AuthStatus::Configured => write!(f, "configured"),
             AuthStatus::ConfiguredCli => write!(f, "configured_cli"),
+            AuthStatus::AutoDetected => write!(f, "auto_detected"),
             AuthStatus::InvalidKey => write!(f, "invalid_key"),
             AuthStatus::Missing => write!(f, "missing"),
             AuthStatus::NotRequired => write!(f, "not_required"),
@@ -118,6 +123,9 @@ pub struct ModelCatalogEntry {
     /// Whether the model supports streaming responses.
     #[serde(default)]
     pub supports_streaming: bool,
+    /// Whether the model supports extended thinking / reasoning.
+    #[serde(default)]
+    pub supports_thinking: bool,
     /// Aliases for this model (e.g. ["sonnet", "claude-sonnet"]).
     #[serde(default)]
     pub aliases: Vec<String>,
@@ -137,6 +145,7 @@ impl Default for ModelCatalogEntry {
             supports_tools: false,
             supports_vision: false,
             supports_streaming: false,
+            supports_thinking: false,
             aliases: Vec::new(),
         }
     }
@@ -342,6 +351,7 @@ mod tests {
         assert_eq!(AuthStatus::ConfiguredCli.to_string(), "configured_cli");
         assert_eq!(AuthStatus::Missing.to_string(), "missing");
         assert_eq!(AuthStatus::NotRequired.to_string(), "not_required");
+        assert_eq!(AuthStatus::AutoDetected.to_string(), "auto_detected");
         assert_eq!(AuthStatus::CliNotInstalled.to_string(), "cli_not_installed");
     }
 
@@ -403,6 +413,7 @@ mod tests {
             supports_tools: true,
             supports_vision: true,
             supports_streaming: true,
+            supports_thinking: true,
             aliases: vec!["sonnet".to_string(), "claude-sonnet".to_string()],
         };
         let json = serde_json::to_string(&entry).unwrap();

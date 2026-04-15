@@ -5,12 +5,11 @@
 
 use crate::formatter;
 use crate::rate_limiter::ChannelRateLimiter;
-use crate::roster::GroupRosterStore;
 use crate::router::AgentRouter;
 use crate::sanitizer::{InputSanitizer, SanitizeResult};
 use crate::types::{
     default_phase_emoji, truncate_utf8, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage,
-    ChannelUser, GroupMember, InteractiveButton, LifecycleReaction, SenderContext,
+    ChannelUser, InteractiveButton, LifecycleReaction, ParticipantRef, SenderContext,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -19,7 +18,7 @@ use librefang_types::config::{
     AutoRouteStrategy, ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat,
 };
 use librefang_types::message::ContentBlock;
-use regex::RegexSet;
+use regex::{Regex, RegexSet};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -105,15 +104,6 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// List providers and their auth status as formatted text for channel display.
     async fn list_providers_text(&self) -> String {
         "Provider listing not available.".to_string()
-    }
-
-    /// Return the uploads directory for an agent's workspace.
-    ///
-    /// Channel files (images, documents) are saved here so agent tools can
-    /// access them inside the workspace sandbox.  Returns `None` if the agent
-    /// has no workspace configured.
-    async fn agent_upload_dir(&self, _agent_id: AgentId) -> Option<std::path::PathBuf> {
-        None
     }
 
     /// Return (provider_id, display_name, auth_ok) for each provider.
@@ -364,47 +354,6 @@ pub trait ChannelBridgeHandle: Send + Sync {
     ) -> Result<String, String> {
         Err("Channel push not available".to_string())
     }
-
-    /// Lightweight LLM precheck: should the agent reply to this group message?
-    ///
-    /// `context` contains recent conversation lines (e.g. the message being
-    /// replied to) so the classifier can detect continuations.
-    ///
-    /// Returns `Ok(true)` → reply, `Ok(false)` → stay silent.
-    /// On error the caller fails open (replies anyway).
-    /// Default: always reply (opt-in via `reply_precheck = true` in channel config).
-    async fn classify_reply_intent(
-        &self,
-        _agent_id: AgentId,
-        _message: &str,
-        _context: Option<&str>,
-    ) -> Result<bool, String> {
-        Ok(true)
-    }
-
-    /// Read the custom precheck prompt from the agent's workspace
-    /// (`PRECHECK.md`). Returns `None` if the file doesn't exist.
-    async fn get_precheck_prompt(&self, _agent_id: AgentId) -> Option<String> {
-        None
-    }
-
-    /// Get the routing aliases for an agent (from `[metadata.routing].aliases`).
-    /// Default: empty (no aliases).
-    async fn get_agent_aliases(&self, _agent_id: AgentId) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// Upsert a member into the persistent group roster (SQLite-backed).
-    async fn roster_upsert(
-        &self,
-        _channel: &str,
-        _chat_id: &str,
-        _user_id: &str,
-        _display_name: &str,
-        _username: Option<&str>,
-    ) {
-        // default no-op
-    }
 }
 
 struct PendingMessage {
@@ -644,14 +593,7 @@ fn content_to_text(content: &ChannelContent) -> String {
             Some(c) => format!("[Photo: {url}]\n{c}"),
             None => format!("[Photo: {url}]"),
         },
-        ChannelContent::File { url, filename } => {
-            // After download_file_to_local, url is a local path
-            if url.starts_with('/') || url.starts_with("./") {
-                format!("[File: {filename} — saved at {url}]")
-            } else {
-                format!("[File ({filename}): {url}]")
-            }
-        }
+        ChannelContent::File { url, filename } => format!("[File ({filename}): {url}]"),
         ChannelContent::Voice {
             url,
             duration_seconds,
@@ -740,17 +682,7 @@ fn flush_debounced(
         };
 
         if let Some(mut blocks) = blocks {
-            // When we already have image content blocks, only prepend the
-            // caption text — NOT the `[Photo: URL]` string that
-            // `content_to_text` would produce, because the raw Telegram URL
-            // confuses vision models into thinking they must fetch it.
-            let text = match &merged_msg.content {
-                ChannelContent::Image {
-                    caption: Some(c), ..
-                } => c.clone(),
-                ChannelContent::Image { caption: None, .. } => String::new(),
-                other => content_to_text(other),
-            };
+            let text = content_to_text(&merged_msg.content);
             if !text.is_empty() {
                 blocks.insert(
                     0,
@@ -1072,35 +1004,11 @@ impl BridgeManager {
                                         message.sender.platform_id
                                     );
 
-                                    // Resolve workspace uploads dir for the channel's
-                                    // default agent so downloaded files land inside the
-                                    // sandbox where agent tools can read them.
-                                    // Router keys use Debug format ("Telegram"), not
-                                    // the lowercase config key ("telegram").
-                                    let ct_key = format!("{:?}", message.channel);
-                                    let ws_upload_dir = match router.channel_default(&ct_key) {
-                                        Some(aid) => handle.agent_upload_dir(aid).await,
-                                        None => None,
-                                    };
-
-                                    // Download remote files to local storage so
-                                    // agent tools (file_read, media_describe) can
-                                    // access them after the remote URL expires.
-                                    let mut message = message;
-                                    if let ChannelContent::File { ref url, ref filename } = message.content {
-                                        if let Some(local_path) = download_file_to_local(url, filename, ws_upload_dir.as_deref()).await {
-                                            message.content = ChannelContent::File {
-                                                url: local_path,
-                                                filename: filename.clone(),
-                                            };
-                                        }
-                                    }
-
                                     let image_blocks = if let ChannelContent::Image {
                                         ref url, ref caption, ref mime_type
                                     } = message.content {
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), ws_upload_dir.as_deref()).await {
-                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
+                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await {
+                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })) => Some(blocks),
                                             _ => None,
                                         }
                                     } else {
@@ -1390,22 +1298,6 @@ fn text_content(message: &ChannelMessage) -> Option<&str> {
     }
 }
 
-/// Convert plain alias strings into case-insensitive word-boundary regex patterns
-/// suitable for use in `group_trigger_patterns`.
-///
-/// This lets operators avoid manually translating agent aliases into regex syntax:
-/// `aliases_to_trigger_patterns(&["fandango", "oye fandango"])` produces
-/// `["(?i)\\bfandango\\b", "(?i)\\boye fandango\\b"]`.
-pub fn aliases_to_trigger_patterns(aliases: &[String]) -> Vec<String> {
-    aliases
-        .iter()
-        .map(|alias| {
-            let escaped = regex::escape(alias);
-            format!("(?i)\\b{escaped}\\b")
-        })
-        .collect()
-}
-
 fn matches_group_trigger_pattern(
     ct_str: &str,
     message: &ChannelMessage,
@@ -1427,6 +1319,120 @@ fn matches_group_trigger_pattern(
         );
     }
     matched
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 §C — Positional vocative trigger + addressee guard (OB-04, OB-05)
+// ---------------------------------------------------------------------------
+
+/// Truncate `text` to `max` chars (UTF-8 safe) for log excerpts.
+fn truncate_excerpt(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (i, ch) in text.chars().enumerate() {
+        if i >= max {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Returns true when `LIBREFANG_GROUP_ADDRESSEE_GUARD=on`.
+///
+/// Per D-§C-6 the guard is shipped default-off for a 1-week observation
+/// window. While off, the legacy substring matcher remains authoritative
+/// and the new positional/addressee functions are bypassed in
+/// `should_process_group_message`.
+fn addressee_guard_enabled() -> bool {
+    std::env::var("LIBREFANG_GROUP_ADDRESSEE_GUARD")
+        .ok()
+        .as_deref()
+        == Some("on")
+}
+
+/// Detect a leading-vocative `<Capitalized>[,!]` token in `text`.
+///
+/// Returns the captured name (without the punctuation) when the turn opens
+/// with a vocative form like "Caterina,". The match is anchored at the start
+/// of the string after optional whitespace; only ASCII-style capitalized
+/// names are recognized (Italian/English vocatives — sufficient for §C).
+fn leading_vocative_name(text: &str) -> Option<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        // ^\s* <Capitalized name (1+ letters)> followed by , or !
+        Regex::new(r"^\s*([A-ZÀ-Ý][A-Za-zÀ-ÿ]+)[,!]").expect("leading_vocative regex compiles")
+    });
+    re.captures(text)
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+}
+
+/// Strict positional vocative-trigger match for `pattern` in `text`.
+///
+/// True iff the (whole-word, case-sensitive — pattern is expected to be a
+/// proper name like "Signore") `pattern` appears either:
+///  * at the start of the turn after optional whitespace, or
+///  * immediately after a `[.!?]` punctuation boundary followed by whitespace.
+///
+/// Additionally REJECTED when another capitalized vocative appears BEFORE
+/// the matched pattern — this captures the Beeper-screenshot case
+/// `"Caterina, chiedi al Signore..."` where "Signore" is mentioned but the
+/// turn is addressed to Caterina.
+pub fn is_vocative_trigger(text: &str, pattern: &str) -> bool {
+    if text.is_empty() || pattern.is_empty() {
+        return false;
+    }
+    // Build a per-call regex (patterns vary per-agent and tests cover several).
+    // Pattern is a literal proper name; escape to avoid regex-meta surprises.
+    let escaped = regex::escape(pattern);
+    let combined = format!(r"(?:^|[.!?])\s*({escaped})\b", escaped = escaped);
+    let re = match Regex::new(&combined) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let Some(m) = re.find(text) else { return false };
+
+    // Heuristic: reject if any *other* capitalized vocative (`<Name>,`) appears
+    // BEFORE the pattern position. We scan only the prefix [0..match_start].
+    let prefix = &text[..m.start()];
+    static OTHER_VOCATIVE: OnceLock<Regex> = OnceLock::new();
+    let other = OTHER_VOCATIVE.get_or_init(|| {
+        Regex::new(r"\b([A-ZÀ-Ý][A-Za-zÀ-ÿ]+),\s").expect("other_vocative regex compiles")
+    });
+    for cap in other.captures_iter(prefix) {
+        if let Some(name) = cap.get(1) {
+            // If the prefix vocative IS the pattern itself we'd have matched at
+            // start; getting here means it's a *different* name → reject.
+            if !name.as_str().eq_ignore_ascii_case(pattern) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// True when the turn opens with a vocative addressed to a participant other
+/// than the agent (e.g. `"Caterina, chiedi..."` in a group containing
+/// Caterina + the Bot).
+///
+/// Heuristic: extract a leading `<Capitalized>[,!]` token and look it up
+/// (case-insensitively) in the participant roster. If found and not equal
+/// to `agent_name`, the turn is addressed to someone else.
+pub fn is_addressed_to_other_participant(
+    text: &str,
+    participants: &[ParticipantRef],
+    agent_name: &str,
+) -> bool {
+    let Some(name) = leading_vocative_name(text) else {
+        return false;
+    };
+    if name.eq_ignore_ascii_case(agent_name) {
+        return false;
+    }
+    participants.iter().any(|p| {
+        p.display_name.eq_ignore_ascii_case(&name)
+            && !p.display_name.eq_ignore_ascii_case(agent_name)
+    })
 }
 
 fn is_group_command(message: &ChannelMessage) -> bool {
@@ -1475,7 +1481,6 @@ fn should_process_group_message(
     ct_str: &str,
     overrides: &ChannelOverrides,
     message: &ChannelMessage,
-    agent_aliases: &[String],
 ) -> bool {
     match overrides.group_policy {
         GroupPolicy::Ignore => {
@@ -1498,57 +1503,120 @@ fn should_process_group_message(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let is_command = is_group_command(message);
-            let regex_triggered = !was_mentioned
-                && !is_command
-                && matches_group_trigger_pattern(
+            let text = text_content(message).unwrap_or("");
+            let sender_excerpt: &str = &message.sender.display_name;
+            let guard_on = addressee_guard_enabled();
+
+            // OB-04/OB-05 — addressee guard. When the turn opens with a vocative
+            // matching another participant in the group roster, abstain even if
+            // a substring of `group_trigger_patterns` matches mid-turn.
+            // (No owner short-circuit here: per OB-06 audit no `is_owner` branch
+            // exists in librefang-channels — owner is treated as any participant.)
+            if guard_on {
+                let participants = extract_group_participants(message);
+                let agent_name = extract_agent_name(message);
+                if is_addressed_to_other_participant(text, &participants, &agent_name) {
+                    info!(
+                        event = "group_gating_skip",
+                        reason = "addressed_to_other_participant",
+                        channel = ct_str,
+                        sender = %sender_excerpt,
+                        text_excerpt = %truncate_excerpt(text, 80),
+                        "OB-04: vocative addressed to other participant"
+                    );
+                    return false;
+                }
+            }
+
+            // Trigger-pattern check. Under guard-on we additionally require
+            // `is_vocative_trigger` (positional) on top of the substring match,
+            // so "Caterina, chiedi al Signore..." with pattern "Signore" no
+            // longer triggers (the substring matches but the position is wrong
+            // AND another vocative precedes it).
+            let regex_triggered = if !was_mentioned && !is_command {
+                let mut hit = matches_group_trigger_pattern(
                     ct_str,
                     message,
                     &overrides.group_trigger_patterns,
                 );
-            let alias_triggered = !was_mentioned
-                && !is_command
-                && !regex_triggered
-                && text_content(message).is_some_and(|text| {
-                    let lower = text.to_lowercase();
-                    agent_aliases
+                if hit && guard_on {
+                    let positional_ok = overrides
+                        .group_trigger_patterns
                         .iter()
-                        .any(|alias| lower.contains(&alias.to_lowercase()))
-                });
-            if alias_triggered {
-                debug!(
+                        .any(|p| is_vocative_trigger(text, p));
+                    if !positional_ok {
+                        info!(
+                            event = "group_gating_skip",
+                            reason = "vocative_position_mismatch",
+                            channel = ct_str,
+                            sender = %sender_excerpt,
+                            text_excerpt = %truncate_excerpt(text, 80),
+                            "OB-05: substring matched but not at vocative position"
+                        );
+                        hit = false;
+                    }
+                }
+                hit
+            } else {
+                false
+            };
+
+            if !was_mentioned && !is_command && !regex_triggered {
+                info!(
+                    event = "group_gating_skip",
+                    reason = "mention_only_no_mention",
                     channel = ct_str,
-                    user = %message.sender.display_name,
-                    "Group message matched agent alias trigger"
-                );
-            }
-            if !was_mentioned && !is_command && !regex_triggered && !alias_triggered {
-                debug!(
-                    "Ignoring group message on {ct_str} (group_policy=mention_only, not mentioned)"
+                    sender = %sender_excerpt,
+                    text_excerpt = %truncate_excerpt(text, 80),
+                    "OB-06: mention_only and bot was not mentioned"
                 );
                 return false;
             }
+            info!(
+                event = "group_gating_pass",
+                channel = ct_str,
+                sender = %sender_excerpt,
+                was_mentioned,
+                is_command,
+                regex_triggered,
+                "Group message accepted for processing"
+            );
             true
         }
         GroupPolicy::All => true,
     }
 }
 
+/// Read `group_participants` from the inbound message metadata payload
+/// (populated gateway-side by `sock.groupMetadata`). Returns empty when the
+/// channel doesn't supply a roster — the addressee guard then becomes a no-op
+/// (cannot fire false positives).
+fn extract_group_participants(message: &ChannelMessage) -> Vec<ParticipantRef> {
+    message
+        .metadata
+        .get("group_participants")
+        .and_then(|v| serde_json::from_value::<Vec<ParticipantRef>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Read the canonical agent display name from message metadata when the
+/// caller provides it (gateway/runtime injects so the addressee guard knows
+/// "this name == us"). Empty string when absent — `eq_ignore_ascii_case("")`
+/// then never matches a real participant name, so the guard simply checks
+/// whether the leading vocative belongs to another roster member.
+fn extract_agent_name(message: &ChannelMessage) -> String {
+    message
+        .metadata
+        .get("agent_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Build a `SenderContext` from an incoming `ChannelMessage`.
 ///
 /// Per-channel auto-routing fields are populated from `overrides` when provided,
 /// and default to `AutoRouteStrategy::Off` / zeros otherwise.
-/// Singleton in-memory group roster shared across all channel adapters.
-///
-/// Populated on every incoming group message from `build_sender_context`. The
-/// accumulated roster is then handed to the agent's system prompt so the LLM
-/// can distinguish the current message sender from other group members it has
-/// seen before (e.g. when a user writes `@pepe` meaning another human, not an
-/// agent in the system).
-fn group_roster() -> &'static GroupRosterStore {
-    static ROSTER: OnceLock<GroupRosterStore> = OnceLock::new();
-    ROSTER.get_or_init(GroupRosterStore::new)
-}
-
 fn build_sender_context(
     message: &ChannelMessage,
     overrides: Option<&ChannelOverrides>,
@@ -1569,48 +1637,15 @@ fn build_sender_context(
         ),
         None => (AutoRouteStrategy::Off, 0, 0, 0, 0),
     };
-
-    let channel = channel_type_str(&message.channel).to_string();
-    let chat_id = message
-        .metadata
-        .get("chat_id")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let bot_username = message
-        .metadata
-        .get("bot_username")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let sender_username = message
-        .metadata
-        .get("sender_username")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    // For group messages, upsert the current sender into the roster and then
-    // read back all known members. For DMs the roster stays empty — the LLM
-    // only needs the current sender and doesn't gain anything from a roster
-    // with a single member.
-    let group_members: Vec<GroupMember> = if message.is_group {
-        if let Some(ref cid) = chat_id {
-            let current = GroupMember {
-                user_id: sender_user_id(message).to_string(),
-                display_name: message.sender.display_name.clone(),
-                username: sender_username.clone(),
-            };
-            let store = group_roster();
-            store.upsert(&channel, cid, current);
-            Vec::new() // Roster is now tool-based, not injected into prompt
-        } else {
-            Vec::new()
-        }
+    let chat_id = if message.sender.platform_id.is_empty() {
+        None
     } else {
-        Vec::new()
+        Some(message.sender.platform_id.clone())
     };
-
     SenderContext {
-        channel,
+        channel: channel_type_str(&message.channel).to_string(),
         user_id: sender_user_id(message).to_string(),
+        chat_id,
         display_name: message.sender.display_name.clone(),
         is_group: message.is_group,
         was_mentioned: message
@@ -1629,10 +1664,10 @@ fn build_sender_context(
         auto_route_confidence_threshold,
         auto_route_sticky_bonus,
         auto_route_divergence_count,
-        bot_username,
-        sender_username,
-        group_members,
-        chat_id,
+        // §C: forward roster from inbound payload (gateway populates via
+        // sock.groupMetadata). Empty for non-WhatsApp channels — addressee
+        // guard then becomes a no-op (BC-01).
+        group_participants: extract_group_participants(message),
     }
 }
 
@@ -1979,7 +2014,7 @@ async fn dispatch_message(
     // --- DM/Group policy check ---
     if let Some(ref ov) = overrides {
         if message.is_group {
-            if !should_process_group_message(ct_str, ov, message, &[]) {
+            if !should_process_group_message(ct_str, ov, message) {
                 return;
             }
         } else {
@@ -2115,39 +2150,6 @@ async fn dispatch_message(
         );
     }
 
-    // Resolve workspace uploads dir so downloaded files land inside the sandbox.
-    // Router keys use Debug format ("Telegram"), not the lowercase config key.
-    let ct_key = format!("{:?}", message.channel);
-    let ws_upload_dir = match router.channel_default(&ct_key) {
-        Some(aid) => handle.agent_upload_dir(aid).await,
-        None => None,
-    };
-
-    // For files: download to local storage so agent tools can access them
-    // after the remote URL expires (e.g. Telegram file links are short-lived).
-    // We create a modified copy since `message` is borrowed immutably.
-    let message = if let ChannelContent::File {
-        ref url,
-        ref filename,
-    } = message.content
-    {
-        if let Some(local_path) =
-            download_file_to_local(url, filename, ws_upload_dir.as_deref()).await
-        {
-            let mut m = message.clone();
-            m.content = ChannelContent::File {
-                url: local_path,
-                filename: filename.clone(),
-            };
-            std::borrow::Cow::Owned(m)
-        } else {
-            std::borrow::Cow::Borrowed(message)
-        }
-    } else {
-        std::borrow::Cow::Borrowed(message)
-    };
-    let message = message.as_ref();
-
     // For images: download, base64 encode, and send as multimodal content blocks
     if let ChannelContent::Image {
         ref url,
@@ -2155,19 +2157,11 @@ async fn dispatch_message(
         ref mime_type,
     } = message.content
     {
-        let blocks = download_image_to_blocks(
-            url,
-            caption.as_deref(),
-            mime_type.as_deref(),
-            ws_upload_dir.as_deref(),
-        )
-        .await;
-        if blocks.iter().any(|b| {
-            matches!(
-                b,
-                ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
-            )
-        }) {
+        let blocks = download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await;
+        if blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }))
+        {
             // We have actual image data — send as structured blocks for vision
             dispatch_with_blocks(
                 blocks,
@@ -2661,72 +2655,6 @@ async fn dispatch_message(
             return;
         }
     };
-
-    // --- Post-resolution group filters (alias awareness + reply-intent precheck) ---
-    if message.is_group {
-        let was_mentioned = message
-            .metadata
-            .get("was_mentioned")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        // Reply-intent precheck: lightweight LLM call to decide if the agent
-        // should reply. Only for non-mentioned group messages when enabled.
-        // Skipped for @mentions, commands, and DMs (those always get a reply).
-        if !was_mentioned && !matches!(message.content, ChannelContent::Command { .. }) {
-            // Check agent aliases first — if a message contains an alias like
-            // "oye fandango", treat it as an implicit mention (skip precheck).
-            let aliases = handle.get_agent_aliases(agent_id).await;
-            let alias_hit = !aliases.is_empty()
-                && text_content(message).is_some_and(|text| {
-                    let lower = text.to_lowercase();
-                    aliases.iter().any(|a| lower.contains(&a.to_lowercase()))
-                });
-
-            if alias_hit {
-                debug!(
-                    channel = ct_str,
-                    "Group message matched agent alias — treating as mention"
-                );
-            } else if let Some(ref ov) = overrides {
-                if ov.reply_precheck {
-                    // No mention, no alias — run LLM precheck.
-                    // Include reply-to context so the classifier can detect
-                    // conversation continuations (e.g. user replying to the bot).
-                    let reply_context: Option<String> =
-                        message.metadata.get("reply_to").and_then(|rt| {
-                            let sender = rt
-                                .get("sender")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("someone");
-                            let text = rt.get("text").and_then(|t| t.as_str())?;
-                            Some(format!("[Replying to {sender}: \"{text}\"]"))
-                        });
-                    if let Some(text) = text_content(message) {
-                        match handle
-                            .classify_reply_intent(agent_id, text, reply_context.as_deref())
-                            .await
-                        {
-                            Ok(true) => {
-                                debug!(channel = ct_str, "Reply-intent precheck: REPLY");
-                            }
-                            Ok(false) => {
-                                debug!(
-                                    channel = ct_str,
-                                    "Reply-intent precheck: NO_REPLY — staying silent"
-                                );
-                                return;
-                            }
-                            Err(e) => {
-                                warn!(channel = ct_str, error = %e, "Reply-intent precheck failed — proceeding with reply");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     let channel_key = format!("{:?}", message.channel);
 
     // RBAC: authorize the user before forwarding to agent
@@ -2793,21 +2721,6 @@ async fn dispatch_message(
 
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides.as_ref());
-
-    // Persist roster member to SQLite
-    if message.is_group {
-        if let Some(ref cid) = sender_ctx.chat_id {
-            handle
-                .roster_upsert(
-                    ct_str,
-                    cid,
-                    &sender_ctx.user_id,
-                    &sender_ctx.display_name,
-                    sender_ctx.sender_username.as_deref(),
-                )
-                .await;
-        }
-    }
 
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
@@ -3050,74 +2963,6 @@ fn media_type_from_url(url: &str) -> String {
     }
 }
 
-/// Download a file from a URL and save it locally so agent tools can access it
-/// after the remote URL expires (e.g. Telegram file links are short-lived).
-///
-/// Returns the local path on success, or `None` if the download fails.
-/// Compatible with all channels — any `ChannelContent::File` gets persisted.
-async fn download_file_to_local(
-    url: &str,
-    filename: &str,
-    upload_dir: Option<&std::path::Path>,
-) -> Option<String> {
-    const MAX_FILE_BYTES: usize = 50 * 1024 * 1024; // 50 MB limit
-
-    let client = crate::http_client::new_client();
-    let resp = match client.get(url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("Failed to download file from channel: {e}");
-            return None;
-        }
-    };
-
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            warn!("Failed to read file bytes: {e}");
-            return None;
-        }
-    };
-
-    if bytes.len() > MAX_FILE_BYTES {
-        warn!(
-            size = bytes.len(),
-            limit = MAX_FILE_BYTES,
-            "File too large, skipping download"
-        );
-        return None;
-    }
-
-    // Save to workspace uploads/ dir (inside sandbox) or /tmp/ as fallback
-    let fallback = std::env::temp_dir().join("librefang_uploads");
-    let upload_dir = upload_dir.unwrap_or(&fallback);
-    if let Err(e) = tokio::fs::create_dir_all(upload_dir).await {
-        warn!("Failed to create upload dir: {e}");
-        return None;
-    }
-
-    let ext = std::path::Path::new(filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("bin");
-    let local_name = format!("{}_{}.{}", uuid::Uuid::new_v4(), filename, ext);
-    let local_path = upload_dir.join(&local_name);
-
-    if let Err(e) = tokio::fs::write(&local_path, &bytes).await {
-        warn!("Failed to write file to {}: {e}", local_path.display());
-        return None;
-    }
-
-    debug!(
-        filename = filename,
-        path = %local_path.display(),
-        size = bytes.len(),
-        "Downloaded channel file to local storage"
-    );
-
-    Some(local_path.to_string_lossy().to_string())
-}
-
 /// Download an image from a URL and build content blocks for multimodal LLM input.
 ///
 /// Returns a `Vec<ContentBlock>` containing an image block (base64-encoded) and
@@ -3131,7 +2976,6 @@ async fn download_image_to_blocks(
     url: &str,
     caption: Option<&str>,
     mime_type_hint: Option<&str>,
-    upload_dir: Option<&std::path::Path>,
 ) -> Vec<ContentBlock> {
     use base64::Engine;
 
@@ -3254,9 +3098,7 @@ async fn download_image_to_blocks(
 
     // Save image to disk instead of base64-encoding into the session.
     // A 3 MB photo becomes ~100 KB on disk with only a short path in the session.
-    // Use workspace uploads/ dir (inside sandbox) or /tmp/ as fallback.
-    let fallback = std::env::temp_dir().join("librefang_uploads");
-    let upload_dir = upload_dir.unwrap_or(&fallback).to_path_buf();
+    let upload_dir = std::env::temp_dir().join("librefang_uploads");
 
     let ext = match final_media_type.as_str() {
         "image/jpeg" => "jpg",
@@ -3390,21 +3232,6 @@ async fn dispatch_with_blocks(
 
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides);
-
-    // Persist roster member to SQLite
-    if message.is_group {
-        if let Some(ref cid) = sender_ctx.chat_id {
-            handle
-                .roster_upsert(
-                    ct_str,
-                    cid,
-                    &sender_ctx.user_id,
-                    &sender_ctx.display_name,
-                    sender_ctx.sender_username.as_deref(),
-                )
-                .await;
-        }
-    }
 
     match handle
         .send_message_with_blocks_and_sender(agent_id, blocks.clone(), &sender_ctx)
@@ -4083,10 +3910,7 @@ mod tests {
             ..Default::default()
         };
         assert!(should_process_group_message(
-            "whatsapp",
-            &overrides,
-            &message,
-            &[]
+            "whatsapp", &overrides, &message
         ));
     }
 
@@ -4098,10 +3922,7 @@ mod tests {
             ..Default::default()
         };
         assert!(!should_process_group_message(
-            "whatsapp",
-            &overrides,
-            &message,
-            &[]
+            "whatsapp", &overrides, &message
         ));
     }
 
@@ -4113,10 +3934,7 @@ mod tests {
             ..Default::default()
         };
         assert!(should_process_group_message(
-            "telegram",
-            &overrides,
-            &message,
-            &[]
+            "telegram", &overrides, &message
         ));
     }
 
@@ -4128,74 +3946,8 @@ mod tests {
             .insert("was_mentioned".to_string(), serde_json::Value::Bool(true));
         let overrides = ChannelOverrides::default();
         assert!(should_process_group_message(
-            "telegram",
-            &overrides,
-            &message,
-            &[]
+            "telegram", &overrides, &message
         ));
-    }
-
-    #[test]
-    fn test_mention_only_triggers_on_agent_alias() {
-        let message = group_text_message("hey fandango what do you think?");
-        let overrides = ChannelOverrides::default();
-        let aliases = vec!["fandango".to_string()];
-        assert!(should_process_group_message(
-            "telegram", &overrides, &message, &aliases
-        ));
-    }
-
-    #[test]
-    fn test_mention_only_alias_is_case_insensitive() {
-        let message = group_text_message("FANDANGO help me");
-        let overrides = ChannelOverrides::default();
-        let aliases = vec!["Fandango".to_string()];
-        assert!(should_process_group_message(
-            "telegram", &overrides, &message, &aliases
-        ));
-    }
-
-    #[test]
-    fn test_mention_only_rejects_no_alias_match() {
-        let message = group_text_message("hello there, anyone?");
-        let overrides = ChannelOverrides::default();
-        let aliases = vec!["fandango".to_string(), "rodelo".to_string()];
-        assert!(!should_process_group_message(
-            "telegram", &overrides, &message, &aliases
-        ));
-    }
-
-    #[test]
-    fn test_mention_only_alias_does_not_override_regex_trigger() {
-        // regex trigger and alias can independently activate — alias fires here
-        let message = group_text_message("oye fandango");
-        let overrides = ChannelOverrides::default();
-        let aliases = vec!["oye fandango".to_string()];
-        assert!(should_process_group_message(
-            "telegram", &overrides, &message, &aliases
-        ));
-    }
-
-    #[test]
-    fn test_aliases_to_trigger_patterns_produces_word_boundary_regex() {
-        let aliases = vec!["fandango".to_string(), "oye fandango".to_string()];
-        let patterns = aliases_to_trigger_patterns(&aliases);
-        assert_eq!(patterns.len(), 2);
-        assert_eq!(patterns[0], r"(?i)\bfandango\b");
-        assert_eq!(patterns[1], r"(?i)\boye fandango\b");
-    }
-
-    #[test]
-    fn test_aliases_to_trigger_patterns_escapes_special_chars() {
-        let aliases = vec!["bot.v2".to_string()];
-        let patterns = aliases_to_trigger_patterns(&aliases);
-        assert_eq!(patterns[0], r"(?i)\bbot\.v2\b");
-    }
-
-    #[test]
-    fn test_aliases_to_trigger_patterns_empty() {
-        let patterns = aliases_to_trigger_patterns(&[]);
-        assert!(patterns.is_empty());
     }
 
     #[test]
@@ -4884,6 +4636,316 @@ mod tests {
             assert!(result.is_some());
             let (drained_msg, _) = result.unwrap();
             assert_content_eq(&drained_msg.content, "1\n2");
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 2 §C — Vocative trigger + addressee guard tests (OB-04, OB-05)
+    // ---------------------------------------------------------------------
+
+    mod vocative_tests {
+        use super::super::is_vocative_trigger;
+
+        #[test]
+        fn matches_at_start_of_turn_with_comma() {
+            assert!(is_vocative_trigger("Signore, dimmi", "Signore"));
+        }
+
+        #[test]
+        fn matches_at_start_of_turn_with_space() {
+            assert!(is_vocative_trigger("Signore chiedi al bot", "Signore"));
+        }
+
+        #[test]
+        fn matches_after_strong_punctuation() {
+            assert!(is_vocative_trigger("ciao. Signore, come va?", "Signore"));
+        }
+
+        #[test]
+        fn matches_with_leading_whitespace() {
+            assert!(is_vocative_trigger("  Signore, ...", "Signore"));
+        }
+
+        #[test]
+        fn rejects_other_capitalized_vocative_before_pattern() {
+            // The Beeper-screenshot case (user directive).
+            assert!(!is_vocative_trigger(
+                "Caterina, chiedi al Signore il pagamento",
+                "Signore"
+            ));
+        }
+
+        #[test]
+        fn rejects_when_not_at_vocative_position() {
+            assert!(!is_vocative_trigger(
+                "Ieri il Signore ha detto di...",
+                "Signore"
+            ));
+        }
+
+        #[test]
+        fn rejects_lowercase_substring() {
+            // Pattern is "Signore" (proper-name); lowercase should not match.
+            assert!(!is_vocative_trigger("il signore è arrivato", "Signore"));
+        }
+
+        #[test]
+        fn rejects_with_alessandro_then_signore() {
+            assert!(!is_vocative_trigger(
+                "Alessandro, dopo chiama il Signore",
+                "Signore"
+            ));
+        }
+
+        #[test]
+        fn word_boundary_signori_not_signore() {
+            assert!(!is_vocative_trigger("Signori, ascoltate", "Signore"));
+        }
+
+        #[test]
+        fn empty_text_returns_false() {
+            assert!(!is_vocative_trigger("", "Signore"));
+        }
+
+        #[test]
+        fn dammi_il_signore_rejected() {
+            assert!(!is_vocative_trigger("dammi il Signore", "Signore"));
+        }
+    }
+
+    mod addressee_tests {
+        use super::super::is_addressed_to_other_participant;
+        use crate::types::ParticipantRef;
+
+        fn roster(names: &[&str]) -> Vec<ParticipantRef> {
+            names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| ParticipantRef {
+                    jid: format!("{}@s.whatsapp.net", i),
+                    display_name: (*n).to_string(),
+                })
+                .collect()
+        }
+
+        #[test]
+        fn caterina_with_caterina_in_roster_returns_true() {
+            let r = roster(&["Caterina", "Ambrogio"]);
+            assert!(is_addressed_to_other_participant(
+                "Caterina, chiedi...",
+                &r,
+                "Ambrogio"
+            ));
+        }
+
+        #[test]
+        fn agent_addressed_returns_false() {
+            let r = roster(&["Caterina", "Ambrogio"]);
+            assert!(!is_addressed_to_other_participant(
+                "Ambrogio, vieni qui",
+                &r,
+                "Ambrogio"
+            ));
+        }
+
+        #[test]
+        fn no_vocative_returns_false() {
+            let r = roster(&["Caterina", "Ambrogio"]);
+            assert!(!is_addressed_to_other_participant(
+                "stamattina è bello",
+                &r,
+                "Ambrogio"
+            ));
+        }
+
+        #[test]
+        fn exclamation_vocative_recognized() {
+            let r = roster(&["Caterina", "Bot"]);
+            assert!(is_addressed_to_other_participant("Caterina!", &r, "Bot"));
+        }
+
+        #[test]
+        fn beeper_screenshot_full_turn() {
+            let r = roster(&["Caterina", "Bot"]);
+            assert!(is_addressed_to_other_participant(
+                "Caterina, chiedi al Signore il pagamento",
+                &r,
+                "Bot"
+            ));
+        }
+
+        #[test]
+        fn name_not_in_roster_returns_false() {
+            // "Marco," is a vocative but Marco isn't a participant — guard
+            // does not fire (avoids false positives on names that happen to
+            // start a sentence but aren't in the group).
+            let r = roster(&["Caterina", "Bot"]);
+            assert!(!is_addressed_to_other_participant(
+                "Marco, dove sei?",
+                &r,
+                "Bot"
+            ));
+        }
+
+        #[test]
+        fn case_insensitive_match() {
+            let r = roster(&["caterina", "Bot"]);
+            assert!(is_addressed_to_other_participant(
+                "Caterina, vieni qui",
+                &r,
+                "Bot"
+            ));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // §C wiring tests — should_process_group_message + guard flag behavior
+    // ---------------------------------------------------------------------
+
+    mod should_process_group_message_v2 {
+        use super::super::{should_process_group_message, ParticipantRef};
+        use super::group_text_message;
+        use librefang_types::config::{ChannelOverrides, GroupPolicy};
+        use serde_json::json;
+        use std::sync::Mutex;
+
+        // Serialize tests that mutate the LIBREFANG_GROUP_ADDRESSEE_GUARD env
+        // var — env mutation is process-global.
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        fn with_guard_on<F: FnOnce()>(f: F) {
+            let _g = ENV_LOCK.lock().unwrap();
+            std::env::set_var("LIBREFANG_GROUP_ADDRESSEE_GUARD", "on");
+            f();
+            std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
+        }
+
+        fn with_guard_off<F: FnOnce()>(f: F) {
+            let _g = ENV_LOCK.lock().unwrap();
+            std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
+            f();
+        }
+
+        fn inject_roster(msg: &mut crate::types::ChannelMessage, names: &[&str], agent: &str) {
+            let participants: Vec<ParticipantRef> = names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| ParticipantRef {
+                    jid: format!("{i}@s.whatsapp.net"),
+                    display_name: (*n).to_string(),
+                })
+                .collect();
+            msg.metadata.insert(
+                "group_participants".to_string(),
+                serde_json::to_value(&participants).unwrap(),
+            );
+            msg.metadata.insert("agent_name".to_string(), json!(agent));
+        }
+
+        #[test]
+        fn caterina_chiedi_al_signore_rejected_under_guard() {
+            with_guard_on(|| {
+                let mut msg = group_text_message("Caterina, chiedi al Signore il pagamento");
+                inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
+                let overrides = ChannelOverrides {
+                    group_policy: GroupPolicy::MentionOnly,
+                    group_trigger_patterns: vec!["Signore".to_string()],
+                    ..Default::default()
+                };
+                assert!(!should_process_group_message("whatsapp", &overrides, &msg));
+            });
+        }
+
+        #[test]
+        fn signore_at_start_passes_under_guard() {
+            with_guard_on(|| {
+                let mut msg = group_text_message("Signore, conferma il prossimo appuntamento");
+                inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
+                let overrides = ChannelOverrides {
+                    group_policy: GroupPolicy::MentionOnly,
+                    group_trigger_patterns: vec!["Signore".to_string()],
+                    ..Default::default()
+                };
+                assert!(should_process_group_message("whatsapp", &overrides, &msg));
+            });
+        }
+
+        #[test]
+        fn owner_no_mention_no_pattern_rejected() {
+            // OB-06: "owner-in-group" doesn't bypass mention_only — there's
+            // no owner short-circuit in librefang-channels (audit confirms).
+            // A plain "ciao a tutti" with no mention is rejected.
+            with_guard_on(|| {
+                let mut msg = group_text_message("ciao a tutti, come va?");
+                inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
+                let overrides = ChannelOverrides {
+                    group_policy: GroupPolicy::MentionOnly,
+                    group_trigger_patterns: vec!["Signore".to_string()],
+                    ..Default::default()
+                };
+                assert!(!should_process_group_message("whatsapp", &overrides, &msg));
+            });
+        }
+
+        #[test]
+        fn owner_explicit_mention_passes() {
+            with_guard_on(|| {
+                let mut msg = group_text_message("@Bot rispondimi");
+                inject_roster(&mut msg, &["Caterina", "Ambrogio"], "Ambrogio");
+                msg.metadata
+                    .insert("was_mentioned".to_string(), json!(true));
+                let overrides = ChannelOverrides {
+                    group_policy: GroupPolicy::MentionOnly,
+                    ..Default::default()
+                };
+                assert!(should_process_group_message("whatsapp", &overrides, &msg));
+            });
+        }
+
+        #[test]
+        fn legacy_substring_still_works_with_guard_off() {
+            // Backward compat: with the flag default-off (rollback path)
+            // the pre-Phase-2 substring matcher remains authoritative.
+            with_guard_off(|| {
+                let msg = group_text_message("Caterina, chiedi al Signore il pagamento");
+                let overrides = ChannelOverrides {
+                    group_policy: GroupPolicy::MentionOnly,
+                    group_trigger_patterns: vec!["(?i)\\bSignore\\b".to_string()],
+                    ..Default::default()
+                };
+                // Legacy behavior: substring matches → returns true.
+                assert!(should_process_group_message("whatsapp", &overrides, &msg));
+            });
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // BC-02 — SenderContext serde-default for group_participants
+    // ---------------------------------------------------------------------
+
+    mod bc02_tests {
+        use crate::types::SenderContext;
+
+        #[test]
+        fn old_blob_without_group_participants_parses() {
+            // Stored canonical blob from before Phase 2 §C — no
+            // `group_participants` key. Must deserialize cleanly.
+            let json = r#"{
+                "channel": "whatsapp",
+                "user_id": "u1",
+                "display_name": "Alice",
+                "is_group": false,
+                "was_mentioned": false,
+                "thread_id": null,
+                "account_id": null,
+                "auto_route": "off",
+                "auto_route_ttl_minutes": 0,
+                "auto_route_confidence_threshold": 0,
+                "auto_route_sticky_bonus": 0,
+                "auto_route_divergence_count": 0
+            }"#;
+            let ctx: SenderContext = serde_json::from_str(json).expect("BC-02 parse");
+            assert!(ctx.group_participants.is_empty());
         }
     }
 }

@@ -1,0 +1,12 @@
+{"t":0,"agent":"a67f5b1","agent_type":"github-checker","event":"agent_stop","success":true}
+{"t":0,"agent":"aa7c29d","agent_type":"github-checker","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"aa7c29d","agent_type":"github-checker","event":"agent_stop","success":true,"duration_ms":18110}
+{"t":0,"agent":"a9dcb27","agent_type":"github-checker","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a9dcb27","agent_type":"github-checker","event":"agent_stop","success":true,"duration_ms":17040}
+{"t":0,"agent":"system","event":"skill_invoked","skill_name":"oh-my-claudecode:ultrawork"}
+{"t":0,"agent":"a4b04a6","agent_type":"session-repair-resolver","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a7489eb","agent_type":"bridge-resolver","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"ab811a6","agent_type":"tool-runner-resolver","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a62c173","agent_type":"types-resolver","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a1b8725","agent_type":"agent-loop-resolver","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"ac85811","agent_type":"merge-master","event":"agent_start","parent_mode":"none"}

@@ -43,6 +43,7 @@ collector_knowledge_base.json
 predictions_database.json
 prediction_report_*.md
 BUILD_LOG.md
+message_journal.jsonl
 
 # Node.js (packages/)
 node_modules/

@@ -229,6 +229,45 @@ pub struct DriverConfig {
     /// silence on stdout, not wall-clock time.
     #[serde(default = "default_message_timeout_secs")]
     pub message_timeout_secs: u64,
+    /// Optional MCP bridge configuration (Claude Code provider only).
+    ///
+    /// When set, the driver writes a temp `mcp_config.json` and passes
+    /// `--mcp-config` to the spawned Claude CLI so the subprocess discovers
+    /// LibreFang tools via the daemon's `/mcp` endpoint. See issue #2314.
+    ///
+    /// Not serialized: set only by the kernel when constructing drivers.
+    #[serde(skip)]
+    pub mcp_bridge: Option<McpBridgeConfig>,
+}
+
+/// Configuration for bridging LibreFang tools into a CLI-based driver via MCP.
+///
+/// Kept in the base crate so `DriverConfig` can carry it without a circular
+/// dependency on `librefang-llm-drivers`. The driver crate re-exports this
+/// type under its own `claude_code` module for convenience.
+#[derive(Debug, Clone, Default)]
+pub struct McpBridgeConfig {
+    /// Daemon base URL (e.g. `http://127.0.0.1:4545`). The MCP endpoint lives
+    /// at `{base_url}/mcp`.
+    pub base_url: String,
+    /// Optional API key for the `X-API-Key` header. Empty disables the header
+    /// (matches daemon "no auth configured" mode).
+    pub api_key: Option<String>,
+}
+
+impl Default for DriverConfig {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            api_key: None,
+            base_url: None,
+            vertex_ai: VertexAiConfig::default(),
+            azure_openai: AzureOpenAiConfig::default(),
+            skip_permissions: default_skip_permissions(),
+            message_timeout_secs: default_message_timeout_secs(),
+            mcp_bridge: None,
+        }
+    }
 }
 
 fn default_skip_permissions() -> bool {
@@ -261,6 +300,7 @@ impl std::fmt::Debug for DriverConfig {
             .field("azure_openai.api_version", &self.azure_openai.api_version)
             .field("skip_permissions", &self.skip_permissions)
             .field("message_timeout_secs", &self.message_timeout_secs)
+            .field("mcp_bridge", &self.mcp_bridge.as_ref().map(|b| &b.base_url))
             .finish()
     }
 }

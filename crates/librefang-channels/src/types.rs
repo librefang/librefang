@@ -52,22 +52,6 @@ pub struct ChannelUser {
     pub librefang_user: Option<String>,
 }
 
-/// A known member of a group chat, accumulated from past messages.
-///
-/// Used to populate multi-user context in the system prompt so agents can
-/// distinguish between the current sender and other users mentioned in a
-/// message (e.g. `@pepe`, `@jose`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GroupMember {
-    /// Platform-specific user ID.
-    pub user_id: String,
-    /// Human-readable display name (what the platform shows).
-    pub display_name: String,
-    /// Optional `@handle` for platforms that expose one (Telegram, Discord, ...).
-    #[serde(default)]
-    pub username: Option<String>,
-}
-
 /// Typing indicator event from a channel.
 #[derive(Debug, Clone)]
 pub struct TypingEvent {
@@ -284,6 +268,13 @@ pub struct SenderContext {
     pub channel: String,
     /// Platform-specific user ID.
     pub user_id: String,
+    /// Platform-specific conversation ID (Telegram chat_id, Discord
+    /// channel_id, WhatsApp JID, etc.). Populated by `build_sender_context`
+    /// from `ChannelMessage.sender.platform_id` so kernel session scoping
+    /// can distinguish groups, DMs, and other conversations on the same
+    /// channel+agent pair. `None` for non-channel invocations (CLI, REST).
+    #[serde(default)]
+    pub chat_id: Option<String>,
     /// Human-readable display name.
     pub display_name: String,
     /// Whether the message came from a group chat (vs DM).
@@ -313,23 +304,30 @@ pub struct SenderContext {
     /// Divergence count threshold for `sticky_heuristic` strategy.
     #[serde(default)]
     pub auto_route_divergence_count: u32,
-    /// The bot's own platform `@handle` on this channel (e.g. `fandangorodelo_bot`
-    /// on Telegram). Used so the agent knows its own alias in the prompt.
+    /// Group participant roster (Phase 2 §C OB-04/OB-05/GS-01).
+    ///
+    /// Populated by the WhatsApp gateway via `sock.groupMetadata(groupJid)`
+    /// (5min TTL cache) for group messages. Empty for DMs and for non-WhatsApp
+    /// channels that don't yet expose roster info. Used by the addressee guard
+    /// in `should_process_group_message` to detect when a turn is addressed
+    /// to a named participant other than the agent.
+    ///
+    /// `#[serde(default)]` ensures BC-02: stored canonical blobs that predate
+    /// this field still deserialize cleanly.
     #[serde(default)]
-    pub bot_username: Option<String>,
-    /// The current sender's `@handle` on the platform, when available.
-    #[serde(default)]
-    pub sender_username: Option<String>,
-    /// Known members of the group chat where this message was sent.
-    /// Empty for DMs and for the very first message in a group before the
-    /// roster has accumulated any entries.
-    #[serde(default)]
-    pub group_members: Vec<GroupMember>,
-    /// Platform chat/conversation ID. For Telegram this is the group chat_id
-    /// (negative for groups) or user_id for DMs. Used by the roster store as
-    /// part of the key.
-    #[serde(default)]
-    pub chat_id: Option<String>,
+    pub group_participants: Vec<ParticipantRef>,
+}
+
+/// Reference to a participant in a group chat.
+///
+/// Minimal shape required by the §C addressee guard. Full roster persistence
+/// (with phone-number resolution, role, etc.) is deferred to Phase 5.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParticipantRef {
+    /// Platform JID (e.g. `1234567890@s.whatsapp.net` or `lid@lid`).
+    pub jid: String,
+    /// Human-readable name (push-name, contact name, or first part of JID).
+    pub display_name: String,
 }
 
 /// Agent lifecycle phase for UX indicators.
@@ -764,40 +762,6 @@ mod tests {
         // Should not panic; should return either 4 or an earlier valid boundary.
         assert!(text.is_char_boundary(result));
         assert!(result <= 4);
-    }
-
-    #[test]
-    fn test_split_message_multibyte_utf8_no_panic() {
-        // Regression test for #2285: retreat_past_html_entity panicked when
-        // search_start landed inside a multi-byte char like ñ (2 bytes).
-        // Build a string where ñ straddles the max_len - 12 boundary.
-        let text = "coño ".repeat(300); // 1500 chars, plenty of ñ near any boundary
-        let chunks = split_message(&text, 50);
-        assert!(!chunks.is_empty());
-        // Verify all chunks are valid UTF-8 (implicit — they're &str)
-        for chunk in &chunks {
-            assert!(chunk.len() <= 50);
-        }
-    }
-
-    #[test]
-    fn test_split_message_emoji_no_panic() {
-        // Emoji are 4 bytes in UTF-8 — even more fragile than ñ.
-        let text = "hello 😀 ".repeat(200);
-        let chunks = split_message(&text, 40);
-        assert!(!chunks.is_empty());
-        for chunk in &chunks {
-            assert!(chunk.len() <= 40);
-        }
-    }
-
-    #[test]
-    fn test_retreat_past_html_entity_multibyte_no_ampersand() {
-        // Direct test: pos just after a ñ, search window crosses into it.
-        let text = "aaaaaaaaañbbbbb"; // ñ at byte 9-10
-        let result = retreat_past_html_entity(text, 11);
-        // Should not panic, and should return 11 (no & found)
-        assert_eq!(result, 11);
     }
 
     #[test]

@@ -14,5 +14,5 @@ export function getStatusVariant(status?: string): BadgeVariant {
 /** Check if a provider auth_status indicates the provider is usable.
  *  Mirrors the Rust AuthStatus::is_available() variants. */
 export function isProviderAvailable(status?: string): boolean {
-  return status === "configured" || status === "validated_key" || status === "not_required" || status === "configured_cli";
+  return status === "configured" || status === "validated_key" || status === "not_required" || status === "configured_cli" || status === "auto_detected";
 }

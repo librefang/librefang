@@ -6,7 +6,7 @@ members = [
     "crates/librefang-runtime",
     "crates/librefang-runtime-mcp",
     "crates/librefang-runtime-oauth",
-    "crates/librefang-runtime-drivers",
+    "crates/librefang-llm-drivers",
     "crates/librefang-runtime-wasm",
     "crates/librefang-llm-driver",
     "crates/librefang-kernel-handle",
@@ -29,7 +29,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"

@@ -141,6 +141,7 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
 
 // Group node component
 function GroupNodeComponent({ data, id }: { data: any; id: string }) {
+  const { t } = useTranslation();
   const expanded = data._expanded !== false;
   return (
     <div
@@ -160,20 +161,20 @@ function GroupNodeComponent({ data, id }: { data: any; id: string }) {
             ? <ChevronDown className="w-3.5 h-3.5 text-brand shrink-0" />
             : <ChevronRight className="w-3.5 h-3.5 text-brand shrink-0" />}
           <Group className="w-3.5 h-3.5 text-brand shrink-0" />
-          <span className="text-xs font-bold text-brand truncate">{data.label || "Group"}</span>
+          <span className="text-xs font-bold text-brand truncate">{data.label || t("canvas.group")}</span>
           {!expanded && data._childCount > 0 && (
             <span className="text-[9px] text-brand/50">{data._childCount}</span>
           )}
         </div>
         {/* Ungroup (keep child nodes) */}
         <button onClick={(e) => { e.stopPropagation(); data._onUngroup?.(id); }}
-          title="Ungroup"
+          title={t("canvas.ungroup")}
           className="p-0.5 rounded hover:bg-brand/20 text-brand/50 hover:text-brand shrink-0">
           <X className="w-3 h-3" />
         </button>
         {/* Delete group + child nodes */}
         <button onClick={(e) => { e.stopPropagation(); data._onDeleteGroup?.(id); }}
-          title="Delete group and children"
+          title={t("canvas.delete_group")}
           className="p-0.5 rounded hover:bg-error/20 text-text-dim/30 hover:text-error shrink-0">
           <Trash2 className="w-3 h-3" />
         </button>
@@ -1703,10 +1704,10 @@ function CanvasPageInner() {
 
           {/* View tools */}
           <div className="flex items-center gap-0.5 px-0.5 sm:px-1">
-            <Button variant="secondary" onClick={() => setIsFullscreen(!isFullscreen)} title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}>
+            <Button variant="secondary" onClick={() => setIsFullscreen(!isFullscreen)} title={isFullscreen ? t("canvas.exit_fullscreen") : t("canvas.fullscreen")}>
               {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             </Button>
-            <Button variant="secondary" onClick={() => fitView({ padding: 0.2, duration: 300 })} title="Fit View (Cmd+1)">
+            <Button variant="secondary" onClick={() => fitView({ padding: 0.2, duration: 300 })} title={t("canvas.fit_view")}>
               <Scan className="w-4 h-4" />
             </Button>
           </div>
@@ -1721,10 +1722,10 @@ function CanvasPageInner() {
             <Button variant="secondary" onClick={() => setShowTemplateBrowser(true)} title={t("canvas.browse_templates")}>
               <LayoutTemplate className="w-4 h-4" />
             </Button>
-            <Button variant="secondary" onClick={exportWorkflow} title="Export (Cmd+E)">
+            <Button variant="secondary" onClick={exportWorkflow} title={t("canvas.export")}>
               <Download className="w-4 h-4" />
             </Button>
-            <Button variant="secondary" onClick={importWorkflow} title="Import (Cmd+I)" className="hidden sm:flex">
+            <Button variant="secondary" onClick={importWorkflow} title={t("canvas.import")} className="hidden sm:flex">
               <Upload className="w-4 h-4" />
             </Button>
           </div>
@@ -1736,7 +1737,7 @@ function CanvasPageInner() {
             <Button variant="secondary" onClick={() => { setNodes([]); setEdges([]); setEditingNode(null); }} title={t("common.clear")}>
               <Trash2 className="w-4 h-4" />
             </Button>
-            <Button variant="secondary" onClick={() => setShowHelp(true)} title="Shortcuts (?)" className="hidden sm:flex">
+            <Button variant="secondary" onClick={() => setShowHelp(true)} title={t("canvas.shortcuts")} className="hidden sm:flex">
               <HelpCircle className="w-4 h-4" />
             </Button>
           </div>
@@ -1761,7 +1762,7 @@ function CanvasPageInner() {
             </Button>
             <Button variant="secondary" onClick={() => handleRunClick("dry")}
               disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId || isDryRunning}
-              title="Dry Run — validate without calling LLMs">
+              title={t("canvas.dry_run_hint")}>
               {isDryRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <FlaskConical className="w-4 h-4" />}
               <span className="hidden sm:inline ml-1">Dry Run</span>
             </Button>
@@ -1866,7 +1867,7 @@ function CanvasPageInner() {
               <div className="p-3 space-y-3">
                 <p className="text-[10px] text-text-dim">
                   {showRunInput === "dry"
-                    ? "Validate agents and preview resolved prompts without calling any LLMs."
+                    ? t("canvas.dry_run_desc")
                     : t("canvas.run_input_hint")}
                 </p>
                 <textarea value={runInput} onChange={e => setRunInput(e.target.value)}
@@ -1891,7 +1892,7 @@ function CanvasPageInner() {
                       </Button>
                       <Button variant="ghost" size="sm" onClick={() => handleDryRun()}
                         disabled={isDryRunning || !!runningWorkflowId}
-                        title="Dry Run">
+                        title={t("canvas.dry_run")}>
                         <FlaskConical className="w-3.5 h-3.5" />
                       </Button>
                     </>

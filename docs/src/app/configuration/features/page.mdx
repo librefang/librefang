@@ -381,6 +381,32 @@ default_max_llm_tokens_per_hour = 0
 | `alert_threshold` | f64 | `0.8` | Warning threshold as a fraction of each limit (0.0–1.0). At 0.8, warnings are logged when 80% of a limit is reached. |
 | `default_max_llm_tokens_per_hour` | u64 | `0` | Global override for per-agent hourly token budget. When `> 0`, overrides all agents' own token limits. `0` = keep each agent's own limit. |
 
+#### Per-provider caps (`[budget.providers.<id>]`)
+
+When you mix a free local provider (e.g. `litellm`, `ollama`) with paid ones (e.g. `moonshot`, `openai`), you can cap spending on the paid providers without throttling the free ones. Provider IDs must match the `provider` field of your agents' `[model]` blocks. Missing or zero limits mean unlimited.
+
+```toml
+[budget.providers.moonshot]
+max_cost_per_day_usd = 2.0
+max_tokens_per_hour = 500000
+
+[budget.providers.openai]
+max_cost_per_hour_usd = 1.0
+max_cost_per_month_usd = 50.0
+
+[budget.providers.litellm]
+# omitted or all zeros = unlimited
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_cost_per_hour_usd` | f64 | `0.0` | Hourly cost cap for this provider. `0.0` = unlimited. |
+| `max_cost_per_day_usd` | f64 | `0.0` | Daily cost cap for this provider. `0.0` = unlimited. |
+| `max_cost_per_month_usd` | f64 | `0.0` | Monthly cost cap for this provider. `0.0` = unlimited. |
+| `max_tokens_per_hour` | u64 | `0` | Hourly token cap (input + output) for this provider. `0` = unlimited. |
+
+When a per-provider limit is hit, the dispatch fails with a `QuotaExceeded` error mentioning the provider name — usage on other providers is unaffected.
+
 ---
 
 ### `[thinking]`

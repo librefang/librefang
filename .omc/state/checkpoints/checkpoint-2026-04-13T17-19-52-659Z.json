@@ -1,0 +1,21 @@
+{
+  "created_at": "2026-04-13T17:19:52.659Z",
+  "trigger": "auto",
+  "active_modes": {},
+  "todo_summary": {
+    "pending": 0,
+    "in_progress": 0,
+    "completed": 0
+  },
+  "wisdom_exported": false,
+  "background_jobs": {
+    "active": [],
+    "recent": [],
+    "stats": {
+      "total": 0,
+      "active": 0,
+      "completed": 0,
+      "failed": 0
+    }
+  }
+}

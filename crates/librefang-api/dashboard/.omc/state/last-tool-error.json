@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"git add crates/librefang-api/src/routes/agents.rs && git commit -m \\\"fix(api): make manifest mutable for custom name override\\\" 2>&1 | tail -5\",\"description\":\"Commit the mut fix to main\"}",
+  "error": "Exit code 128\nadvertencia: no se pudo abrir el directorio 'crates/librefang-api/dashboard/crates/librefang-api/src/routes/': No existe el fichero o el directorio\nfatal: ruta especificada 'crates/librefang-api/src/routes/agents.rs' no concordó con ningún archivo",
+  "timestamp": "2026-04-09T22:28:34.186Z",
+  "retry_count": 1
+}

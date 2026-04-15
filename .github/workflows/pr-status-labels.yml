@@ -1,0 +1,440 @@
+name: PR Status Labels
+
+# Automated PR label management:
+# - has-conflicts: merge conflict detection
+# - ci-failed: CI check failure detection
+# - size/*: diff size classification
+# - no-rust-required: docs/CI-only PRs
+# - review state: ready-for-review ↔ needs-changes sync
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+  check_suite:
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ── Conflict detection ────────────────────────────────────────────
+  conflicts:
+    name: Conflict Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Label conflicting PRs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LABEL = 'has-conflicts';
+            let prs;
+            if (context.eventName === 'push' || context.eventName === 'workflow_dispatch') {
+              const resp = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                per_page: 100,
+              });
+              prs = resp.data;
+            } else {
+              prs = [{ number: context.payload.pull_request.number }];
+            }
+
+            for (const pr of prs) {
+              const { data: full } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+              });
+
+              let mergeable = full.mergeable;
+              // On synchronize (new push), GitHub may not have recomputed
+              // mergeability yet — the API can return a stale `false` or `null`.
+              // Retry in both cases so a conflict-fixing push removes the label.
+              const isSynchronize = context.eventName === 'pull_request_target' &&
+                context.payload.action === 'synchronize';
+              if (mergeable === null || (isSynchronize && mergeable === false)) {
+                await new Promise(r => setTimeout(r, 5000));
+                const { data: retry } = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                });
+                mergeable = retry.mergeable;
+              }
+
+              const labels = full.labels.map(l => l.name);
+              const hasLabel = labels.includes(LABEL);
+
+              const rmLabel = async (name) => {
+                if (labels.includes(name)) {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner, repo: context.repo.repo,
+                    issue_number: pr.number, name,
+                  }).catch(() => {});
+                }
+              };
+
+              if (mergeable === false) {
+                if (!hasLabel) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    labels: [LABEL],
+                  });
+                  core.info(`#${pr.number}: +${LABEL}`);
+                }
+                // Always enforce: conflicts → no ready-for-review
+                await rmLabel('ready-for-review');
+              } else if (mergeable !== false && hasLabel) {
+                await rmLabel(LABEL);
+                // Restore ready-for-review if no other blockers remain
+                const hasCiFailed = labels.includes('ci-failed');
+                const needsChanges = labels.includes('needs-changes');
+                if (!hasCiFailed && !needsChanges && !labels.includes('ready-for-review')) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    labels: ['ready-for-review'],
+                  });
+                  core.info(`#${pr.number}: -${LABEL} +ready-for-review`);
+                } else {
+                  core.info(`#${pr.number}: -${LABEL}`);
+                }
+              }
+            }
+
+  # ── CI status detection ───────────────────────────────────────────
+  ci-status:
+    name: CI Status Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'check_suite' || (github.event_name == 'pull_request_target' && github.event.action == 'synchronize')
+    steps:
+      - name: Label PRs with failed CI
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LABEL = 'ci-failed';
+
+            // On synchronize (new push), the old CI results are stale — clear
+            // ci-failed immediately. The check_suite.completed event will re-add
+            // it if the new run fails.
+            if (context.eventName === 'pull_request_target') {
+              const pr = context.payload.pull_request;
+              const labels = pr.labels.map(l => l.name);
+              if (labels.includes(LABEL)) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: pr.number, name: LABEL,
+                }).catch(() => {});
+                core.info(`#${pr.number}: -${LABEL} (new push invalidates old CI result)`);
+              }
+              return;
+            }
+
+            // check_suite.completed path
+            const suite = context.payload.check_suite;
+            let prNumbers = (suite.pull_requests || []).map(pr => pr.number);
+
+            if (prNumbers.length === 0) {
+              // check_suite may not list PRs after rebase/force-push.
+              // Fall back to the commits → PR association API.
+              const { data: associated } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: suite.head_sha,
+              });
+              prNumbers = associated
+                .filter(pr => pr.state === 'open')
+                .map(pr => pr.number);
+              if (prNumbers.length === 0) {
+                core.info('No open PRs associated with this check suite');
+                return;
+              }
+            }
+
+            // Fetch all check runs for the SHA (paginated)
+            const allCheckRuns = await github.paginate(
+              github.rest.checks.listForRef,
+              { owner: context.repo.owner, repo: context.repo.repo, ref: suite.head_sha, per_page: 100 },
+              (response) => response.data.check_runs,
+            );
+
+            // Exclude this workflow's own check runs so a failure in label
+            // management (e.g. rate limit) doesn't mark the PR as ci-failed.
+            const SELF_JOBS = new Set([
+              'Conflict Check', 'CI Status Check', 'PR Size',
+              'Docs/CI Check', 'Review State',
+            ]);
+            const externalRuns = allCheckRuns.filter(cr => !SELF_JOBS.has(cr.name));
+
+            const hasFailure = externalRuns.some(
+              cr => cr.conclusion === 'failure' || cr.conclusion === 'timed_out'
+            );
+            const allDone = externalRuns.every(
+              cr => cr.status === 'completed'
+            );
+
+            if (!allDone) {
+              core.info(`checks still running for ${suite.head_sha}, skipping`);
+              return;
+            }
+
+            for (const prNumber of prNumbers) {
+              const { data: fullPr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              const labels = fullPr.labels.map(l => l.name);
+              const hasLabel = labels.includes(LABEL);
+
+              const rmLabel = async (name) => {
+                if (labels.includes(name)) {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner, repo: context.repo.repo,
+                    issue_number: prNumber, name,
+                  }).catch(() => {});
+                }
+              };
+
+              if (hasFailure && !hasLabel) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  labels: [LABEL],
+                });
+                await rmLabel('ready-for-review');
+                core.info(`#${prNumber}: +${LABEL} -ready-for-review`);
+              } else if (!hasFailure) {
+                // CI passed — remove ci-failed if present, and ensure
+                // ready-for-review is set when no blockers remain.
+                if (hasLabel) {
+                  await rmLabel(LABEL);
+                }
+                const hasConflicts = labels.includes('has-conflicts');
+                const needsChanges = labels.includes('needs-changes');
+                if (!hasConflicts && !needsChanges && !labels.includes('ready-for-review')) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: prNumber,
+                    labels: ['ready-for-review'],
+                  });
+                  core.info(`#${prNumber}: ${hasLabel ? `-${LABEL} ` : ''}+ready-for-review (CI passed, no blockers)`);
+                } else if (hasLabel) {
+                  core.info(`#${prNumber}: -${LABEL}`);
+                }
+              }
+            }
+
+  # ── PR size labels ────────────────────────────────────────────────
+  size:
+    name: PR Size
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target'
+    steps:
+      - name: Classify PR size
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const SIZE_LABELS = ['size/XS', 'size/S', 'size/M', 'size/L', 'size/XL'];
+            const pr = context.payload.pull_request;
+
+            // Fetch file list to count changed lines (additions + deletions)
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            // Exclude auto-generated files from size calculation
+            const IGNORE = /^(package-lock\.json|Cargo\.lock|openapi\.json|.*\.snap$)/;
+            const changed = files
+              .filter(f => !IGNORE.test(f.filename))
+              .reduce((sum, f) => sum + f.additions + f.deletions, 0);
+
+            let sizeLabel;
+            if (changed < 10) sizeLabel = 'size/XS';
+            else if (changed < 50) sizeLabel = 'size/S';
+            else if (changed < 250) sizeLabel = 'size/M';
+            else if (changed < 1000) sizeLabel = 'size/L';
+            else sizeLabel = 'size/XL';
+
+            // Remove old size labels and add new one
+            const current = pr.labels.map(l => l.name);
+            for (const old of SIZE_LABELS) {
+              if (old !== sizeLabel && current.includes(old)) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  name: old,
+                }).catch(() => {});
+              }
+            }
+            if (!current.includes(sizeLabel)) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                labels: [sizeLabel],
+              });
+            }
+            core.info(`#${pr.number}: ${changed} lines → ${sizeLabel}`);
+
+  # ── Docs/CI-only → no-rust-required ──────────────────────────────
+  docs-only:
+    name: Docs/CI Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target'
+    steps:
+      - name: Label docs/CI-only PRs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LABEL = 'no-rust-required';
+            const pr = context.payload.pull_request;
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            // Patterns that don't require Rust knowledge
+            // Note: Cargo.toml excluded — dependency/feature changes need Rust context
+            const NO_RUST = /^(\.github\/|docs\/|.*\.md$|.*\.mdx$|.*\.json$|.*\.ya?ml$|.*\.css$|.*\.tsx?$|.*\.jsx?$|LICENSE|\.gitignore)/;
+            const allNoRust = files.every(f => NO_RUST.test(f.filename));
+
+            const labels = pr.labels.map(l => l.name);
+            const hasLabel = labels.includes(LABEL);
+
+            if (allNoRust && !hasLabel && files.length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                labels: [LABEL],
+              });
+              core.info(`#${pr.number}: added "${LABEL}" (no .rs files changed)`);
+            } else if (!allNoRust && hasLabel) {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                name: LABEL,
+              }).catch(() => {});
+              core.info(`#${pr.number}: removed "${LABEL}" (has .rs files)`);
+            }
+
+  # ── Review state: ready-for-review ↔ needs-changes ───────────────
+  review-state:
+    name: Review State
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_review' || (github.event_name == 'pull_request_target' && github.event.action == 'synchronize')
+    steps:
+      - name: Sync review labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const READY = 'ready-for-review';
+            const NEEDS = 'needs-changes';
+
+            const prNumber = context.payload.pull_request.number;
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            const labels = pr.labels.map(l => l.name);
+
+            async function addLabel(label) {
+              if (!labels.includes(label)) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  labels: [label],
+                });
+              }
+            }
+            async function removeLabel(label) {
+              if (labels.includes(label)) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: label,
+                }).catch(() => {});
+              }
+            }
+
+            // Don't add ready-for-review if blocking labels are present
+            const hasBlocker = labels.includes('has-conflicts') || labels.includes('ci-failed');
+
+            if (context.eventName === 'pull_request_review') {
+              const state = context.payload.review.state;
+              if (state === 'changes_requested') {
+                await addLabel(NEEDS);
+                await removeLabel(READY);
+                core.info(`#${prNumber}: changes requested → +${NEEDS} -${READY}`);
+              } else if (state === 'approved') {
+                await removeLabel(NEEDS);
+                if (!hasBlocker) {
+                  await addLabel(READY);
+                  core.info(`#${prNumber}: approved → -${NEEDS} +${READY}`);
+                } else {
+                  core.info(`#${prNumber}: approved but has blockers, skipping ${READY}`);
+                }
+              }
+            } else if (context.eventName === 'pull_request_target' && context.payload.action === 'synchronize') {
+              // New push — check whether any changes_requested reviews are still
+              // pending (not superseded by a later approved/dismissed review from
+              // the same reviewer). Only clear needs-changes when all such reviews
+              // have been resolved.
+              if (labels.includes(NEEDS)) {
+                const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  per_page: 100,
+                });
+
+                // Build per-reviewer latest state (last review wins)
+                const latestByReviewer = new Map();
+                for (const r of reviews) {
+                  if (!r.user || r.state === 'COMMENTED' || r.state === 'PENDING') continue;
+                  latestByReviewer.set(r.user.login, r.state);
+                }
+
+                const hasPendingChangesRequested = [...latestByReviewer.values()].some(
+                  s => s === 'CHANGES_REQUESTED'
+                );
+
+                if (hasPendingChangesRequested) {
+                  core.info(`#${prNumber}: new push but changes_requested still pending, keeping ${NEEDS}`);
+                } else {
+                  await removeLabel(NEEDS);
+                  if (!hasBlocker) {
+                    await addLabel(READY);
+                    core.info(`#${prNumber}: new push, all reviews resolved → -${NEEDS} +${READY}`);
+                  } else {
+                    core.info(`#${prNumber}: new push → -${NEEDS}, skipping ${READY} (blockers)`);
+                  }
+                }
+              }
+            }

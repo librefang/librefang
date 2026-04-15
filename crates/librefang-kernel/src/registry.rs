@@ -398,7 +398,7 @@ impl AgentRegistry {
             entry.manifest.resources.max_cost_per_month_usd = v;
         }
         if let Some(v) = tokens_per_hour {
-            entry.manifest.resources.max_llm_tokens_per_hour = v;
+            entry.manifest.resources.max_llm_tokens_per_hour = Some(v);
         }
         entry.last_active = chrono::Utc::now();
         Ok(())

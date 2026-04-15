@@ -145,6 +145,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": cfg.log_level,
         "network_enabled": cfg.network_enabled,
+        "terminal_enabled": cfg.terminal.enabled,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
         "agents": agents,
     }))
@@ -878,6 +879,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "path": config.vault.path.as_ref().map(|p| p.to_string_lossy().to_string()),
     });
 
+    let stt_available = config.media.audio_provider.is_some();
     set!("media", {
         "image_description": config.media.image_description,
         "audio_transcription": config.media.audio_transcription,
@@ -885,6 +887,8 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "max_concurrency": config.media.max_concurrency,
         "image_provider": config.media.image_provider,
         "audio_provider": config.media.audio_provider,
+        "audio_model": config.media.audio_model,
+        "stt_available": stt_available,
     });
 
     set!("links", {
@@ -917,6 +921,8 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "timeout_secs": config.approval.timeout_secs,
         "auto_approve_autonomous": config.approval.auto_approve_autonomous,
         "auto_approve": config.approval.auto_approve,
+        "second_factor": serde_json::to_value(config.approval.second_factor).unwrap_or(serde_json::json!("none")),
+        "totp_issuer": config.approval.totp_issuer,
     });
 
     set!("exec_policy", {
@@ -1632,7 +1638,9 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     sec!("media", { "fields": {
         "image_description": "boolean", "audio_transcription": "boolean",
         "video_description": "boolean", "max_concurrency": "number",
-        "image_provider": "string", "audio_provider": "string"
+        "image_provider": "string",
+        "audio_provider": { "type": "select", "options": ["", "groq", "openai", "gemini", "elevenlabs", "minimax", "fireworks", "together", "siliconflow"] },
+        "audio_model": "string"
     }});
     sec!("links", { "fields": {
         "enabled": "boolean", "max_links": "number",
@@ -1648,7 +1656,9 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }});
     sec!("approval", { "hot_reloadable": true, "fields": {
         "require_approval": "string[]", "timeout_secs": "number",
-        "auto_approve_autonomous": "boolean", "auto_approve": "boolean"
+        "auto_approve_autonomous": "boolean", "auto_approve": "boolean",
+        "second_factor": { "type": "select", "options": ["none", "totp", "login", "both"] },
+        "totp_issuer": "string"
     }});
     sec!("exec_policy", { "fields": {
         "mode": { "type": "select", "options": ["deny", "allowlist", "full"] },
@@ -1767,44 +1777,64 @@ pub async fn config_set(
         );
     }
 
-    // Read existing config as a TOML table, or start fresh
-    let mut table: toml::value::Table = if config_path.exists() {
-        match std::fs::read_to_string(&config_path) {
-            Ok(content) => toml::from_str(&content).unwrap_or_default(),
-            Err(_) => toml::value::Table::new(),
-        }
+    // Serialize concurrent writes to prevent read-modify-write races
+    let _config_guard = state.config_write_lock.lock().await;
+
+    // Read existing config — use toml_edit to preserve comments and formatting
+    let raw_content = if config_path.exists() {
+        std::fs::read_to_string(&config_path).unwrap_or_default()
     } else {
-        toml::value::Table::new()
+        String::new()
+    };
+    let mut doc: toml_edit::DocumentMut = match raw_content.parse() {
+        Ok(d) => d,
+        Err(_) => toml_edit::DocumentMut::new(),
     };
 
-    // Convert JSON value to TOML value
-    let toml_val = json_to_toml_value(&value);
+    // null → remove key instead of writing empty string
+    let is_remove = value.is_null();
 
-    // Parse "section.key" path and set value
+    // Parse "section.key" path and set/remove value
     let parts: Vec<&str> = path.split('.').collect();
     match parts.len() {
         1 => {
-            table.insert(parts[0].to_string(), toml_val);
+            if is_remove {
+                doc.remove(parts[0]);
+            } else {
+                doc[parts[0]] = toml_edit::Item::Value(json_to_toml_edit_value(&value));
+            }
         }
         2 => {
-            let section = table
-                .entry(parts[0].to_string())
-                .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-            if let toml::Value::Table(ref mut t) = section {
-                t.insert(parts[1].to_string(), toml_val);
+            if is_remove {
+                if let Some(t) = doc[parts[0]].as_table_mut() {
+                    t.remove(parts[1]);
+                }
+            } else {
+                if !doc.contains_table(parts[0]) {
+                    doc[parts[0]] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                doc[parts[0]][parts[1]] = toml_edit::Item::Value(json_to_toml_edit_value(&value));
             }
         }
         3 => {
-            let section = table
-                .entry(parts[0].to_string())
-                .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-            if let toml::Value::Table(ref mut t) = section {
-                let sub = t
-                    .entry(parts[1].to_string())
-                    .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-                if let toml::Value::Table(ref mut t2) = sub {
-                    t2.insert(parts[2].to_string(), toml_val);
+            if is_remove {
+                if let Some(t) = doc[parts[0]].as_table_mut() {
+                    if let Some(t2) = t.get_mut(parts[1]).and_then(|i| i.as_table_mut()) {
+                        t2.remove(parts[2]);
+                    }
                 }
+            } else {
+                if !doc.contains_table(parts[0]) {
+                    doc[parts[0]] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                if !doc[parts[0]]
+                    .as_table()
+                    .is_some_and(|t| t.contains_table(parts[1]))
+                {
+                    doc[parts[0]][parts[1]] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                doc[parts[0]][parts[1]][parts[2]] =
+                    toml_edit::Item::Value(json_to_toml_edit_value(&value));
             }
         }
         _ => {
@@ -1817,19 +1847,26 @@ pub async fn config_set(
         }
     }
 
-    // Write back
-    let toml_string = match toml::to_string_pretty(&table) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"status": "error", "error": format!("serialize failed: {e}")}),
-                ),
-            );
-        }
-    };
-    if let Err(e) = std::fs::write(&config_path, &toml_string) {
+    // Validate by parsing the result as KernelConfig before writing
+    let new_toml_str = doc.to_string();
+    if let Err(e) = toml::from_str::<librefang_types::config::KernelConfig>(&new_toml_str) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!("invalid config after edit: {e}")
+            })),
+        );
+    }
+
+    // Backup before write
+    let backup_path = config_path.with_extension("toml.bak");
+    if config_path.exists() {
+        let _ = std::fs::copy(&config_path, &backup_path);
+    }
+
+    // Write back — preserves comments, whitespace, and key ordering
+    if let Err(e) = std::fs::write(&config_path, &new_toml_str) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"status": "error", "error": format!("write failed: {e}")})),
@@ -1859,6 +1896,39 @@ pub async fn config_set(
         StatusCode::OK,
         Json(serde_json::json!({"status": reload_status, "path": path})),
     )
+}
+
+/// Convert a serde_json::Value to a toml_edit::Value (format-preserving).
+fn json_to_toml_edit_value(value: &serde_json::Value) -> toml_edit::Value {
+    match value {
+        serde_json::Value::String(s) => s.as_str().into(),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.into()
+            } else if let Some(f) = n.as_f64() {
+                f.into()
+            } else {
+                n.to_string().into()
+            }
+        }
+        serde_json::Value::Bool(b) => (*b).into(),
+        serde_json::Value::Array(arr) => {
+            let mut a = toml_edit::Array::new();
+            for item in arr {
+                a.push(json_to_toml_edit_value(item));
+            }
+            toml_edit::Value::Array(a)
+        }
+        serde_json::Value::Object(map) => {
+            let mut t = toml_edit::InlineTable::new();
+            for (k, v) in map {
+                t.insert(k, json_to_toml_edit_value(v));
+            }
+            toml_edit::Value::InlineTable(t)
+        }
+        // null is handled by the caller (remove key) — fallback to empty string
+        serde_json::Value::Null => "".into(),
+    }
 }
 
 /// Convert a serde_json::Value to a toml::Value.
@@ -1952,6 +2022,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         "default_model": cfg.default_model.model,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
         "network_enabled": cfg.network_enabled,
+        "terminal_enabled": cfg.terminal.enabled,
     });
 
     // Agents list — fully enriched (same fields as /api/agents) so AgentsPage

@@ -27,8 +27,11 @@ interface UIState {
   toasts: Toast[];
   skillOutputs: SkillOutput[];
   hiddenModelKeys: string[];
+  terminalEnabled: boolean | null;
+  modelsAvailableOnly: boolean;
   deepThinking: boolean;
   showThinkingProcess: boolean;
+  setModelsAvailableOnly: (value: boolean) => void;
   setDeepThinking: (value: boolean) => void;
   setShowThinkingProcess: (value: boolean) => void;
   toggleTheme: () => void;
@@ -45,6 +48,7 @@ interface UIState {
   hideModel: (key: string) => void;
   unhideModel: (key: string) => void;
   pruneHiddenKeys: (validKeys: Set<string>) => void;
+  setTerminalEnabled: (enabled: boolean) => void;
 }
 
 export const useUIStore = create<UIState>()(
@@ -59,8 +63,11 @@ export const useUIStore = create<UIState>()(
       toasts: [],
       skillOutputs: [],
       hiddenModelKeys: [],
+      terminalEnabled: null,
+      modelsAvailableOnly: true,
       deepThinking: false,
       showThinkingProcess: true,
+      setModelsAvailableOnly: (value) => set({ modelsAvailableOnly: value }),
       setDeepThinking: (value) => set({ deepThinking: value }),
       setShowThinkingProcess: (value) => set({ showThinkingProcess: value }),
       toggleTheme: () =>
@@ -107,6 +114,7 @@ export const useUIStore = create<UIState>()(
         set((state) => ({
           hiddenModelKeys: state.hiddenModelKeys.filter((k) => validKeys.has(k)),
         })),
+      setTerminalEnabled: (enabled) => set({ terminalEnabled: enabled }),
     }),
     {
       name: "librefang-ui-storage",
@@ -115,6 +123,7 @@ export const useUIStore = create<UIState>()(
         language: state.language,
         navLayout: state.navLayout,
         hiddenModelKeys: state.hiddenModelKeys,
+        modelsAvailableOnly: state.modelsAvailableOnly,
         deepThinking: state.deepThinking,
         showThinkingProcess: state.showThinkingProcess,
       }),

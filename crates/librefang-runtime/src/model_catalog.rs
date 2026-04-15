@@ -6,7 +6,7 @@
 use librefang_types::model_catalog::{
     AliasesCatalogFile, AuthStatus, ModelCatalogEntry, ModelCatalogFile, ModelTier, ProviderInfo,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::warn;
 
 /// The model catalog — registry of all known models and providers.
@@ -14,6 +14,9 @@ pub struct ModelCatalog {
     models: Vec<ModelCatalogEntry>,
     aliases: HashMap<String, String>,
     providers: Vec<ProviderInfo>,
+    /// Providers whose fallback/CLI detection is suppressed by the user
+    /// (i.e. the user explicitly removed the key via the dashboard).
+    suppressed_providers: HashSet<String>,
 }
 
 impl ModelCatalog {
@@ -151,6 +154,7 @@ impl ModelCatalog {
             models,
             aliases,
             providers,
+            suppressed_providers: HashSet::new(),
         }
     }
 
@@ -192,30 +196,46 @@ impl ModelCatalog {
             // Primary: check the provider's declared env var (non-empty after trim)
             let has_key = std::env::var(&provider.api_key_env).is_ok_and(|v| !v.trim().is_empty());
 
+            // If the user explicitly removed this provider's key, skip
+            // fallback/CLI detection — only honour the primary env var.
+            let suppressed = self.suppressed_providers.contains(&provider.id);
+
             // Secondary: provider-specific fallback keys (still API-key-based auth)
-            let has_key_fallback = match provider.id.as_str() {
-                "gemini" => std::env::var("GOOGLE_API_KEY").is_ok_and(|v| !v.trim().is_empty()),
-                "openai" | "codex" => {
-                    std::env::var("OPENAI_API_KEY").is_ok_and(|v| !v.trim().is_empty())
-                        || read_codex_credential().is_some()
+            let has_key_fallback = if suppressed {
+                false
+            } else {
+                match provider.id.as_str() {
+                    "gemini" => std::env::var("GOOGLE_API_KEY").is_ok_and(|v| !v.trim().is_empty()),
+                    "openai" | "codex" => {
+                        std::env::var("OPENAI_API_KEY").is_ok_and(|v| !v.trim().is_empty())
+                            || read_codex_credential().is_some()
+                    }
+                    _ => false,
                 }
-                _ => false,
             };
 
             // Tertiary: CLI tools that can serve as fallback for API providers
-            let aider_ok = || crate::drivers::cli_provider_available("aider");
-            let has_cli_fallback = match provider.id.as_str() {
-                "anthropic" => crate::drivers::cli_provider_available("claude-code") || aider_ok(),
-                "gemini" => crate::drivers::cli_provider_available("gemini-cli") || aider_ok(),
-                "openai" | "codex" => {
-                    crate::drivers::cli_provider_available("codex-cli") || aider_ok()
+            let has_cli_fallback = if suppressed {
+                false
+            } else {
+                let aider_ok = || crate::drivers::cli_provider_available("aider");
+                match provider.id.as_str() {
+                    "anthropic" => {
+                        crate::drivers::cli_provider_available("claude-code") || aider_ok()
+                    }
+                    "gemini" => crate::drivers::cli_provider_available("gemini-cli") || aider_ok(),
+                    "openai" | "codex" => {
+                        crate::drivers::cli_provider_available("codex-cli") || aider_ok()
+                    }
+                    "qwen" => crate::drivers::cli_provider_available("qwen-code") || aider_ok(),
+                    _ => false,
                 }
-                "qwen" => crate::drivers::cli_provider_available("qwen-code") || aider_ok(),
-                _ => false,
             };
 
-            provider.auth_status = if has_key || has_key_fallback {
+            provider.auth_status = if has_key {
                 AuthStatus::Configured
+            } else if has_key_fallback {
+                AuthStatus::AutoDetected
             } else if has_cli_fallback {
                 AuthStatus::ConfiguredCli
             } else {
@@ -239,7 +259,9 @@ impl ModelCatalog {
     pub fn providers_needing_validation(&self) -> Vec<(String, String, String)> {
         self.providers
             .iter()
-            .filter(|p| p.auth_status == AuthStatus::Configured)
+            .filter(|p| {
+                p.auth_status == AuthStatus::Configured || p.auth_status == AuthStatus::AutoDetected
+            })
             .map(|p| (p.id.clone(), p.base_url.clone(), p.api_key_env.clone()))
             .collect()
     }
@@ -391,6 +413,40 @@ impl ModelCatalog {
     /// Returns `true` if the alias was found and removed.
     pub fn remove_alias(&mut self, alias: &str) -> bool {
         self.aliases.remove(&alias.to_lowercase()).is_some()
+    }
+
+    /// Mark a provider as suppressed — fallback/CLI detection will be skipped
+    /// for this provider until `unsuppress_provider` is called.
+    pub fn suppress_provider(&mut self, id: &str) {
+        self.suppressed_providers.insert(id.to_string());
+    }
+
+    /// Remove a provider from the suppressed set, re-enabling fallback/CLI detection.
+    pub fn unsuppress_provider(&mut self, id: &str) {
+        self.suppressed_providers.remove(id);
+    }
+
+    /// Load the suppressed-providers list from a JSON file.
+    pub fn load_suppressed(&mut self, path: &std::path::Path) {
+        if let Ok(data) = std::fs::read_to_string(path) {
+            if let Ok(list) = serde_json::from_str::<Vec<String>>(&data) {
+                self.suppressed_providers = list.into_iter().collect();
+            }
+        }
+    }
+
+    /// Persist the suppressed-providers list to a JSON file.
+    /// Removes the file when the set is empty.
+    pub fn save_suppressed(&self, path: &std::path::Path) {
+        if self.suppressed_providers.is_empty() {
+            let _ = std::fs::remove_file(path);
+            return;
+        }
+        let mut list: Vec<&String> = self.suppressed_providers.iter().collect();
+        list.sort();
+        if let Ok(json) = serde_json::to_string_pretty(&list) {
+            let _ = std::fs::write(path, json);
+        }
     }
 
     /// Set a custom base URL for a provider, overriding the default.
@@ -552,6 +608,7 @@ impl ModelCatalog {
                 supports_tools: true,
                 supports_vision: false,
                 supports_streaming: true,
+                supports_thinking: false,
                 aliases: Vec::new(),
             });
             added += 1;
@@ -1240,6 +1297,7 @@ id = "acme"
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
+            supports_thinking: false,
             aliases: vec!["custom-qwen".to_string()],
         });
 
@@ -1267,6 +1325,7 @@ id = "acme"
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
+            supports_thinking: false,
             aliases: Vec::new(),
         }));
 
@@ -1282,6 +1341,7 @@ id = "acme"
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
+            supports_thinking: false,
             aliases: Vec::new(),
         }));
 
@@ -1324,6 +1384,7 @@ id = "acme"
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
+            supports_thinking: false,
             aliases: Vec::new(),
         }));
 
@@ -1993,22 +2054,34 @@ supports_streaming = true
     #[test]
     fn test_alibaba_coding_plan_zero_cost() {
         let catalog = test_catalog();
-        let model = catalog
+        let qwen35plus = catalog
             .find_model("alibaba-coding-plan/qwen3.5-plus")
             .expect("qwen3.5-plus model should be registered");
-        assert_eq!(model.input_cost_per_m, 0.0);
-        assert_eq!(model.output_cost_per_m, 0.0);
+        assert_eq!(qwen35plus.input_cost_per_m, 0.0);
+        assert_eq!(qwen35plus.output_cost_per_m, 0.0);
+        let qwen36plus = catalog
+            .find_model("alibaba-coding-plan/qwen3.6-plus")
+            .expect("qwen3.6-plus model should be registered");
+        assert_eq!(qwen36plus.input_cost_per_m, 0.0);
+        assert_eq!(qwen36plus.output_cost_per_m, 0.0);
     }
 
     #[test]
     fn test_alibaba_coding_plan_vision_models() {
         let catalog = test_catalog();
-        let qwen_plus = catalog
+        let qwen35plus = catalog
             .find_model("alibaba-coding-plan/qwen3.5-plus")
             .expect("qwen3.5-plus model should be registered");
-        assert!(qwen_plus.supports_vision);
-        assert_eq!(qwen_plus.tier, ModelTier::Smart);
-        assert_eq!(qwen_plus.context_window, 1_000_000);
+        assert!(qwen35plus.supports_vision);
+        assert_eq!(qwen35plus.tier, ModelTier::Smart);
+        assert_eq!(qwen35plus.context_window, 1_000_000);
+
+        let qwen36plus = catalog
+            .find_model("alibaba-coding-plan/qwen3.6-plus")
+            .expect("qwen3.6-plus model should be registered");
+        assert!(qwen36plus.supports_vision);
+        assert_eq!(qwen36plus.tier, ModelTier::Smart);
+        assert_eq!(qwen36plus.context_window, 1_000_000);
 
         let kimi = catalog
             .find_model("alibaba-coding-plan/kimi-k2.5")

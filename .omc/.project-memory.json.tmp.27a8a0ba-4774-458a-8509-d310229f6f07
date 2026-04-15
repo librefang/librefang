@@ -1,0 +1,334 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775941819490,
+  "projectRoot": "/home/blitz/development/agents/librefang",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Rust",
+        "version": "1.94.1",
+        "confidence": "high",
+        "markers": [
+          "Cargo.toml"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "axum",
+        "version": null,
+        "category": "backend"
+      }
+    ],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cargo build",
+    "testCommand": "cargo test",
+    "lintCommand": "cargo clippy",
+    "devCommand": "cargo run",
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "examples",
+      "public",
+      "scripts"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "api-docs": {
+      "path": "api-docs",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1775941819486,
+      "keyFiles": [
+        "index.html",
+        "openapi.json"
+      ]
+    },
+    "articles": {
+      "path": "articles",
+      "purpose": null,
+      "fileCount": 16,
+      "lastAccessed": 1775941819486,
+      "keyFiles": [
+        "hello-librefang.md",
+        "new-website-launch.md",
+        "release-0.5.6.md",
+        "release-0.5.7.md",
+        "release-0.6.0.md"
+      ]
+    },
+    "crates": {
+      "path": "crates",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775941819486,
+      "keyFiles": []
+    },
+    "deploy": {
+      "path": "deploy",
+      "purpose": null,
+      "fileCount": 7,
+      "lastAccessed": 1775941819486,
+      "keyFiles": [
+        "Dockerfile",
+        "OBSERVABILITY.md",
+        "docker-compose.observability.yml",
+        "docker-compose.yml",
+        "docker-entrypoint.sh"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 11,
+      "lastAccessed": 1775941819486,
+      "keyFiles": [
+        "README.md",
+        "cli-profile-rotation.md",
+        "mdx-components.tsx",
+        "next.config.mjs",
+        "package.json"
+      ]
+    },
+    "examples": {
+      "path": "examples",
+      "purpose": "Example code",
+      "fileCount": 0,
+      "lastAccessed": 1775941819486,
+      "keyFiles": []
+    },
+    "i18n": {
+      "path": "i18n",
+      "purpose": null,
+      "fileCount": 11,
+      "lastAccessed": 1775941819486,
+      "keyFiles": [
+        "README.de.md",
+        "README.es.md",
+        "README.ja.md",
+        "README.ko.md",
+        "README.md"
+      ]
+    },
+    "k8s": {
+      "path": "k8s",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1775941819486,
+      "keyFiles": [
+        "configmap.yaml",
+        "deployment.yaml",
+        "secret.yaml"
+      ]
+    },
+    "packages": {
+      "path": "packages",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775941819487,
+      "keyFiles": []
+    },
+    "public": {
+      "path": "public",
+      "purpose": "Public files",
+      "fileCount": 0,
+      "lastAccessed": 1775941819487,
+      "keyFiles": []
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 1,
+      "lastAccessed": 1775941819487,
+      "keyFiles": [
+        "read_email.py"
+      ]
+    },
+    "sdk": {
+      "path": "sdk",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775941819487,
+      "keyFiles": []
+    },
+    "target": {
+      "path": "target",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1775941819488,
+      "keyFiles": [
+        "CACHEDIR.TAG"
+      ]
+    },
+    "web": {
+      "path": "web",
+      "purpose": null,
+      "fileCount": 12,
+      "lastAccessed": 1775941819488,
+      "keyFiles": [
+        "README.md",
+        "eslint.config.js",
+        "index.html",
+        "package.json",
+        "pnpm-lock.yaml"
+      ]
+    },
+    "xtask": {
+      "path": "xtask",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1775941819488,
+      "keyFiles": [
+        "Cargo.toml",
+        "README.md"
+      ]
+    },
+    "docs/public": {
+      "path": "docs/public",
+      "purpose": "Public files",
+      "fileCount": 1,
+      "lastAccessed": 1775941819489,
+      "keyFiles": [
+        "_redirects"
+      ]
+    },
+    "public/assets": {
+      "path": "public/assets",
+      "purpose": "Static assets",
+      "fileCount": 8,
+      "lastAccessed": 1775941819489,
+      "keyFiles": [
+        "contributors.svg",
+        "cute-d.svg",
+        "dashboard.png"
+      ]
+    },
+    "scripts/tests": {
+      "path": "scripts/tests",
+      "purpose": "Test files",
+      "fileCount": 1,
+      "lastAccessed": 1775941819489,
+      "keyFiles": [
+        "install_sh_test.sh"
+      ]
+    },
+    "web/public": {
+      "path": "web/public",
+      "purpose": "Public files",
+      "fileCount": 15,
+      "lastAccessed": 1775941819489,
+      "keyFiles": [
+        "404.html",
+        "_worker.js",
+        "favicon.svg"
+      ]
+    },
+    "web/scripts": {
+      "path": "web/scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 1,
+      "lastAccessed": 1775941819489,
+      "keyFiles": [
+        "fetch-registry.ts"
+      ]
+    },
+    "xtask/src": {
+      "path": "xtask/src",
+      "purpose": "Source code",
+      "fileCount": 32,
+      "lastAccessed": 1775941819490,
+      "keyFiles": [
+        "api_docs.rs",
+        "bench.rs",
+        "build_web.rs"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "crates/librefang-channels/src/bridge.rs",
+      "accessCount": 30,
+      "lastAccessed": 1775943045442,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-runtime/src/drivers/openai.rs",
+      "accessCount": 21,
+      "lastAccessed": 1775942469466,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-types/src/message.rs",
+      "accessCount": 8,
+      "lastAccessed": 1775942418485,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-kernel/src/kernel.rs",
+      "accessCount": 6,
+      "lastAccessed": 1775942272953,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-runtime/src/agent_loop.rs",
+      "accessCount": 6,
+      "lastAccessed": 1775942279182,
+      "type": "directory"
+    },
+    {
+      "path": "",
+      "accessCount": 6,
+      "lastAccessed": 1775942392148,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/src/channel_bridge.rs",
+      "accessCount": 4,
+      "lastAccessed": 1775942409479,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-types/src/lib.rs",
+      "accessCount": 2,
+      "lastAccessed": 1775942384133,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-runtime/src/media_understanding.rs",
+      "accessCount": 2,
+      "lastAccessed": 1775942469909,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-runtime/src/media/openai.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775942380120,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-types/src",
+      "accessCount": 1,
+      "lastAccessed": 1775942391671,
+      "type": "directory"
+    }
+  ],
+  "userDirectives": []
+}

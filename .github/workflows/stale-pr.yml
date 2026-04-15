@@ -1,0 +1,79 @@
+name: Stale PR
+
+# Mark PRs with no activity for 14 days as stale.
+# Runs daily. Removes the label when new activity is detected.
+
+on:
+  schedule:
+    - cron: '23 3 * * *' # daily at 03:23 UTC
+  pull_request_target:
+    types: [synchronize] # new push removes stale
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Manage stale-pr labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LABEL = 'stale-pr';
+            const STALE_DAYS = 14;
+            const now = Date.now();
+            const cutoff = now - STALE_DAYS * 24 * 60 * 60 * 1000;
+
+            // On synchronize event: remove stale label from the pushed PR
+            if (context.eventName === 'pull_request_target') {
+              const pr = context.payload.pull_request;
+              const labels = pr.labels.map(l => l.name);
+              if (labels.includes(LABEL)) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  name: LABEL,
+                }).catch(() => {});
+                core.info(`#${pr.number}: removed "${LABEL}" (new push)`);
+              }
+              return;
+            }
+
+            // On schedule/dispatch: scan all open PRs
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              sort: 'updated',
+              direction: 'asc',
+              per_page: 100,
+            });
+
+            for (const pr of prs) {
+              const updatedAt = new Date(pr.updated_at).getTime();
+              const labels = pr.labels.map(l => l.name);
+              const hasLabel = labels.includes(LABEL);
+
+              if (updatedAt < cutoff && !hasLabel) {
+                // Skip draft PRs
+                if (pr.draft) continue;
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  labels: [LABEL],
+                });
+                core.info(`#${pr.number}: added "${LABEL}" (last updated ${pr.updated_at})`);
+              } else if (updatedAt >= cutoff && hasLabel) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  name: LABEL,
+                }).catch(() => {});
+                core.info(`#${pr.number}: removed "${LABEL}" (recently updated)`);
+              }
+            }

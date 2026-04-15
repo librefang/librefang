@@ -550,7 +550,6 @@ struct ToolExecutionContext<'a> {
     process_manager: Option<&'a crate::process_manager::ProcessManager>,
     sender_user_id: Option<&'a str>,
     sender_channel: Option<&'a str>,
-    sender_chat_id: Option<&'a str>,
     context_budget: &'a ContextBudget,
     context_engine: Option<&'a dyn ContextEngine>,
     context_window_tokens: usize,
@@ -687,7 +686,6 @@ async fn execute_single_tool_call(
             ctx.process_manager,
             ctx.sender_user_id,
             ctx.sender_channel,
-            ctx.sender_chat_id,
         ),
     )
     .await
@@ -757,6 +755,29 @@ async fn execute_single_tool_call(
     })
 }
 
+/// Emit stub `ToolResult` blocks for any tool calls in `remaining` that
+/// were not actually executed (e.g. because we hit a hard error and broke
+/// out of the per-call loop). OpenAI/Anthropic both require **every**
+/// `tool_call_id` in an assistant message to be answered by a matching
+/// tool_result on the next turn — without these stubs the next API call
+/// fails with `tool_call_ids ... did not have response messages` and
+/// the agent gets bricked. Issue #2381.
+fn append_skipped_tool_results(
+    tool_result_blocks: &mut Vec<ContentBlock>,
+    remaining: &[ToolCall],
+    reason: &str,
+) {
+    for tc in remaining {
+        tool_result_blocks.push(ContentBlock::ToolResult {
+            tool_use_id: tc.id.clone(),
+            tool_name: tc.name.clone(),
+            content: format!("Skipped: {reason}"),
+            is_error: true,
+            status: librefang_types::tool::ToolExecutionStatus::Skipped,
+            approval_request_id: None,
+        });
+    }
+}
 fn handle_mid_turn_signal(
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
     manifest_name: &str,
@@ -2109,11 +2130,6 @@ pub async fn run_agent_loop(
         .get("sender_channel")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let sender_chat_id: Option<String> = manifest
-        .metadata
-        .get("sender_chat_id")
-        .and_then(|v| v.as_str())
-        .map(String::from);
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
@@ -2497,7 +2513,8 @@ pub async fn run_agent_loop(
                 // Execute each tool call with loop guard, timeout, and truncation.
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
                 let mut committed_by_signal = false;
-                for tool_call in &response.tool_calls {
+                let total_tool_calls = response.tool_calls.len();
+                for (call_idx, tool_call) in response.tool_calls.iter().enumerate() {
                     let mut tool_exec_ctx = ToolExecutionContext {
                         manifest,
                         loop_guard: &mut loop_guard,
@@ -2520,7 +2537,6 @@ pub async fn run_agent_loop(
                         process_manager,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
-                        sender_chat_id: sender_chat_id.as_deref(),
                         context_budget: &context_budget,
                         context_engine,
                         context_window_tokens: ctx_window,
@@ -2543,16 +2559,28 @@ pub async fn run_agent_loop(
                         approval_request_id: executed.result.approval_request_id.clone(),
                     });
 
-                    // NOTE (#2381): previously this loop used to `break`
-                    // on hard tool errors to stop executing remaining
-                    // calls. That produced orphan tool_use_ids on the
-                    // wire, because the skipped calls never received
-                    // paired tool_result blocks. Running every tool in
-                    // the batch — even after a hard error — is honest
-                    // information for the LLM's next iteration and is
-                    // capped by MAX_CONSECUTIVE_ALL_FAILED via
-                    // `update_consecutive_hard_failures` below, so the
-                    // loop cannot wheel-spin.
+                    // Stop executing remaining tool calls on failure (#948)
+                    // but not for approval denials or sandbox security rejections —
+                    // those should let the LLM recover and retry with a valid path (#1861)
+                    // Issue #2381: emit stub tool_results for the remaining unexecuted
+                    // calls so OpenAI / Anthropic see a response for every tool_call_id.
+                    // Without this the next API request returns 400 with
+                    // "tool_call_ids ... did not have response messages" and the agent
+                    // gets bricked.
+                    let is_soft_error = executed.result.status.is_soft_error()
+                        || is_soft_error_content(&executed.result.content);
+                    if executed.result.is_error && !is_soft_error {
+                        warn!(
+                            tool = %tool_call.name,
+                            "Tool execution failed — skipping remaining tool calls"
+                        );
+                        append_skipped_tool_results(
+                            &mut staged.tool_result_blocks,
+                            &response.tool_calls[call_idx + 1..],
+                            "previous tool call in the same batch failed with a hard error",
+                        );
+                        break;
+                    }
 
                     // Mid-turn message injection (#956): check for
                     // pending user messages between tool calls. The
@@ -2566,6 +2594,19 @@ pub async fn run_agent_loop(
                         &mut messages,
                         &mut staged,
                     ) {
+                        // Same #2381 invariant: even when the batch is
+                        // interrupted by a mid-turn signal, every tool_call
+                        // must end up with a tool_result. handle_mid_turn_signal
+                        // already called pad_missing_results before committing,
+                        // so remaining ids are covered. This stub call is a
+                        // belt-and-suspenders guard for any ids not yet in staged.
+                        if call_idx + 1 < total_tool_calls {
+                            append_skipped_tool_results(
+                                &mut staged.tool_result_blocks,
+                                &response.tool_calls[call_idx + 1..],
+                                "tool batch interrupted by a mid-turn user message",
+                            );
+                        }
                         iteration_outcomes.accumulate(flushed_outcomes);
                         committed_by_signal = true;
                         break;
@@ -3026,11 +3067,6 @@ pub async fn run_agent_loop_streaming(
         .get("sender_channel")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let sender_chat_id: Option<String> = manifest
-        .metadata
-        .get("sender_chat_id")
-        .and_then(|v| v.as_str())
-        .map(String::from);
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
@@ -3470,7 +3506,8 @@ pub async fn run_agent_loop_streaming(
                 // Execute each tool call with loop guard, timeout, and truncation.
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
                 let mut committed_by_signal = false;
-                for tool_call in &response.tool_calls {
+                let total_tool_calls = response.tool_calls.len();
+                for (call_idx, tool_call) in response.tool_calls.iter().enumerate() {
                     let mut tool_exec_ctx = ToolExecutionContext {
                         manifest,
                         loop_guard: &mut loop_guard,
@@ -3493,7 +3530,6 @@ pub async fn run_agent_loop_streaming(
                         process_manager,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
-                        sender_chat_id: sender_chat_id.as_deref(),
                         context_budget: &context_budget,
                         context_engine,
                         context_window_tokens: ctx_window,
@@ -3530,9 +3566,26 @@ pub async fn run_agent_loop_streaming(
                         approval_request_id: executed.result.approval_request_id.clone(),
                     });
 
-                    // NOTE (#2381): previously this loop used to `break`
-                    // on hard tool errors. Removed — see the non-streaming
-                    // branch for the full reasoning.
+                    // Stop executing remaining tool calls on failure (#948)
+                    // but not for approval denials or sandbox security rejections —
+                    // those should let the LLM recover and retry with a valid path (#1861)
+                    // Issue #2381: stub the remaining tool_calls so every tool_call_id
+                    // has a matching tool_result. See the non-streaming branch above for
+                    // the full explanation of why this matters.
+                    let is_soft_error = executed.result.status.is_soft_error()
+                        || is_soft_error_content(&executed.result.content);
+                    if executed.result.is_error && !is_soft_error {
+                        warn!(
+                            tool = %tool_call.name,
+                            "Tool execution failed — skipping remaining tool calls (streaming)"
+                        );
+                        append_skipped_tool_results(
+                            &mut staged.tool_result_blocks,
+                            &response.tool_calls[call_idx + 1..],
+                            "previous tool call in the same batch failed with a hard error",
+                        );
+                        break;
+                    }
 
                     // Mid-turn message injection (#956): check for
                     // pending user messages between tool calls (streaming
@@ -3544,6 +3597,13 @@ pub async fn run_agent_loop_streaming(
                         &mut messages,
                         &mut staged,
                     ) {
+                        if call_idx + 1 < total_tool_calls {
+                            append_skipped_tool_results(
+                                &mut staged.tool_result_blocks,
+                                &response.tool_calls[call_idx + 1..],
+                                "tool batch interrupted by a mid-turn user message",
+                            );
+                        }
                         iteration_outcomes.accumulate(flushed_outcomes);
                         committed_by_signal = true;
                         break;
