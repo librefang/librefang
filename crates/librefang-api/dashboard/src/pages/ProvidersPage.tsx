@@ -666,7 +666,7 @@ export function ProvidersPage() {
     setConfigProvider(provider);
     setKeyInput("");
     setUrlInput(provider.base_url || "");
-    setHasStoredKey(provider.auth_status === "configured" || provider.auth_status === "validated_key");
+    setHasStoredKey(provider.auth_status === "configured" || provider.auth_status === "validated_key" || provider.auth_status === "invalid_key");
     setKeyError(null);
     setKeyTestResult(null);
   };
@@ -686,6 +686,8 @@ export function ProvidersPage() {
       }
       await providersQuery.refetch();
       setConfigProvider(null);
+      // Auto-switch to "configured" tab so the user sees the newly configured provider
+      if (activeTab === "unconfigured") setActiveTab("configured");
       addToast(t("providers.key_saved"), "success");
     } catch (e: any) {
       setKeyError(e?.message || String(e));
@@ -978,7 +980,7 @@ export function ProvidersPage() {
               <div>
                 <label className="text-[10px] font-bold text-text-dim uppercase">API Key</label>
                 <input type="password" value={keyInput} onChange={e => setKeyInput(e.target.value)}
-                  placeholder={isProviderAvailable(configProvider.auth_status) ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
+                  placeholder={hasStoredKey ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
                   className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
               </div>
 
