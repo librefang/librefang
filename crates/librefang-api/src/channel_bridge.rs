@@ -1520,7 +1520,14 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                     }
                                 })
                                 .collect();
-                            let escaped = format!("(?i)\\b{}\\b", escaped_alias);
+                            // Use \b word boundaries only for ASCII aliases;
+                            // CJK and other non-ASCII aliases use plain substring
+                            // matching since \b is ASCII-only in Rust's regex.
+                            let escaped = if escaped_alias.is_ascii() {
+                                format!("(?i)\\b{}\\b", escaped_alias)
+                            } else {
+                                format!("(?i){}", escaped_alias)
+                            };
                             if !ov.group_trigger_patterns.iter().any(|p| p == &escaped) {
                                 ov.group_trigger_patterns.push(escaped);
                             }
