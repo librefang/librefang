@@ -436,8 +436,14 @@ impl ModelCatalog {
     }
 
     /// Persist the suppressed-providers list to a JSON file.
+    /// Removes the file when the set is empty.
     pub fn save_suppressed(&self, path: &std::path::Path) {
-        let list: Vec<&String> = self.suppressed_providers.iter().collect();
+        if self.suppressed_providers.is_empty() {
+            let _ = std::fs::remove_file(path);
+            return;
+        }
+        let mut list: Vec<&String> = self.suppressed_providers.iter().collect();
+        list.sort();
         if let Ok(json) = serde_json::to_string_pretty(&list) {
             let _ = std::fs::write(path, json);
         }
