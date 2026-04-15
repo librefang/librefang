@@ -1650,7 +1650,9 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     sec!("media", { "fields": {
         "image_description": "boolean", "audio_transcription": "boolean",
         "video_description": "boolean", "max_concurrency": "number",
-        "image_provider": "string", "audio_provider": "string", "audio_model": "string"
+        "image_provider": "string",
+        "audio_provider": { "type": "select", "options": ["", "groq", "openai", "gemini", "elevenlabs", "minimax", "fireworks", "together", "siliconflow"] },
+        "audio_model": "string"
     }});
     sec!("links", { "fields": {
         "enabled": "boolean", "max_links": "number",
