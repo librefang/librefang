@@ -10,7 +10,7 @@ import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } f
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -923,11 +923,12 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
   agentId: string; onModelChange: () => void;
+  webSearchAugmentation?: "off" | "auto" | "always"; onWebSearchChange?: (mode: "off" | "auto" | "always") => void;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
@@ -1118,6 +1119,26 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
             </div>
           )}
         </div>
+        {/* Web Search toggle (off → auto → always → off) */}
+        {onWebSearchChange && (
+          <button
+            onClick={() => {
+              const cycle: Record<string, "off" | "auto" | "always"> = { off: "auto", auto: "always", always: "off" };
+              onWebSearchChange(cycle[webSearchAugmentation || "auto"] || "auto");
+            }}
+            title={t("chat.web_search_tooltip", { defaultValue: "Web Search: {{mode}}. Requires a search API key (Tavily, Brave, Jina, or Perplexity) configured in config.toml [web] section.", mode: webSearchAugmentation || "auto" })}
+            className={`hidden sm:flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono transition-colors ${
+              webSearchAugmentation === "always"
+                ? "text-brand bg-brand/10 hover:bg-brand/20"
+                : webSearchAugmentation === "auto"
+                  ? "text-text-dim/50 hover:text-text hover:bg-surface-hover"
+                  : "text-text-dim/30 hover:text-text-dim/60 hover:bg-surface-hover"
+            }`}
+          >
+            <Globe className="h-3 w-3" />
+            <span className="hidden lg:inline">{webSearchAugmentation === "always" ? t("common.always", { defaultValue: "Always" }) : webSearchAugmentation === "auto" ? t("common.auto", { defaultValue: "Auto" }) : t("common.off", { defaultValue: "Off" })}</span>
+          </button>
+        )}
         {/* Session dropdown */}
         {sessions && sessions.length > 0 && (
           <div className="relative" ref={dropdownRef}>
@@ -1755,6 +1776,14 @@ export function ChatPage() {
               onDeleteSession={handleDeleteSession}
               agentId={selectedAgentId}
               onModelChange={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
+              webSearchAugmentation={selectedAgent?.web_search_augmentation}
+              onWebSearchChange={async (mode) => {
+                try {
+                  await patchAgentConfig(selectedAgentId, { web_search_augmentation: mode });
+                  queryClient.invalidateQueries({ queryKey: ["agents", "list"] });
+                  queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] });
+                } catch {}
+              }}
             />
           )}
 

@@ -201,6 +201,7 @@ export interface AgentItem {
   profile?: string;
   identity?: AgentIdentity;
   is_hand?: boolean;
+  web_search_augmentation?: "off" | "auto" | "always";
 }
 
 export interface PaginatedResponse<T> {
