@@ -282,8 +282,8 @@
     },
     {
       "path": "crates/librefang-runtime/src/tool_runner.rs",
-      "accessCount": 27,
-      "lastAccessed": 1776246035253,
+      "accessCount": 33,
+      "lastAccessed": 1776270252847,
       "type": "directory"
     },
     {
@@ -312,8 +312,8 @@
     },
     {
       "path": "crates/librefang-runtime/src",
-      "accessCount": 10,
-      "lastAccessed": 1776122660708,
+      "accessCount": 14,
+      "lastAccessed": 1776270226635,
       "type": "directory"
     },
     {
@@ -435,6 +435,12 @@
       "accessCount": 1,
       "lastAccessed": 1776268941202,
       "type": "file"
+    },
+    {
+      "path": "crates/librefang-runtime",
+      "accessCount": 1,
+      "lastAccessed": 1776270203843,
+      "type": "directory"
     }
   ],
   "userDirectives": []

@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"git add -A && git commit -m \\\"$(cat <<'EOF'\\nfeat(types,kernel,api): add session_mode to CronJob for fresh session per execution\\n\\nFixes #2647\\n\\nCron jobs with AgentTurn action would acc...",
-  "error": "Exit code 1\nDiff in /home/blitz/development/agents/librefang/crates/librefang-kernel/src/kernel/mod.rs:8286:\n                                         Some(kh),\n                                         None,\n                                         Some(&cron_sender),\n\u001b[31m-                                        job.session_mode,  // Use per-cron session mode override\n\u001b(B\u001b[m\u001b[32m+                                        job.session_mode, // Use per-cron session mode override\n\u001b(B\u001b[m               ...",
-  "timestamp": "2026-04-15T16:19:36.473Z",
-  "retry_count": 1
-}
