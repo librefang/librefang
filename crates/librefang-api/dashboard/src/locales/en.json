@@ -378,6 +378,8 @@
     "api_key": "API Key",
     "set_as_default": "Set as Default",
     "default_set": "Default provider updated",
+    "auto_select_model": "Auto-select best model",
+    "model_name_placeholder": "e.g. llama3.2, qwen2.5",
     "is_default": "Default",
     "add": "Add Provider",
     "delete_confirm_title": "Remove Provider Key",

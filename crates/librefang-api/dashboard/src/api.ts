@@ -929,8 +929,8 @@ export async function setProviderUrl(providerId: string, baseUrl: string): Promi
   return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, { base_url: baseUrl });
 }
 
-export async function setDefaultProvider(providerId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/default`, {});
+export async function setDefaultProvider(providerId: string, model?: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/default`, model ? { model } : {});
 }
 
 // ── Media generation API ──────────────────────────────────────────────

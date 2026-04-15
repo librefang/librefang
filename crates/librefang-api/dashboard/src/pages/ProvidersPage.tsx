@@ -79,6 +79,71 @@ type SortOrder = "asc" | "desc";
 type ViewMode = "grid" | "list";
 type FilterStatus = "all" | "reachable" | "unreachable";
 
+// ── SetDefaultModelSection — model picker + "set as default" in config modal ──
+
+function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }: {
+  providerId: string;
+  currentDefault?: string;
+  onSetDefault: (id: string, model?: string) => Promise<void>;
+  t: (key: string, opts?: any) => string;
+}) {
+  const [selectedModel, setSelectedModel] = useState("");
+  const [setting, setSetting] = useState(false);
+  const isDefault = currentDefault === providerId;
+
+  const modelsQuery = useQuery({
+    queryKey: ["models", "provider", providerId],
+    queryFn: () => listModels({ provider: providerId, available: true }),
+    staleTime: 60_000,
+  });
+
+  const models = modelsQuery.data?.models || [];
+
+  const handleSetDefault = async () => {
+    setSetting(true);
+    try {
+      await onSetDefault(providerId, selectedModel || undefined);
+    } finally {
+      setSetting(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-border-subtle pt-3 mt-1 space-y-2">
+      <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.set_as_default")}</label>
+      {models.length > 0 ? (
+        <select
+          value={selectedModel}
+          onChange={e => setSelectedModel(e.target.value)}
+          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
+        >
+          <option value="">{t("providers.auto_select_model")}</option>
+          {models.map(m => (
+            <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
+          ))}
+        </select>
+      ) : (
+        <input
+          type="text"
+          value={selectedModel}
+          onChange={e => setSelectedModel(e.target.value)}
+          placeholder={t("providers.model_name_placeholder")}
+          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
+        />
+      )}
+      <Button
+        variant={isDefault ? "ghost" : "secondary"}
+        className="w-full"
+        onClick={handleSetDefault}
+        disabled={setting || isDefault}
+      >
+        {setting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Star className="w-4 h-4 mr-1" />}
+        {isDefault ? t("providers.is_default") : t("providers.set_as_default")}
+      </Button>
+    </div>
+  );
+}
+
 // ── useProviderConfig hook ────────────────────────────────────────
 
 interface ProviderConfigState {
@@ -964,7 +1029,7 @@ export function ProvidersPage() {
   const providersQuery = useQuery({ queryKey: ["providers", "list"], queryFn: listProviders, refetchInterval: REFRESH_MS });
   const statusQuery = useQuery({ queryKey: ["status"], queryFn: getStatus, refetchInterval: REFRESH_MS });
   const testMutation = useMutation({ mutationFn: testProvider });
-  const defaultProviderMutation = useMutation({ mutationFn: setDefaultProvider });
+  const defaultProviderMutation = useMutation({ mutationFn: ({ id, model }: { id: string; model?: string }) => setDefaultProvider(id, model) });
 
   const config = useProviderConfig(
     () => void providersQuery.refetch(),
@@ -1052,9 +1117,9 @@ export function ProvidersPage() {
     }
   };
 
-  const handleSetDefault = async (id: string) => {
+  const handleSetDefault = async (id: string, model?: string) => {
     try {
-      await defaultProviderMutation.mutateAsync(id);
+      await defaultProviderMutation.mutateAsync({ id, model });
       await statusQuery.refetch();
       addToast(t("providers.default_set"), "success");
     } catch (e: any) {
@@ -1282,6 +1347,15 @@ export function ProvidersPage() {
                 </Button>
               )}
             </div>
+
+            {config.hasStoredKey && (
+              <SetDefaultModelSection
+                providerId={config.provider.id}
+                currentDefault={statusQuery.data?.default_provider}
+                onSetDefault={handleSetDefault}
+                t={t}
+              />
+            )}
           </div>
         )}
       </Modal>

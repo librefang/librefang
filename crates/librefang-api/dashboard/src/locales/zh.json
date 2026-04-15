@@ -378,6 +378,8 @@
     "api_key": "API Key",
     "set_as_default": "设为默认",
     "default_set": "默认供应商已更新",
+    "auto_select_model": "自动选择最佳模型",
+    "model_name_placeholder": "例如 llama3.2, qwen2.5",
     "is_default": "默认",
     "add": "添加供应商",
     "delete_confirm_title": "移除供应商密钥",

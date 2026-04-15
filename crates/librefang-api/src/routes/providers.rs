@@ -1308,7 +1308,17 @@ pub async fn set_provider_url(
 pub async fn set_default_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
+    // Accept optional {"model": "model-id"} body to override the auto-selected model.
+    // This is needed for providers like ollama where models are dynamic and may
+    // not be in the static catalog.
+    let user_model = body
+        .as_ref()
+        .and_then(|b| b.get("model"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     // Verify the provider exists in the catalog
     let (default_model, env_var) = {
         let catalog = state
@@ -1323,7 +1333,7 @@ pub async fn set_default_provider(
                     .into_json_tuple();
             }
         };
-        let model_id = catalog.default_model_for_provider(&name);
+        let model_id = user_model.or_else(|| catalog.default_model_for_provider(&name));
         (model_id, provider.api_key_env.clone())
     };
 
@@ -1331,7 +1341,7 @@ pub async fn set_default_provider(
         Some(id) => id,
         None => {
             return ApiErrorResponse::bad_request(format!(
-                "No models found for provider '{}'",
+                "No models found for provider '{}'. Specify a model in the request body: {{\"model\": \"model-name\"}}",
                 name
             ))
             .into_json_tuple();
