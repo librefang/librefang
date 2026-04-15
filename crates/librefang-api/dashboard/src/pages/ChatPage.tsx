@@ -923,8 +923,8 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange }: {
-  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string;
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange }: {
+  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
   agentId: string; onModelChange: () => void;
@@ -1129,11 +1129,9 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
 
                 {/* Provider list view */}
                 {!modelLoading && !modelFetchError && !selectedProvider && (() => {
-                  // Resolve current agent's provider from the agent list data (passed via props),
-                  // not by scanning the model catalog — avoids false matches when multiple
-                  // providers share the same model ID (e.g. "llama3.2" in ollama and openrouter).
-                  const currentModel = optimisticModel ?? modelName;
-                  const agentProvider = models.find(m => m.id === currentModel)?.provider;
+                  // Use the agent's known provider (from props) to highlight the current provider.
+                  // Falls back to scanning the model list only if the prop is unavailable.
+                  const agentProvider = modelProvider || models.find(m => m.id === (optimisticModel ?? modelName))?.provider;
                   return (
                   <>
                     {filteredProviders.length === 0 && (
@@ -1840,6 +1838,7 @@ export function ChatPage() {
               onExport={handleExport}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
+              modelProvider={selectedAgent?.model_provider}
               sessions={sessionsQuery.data}
               activeSessionId={activeSessionId}
               onSwitchSession={handleSwitchSession}
