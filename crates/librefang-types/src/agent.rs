@@ -327,7 +327,12 @@ pub struct ResourceQuota {
     /// Maximum tool calls per minute.
     pub max_tool_calls_per_minute: u32,
     /// Maximum LLM tokens per hour.
-    pub max_llm_tokens_per_hour: u64,
+    ///
+    /// - `None` = not configured (inherit global default from `[budget]`).
+    /// - `Some(0)` = explicitly unlimited.
+    /// - `Some(n)` = limit to `n` tokens per hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_llm_tokens_per_hour: Option<u64>,
     /// Maximum network bytes per hour.
     pub max_network_bytes_per_hour: u64,
     /// Maximum cost in USD per hour.
@@ -344,12 +349,25 @@ impl Default for ResourceQuota {
             max_memory_bytes: 256 * 1024 * 1024, // 256 MB
             max_cpu_time_ms: 30_000,             // 30 seconds
             max_tool_calls_per_minute: 60,
-            max_llm_tokens_per_hour: 0, // unlimited by default
+            max_llm_tokens_per_hour: None, // inherit global default
             max_network_bytes_per_hour: 100 * 1024 * 1024, // 100 MB
-            max_cost_per_hour_usd: 0.0, // unlimited by default
-            max_cost_per_day_usd: 0.0,  // unlimited
-            max_cost_per_month_usd: 0.0, // unlimited
+            max_cost_per_hour_usd: 0.0,    // unlimited by default
+            max_cost_per_day_usd: 0.0,     // unlimited
+            max_cost_per_month_usd: 0.0,   // unlimited
         }
+    }
+}
+
+impl ResourceQuota {
+    /// Return the effective hourly token limit as a plain `u64`.
+    ///
+    /// * `None` and `Some(0)` both yield `0` (unlimited).
+    /// * `Some(n)` yields `n`.
+    ///
+    /// Callers that enforce the limit should skip enforcement when the
+    /// returned value is `0`.
+    pub fn effective_token_limit(&self) -> u64 {
+        self.max_llm_tokens_per_hour.unwrap_or(0)
     }
 }
 

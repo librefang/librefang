@@ -181,17 +181,17 @@ impl AgentScheduler {
         tracker.reset_if_expired();
 
         // --- Token limits (hourly) ---
-        if quota.max_llm_tokens_per_hour > 0 && tracker.total_tokens > quota.max_llm_tokens_per_hour
-        {
+        let token_limit = quota.effective_token_limit();
+        if token_limit > 0 && tracker.total_tokens > token_limit {
             return Err(LibreFangError::QuotaExceeded(format!(
                 "Token limit exceeded: {} / {}",
-                tracker.total_tokens, quota.max_llm_tokens_per_hour
+                tracker.total_tokens, token_limit
             )));
         }
 
         // --- Burst limit: no more than 1/5 of the hourly token budget in any single minute ---
-        if quota.max_llm_tokens_per_hour > 0 {
-            let burst_cap = quota.max_llm_tokens_per_hour / 5;
+        if token_limit > 0 {
+            let burst_cap = token_limit / 5;
             let tokens_last_min = tracker.tokens_in_last_minute();
             if burst_cap > 0 && tokens_last_min > burst_cap {
                 return Err(LibreFangError::QuotaExceeded(format!(
@@ -291,7 +291,7 @@ mod tests {
         let scheduler = AgentScheduler::new();
         let id = AgentId::new();
         let quota = ResourceQuota {
-            max_llm_tokens_per_hour: 100,
+            max_llm_tokens_per_hour: Some(100),
             ..Default::default()
         };
         scheduler.register(id, quota);
@@ -312,7 +312,7 @@ mod tests {
         let id = AgentId::new();
         let quota = ResourceQuota {
             max_tool_calls_per_minute: 5,
-            max_llm_tokens_per_hour: 0, // unlimited tokens
+            max_llm_tokens_per_hour: Some(0), // unlimited tokens
             ..Default::default()
         };
         scheduler.register(id, quota);
@@ -332,7 +332,7 @@ mod tests {
         let id = AgentId::new();
         // 1000 tokens/hour => burst cap = 200/min
         let quota = ResourceQuota {
-            max_llm_tokens_per_hour: 1000,
+            max_llm_tokens_per_hour: Some(1000),
             max_tool_calls_per_minute: 0, // unlimited tool calls
             ..Default::default()
         };
@@ -374,7 +374,7 @@ mod tests {
         let scheduler = AgentScheduler::new();
         let id = AgentId::new();
         let quota = ResourceQuota {
-            max_llm_tokens_per_hour: 0,
+            max_llm_tokens_per_hour: Some(0),
             max_tool_calls_per_minute: 0,
             ..Default::default()
         };
