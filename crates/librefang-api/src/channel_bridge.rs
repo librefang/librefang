@@ -1497,10 +1497,18 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         if let Some(ref mut ov) = overrides {
             macro_rules! find_default_agent {
                 ($field:ident) => {
-                    channels
-                        .$field
-                        .first()
-                        .and_then(|c| c.default_agent.clone())
+                    if let Some(aid) = account_id {
+                        channels
+                            .$field
+                            .iter()
+                            .find(|c| c.account_id.as_deref() == Some(aid))
+                            .and_then(|c| c.default_agent.clone())
+                    } else {
+                        channels
+                            .$field
+                            .first()
+                            .and_then(|c| c.default_agent.clone())
+                    }
                 };
             }
             let default_agent_name: Option<String> = match channel_type {
@@ -1510,7 +1518,43 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 "whatsapp" => find_default_agent!(whatsapp),
                 "signal" => find_default_agent!(signal),
                 "matrix" => find_default_agent!(matrix),
+                "email" => find_default_agent!(email),
+                "teams" => find_default_agent!(teams),
+                "mattermost" => find_default_agent!(mattermost),
+                "irc" => find_default_agent!(irc),
+                "google_chat" => find_default_agent!(google_chat),
+                "twitch" => find_default_agent!(twitch),
+                "rocketchat" => find_default_agent!(rocketchat),
+                "zulip" => find_default_agent!(zulip),
+                "xmpp" => find_default_agent!(xmpp),
+                "line" => find_default_agent!(line),
+                "viber" => find_default_agent!(viber),
+                "messenger" => find_default_agent!(messenger),
+                "reddit" => find_default_agent!(reddit),
+                "mastodon" => find_default_agent!(mastodon),
+                "bluesky" => find_default_agent!(bluesky),
                 "feishu" => find_default_agent!(feishu),
+                "revolt" => find_default_agent!(revolt),
+                "nextcloud" => find_default_agent!(nextcloud),
+                "guilded" => find_default_agent!(guilded),
+                "keybase" => find_default_agent!(keybase),
+                "threema" => find_default_agent!(threema),
+                "nostr" => find_default_agent!(nostr),
+                "webex" => find_default_agent!(webex),
+                "pumble" => find_default_agent!(pumble),
+                "flock" => find_default_agent!(flock),
+                "twist" => find_default_agent!(twist),
+                "mumble" => find_default_agent!(mumble),
+                "dingtalk" => find_default_agent!(dingtalk),
+                "discourse" => find_default_agent!(discourse),
+                "gitter" => find_default_agent!(gitter),
+                "ntfy" => find_default_agent!(ntfy),
+                "gotify" => find_default_agent!(gotify),
+                "webhook" => find_default_agent!(webhook),
+                "voice" => find_default_agent!(voice),
+                "linkedin" => find_default_agent!(linkedin),
+                "wechat" => find_default_agent!(wechat),
+                "wecom" => find_default_agent!(wecom),
                 _ => None,
             };
             if let Some(agent_name) = default_agent_name {
@@ -1525,10 +1569,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             .and_then(|v| serde_json::from_value(v.clone()).ok())
                             .unwrap_or_default();
                         for alias in aliases.into_iter().chain(weak) {
-                            if !alias.is_empty()
-                                && !ov.group_trigger_patterns.iter().any(|p| p == &alias)
-                            {
-                                ov.group_trigger_patterns.push(alias);
+                            if !alias.is_empty() {
+                                let escaped_alias: String = alias
+                                    .chars()
+                                    .flat_map(|c| {
+                                        if ".+*?^$()[]{}|\\".contains(c) {
+                                            vec!['\\', c]
+                                        } else {
+                                            vec![c]
+                                        }
+                                    })
+                                    .collect();
+                                let escaped = format!("(?i)\\b{}\\b", escaped_alias);
+                                if !ov.group_trigger_patterns.iter().any(|p| p == &escaped) {
+                                    ov.group_trigger_patterns.push(escaped);
+                                }
                             }
                         }
                     }
