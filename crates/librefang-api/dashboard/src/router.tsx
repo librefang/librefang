@@ -1,37 +1,63 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, type ComponentType } from "react";
 import { Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { App } from "./App";
 
+// Auto-reload on stale chunk — when the dashboard is rebuilt (dev HMR, sync,
+// or version upgrade) the old chunk hashes no longer exist on the server.
+// Detect the "Failed to fetch dynamically imported module" error and reload
+// once so the browser picks up the new index.html with correct chunk hashes.
+// A sessionStorage guard prevents infinite reload loops.
+function lazyWithReload<T extends ComponentType<any>>(
+  factory: () => Promise<{ default: T }>,
+): React.LazyExoticComponent<T> {
+  return lazy(() =>
+    factory().catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        /Failed to fetch dynamically imported module|Loading chunk .* failed|import .* from .* failed/i.test(msg)
+      ) {
+        const key = "__chunk_reload";
+        const last = Number(sessionStorage.getItem(key) || "0");
+        if (Date.now() - last > 10_000) {
+          sessionStorage.setItem(key, String(Date.now()));
+          window.location.reload();
+        }
+      }
+      throw err;
+    }),
+  );
+}
+
 // Lazy-loaded pages — each becomes a separate chunk
-const OverviewPage = lazy(() => import("./pages/OverviewPage").then(m => ({ default: m.OverviewPage })));
-const AgentsPage = lazy(() => import("./pages/AgentsPage").then(m => ({ default: m.AgentsPage })));
-const AnalyticsPage = lazy(() => import("./pages/AnalyticsPage").then(m => ({ default: m.AnalyticsPage })));
-const CanvasPage = lazy(() => import("./pages/CanvasPage").then(m => ({ default: m.CanvasPage })));
-const ApprovalsPage = lazy(() => import("./pages/ApprovalsPage").then(m => ({ default: m.ApprovalsPage })));
-const ChannelsPage = lazy(() => import("./pages/ChannelsPage").then(m => ({ default: m.ChannelsPage })));
-const ChatPage = lazy(() => import("./pages/ChatPage").then(m => ({ default: m.ChatPage })));
-const CommsPage = lazy(() => import("./pages/CommsPage").then(m => ({ default: m.CommsPage })));
-const GoalsPage = lazy(() => import("./pages/GoalsPage").then(m => ({ default: m.GoalsPage })));
-const HandsPage = lazy(() => import("./pages/HandsPage").then(m => ({ default: m.HandsPage })));
-const LogsPage = lazy(() => import("./pages/LogsPage").then(m => ({ default: m.LogsPage })));
-const MemoryPage = lazy(() => import("./pages/MemoryPage").then(m => ({ default: m.MemoryPage })));
-const ProvidersPage = lazy(() => import("./pages/ProvidersPage").then(m => ({ default: m.ProvidersPage })));
-const RuntimePage = lazy(() => import("./pages/RuntimePage").then(m => ({ default: m.RuntimePage })));
-const SchedulerPage = lazy(() => import("./pages/SchedulerPage").then(m => ({ default: m.SchedulerPage })));
-const SessionsPage = lazy(() => import("./pages/SessionsPage").then(m => ({ default: m.SessionsPage })));
-const SettingsPage = lazy(() => import("./pages/SettingsPage").then(m => ({ default: m.SettingsPage })));
-const SkillsPage = lazy(() => import("./pages/SkillsPage").then(m => ({ default: m.SkillsPage })));
-const WizardPage = lazy(() => import("./pages/WizardPage").then(m => ({ default: m.WizardPage })));
-const WorkflowsPage = lazy(() => import("./pages/WorkflowsPage").then(m => ({ default: m.WorkflowsPage })));
-const PluginsPage = lazy(() => import("./pages/PluginsPage").then(m => ({ default: m.PluginsPage })));
-const ModelsPage = lazy(() => import("./pages/ModelsPage").then(m => ({ default: m.ModelsPage })));
-const MediaPage = lazy(() => import("./pages/MediaPage").then(m => ({ default: m.MediaPage })));
-const NetworkPage = lazy(() => import("./pages/NetworkPage").then(m => ({ default: m.NetworkPage })));
-const A2APage = lazy(() => import("./pages/A2APage").then(m => ({ default: m.A2APage })));
-const TelemetryPage = lazy(() => import("./pages/TelemetryPage").then(m => ({ default: m.TelemetryPage })));
-const TerminalPage = lazy(() => import("./pages/TerminalPage").then(m => ({ default: m.TerminalPage })));
-const McpServersPage = lazy(() => import("./pages/McpServersPage").then(m => ({ default: m.McpServersPage })));
-const ConfigPage = lazy(() => import("./pages/ConfigPage").then(m => ({ default: m.ConfigPage })));
+const OverviewPage = lazyWithReload(() => import("./pages/OverviewPage").then(m => ({ default: m.OverviewPage })));
+const AgentsPage = lazyWithReload(() => import("./pages/AgentsPage").then(m => ({ default: m.AgentsPage })));
+const AnalyticsPage = lazyWithReload(() => import("./pages/AnalyticsPage").then(m => ({ default: m.AnalyticsPage })));
+const CanvasPage = lazyWithReload(() => import("./pages/CanvasPage").then(m => ({ default: m.CanvasPage })));
+const ApprovalsPage = lazyWithReload(() => import("./pages/ApprovalsPage").then(m => ({ default: m.ApprovalsPage })));
+const ChannelsPage = lazyWithReload(() => import("./pages/ChannelsPage").then(m => ({ default: m.ChannelsPage })));
+const ChatPage = lazyWithReload(() => import("./pages/ChatPage").then(m => ({ default: m.ChatPage })));
+const CommsPage = lazyWithReload(() => import("./pages/CommsPage").then(m => ({ default: m.CommsPage })));
+const GoalsPage = lazyWithReload(() => import("./pages/GoalsPage").then(m => ({ default: m.GoalsPage })));
+const HandsPage = lazyWithReload(() => import("./pages/HandsPage").then(m => ({ default: m.HandsPage })));
+const LogsPage = lazyWithReload(() => import("./pages/LogsPage").then(m => ({ default: m.LogsPage })));
+const MemoryPage = lazyWithReload(() => import("./pages/MemoryPage").then(m => ({ default: m.MemoryPage })));
+const ProvidersPage = lazyWithReload(() => import("./pages/ProvidersPage").then(m => ({ default: m.ProvidersPage })));
+const RuntimePage = lazyWithReload(() => import("./pages/RuntimePage").then(m => ({ default: m.RuntimePage })));
+const SchedulerPage = lazyWithReload(() => import("./pages/SchedulerPage").then(m => ({ default: m.SchedulerPage })));
+const SessionsPage = lazyWithReload(() => import("./pages/SessionsPage").then(m => ({ default: m.SessionsPage })));
+const SettingsPage = lazyWithReload(() => import("./pages/SettingsPage").then(m => ({ default: m.SettingsPage })));
+const SkillsPage = lazyWithReload(() => import("./pages/SkillsPage").then(m => ({ default: m.SkillsPage })));
+const WizardPage = lazyWithReload(() => import("./pages/WizardPage").then(m => ({ default: m.WizardPage })));
+const WorkflowsPage = lazyWithReload(() => import("./pages/WorkflowsPage").then(m => ({ default: m.WorkflowsPage })));
+const PluginsPage = lazyWithReload(() => import("./pages/PluginsPage").then(m => ({ default: m.PluginsPage })));
+const ModelsPage = lazyWithReload(() => import("./pages/ModelsPage").then(m => ({ default: m.ModelsPage })));
+const MediaPage = lazyWithReload(() => import("./pages/MediaPage").then(m => ({ default: m.MediaPage })));
+const NetworkPage = lazyWithReload(() => import("./pages/NetworkPage").then(m => ({ default: m.NetworkPage })));
+const A2APage = lazyWithReload(() => import("./pages/A2APage").then(m => ({ default: m.A2APage })));
+const TelemetryPage = lazyWithReload(() => import("./pages/TelemetryPage").then(m => ({ default: m.TelemetryPage })));
+const TerminalPage = lazyWithReload(() => import("./pages/TerminalPage").then(m => ({ default: m.TerminalPage })));
+const McpServersPage = lazyWithReload(() => import("./pages/McpServersPage").then(m => ({ default: m.McpServersPage })));
+const ConfigPage = lazyWithReload(() => import("./pages/ConfigPage").then(m => ({ default: m.ConfigPage })));
 
 // Suspense wrapper — shows nothing briefly while chunk loads (page transition animation covers it)
 function L({ children }: { children: React.ReactNode }) {
