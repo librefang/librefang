@@ -241,7 +241,9 @@ impl ModelCatalog {
     pub fn providers_needing_validation(&self) -> Vec<(String, String, String)> {
         self.providers
             .iter()
-            .filter(|p| p.auth_status == AuthStatus::Configured)
+            .filter(|p| {
+                p.auth_status == AuthStatus::Configured || p.auth_status == AuthStatus::AutoDetected
+            })
             .map(|p| (p.id.clone(), p.base_url.clone(), p.api_key_env.clone()))
             .collect()
     }
