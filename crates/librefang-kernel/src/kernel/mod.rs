@@ -8278,6 +8278,13 @@ system_prompt = "You are a helpful assistant."
                                     account_id: None,
                                     ..Default::default()
                                 };
+                                // Cron jobs default to New session mode to prevent token accumulation.
+                                // None -> New (fresh session each run)
+                                // Some(Persistent) -> respect user override
+                                // Some(New) -> respect user override
+                                let effective_session_mode = job
+                                    .session_mode
+                                    .or(Some(librefang_types::agent::SessionMode::New));
                                 match tokio::time::timeout(
                                     timeout,
                                     kernel.send_message_full(
@@ -8286,7 +8293,7 @@ system_prompt = "You are a helpful assistant."
                                         Some(kh),
                                         None,
                                         Some(&cron_sender),
-                                        job.session_mode, // Use per-cron session mode override
+                                        effective_session_mode,
                                         None,
                                     ),
                                 )
