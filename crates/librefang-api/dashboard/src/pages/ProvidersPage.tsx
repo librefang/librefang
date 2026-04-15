@@ -175,9 +175,9 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               <span className="hidden sm:inline">{t("common.edit")}</span>
             </Button>
           )}
-          {isConfigured && p.is_custom && (
+          {isConfigured && (
             <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
-              <span className="hidden sm:inline text-error">{t("common.delete")}</span>
+              <span className="hidden sm:inline text-error">{p.is_custom ? t("common.delete") : t("providers.remove_key")}</span>
             </Button>
           )}
           <Button
@@ -344,9 +344,9 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               {t("common.edit")}
             </Button>
           )}
-          {isConfigured && p.is_custom && (
+          {isConfigured && (
             <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
-              {t("common.delete")}
+              {p.is_custom ? t("common.delete") : t("providers.remove_key")}
             </Button>
           )}
           <Button
@@ -1032,7 +1032,7 @@ export function ProvidersPage() {
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <div className="flex items-center gap-2">
                 <Trash2 className="w-4 h-4 text-error" />
-                <h3 className="text-sm font-bold">{t("providers.delete_confirm_title")}</h3>
+                <h3 className="text-sm font-bold">{deleteConfirmProvider.is_custom ? t("providers.delete_confirm_title") : t("providers.remove_key_confirm_title", { defaultValue: "Remove API Key" })}</h3>
               </div>
               <button onClick={() => setDeleteConfirmProvider(null)} className="p-1 rounded hover:bg-main" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
             </div>
@@ -1046,14 +1046,14 @@ export function ProvidersPage() {
                   <p className="text-[10px] text-text-dim font-mono">{deleteConfirmProvider.id}</p>
                 </div>
               </div>
-              <p className="text-sm text-text-dim">{t("providers.delete_confirm_message")}</p>
+              <p className="text-sm text-text-dim">{deleteConfirmProvider.is_custom ? t("providers.delete_confirm_message") : t("providers.remove_key_confirm_message", { defaultValue: "This will remove the stored API key and move the provider back to unconfigured." })}</p>
               <div className="flex gap-2 pt-2">
                 <Button variant="ghost" className="flex-1" onClick={() => setDeleteConfirmProvider(null)}>
                   {t("common.cancel")}
                 </Button>
                 <Button variant="primary" className="flex-1 !bg-error hover:!bg-error/80" onClick={handleDeleteConfirm} disabled={keySaving}>
                   {keySaving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Trash2 className="w-4 h-4 mr-1" />}
-                  {t("common.delete")}
+                  {deleteConfirmProvider.is_custom ? t("common.delete") : t("providers.remove_key")}
                 </Button>
               </div>
             </div>
@@ -1072,6 +1072,7 @@ export function ProvidersPage() {
               onSubmit={async (values) => {
                 await createRegistryContent("provider", values);
                 setShowCreateForm(false);
+                setActiveTab("configured");
                 void providersQuery.refetch();
               }}
               onCancel={() => setShowCreateForm(false)}

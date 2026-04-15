@@ -1,6 +1,7 @@
 //! Audit, logging, tools, profiles, templates, memory, approvals,
 //! bindings, pairing, webhooks, and miscellaneous system handlers.
 
+use super::skills::write_secret_env;
 use super::AppState;
 
 /// Build routes for the system miscellaneous domain (audit, logs, tools, sessions, approvals, pairing, etc.).
@@ -3988,15 +3989,45 @@ async fn create_registry_content(
         .into_response();
     }
 
+    // For providers: extract the `api_key` value (if present) before writing TOML.
+    // The actual key is stored in secrets.env, NOT in the provider TOML file.
+    let api_key_to_save: Option<(String, String)> = if content_type == "provider" {
+        let obj = body.as_object();
+        let api_key = obj
+            .and_then(|m| m.get("api_key"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
+        let api_key_env = obj
+            .and_then(|m| m.get("api_key_env"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{}_API_KEY", identifier.to_uppercase().replace('-', "_")));
+        api_key.map(|k| (api_key_env, k))
+    } else {
+        None
+    };
+
     // Convert JSON values to TOML.
     // For providers: the catalog TOML format requires a `[provider]` section header.
     // If the body is a flat object (fields at the top level), restructure it so that
     // non-`models` fields are nested under a `"provider"` key, producing the correct
     // `[provider] … [[models]] …` layout that `ModelCatalogFile` expects.
-    let body_for_toml = if content_type == "provider" {
-        normalize_provider_body(&body)
+    // Strip `api_key` from the body so the secret is not written to the TOML file.
+    let body_without_secret = if content_type == "provider" {
+        let mut b = body.clone();
+        if let Some(obj) = b.as_object_mut() {
+            obj.remove("api_key");
+        }
+        b
     } else {
         body.clone()
+    };
+    let body_for_toml = if content_type == "provider" {
+        normalize_provider_body(&body_without_secret)
+    } else {
+        body_without_secret
     };
     let toml_value = json_to_toml_value(&body_for_toml);
     let toml_string = match toml::to_string_pretty(&toml_value) {
@@ -4025,6 +4056,16 @@ async fn create_registry_content(
     // For provider files, refresh the in-memory model catalog so new models
     // and provider config changes are available immediately.
     if content_type == "provider" {
+        // Save the API key to secrets.env before detect_auth so the provider
+        // is immediately recognized as configured.
+        if let Some((env_var, key_value)) = &api_key_to_save {
+            let secrets_path = state.kernel.home_dir().join("secrets.env");
+            if let Err(e) = write_secret_env(&secrets_path, env_var, key_value) {
+                tracing::warn!("Failed to write API key to secrets.env: {e}");
+            }
+            std::env::set_var(env_var, key_value);
+        }
+
         let mut catalog = state
             .kernel
             .model_catalog_ref()
@@ -4037,6 +4078,10 @@ async fn create_registry_content(
         // Invalidate cached LLM drivers — URLs/keys may have changed.
         drop(catalog);
         state.kernel.clear_driver_cache();
+
+        if api_key_to_save.is_some() {
+            state.kernel.clone().spawn_key_validation();
+        }
     }
 
     Json(serde_json::json!({
