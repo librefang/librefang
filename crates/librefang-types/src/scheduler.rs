@@ -185,6 +185,12 @@ pub struct CronJob {
     pub action: CronAction,
     /// Where to deliver the result.
     pub delivery: CronDelivery,
+    /// Session mode override for this cron job.
+    /// When `None`, inherits the agent's manifest `session_mode`.
+    /// When `Some(New)`, creates a fresh session for each execution.
+    /// When `Some(Persistent)`, reuses the cron channel session (default behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<crate::agent::SessionMode>,
     /// When the job was created.
     pub created_at: DateTime<Utc>,
     /// When the job last fired (if ever).

@@ -561,6 +561,7 @@ mod tests {
                 text: "ping".into(),
             },
             delivery: CronDelivery::None,
+            session_mode: None,
             created_at: Utc::now(),
             last_run: None,
             next_run: None,
