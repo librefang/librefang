@@ -8678,14 +8678,16 @@ system_prompt = "You are a helpful assistant."
                                     Ok(Ok(result)) => {
                                         tracing::info!(job = %job_name, "Cron job completed successfully");
                                         kernel.cron_scheduler.record_success(job_id);
-                                        // Deliver response to configured channel
-                                        cron_deliver_response(
-                                            &kernel,
-                                            agent_id,
-                                            &result.response,
-                                            &delivery,
-                                        )
-                                        .await;
+                                        // Deliver response to configured channel (skip NO_REPLY/silent)
+                                        if !result.silent {
+                                            cron_deliver_response(
+                                                &kernel,
+                                                agent_id,
+                                                &result.response,
+                                                &delivery,
+                                            )
+                                            .await;
+                                        }
                                     }
                                     Ok(Err(e)) => {
                                         let err_msg = format!("{e}");
@@ -11308,6 +11310,18 @@ async fn cron_deliver_response(
     use librefang_types::scheduler::CronDelivery;
 
     if response.is_empty() {
+        return;
+    }
+
+    // Skip NO_REPLY and [no reply needed] sentinels
+    let trimmed = response.trim();
+    if trimmed == "NO_REPLY"
+        || trimmed.ends_with("NO_REPLY")
+        || trimmed == "[no reply needed]"
+        || trimmed.ends_with("[no reply needed]")
+        || trimmed == "no reply needed"
+        || trimmed.ends_with("no reply needed")
+    {
         return;
     }
 

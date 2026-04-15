@@ -38,6 +38,22 @@ fn sanitize_channel_error(err: &str) -> String {
     }
 }
 
+/// Check if a response is a NO_REPLY sentinel. Matches:
+/// - Exact `"NO_REPLY"` (original behaviour)
+/// - Text ending with `NO_REPLY` (model sometimes adds context before it)
+/// - Exact `"[no reply needed]"` — the runtime writes this placeholder back
+/// - Text ending with `"[no reply needed]"`
+/// - Unbracketed `"no reply needed"` variant the model occasionally emits
+fn is_no_reply(text: &str) -> bool {
+    let t = text.trim();
+    t == "NO_REPLY"
+        || t.ends_with("NO_REPLY")
+        || t == "[no reply needed]"
+        || t.ends_with("[no reply needed]")
+        || t == "no reply needed"
+        || t.ends_with("no reply needed")
+}
+
 /// Check if text looks like a raw tool call leaked as content.
 ///
 /// Some providers emit tool calls as plain text (recovered by
@@ -345,11 +361,16 @@ fn start_stream_text_bridge(
                     // 2. The text looks like a raw tool call emitted as text by
                     //    providers that don't use the tool_use API properly
                     //    (e.g. agent_send JSON leaked as visible text).
+                    // 3. The text is NO_REPLY or [no reply needed] (agent chose silence)
                     if !iter_buf.is_empty() {
                         if saw_tool_use {
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
                         } else if looks_like_tool_call(&iter_buf) {
                             debug!("Streaming bridge: filtered leaked tool call text at ContentComplete");
+                        } else if is_no_reply(&iter_buf) {
+                            debug!(
+                                "Streaming bridge: filtered NO_REPLY sentinel at ContentComplete"
+                            );
                         } else if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
                             break;
                         }
@@ -371,10 +392,12 @@ fn start_stream_text_bridge(
         }
 
         if !iter_buf.is_empty() && !saw_tool_use {
-            if !looks_like_tool_call(&iter_buf) {
-                let _ = tx.send(iter_buf).await;
-            } else {
+            if looks_like_tool_call(&iter_buf) {
                 debug!("Streaming bridge: filtered leaked tool call text in final flush");
+            } else if is_no_reply(&iter_buf) {
+                debug!("Streaming bridge: filtered NO_REPLY sentinel in final flush");
+            } else {
+                let _ = tx.send(iter_buf).await;
             }
         }
     });
@@ -1673,7 +1696,14 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .should_reply(message, channel_type, agent_id)?;
         // Fire auto-reply synchronously (bridge already runs in background task)
         match self.kernel.send_message(agent_id, message).await {
-            Ok(result) => Some(result.response),
+            Ok(result) => {
+                // If the agent chose NO_REPLY (silent), don't send the literal text
+                if result.silent {
+                    None
+                } else {
+                    Some(result.response)
+                }
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "Auto-reply failed");
                 None
