@@ -249,10 +249,10 @@ pub enum SessionMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchAugmentationMode {
-    /// Disabled (default).
-    #[default]
+    /// Disabled.
     Off,
-    /// Augment only when the model catalog reports `supports_tools == false`.
+    /// Augment only when the model catalog reports `supports_tools == false` (default).
+    #[default]
     Auto,
     /// Always search the web before every LLM call.
     Always,

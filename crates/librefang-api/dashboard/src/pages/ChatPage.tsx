@@ -10,7 +10,7 @@ import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } f
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -925,11 +925,12 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange }: {
-  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string;
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange }: {
+  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
   agentId: string; onModelChange: () => void;
+  webSearchAugmentation?: "off" | "auto" | "always"; onWebSearchChange?: (mode: "off" | "auto" | "always") => void;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
@@ -945,6 +946,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   const [patchError, setPatchError] = useState<string | null>(null);
   const [patchPending, setPatchPending] = useState(false);
   const [optimisticModel, setOptimisticModel] = useState<string | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<string>("");
 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
@@ -974,6 +976,8 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     const handler = (e: MouseEvent) => {
       if (modelRef.current && !modelRef.current.contains(e.target as Node)) {
         setModelOpen(false);
+        setSelectedProvider("");
+        setModelSearch("");
       }
     };
     document.addEventListener("mousedown", handler);
@@ -992,9 +996,37 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   }, [modelOpen, models.length, modelLoading]);
 
   const visibleModels = useMemo(() => filterVisible(models, hiddenSet), [models, hiddenSet]);
-  const filteredModels = visibleModels.filter(m =>
-    (m.provider + " " + (m.id || "")).toLowerCase().includes(modelSearch.toLowerCase())
-  );
+
+  // Unique providers derived from loaded models, sorted alphabetically
+  const providers = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const m of visibleModels) {
+      map.set(m.provider, (map.get(m.provider) ?? 0) + 1);
+    }
+    return Array.from(map.entries())
+      .map(([id, count]) => ({ id, count }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }, [visibleModels]);
+
+  // Models filtered by selected provider, then by search
+  const filteredModels = useMemo(() => {
+    let list = visibleModels;
+    if (selectedProvider) {
+      list = list.filter(m => m.provider === selectedProvider);
+    }
+    if (modelSearch) {
+      const q = modelSearch.toLowerCase();
+      list = list.filter(m => (m.id || "").toLowerCase().includes(q) || (m.display_name || "").toLowerCase().includes(q));
+    }
+    return list;
+  }, [visibleModels, selectedProvider, modelSearch]);
+
+  // Filter providers by search when in provider view
+  const filteredProviders = useMemo(() => {
+    if (!modelSearch) return providers;
+    const q = modelSearch.toLowerCase();
+    return providers.filter(p => p.id.toLowerCase().includes(q));
+  }, [providers, modelSearch]);
 
   async function handleSelectModel(model: ModelItem) {
     const prev = optimisticModel ?? modelName ?? null;
@@ -1004,6 +1036,8 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     try {
       await patchAgentConfig(agentId, { model: model.id, provider: model.provider });
       setModelOpen(false);
+      setSelectedProvider("");
+      setModelSearch("");
       onModelChange(); // invalidates queries; useEffect clears optimisticModel when modelName catches up
     } catch {
       setOptimisticModel(prev);
@@ -1039,7 +1073,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
         {/* Model switcher */}
         <div className="relative hidden sm:block" ref={modelRef}>
           <button
-            onClick={() => setModelOpen(v => !v)}
+            onClick={() => { setModelOpen(v => { if (v) { setSelectedProvider(""); setModelSearch(""); } return !v; }); }}
             className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono text-text-dim/50 hover:text-text hover:bg-surface-hover transition-colors truncate max-w-[200px]"
             title={t("chat.switch_model")}
           >
@@ -1048,16 +1082,28 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
           </button>
           {modelOpen && (
             <div className="absolute right-0 top-full mt-1 w-80 bg-surface border border-border-subtle rounded-xl shadow-xl z-50 overflow-hidden">
-              <div className="p-2 border-b border-border-subtle/50">
-                <span className="text-[10px] font-semibold text-text-dim/50 uppercase tracking-wider px-2">{t("chat.switch_model")}</span>
+              {/* Header */}
+              <div className="p-2 border-b border-border-subtle/50 flex items-center gap-2">
+                {selectedProvider && (
+                  <button
+                    onClick={() => { setSelectedProvider(""); setModelSearch(""); }}
+                    className="p-0.5 rounded hover:bg-surface-hover transition-colors"
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5 text-text-dim" />
+                  </button>
+                )}
+                <span className="text-[10px] font-semibold text-text-dim/50 uppercase tracking-wider px-1">
+                  {selectedProvider || t("chat.select_provider", { defaultValue: "Select Provider" })}
+                </span>
               </div>
+              {/* Search */}
               <div className="p-2 border-b border-border-subtle/50">
                 <input
                   autoFocus
                   type="text"
                   value={modelSearch}
                   onChange={e => setModelSearch(e.target.value)}
-                  placeholder={t("chat.search_models")}
+                  placeholder={selectedProvider ? t("chat.search_models") : t("chat.search_providers", { defaultValue: "Search providers..." })}
                   className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-main border border-border-subtle focus:outline-none focus:border-brand"
                 />
                 {patchError && (
@@ -1082,44 +1128,88 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                     </button>
                   </div>
                 )}
-                {!modelLoading && !modelFetchError && filteredModels.length === 0 && (
-                  <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
-                )}
-                {!modelLoading && !modelFetchError && modelName && !filteredModels.some(m => m.id === modelName) && (
-                  <div
-                    key={`fallback/${modelName}`}
-                    onClick={() => {}}
-                    className="flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors bg-brand/10 text-brand"
-                  >
-                    {patchPending
-                      ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
-                      : <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
-                    }
-                    <span className="text-xs font-medium truncate">{modelName}</span>
-                  </div>
-                )}
-                {!modelLoading && !modelFetchError && filteredModels.map(model => {
-                  const isActive = model.id === (optimisticModel ?? modelName);
+
+                {/* Provider list view */}
+                {!modelLoading && !modelFetchError && !selectedProvider && (() => {
+                  // Use the agent's known provider (from props) to highlight the current provider.
+                  // Falls back to scanning the model list only if the prop is unavailable.
+                  const agentProvider = modelProvider || models.find(m => m.id === (optimisticModel ?? modelName))?.provider;
                   return (
-                    <div
-                      key={`${model.provider}/${model.id}`}
-                      onClick={() => { if (!isActive) handleSelectModel(model); }}
-                      className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
-                    >
-                      {isActive && patchPending
-                        ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
-                        : isActive && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
-                      }
-                      <span className="text-[10px] text-text-dim/60 shrink-0">{model.provider}</span>
-                      <span className="text-[10px]">·</span>
-                      <span className="text-xs font-medium truncate">{model.id}</span>
-                    </div>
+                  <>
+                    {filteredProviders.length === 0 && (
+                      <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
+                    )}
+                    {filteredProviders.map(p => {
+                      const isCurrent = p.id === agentProvider;
+                      return (
+                        <div
+                          key={p.id}
+                          onClick={() => { setSelectedProvider(p.id); setModelSearch(""); }}
+                          className={`flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isCurrent ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            {isCurrent && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />}
+                            <span className="text-xs font-medium">{p.id}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-text-dim/40">{p.count} {p.count === 1 ? "model" : "models"}</span>
+                            <ArrowRight className="h-3 w-3 text-text-dim/30" />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </>
                   );
-                })}
+                })()}
+
+                {/* Model list view (filtered by selected provider) */}
+                {!modelLoading && !modelFetchError && selectedProvider && (
+                  <>
+                    {filteredModels.length === 0 && (
+                      <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
+                    )}
+                    {filteredModels.map(model => {
+                      const isActive = model.id === (optimisticModel ?? modelName) && model.provider === selectedProvider;
+                      return (
+                        <div
+                          key={`${model.provider}/${model.id}`}
+                          onClick={() => { if (!isActive) handleSelectModel(model); }}
+                          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
+                        >
+                          {isActive && patchPending
+                            ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                            : isActive && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
+                          }
+                          <span className="text-xs font-medium truncate">{model.display_name || model.id}</span>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
               </div>
             </div>
           )}
         </div>
+        {/* Web Search toggle (off → auto → always → off) */}
+        {onWebSearchChange && (
+          <button
+            onClick={() => {
+              const cycle: Record<string, "off" | "auto" | "always"> = { off: "auto", auto: "always", always: "off" };
+              onWebSearchChange(cycle[webSearchAugmentation || "auto"] || "auto");
+            }}
+            title={t("chat.web_search_tooltip", { defaultValue: "Web Search: {{mode}}. Requires a search API key (Tavily, Brave, Jina, or Perplexity) configured in config.toml [web] section.", mode: webSearchAugmentation || "auto" })}
+            className={`hidden sm:flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono transition-colors ${
+              webSearchAugmentation === "always"
+                ? "text-brand bg-brand/10 hover:bg-brand/20"
+                : webSearchAugmentation === "auto"
+                  ? "text-text-dim/50 hover:text-text hover:bg-surface-hover"
+                  : "text-text-dim/30 hover:text-text-dim/60 hover:bg-surface-hover"
+            }`}
+          >
+            <Globe className="h-3 w-3" />
+            <span className="hidden lg:inline">{webSearchAugmentation === "always" ? t("common.always", { defaultValue: "Always" }) : webSearchAugmentation === "auto" ? t("common.auto", { defaultValue: "Auto" }) : t("common.off", { defaultValue: "Off" })}</span>
+          </button>
+        )}
         {/* Session dropdown */}
         {sessions && sessions.length > 0 && (
           <div className="relative" ref={dropdownRef}>
@@ -1750,6 +1840,7 @@ export function ChatPage() {
               onExport={handleExport}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
+              modelProvider={selectedAgent?.model_provider}
               sessions={sessionsQuery.data}
               activeSessionId={activeSessionId}
               onSwitchSession={handleSwitchSession}
@@ -1757,6 +1848,14 @@ export function ChatPage() {
               onDeleteSession={handleDeleteSession}
               agentId={selectedAgentId}
               onModelChange={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
+              webSearchAugmentation={selectedAgent?.web_search_augmentation}
+              onWebSearchChange={async (mode) => {
+                try {
+                  await patchAgentConfig(selectedAgentId, { web_search_augmentation: mode });
+                  queryClient.invalidateQueries({ queryKey: ["agents", "list"] });
+                  queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] });
+                } catch {}
+              }}
             />
           )}
 

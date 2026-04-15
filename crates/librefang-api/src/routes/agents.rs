@@ -763,6 +763,7 @@ pub(crate) fn enrich_agent_json(
             "avatar_url": e.identity.avatar_url,
             "color": e.identity.color,
         },
+        "web_search_augmentation": e.manifest.web_search_augmentation,
     })
 }
 

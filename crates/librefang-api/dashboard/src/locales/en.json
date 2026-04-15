@@ -1460,6 +1460,7 @@
     "neural_terminal": "Neural Terminal",
     "group_standalone": "Standalone",
     "hand_coordinator": "coordinator",
+    "web_search_tooltip": "Web Search: {{mode}}. Requires a search API key (Tavily, Brave, Jina, or Perplexity) in config.toml [web] section.",
     "select_agent": "Select Agent",
     "select_agent_desc": "Choose an agent from the list to establish a communication link.",
     "transmit_command": "Transmit neural pulse...",
