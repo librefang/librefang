@@ -66,14 +66,23 @@ impl MediaEngine {
             return Err("Expected audio attachment".into());
         }
 
+        let explicit = self.config.audio_provider.is_some();
         let provider = self
             .config
             .audio_provider
             .as_deref()
             .or_else(|| detect_audio_provider())
             .ok_or(
-                "No audio transcription provider configured. Set one of: GROQ_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, ELEVENLABS_API_KEY, MINIMAX_API_KEY, FIREWORKS_API_KEY, TOGETHER_API_KEY, SILICONFLOW_API_KEY",
+                "No audio transcription provider configured. Set [media] audio_provider in config.toml.",
             )?;
+
+        if !explicit {
+            tracing::warn!(
+                detected_provider = provider,
+                "Audio provider auto-detected from env var — may not match actual service. \
+                 Set [media] audio_provider in config.toml for reliable STT."
+            );
+        }
 
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
 

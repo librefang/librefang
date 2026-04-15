@@ -46,6 +46,9 @@ pub enum AuthStatus {
     Configured,
     /// No API key, but a CLI tool (e.g. claude-code) is available as fallback.
     ConfiguredCli,
+    /// Key detected via fallback env var — may not match the actual provider.
+    /// Functionally usable but user should verify.
+    AutoDetected,
     /// API key is present but was rejected by the provider (HTTP 401/403).
     InvalidKey,
     /// API key is missing.
@@ -66,6 +69,7 @@ impl AuthStatus {
             self,
             AuthStatus::ValidatedKey
                 | AuthStatus::Configured
+                | AuthStatus::AutoDetected
                 | AuthStatus::ConfiguredCli
                 | AuthStatus::NotRequired
         )
@@ -78,6 +82,7 @@ impl fmt::Display for AuthStatus {
             AuthStatus::ValidatedKey => write!(f, "validated_key"),
             AuthStatus::Configured => write!(f, "configured"),
             AuthStatus::ConfiguredCli => write!(f, "configured_cli"),
+            AuthStatus::AutoDetected => write!(f, "auto_detected"),
             AuthStatus::InvalidKey => write!(f, "invalid_key"),
             AuthStatus::Missing => write!(f, "missing"),
             AuthStatus::NotRequired => write!(f, "not_required"),

@@ -977,12 +977,14 @@ export function ProvidersPage() {
                 </Badge>
               </div>
 
+              {configProvider.key_required !== false && (
               <div>
                 <label className="text-[10px] font-bold text-text-dim uppercase">API Key</label>
                 <input type="password" value={keyInput} onChange={e => setKeyInput(e.target.value)}
                   placeholder={hasStoredKey ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
                   className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
               </div>
+              )}
 
               <div>
                 <label className="text-[10px] font-bold text-text-dim uppercase">Base URL <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>

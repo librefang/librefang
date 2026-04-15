@@ -214,8 +214,10 @@ impl ModelCatalog {
                 _ => false,
             };
 
-            provider.auth_status = if has_key || has_key_fallback {
+            provider.auth_status = if has_key {
                 AuthStatus::Configured
+            } else if has_key_fallback {
+                AuthStatus::AutoDetected
             } else if has_cli_fallback {
                 AuthStatus::ConfiguredCli
             } else {
