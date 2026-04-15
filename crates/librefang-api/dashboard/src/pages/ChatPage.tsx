@@ -654,8 +654,10 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               />
             </button>
             {thinkingExpanded && (
-              <div className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim whitespace-pre-wrap break-words">
-                {message.thinking}
+              <div className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim prose prose-sm prose-invert max-w-none">
+                <MarkdownContent remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                  {message.thinking}
+                </MarkdownContent>
               </div>
             )}
           </div>
