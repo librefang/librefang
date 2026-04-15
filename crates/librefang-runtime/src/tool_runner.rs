@@ -1592,6 +1592,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "object",
                         "description": "Delivery target: {\"kind\":\"none\"} or {\"kind\":\"channel\",\"channel\":\"telegram\"} or {\"kind\":\"last_channel\"}"
                     },
+                    "session_mode": {
+                        "type": "string",
+                        "enum": ["persistent", "new"],
+                        "description": "Session mode for AgentTurn actions. 'persistent' (default) reuses the cron session across executions. 'new' creates a fresh session each time, preventing token accumulation for long-running crons."
+                    },
                     "one_shot": { "type": "boolean", "description": "If true, auto-delete after execution. Default: false" }
                 },
                 "required": ["name", "schedule", "action"]
