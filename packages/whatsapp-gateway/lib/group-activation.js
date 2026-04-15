@@ -72,19 +72,44 @@ function list(db) {
     .all();
 }
 
-// Parse `/activation [always|mention|off]` from a message body. Returns
-// { mode } on a valid command, { query: true } when the owner asked for the
-// current mode with a bare `/activation`, or null when the text isn't an
-// activation command at all. Case-insensitive; tolerates surrounding
-// whitespace and trailing punctuation.
+// Parse `/activation` commands from a message body.
+//
+// Supported shapes:
+//   /activation                     → { query: true }
+//   /activation <mode>              → { mode }
+//   /activation <groupJid>          → { targetGroup, query: true }
+//   /activation <groupJid> <mode>   → { targetGroup, mode }
+//
+// `<groupJid>` must end in `@g.us` — that's how we disambiguate the
+// in-group single-arg form (`mode`) from the DM two-arg form.
+//
+// Returns `null` when the text isn't an activation command,
+// `{ error: 'invalid_mode', arg }` when the mode argument is unknown.
+// Case-insensitive on the command and mode; preserves the JID exactly.
 function parseCommand(text) {
   if (typeof text !== 'string') return null;
-  const m = text.trim().match(/^\/activation(?:\s+(\S+))?\s*$/i);
+  const m = text.trim().match(/^\/activation(?:\s+(\S+)(?:\s+(\S+))?)?\s*$/i);
   if (!m) return null;
-  const arg = (m[1] || '').toLowerCase();
-  if (!arg) return { query: true };
-  if (!MODES.includes(arg)) return { error: 'invalid_mode', arg };
-  return { mode: arg };
+  const a = m[1] || '';
+  const b = m[2] || '';
+
+  if (!a) return { query: true };
+
+  // Two-arg DM form: `/activation <groupJid> <mode>`.
+  if (b) {
+    if (!/@g\.us$/i.test(a)) return { error: 'invalid_target', arg: a };
+    const mode = b.toLowerCase();
+    if (!MODES.includes(mode)) return { error: 'invalid_mode', arg: b };
+    return { targetGroup: a, mode };
+  }
+
+  // Single-arg form. A `@g.us` JID is a DM query for that group's mode.
+  if (/@g\.us$/i.test(a)) return { targetGroup: a, query: true };
+
+  // Otherwise it must be a mode name (in-group form).
+  const mode = a.toLowerCase();
+  if (!MODES.includes(mode)) return { error: 'invalid_mode', arg: a };
+  return { mode };
 }
 
 module.exports = {

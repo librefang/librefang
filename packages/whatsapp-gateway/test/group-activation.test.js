@@ -130,6 +130,41 @@ describe('group-activation', () => {
       assert.equal(groupActivation.parseCommand(null), null);
       assert.equal(groupActivation.parseCommand(undefined), null);
     });
+
+    it('parses DM form /activation <groupJid> <mode>', () => {
+      assert.deepEqual(
+        groupActivation.parseCommand('/activation 120363100000000001@g.us mention'),
+        { targetGroup: '120363100000000001@g.us', mode: 'mention' },
+      );
+    });
+
+    it('parses DM form with only groupJid as a query', () => {
+      assert.deepEqual(
+        groupActivation.parseCommand('/activation 120363100000000001@g.us'),
+        { targetGroup: '120363100000000001@g.us', query: true },
+      );
+    });
+
+    it('rejects a first arg that is not @g.us and not a valid mode', () => {
+      assert.deepEqual(
+        groupActivation.parseCommand('/activation somechat@s.whatsapp.net'),
+        { error: 'invalid_mode', arg: 'somechat@s.whatsapp.net' },
+      );
+    });
+
+    it('rejects a target+bad-mode combination with invalid_mode', () => {
+      assert.deepEqual(
+        groupActivation.parseCommand('/activation 120363100000000001@g.us spam'),
+        { error: 'invalid_mode', arg: 'spam' },
+      );
+    });
+
+    it('rejects a non-group first arg when a second arg is present', () => {
+      assert.deepEqual(
+        groupActivation.parseCommand('/activation bogus mention'),
+        { error: 'invalid_target', arg: 'bogus' },
+      );
+    });
   });
 
   describe('MODES / DEFAULT_MODE', () => {

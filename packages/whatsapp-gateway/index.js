@@ -108,10 +108,16 @@ try {
 
 function resolveGroupMode(groupJid) {
   try {
-    return groupActivation.get(db, groupJid) || groupActivation.DEFAULT_MODE;
-  } catch (_) {
-    return groupActivation.DEFAULT_MODE;
+    const stored = groupActivation.get(db, groupJid);
+    if (stored) return stored;
+  } catch (_) { /* fall through to config override then default */ }
+  // tomlConfig is declared further down; by the time a message arrives it
+  // is fully initialised, so the reference is safe at call time.
+  const overrides = tomlConfig && tomlConfig.group_activation_overrides;
+  if (overrides instanceof Map && overrides.has(groupJid)) {
+    return overrides.get(groupJid);
   }
+  return groupActivation.DEFAULT_MODE;
 }
 
 console.log(`[gateway] SQLite message store initialized: ${DB_PATH}`);
@@ -240,17 +246,39 @@ function dbUpdateLastSeen(jid, timestamp) {
 const CONFIG_PATH = process.env.LIBREFANG_CONFIG || path.join(os.homedir(), '.librefang', 'config.toml');
 
 function readWhatsAppConfig(configPath) {
-  const defaults = { default_agent: 'assistant', owner_numbers: [], conversation_ttl_hours: 24 };
+  const defaults = {
+    default_agent: 'assistant',
+    owner_numbers: [],
+    conversation_ttl_hours: 24,
+    group_activation_overrides: new Map(),
+  };
   try {
     const content = fs.readFileSync(configPath, 'utf8');
     const parsed = toml.parse(content);
     const wa = parsed?.channels?.whatsapp || {};
+    // Phase 5 §A — optional array-of-tables to seed group activation modes
+    // declaratively without typing `/activation` in every group:
+    //   [[channels.whatsapp.group_activation]]
+    //   jid = "120363...@g.us"
+    //   mode = "mention"
+    // Used as a fallback when the SQLite table has no row for a group.
+    const overrides = new Map();
+    const rawRows = Array.isArray(wa.group_activation) ? wa.group_activation : [];
+    for (const row of rawRows) {
+      if (!row || typeof row.jid !== 'string' || typeof row.mode !== 'string') continue;
+      if (!/@g\.us$/i.test(row.jid)) continue;
+      const mode = row.mode.toLowerCase();
+      if (!['always', 'mention', 'off'].includes(mode)) continue;
+      overrides.set(row.jid, mode);
+    }
     const cfg = {
       default_agent: wa.default_agent || defaults.default_agent,
       owner_numbers: Array.isArray(wa.owner_numbers) ? wa.owner_numbers : defaults.owner_numbers,
       conversation_ttl_hours: parseInt(wa.conversation_ttl_hours, 10) || defaults.conversation_ttl_hours,
+      group_activation_overrides: overrides,
     };
-    console.log(`[gateway] Read config from ${configPath}: default_agent="${cfg.default_agent}", owner_numbers=${JSON.stringify(cfg.owner_numbers)}, conversation_ttl_hours=${cfg.conversation_ttl_hours}`);
+    const overrideLog = overrides.size > 0 ? `, group_activation_overrides=${overrides.size}` : '';
+    console.log(`[gateway] Read config from ${configPath}: default_agent="${cfg.default_agent}", owner_numbers=${JSON.stringify(cfg.owner_numbers)}, conversation_ttl_hours=${cfg.conversation_ttl_hours}${overrideLog}`);
     return cfg;
   } catch (err) {
     console.warn(`[gateway] Could not read ${configPath}: ${err.message} — using defaults/env vars`);
@@ -1587,40 +1615,57 @@ async function startConnection() {
 
       // Phase 5 §A (GA-01) — `/activation` command + per-group gating.
       // Owner can change the mode; everyone is gated by the stored mode.
-      if (isGroup) {
-        const cmd = isOwner ? groupActivation.parseCommand(text) : null;
-        if (cmd) {
-          if (cmd.error === 'invalid_mode') {
-            await sock.sendMessage(sender, {
-              text: `Modalità non valida: \`${cmd.arg}\`. Usa una di: ${groupActivation.MODES.join(', ')}.`,
+      // In a group, `/activation [mode]` targets the group itself.
+      // In a DM, `/activation <groupJid> [mode]` targets the named group so
+      // the owner doesn't have to type technical commands in a shared chat.
+      const parsedActivation = isOwner ? groupActivation.parseCommand(text) : null;
+      if (parsedActivation) {
+        const targetJid = parsedActivation.targetGroup || (isGroup ? sender : null);
+        const replyTo = sender; // always ack back in the chat the owner wrote from
+        if (parsedActivation.error === 'invalid_mode') {
+          await sock.sendMessage(replyTo, {
+            text: `Modalità non valida: \`${parsedActivation.arg}\`. Usa una di: ${groupActivation.MODES.join(', ')}.`,
+          }).catch(() => {});
+        } else if (parsedActivation.error === 'invalid_target') {
+          await sock.sendMessage(replyTo, {
+            text: `JID di gruppo non valido: \`${parsedActivation.arg}\`. Deve terminare con \`@g.us\`.`,
+          }).catch(() => {});
+        } else if (!targetJid) {
+          // Bare `/activation` in DM — no group to query/configure.
+          await sock.sendMessage(replyTo, {
+            text: `In chat privata serve il JID: \`/activation <group@g.us> [${groupActivation.MODES.join('|')}]\`.`,
+          }).catch(() => {});
+        } else if (parsedActivation.query) {
+          const current = resolveGroupMode(targetJid);
+          const label = isGroup ? 'Attivazione corrente' : `Attivazione per ${targetJid}`;
+          await sock.sendMessage(replyTo, {
+            text: `${label}: *${current}*. Modalità disponibili: ${groupActivation.MODES.join(', ')}.`,
+          }).catch(() => {});
+        } else if (parsedActivation.mode) {
+          try {
+            groupActivation.set(db, targetJid, parsedActivation.mode);
+            const label = isGroup ? 'Attivazione aggiornata' : `Attivazione per ${targetJid} aggiornata`;
+            await sock.sendMessage(replyTo, {
+              text: `${label}: *${parsedActivation.mode}*.`,
             }).catch(() => {});
-          } else if (cmd.query) {
-            const current = resolveGroupMode(sender);
-            await sock.sendMessage(sender, {
-              text: `Attivazione corrente: *${current}*. Modalità disponibili: ${groupActivation.MODES.join(', ')}.`,
-            }).catch(() => {});
-          } else if (cmd.mode) {
-            try {
-              groupActivation.set(db, sender, cmd.mode);
-              await sock.sendMessage(sender, {
-                text: `Attivazione aggiornata: *${cmd.mode}*.`,
-              }).catch(() => {});
-              console.log(JSON.stringify({
-                event: 'group_activation_set',
-                group_jid: sender,
-                mode: cmd.mode,
-              }));
-            } catch (err) {
-              console.warn(JSON.stringify({
-                event: 'group_activation_set_failed',
-                group_jid: sender,
-                error: err.message,
-              }));
-            }
+            console.log(JSON.stringify({
+              event: 'group_activation_set',
+              group_jid: targetJid,
+              mode: parsedActivation.mode,
+              via_dm: !isGroup,
+            }));
+          } catch (err) {
+            console.warn(JSON.stringify({
+              event: 'group_activation_set_failed',
+              group_jid: targetJid,
+              error: err.message,
+            }));
           }
-          continue; // command processed, do not forward to the agent
         }
+        continue; // command processed, do not forward to the agent
+      }
 
+      if (isGroup) {
         const groupMode = resolveGroupMode(sender);
         if (groupMode === 'off') {
           console.log(JSON.stringify({
