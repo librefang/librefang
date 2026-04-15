@@ -207,10 +207,7 @@ function ConfigFieldInput({
   if ((fieldType === "select" || fieldType === "number_select") && options) {
     const normalizedOptions = options.map((o) => {
       if (typeof o === "string") {
-        const i18nLabel = fieldType === "number_select"
-          ? t(`config.${fieldKey}_${o}`, o)
-          : o;
-        return { value: o, label: i18nLabel };
+        return { value: o, label: t(`config.${fieldKey}_${o}`, o) };
       }
       if ("value" in o && "label" in o) return { value: String((o as { value: unknown }).value), label: String((o as { label: unknown }).label) };
       if ("id" in o) return { value: (o as { id: string; name?: string }).id, label: (o as { name?: string; id: string }).name ?? (o as { id: string }).id };
