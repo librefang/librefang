@@ -1128,13 +1128,19 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                 )}
 
                 {/* Provider list view */}
-                {!modelLoading && !modelFetchError && !selectedProvider && (
+                {!modelLoading && !modelFetchError && !selectedProvider && (() => {
+                  // Resolve current agent's provider from the agent list data (passed via props),
+                  // not by scanning the model catalog — avoids false matches when multiple
+                  // providers share the same model ID (e.g. "llama3.2" in ollama and openrouter).
+                  const currentModel = optimisticModel ?? modelName;
+                  const agentProvider = models.find(m => m.id === currentModel)?.provider;
+                  return (
                   <>
                     {filteredProviders.length === 0 && (
                       <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
                     )}
                     {filteredProviders.map(p => {
-                      const isCurrent = p.id === (models.find(m => m.id === (optimisticModel ?? modelName))?.provider);
+                      const isCurrent = p.id === agentProvider;
                       return (
                         <div
                           key={p.id}
@@ -1153,7 +1159,8 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                       );
                     })}
                   </>
-                )}
+                  );
+                })()}
 
                 {/* Model list view (filtered by selected provider) */}
                 {!modelLoading && !modelFetchError && selectedProvider && (
@@ -1162,7 +1169,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                       <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
                     )}
                     {filteredModels.map(model => {
-                      const isActive = model.id === (optimisticModel ?? modelName);
+                      const isActive = model.id === (optimisticModel ?? modelName) && model.provider === selectedProvider;
                       return (
                         <div
                           key={`${model.provider}/${model.id}`}
