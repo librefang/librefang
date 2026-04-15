@@ -10,6 +10,7 @@ const toml = require('toml');
 const { EchoTracker } = require('./lib/echo-tracker');
 const lidCache = require('./lib/lid-cache');
 const groupActivation = require('./lib/group-activation');
+const groupAllowFrom = require('./lib/group-allow-from');
 const {
   isLidJid,
   isGroupJid,
@@ -102,6 +103,16 @@ try {
 } catch (err) {
   console.warn(JSON.stringify({
     event: 'group_activation_init_failed',
+    error: err.message,
+  }));
+}
+
+// Phase 3 completion (GA-02): per-group sender allowlist.
+try {
+  groupAllowFrom.init(db);
+} catch (err) {
+  console.warn(JSON.stringify({
+    event: 'group_allow_from_init_failed',
     error: err.message,
   }));
 }
@@ -1665,6 +1676,66 @@ async function startConnection() {
         continue; // command processed, do not forward to the agent
       }
 
+      // Phase 3 completion (GA-02) — `/allowlist` DM command (owner only).
+      const parsedAllowlist = isOwner ? groupAllowFrom.parseCommand(text) : null;
+      if (parsedAllowlist) {
+        const replyTo = sender;
+        if (parsedAllowlist.error === 'invalid_target') {
+          await sock.sendMessage(replyTo, {
+            text: `JID di gruppo non valido: \`${parsedAllowlist.arg}\`. Deve terminare con \`@g.us\`.`,
+          }).catch(() => {});
+        } else if (parsedAllowlist.error === 'invalid_action') {
+          await sock.sendMessage(replyTo, {
+            text: `Azione non valida: \`${parsedAllowlist.arg}\`. Usa \`list\`, \`add <senderJid>\`, \`remove <senderJid>\`, \`clear\`.`,
+          }).catch(() => {});
+        } else if (parsedAllowlist.error === 'missing_group') {
+          await sock.sendMessage(replyTo, {
+            text: 'Uso: `/allowlist <group@g.us> [list|add <senderJid>|remove <senderJid>|clear]`.',
+          }).catch(() => {});
+        } else if (parsedAllowlist.error === 'missing_sender') {
+          await sock.sendMessage(replyTo, {
+            text: `\`${parsedAllowlist.action}\` richiede un senderJid.`,
+          }).catch(() => {});
+        } else {
+          const { targetGroup, action, sender: senderArg } = parsedAllowlist;
+          try {
+            if (action === 'list') {
+              const rows = groupAllowFrom.list(db, targetGroup);
+              const body = rows.length === 0
+                ? `Nessuna allowlist attiva per ${targetGroup} — tutti i membri possono parlare (fallback sulla modalità attivazione).`
+                : `Allowlist per ${targetGroup} (${rows.length}):\n` + rows.map((j) => `• ${j}`).join('\n');
+              await sock.sendMessage(replyTo, { text: body }).catch(() => {});
+            } else if (action === 'add') {
+              groupAllowFrom.add(db, targetGroup, senderArg);
+              await sock.sendMessage(replyTo, {
+                text: `Aggiunto \`${senderArg}\` all'allowlist di ${targetGroup}.`,
+              }).catch(() => {});
+              console.log(JSON.stringify({ event: 'group_allow_from_add', group_jid: targetGroup, sender_jid: senderArg }));
+            } else if (action === 'remove') {
+              groupAllowFrom.remove(db, targetGroup, senderArg);
+              await sock.sendMessage(replyTo, {
+                text: `Rimosso \`${senderArg}\` dall'allowlist di ${targetGroup}.`,
+              }).catch(() => {});
+              console.log(JSON.stringify({ event: 'group_allow_from_remove', group_jid: targetGroup, sender_jid: senderArg }));
+            } else if (action === 'clear') {
+              groupAllowFrom.clear(db, targetGroup);
+              await sock.sendMessage(replyTo, {
+                text: `Allowlist di ${targetGroup} svuotata.`,
+              }).catch(() => {});
+              console.log(JSON.stringify({ event: 'group_allow_from_clear', group_jid: targetGroup }));
+            }
+          } catch (err) {
+            console.warn(JSON.stringify({
+              event: 'group_allow_from_op_failed',
+              group_jid: targetGroup,
+              action,
+              error: err.message,
+            }));
+          }
+        }
+        continue;
+      }
+
       if (isGroup) {
         const groupMode = resolveGroupMode(sender);
         if (groupMode === 'off') {
@@ -1682,6 +1753,29 @@ async function startConnection() {
             group_jid: sender,
           }));
           continue;
+        }
+        // Phase 3 completion (GA-02) — allowlist check. If the group has
+        // any allowlist entry, only those senders get forwarded. Owner is
+        // always allowed. The participant JID may be either a phone or a
+        // LID depending on the contact; try both forms.
+        if (!isOwner && groupAllowFrom.hasAny(db, sender)) {
+          const participantPn = msg.key.participantPn || '';
+          const participantLidNorm = msg.key.participant
+            ? normalizeDeviceScopedJid(msg.key.participant)
+            : '';
+          const allowed =
+            (participantPn && groupAllowFrom.isAllowed(db, sender, participantPn)) ||
+            (participantLidNorm && groupAllowFrom.isAllowed(db, sender, participantLidNorm));
+          if (!allowed) {
+            console.log(JSON.stringify({
+              event: 'group_gating_skip',
+              reason: 'allowlist_miss',
+              group_jid: sender,
+              participant_pn: participantPn || null,
+              participant_lid: participantLidNorm || null,
+            }));
+            continue;
+          }
         }
       }
 
@@ -3298,6 +3392,8 @@ module.exports = {
   // Phase 5 §A — group activation (testing + introspection)
   groupActivation,
   resolveGroupMode,
+  // Phase 3 completion — group allow-from (testing)
+  groupAllowFrom,
   // Phase 5 §B — readiness predicate (testing)
   computeReadiness,
   HEARTBEAT_MS,
