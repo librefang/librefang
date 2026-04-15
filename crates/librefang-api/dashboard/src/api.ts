@@ -48,6 +48,9 @@ export interface ProviderItem {
   key_required?: boolean;
   health?: string;
   media_capabilities?: string[];
+  is_custom?: boolean;
+  error_message?: string;
+  last_tested?: string;
 }
 
 export interface MediaProvider {

@@ -412,7 +412,13 @@
     "wizard_create": "Create Provider",
     "wizard_creating": "Creating...",
     "wizard_id_required": "Provider ID is required",
-    "wizard_base_url_required": "Base URL is required"
+    "wizard_base_url_required": "Base URL is required",
+    "wizard_auto_derived": "Auto-derived",
+    "wizard_env_var": "Env Var",
+    "provider_models": "Models",
+    "no_models_for_provider": "No models registered",
+    "remove_key_confirm_title": "Remove API Key",
+    "remove_key_confirm_message": "This will remove the stored API key and move the provider back to unconfigured."
   },
   "channels": {
     "title": "Channels",
