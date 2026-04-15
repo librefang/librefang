@@ -150,6 +150,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
 function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0) {
+  const { t } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Per-agent loading state. A single shared `isLoading` would freeze the
   // ChatInput on every agent while one of them is streaming (#2322). Keyed
