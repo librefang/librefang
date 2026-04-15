@@ -19,7 +19,7 @@ import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
-  ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2,
+  Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2,
   Check, ChevronLeft
 } from "lucide-react";
 
@@ -275,7 +275,6 @@ interface ProviderCardProps {
 function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onConfigure, onDelete, t }: ProviderCardProps) {
   const isConfigured = isProviderAvailable(p.auth_status);
   const isCli = p.auth_status === "configured_cli" || p.auth_status === "cli_not_installed" || (!p.base_url && !p.key_required);
-  const authBadge = getAuthBadge(p.auth_status);
 
   if (viewMode === "list") {
     return (
@@ -1147,7 +1146,6 @@ export function ProvidersPage() {
     }
   };
 
-  const effectivePendingId = pendingId || (testingIds.size > 0 ? Array.from(testingIds)[0] : null);
   const allSelected = filteredProviders.length > 0 && selectedIds.size === filteredProviders.length;
 
   return (
