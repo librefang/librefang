@@ -1501,7 +1501,15 @@
     "info_model": "模型",
     "info_provider": "提供商",
     "info_state": "状态",
-    "ws_not_connected": "WebSocket 未连接，请刷新页面。"
+    "ws_not_connected": "WebSocket 未连接，请刷新页面。",
+    "session": "会话",
+    "sessions_title": "会话列表",
+    "new_session": "新建会话",
+    "delete_session": "删除会话",
+    "export": "导出",
+    "export_markdown": "导出为 Markdown",
+    "approval_required": "需要审批",
+    "approval_tool": "工具"
   },
   "goals": {
     "title": "目标",

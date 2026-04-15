@@ -1526,7 +1526,15 @@
     "info_model": "Model",
     "info_provider": "Provider",
     "info_state": "State",
-    "ws_not_connected": "WebSocket not connected. Please refresh the page."
+    "ws_not_connected": "WebSocket not connected. Please refresh the page.",
+    "session": "Session",
+    "sessions_title": "Sessions",
+    "new_session": "New session",
+    "delete_session": "Delete session",
+    "export": "Export",
+    "export_markdown": "Export as Markdown",
+    "approval_required": "Approval Required",
+    "approval_tool": "Tool"
   },
   "goals": {
     "title": "Goals",
