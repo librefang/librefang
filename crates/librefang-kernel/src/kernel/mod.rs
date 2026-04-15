@@ -10486,10 +10486,27 @@ impl KernelHandle for LibreFangKernel {
         assigned_to: Option<&str>,
         created_by: Option<&str>,
     ) -> Result<String, String> {
-        self.memory
+        let task_id = self
+            .memory
             .task_post(title, description, assigned_to, created_by)
             .await
-            .map_err(|e| format!("Task post failed: {e}"))
+            .map_err(|e| format!("Task post failed: {e}"))?;
+
+        let event = librefang_types::event::Event::new(
+            AgentId::new(), // system-originated
+            librefang_types::event::EventTarget::Broadcast,
+            librefang_types::event::EventPayload::System(
+                librefang_types::event::SystemEvent::TaskPosted {
+                    task_id: task_id.clone(),
+                    title: title.to_string(),
+                    assigned_to: assigned_to.map(String::from),
+                    created_by: created_by.map(String::from),
+                },
+            ),
+        );
+        self.publish_event(event).await;
+
+        Ok(task_id)
     }
 
     async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String> {
@@ -10508,17 +10525,49 @@ impl KernelHandle for LibreFangKernel {
                 }
             },
         };
-        self.memory
+        let result = self
+            .memory
             .task_claim(&resolved)
             .await
-            .map_err(|e| format!("Task claim failed: {e}"))
+            .map_err(|e| format!("Task claim failed: {e}"))?;
+
+        if let Some(ref task) = result {
+            let task_id = task["id"].as_str().unwrap_or("").to_string();
+            let event = librefang_types::event::Event::new(
+                AgentId::new(), // system-originated
+                librefang_types::event::EventTarget::Broadcast,
+                librefang_types::event::EventPayload::System(
+                    librefang_types::event::SystemEvent::TaskClaimed {
+                        task_id,
+                        claimed_by: resolved.clone(),
+                    },
+                ),
+            );
+            self.publish_event(event).await;
+        }
+
+        Ok(result)
     }
 
     async fn task_complete(&self, task_id: &str, result: &str) -> Result<(), String> {
         self.memory
             .task_complete(task_id, result)
             .await
-            .map_err(|e| format!("Task complete failed: {e}"))
+            .map_err(|e| format!("Task complete failed: {e}"))?;
+
+        let event = librefang_types::event::Event::new(
+            AgentId::new(), // system-originated
+            librefang_types::event::EventTarget::Broadcast,
+            librefang_types::event::EventPayload::System(
+                librefang_types::event::SystemEvent::TaskCompleted {
+                    task_id: task_id.to_string(),
+                    result: result.to_string(),
+                },
+            ),
+        );
+        self.publish_event(event).await;
+
+        Ok(())
     }
 
     async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
