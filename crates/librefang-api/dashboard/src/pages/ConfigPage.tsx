@@ -372,38 +372,39 @@ export function ConfigPage({ category }: { category: string }) {
   // ── Render ─────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-6 p-6">
-      <div className="flex items-start justify-between gap-4">
-        <PageHeader badge={t("nav.config")} title={categoryTitle} subtitle={t("config.desc", "System configuration editor")} icon={<Settings className="h-4 w-4" />} />
-        <div className="flex flex-col items-end gap-2 shrink-0">
-          {/* Section tabs — only shown when multiple sections exist */}
-          {sectionKeys.length > 1 && !q && (
-            <div className="flex items-center gap-1 bg-surface border border-border-subtle rounded-xl p-1">
-              {sectionKeys.map((sKey) => (
-                <button
-                  key={sKey}
-                  onClick={() => setActiveSection(sKey)}
-                  className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
-                    effectiveTab === sKey
-                      ? "bg-brand text-white shadow-sm"
-                      : "text-text-dim hover:text-text hover:bg-surface-hover"
-                  }`}
-                >
-                  {t(`config.sec_${sKey}`, sectionLabelFallback(sKey))}
-                </button>
-              ))}
-            </div>
-          )}
-          <div className="flex items-center gap-2">
-            {reloadStatus && (
-              <span className={`text-xs font-semibold ${reloadStatus.ok ? "text-success" : "text-danger"}`}>
-                {reloadStatus.msg}
-              </span>
-            )}
-            <Button variant="secondary" size="sm" onClick={() => reloadMutation.mutate()} isLoading={reloadMutation.isPending}>
-              <RefreshCw className="w-3 h-3 mr-1.5" />
-              {t("config.reload", "Reload")}
-            </Button>
+      <div className="flex items-center justify-between gap-4">
+        {/* LEFT: section tabs */}
+        {sectionKeys.length > 1 && !q ? (
+          <div className="flex items-center gap-1 bg-surface border border-border-subtle rounded-xl p-1">
+            {sectionKeys.map((sKey) => (
+              <button
+                key={sKey}
+                onClick={() => setActiveSection(sKey)}
+                className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                  effectiveTab === sKey
+                    ? "bg-brand text-white shadow-sm"
+                    : "text-text-dim hover:text-text hover:bg-surface-hover"
+                }`}
+              >
+                {t(`config.sec_${sKey}`, sectionLabelFallback(sKey))}
+              </button>
+            ))}
           </div>
+        ) : (
+          <div />
+        )}
+        {/* RIGHT: title + description + reload */}
+        <div className="flex items-center gap-4 shrink-0">
+          <PageHeader badge={t("nav.config")} title={categoryTitle} subtitle={t("config.desc", "System configuration editor")} icon={<Settings className="h-4 w-4" />} />
+          {reloadStatus && (
+            <span className={`text-xs font-semibold ${reloadStatus.ok ? "text-success" : "text-danger"}`}>
+              {reloadStatus.msg}
+            </span>
+          )}
+          <Button variant="secondary" size="sm" onClick={() => reloadMutation.mutate()} isLoading={reloadMutation.isPending}>
+            <RefreshCw className="w-3 h-3 mr-1.5" />
+            {t("config.reload", "Reload")}
+          </Button>
         </div>
       </div>
 
