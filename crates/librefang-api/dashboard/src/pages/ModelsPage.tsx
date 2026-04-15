@@ -30,7 +30,7 @@ export function ModelsPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   useCreateShortcut(() => setShowAdd(true));
   const [showHidden, setShowHidden] = useState(false);
-  const [collapsedProviders, setCollapsedProviders] = useState<Set<string>>(new Set());
+  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set());
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hideModelAction = useUIStore((s) => s.hideModel);
   const unhideModelAction = useUIStore((s) => s.unhideModel);
@@ -354,7 +354,7 @@ export function ModelsPage() {
         };
 
         const toggleProvider = (p: string) => {
-          setCollapsedProviders(prev => {
+          setExpandedProviders(prev => {
             const next = new Set(prev);
             if (next.has(p)) next.delete(p); else next.add(p);
             return next;
@@ -365,7 +365,7 @@ export function ModelsPage() {
           return (
             <div className="flex flex-col gap-3">
               {Array.from(grouped.entries()).map(([provider, models]) => {
-                const collapsed = collapsedProviders.has(provider);
+                const collapsed = !expandedProviders.has(provider);
                 const availCount = models.filter(m => m.available).length;
                 return (
                   <div key={provider} className="rounded-2xl border border-border-subtle overflow-hidden overflow-x-auto">
