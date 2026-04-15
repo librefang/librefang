@@ -928,6 +928,32 @@ pub fn is_cli_provider(name: &str) -> bool {
     )
 }
 
+/// Resolve the API key for a provider by checking all known sources:
+/// primary env var → alt env var → Codex credential file (for openai).
+///
+/// Returns `None` if no key is found through any source.
+pub fn resolve_provider_api_key(provider: &str) -> Option<String> {
+    let entry = find_provider(provider)?;
+    let non_empty = |v: String| if v.trim().is_empty() { None } else { Some(v) };
+
+    std::env::var(entry.api_key_env)
+        .ok()
+        .and_then(non_empty)
+        .or_else(|| {
+            entry
+                .alt_api_key_env
+                .and_then(|v| std::env::var(v).ok())
+                .and_then(non_empty)
+        })
+        .or_else(|| {
+            if entry.name == "openai" {
+                read_codex_credential()
+            } else {
+                None
+            }
+        })
+}
+
 /// Read an OpenAI API key from the Codex CLI credential file.
 ///
 /// Checks `$CODEX_HOME/auth.json` or `~/.codex/auth.json`.

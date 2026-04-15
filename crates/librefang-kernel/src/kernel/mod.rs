@@ -717,10 +717,20 @@ impl LibreFangKernel {
                 .map(|(id, base_url, key_env)| {
                     let kernel = Arc::clone(&self);
                     tokio::spawn(async move {
-                        let key = match std::env::var(&key_env) {
-                            Ok(k) if !k.trim().is_empty() => k,
-                            _ => return,
-                        };
+                        // Resolve the actual key via primary env var, alt env var,
+                        // and credential files. This is needed for AutoDetected
+                        // providers whose key lives in a fallback env var (e.g.
+                        // GOOGLE_API_KEY for gemini, not GEMINI_API_KEY).
+                        let key = librefang_runtime::drivers::resolve_provider_api_key(&id)
+                            .or_else(|| {
+                                std::env::var(&key_env)
+                                    .ok()
+                                    .filter(|k| !k.trim().is_empty())
+                            })
+                            .unwrap_or_default();
+                        if key.is_empty() {
+                            return;
+                        }
                         let result =
                             librefang_runtime::model_catalog::probe_api_key(&id, &base_url, &key)
                                 .await;
