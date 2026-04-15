@@ -92,7 +92,7 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }:
   const isDefault = currentDefault === providerId;
 
   const modelsQuery = useQuery({
-    queryKey: ["models", "provider", providerId],
+    queryKey: ["models", "provider", providerId, { available: true }],
     queryFn: () => listModels({ provider: providerId, available: true }),
     staleTime: 60_000,
   });
