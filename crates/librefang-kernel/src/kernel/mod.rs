@@ -2655,9 +2655,27 @@ system_prompt = "You are a helpful assistant."
         source_toml_path: Option<PathBuf>,
         predetermined_id: Option<AgentId>,
     ) -> KernelResult<AgentId> {
-        let agent_id = predetermined_id.unwrap_or_default();
-        let session_id = SessionId::new();
         let name = manifest.name.clone();
+        // Use a deterministic agent ID derived from the agent name so the
+        // same agent gets the same UUID across daemon restarts. This preserves
+        // session history associations in SQLite. Child agents spawned at
+        // runtime still use random IDs (via predetermined_id = None + parent).
+        let agent_id = predetermined_id.unwrap_or_else(|| {
+            if parent.is_none() {
+                AgentId::from_name(&name)
+            } else {
+                AgentId::new()
+            }
+        });
+
+        // Restore the most recent session for this agent if one exists in the
+        // database, so conversation history survives daemon restarts.
+        let session_id = self
+            .memory
+            .get_agent_session_ids(agent_id)
+            .ok()
+            .and_then(|ids| ids.into_iter().next())
+            .unwrap_or_default();
 
         // SECURITY: If this spawn is linked to a running parent agent,
         // enforce that the child's capabilities are a subset of the

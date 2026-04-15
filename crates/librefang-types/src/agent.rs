@@ -147,6 +147,20 @@ impl AgentId {
         Self(Uuid::new_v5(&Self::HAND_NAMESPACE, hand_id.as_bytes()))
     }
 
+    /// A fixed namespace UUID for deriving deterministic agent IDs from names.
+    const AGENT_NAMESPACE: Uuid = Uuid::from_bytes([
+        0xa7, 0x3e, 0xf1, 0x4b, 0x5c, 0x2d, 0x48, 0x9a, 0xb6, 0x1e, 0xd8, 0x4a, 0x9c, 0x0f, 0x7b,
+        0xe2,
+    ]);
+
+    /// Generate a deterministic AgentId from an agent name.
+    ///
+    /// Uses UUID v5 (SHA-1) so the same agent name always produces the same
+    /// ID across daemon restarts, preserving session history associations.
+    pub fn from_name(name: &str) -> Self {
+        Self(Uuid::new_v5(&Self::AGENT_NAMESPACE, name.as_bytes()))
+    }
+
     /// Generate a deterministic agent ID for a specific role within a multi-agent hand instance.
     ///
     /// **Backward compatibility**: when `instance_id` is `None`, uses the legacy
