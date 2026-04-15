@@ -240,6 +240,24 @@ pub enum SessionMode {
     New,
 }
 
+/// Web search augmentation mode.
+///
+/// Controls whether the agent loop automatically searches the web using the
+/// user's message and injects results into the LLM context before the call.
+/// This enables models that don't support tool/function calling (e.g. Ollama
+/// Gemma4) to benefit from web search without needing to invoke the `web_search` tool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchAugmentationMode {
+    /// Disabled (default).
+    #[default]
+    Off,
+    /// Augment only when the model catalog reports `supports_tools == false`.
+    Auto,
+    /// Always search the web before every LLM call.
+    Always,
+}
+
 /// The current lifecycle state of an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -631,6 +649,11 @@ pub struct AgentManifest {
     /// it survives restarts without requiring tag-based detection.
     #[serde(default)]
     pub is_hand: bool,
+    /// Web search augmentation mode — automatically search the web using the
+    /// user's message and inject results into the LLM context before the call.
+    /// Useful for models that don't support tool/function calling (e.g. Ollama).
+    #[serde(default)]
+    pub web_search_augmentation: WebSearchAugmentationMode,
 }
 
 fn default_true() -> bool {
@@ -675,6 +698,7 @@ impl Default for AgentManifest {
             thinking: None,
             context_injection: Vec::new(),
             is_hand: false,
+            web_search_augmentation: WebSearchAugmentationMode::default(),
         }
     }
 }

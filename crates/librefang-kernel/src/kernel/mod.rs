@@ -3207,6 +3207,17 @@ system_prompt = "You are a helpful assistant."
                 .map(|m| m.context_window as usize)
         });
 
+        // Inject model_supports_tools for auto web search augmentation
+        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&manifest.model.model)
+                .map(|m| m.supports_tools)
+        }) {
+            manifest.metadata.insert(
+                "model_supports_tools".to_string(),
+                serde_json::Value::Bool(supports),
+            );
+        }
+
         // Create a temporary in-memory session (empty — no history loaded)
         let ephemeral_session_id = SessionId::new();
         let mut ephemeral_session = librefang_memory::session::Session {
@@ -3737,6 +3748,17 @@ system_prompt = "You are a helpful assistant."
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
         let mut manifest = entry.manifest.clone();
+
+        // Inject model_supports_tools for auto web search augmentation
+        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&manifest.model.model)
+                .map(|m| m.supports_tools)
+        }) {
+            manifest.metadata.insert(
+                "model_supports_tools".to_string(),
+                serde_json::Value::Bool(supports),
+            );
+        }
 
         // Backfill thinking config from global config if per-agent is not set
         if manifest.thinking.is_none() {
@@ -5103,6 +5125,17 @@ system_prompt = "You are a helpful assistant."
             cat.find_model(&manifest.model.model)
                 .map(|m| m.context_window as usize)
         });
+
+        // Inject model_supports_tools for auto web search augmentation
+        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&manifest.model.model)
+                .map(|m| m.supports_tools)
+        }) {
+            manifest.metadata.insert(
+                "model_supports_tools".to_string(),
+                serde_json::Value::Bool(supports),
+            );
+        }
 
         // Snapshot skill registry before async call (RwLockReadGuard is !Send)
         let mut skill_snapshot = self

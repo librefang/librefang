@@ -1816,6 +1816,49 @@ fn prepare_llm_messages(
     }
 }
 
+/// Check if web search augmentation should be performed for this agent.
+fn should_augment_web_search(manifest: &AgentManifest) -> bool {
+    use librefang_types::agent::WebSearchAugmentationMode;
+    match manifest.web_search_augmentation {
+        WebSearchAugmentationMode::Off => false,
+        WebSearchAugmentationMode::Always => true,
+        WebSearchAugmentationMode::Auto => {
+            // Auto: augment when model catalog says supports_tools == false.
+            // If model is not in catalog (None), assume tools are supported (conservative).
+            let supports = manifest
+                .metadata
+                .get("model_supports_tools")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            !supports
+        }
+    }
+}
+
+/// Perform web search augmentation — search the web using the user's message
+/// and return formatted results for context injection.
+async fn web_search_augment(
+    manifest: &AgentManifest,
+    user_message: &str,
+    web_ctx: Option<&WebToolsContext>,
+) -> Option<String> {
+    if !should_augment_web_search(manifest) {
+        return None;
+    }
+    let ctx = web_ctx?;
+    match ctx.search.search(user_message, 5).await {
+        Ok(results) if !results.trim().is_empty() => {
+            debug!("Web search augmentation: injecting search results");
+            Some(results)
+        }
+        Ok(_) => None,
+        Err(e) => {
+            warn!("Web search augmentation failed: {e}");
+            None
+        }
+    }
+}
+
 /// Serialize session messages into a JSON array for auto_memorize.
 fn serialize_session_messages(
     messages: &[librefang_types::message::Message],
@@ -2220,6 +2263,17 @@ pub async fn run_agent_loop(
         &effective_user_message,
         memory_context_msg,
     );
+
+    // Web search augmentation: inject search results into context for models
+    // that cannot use tool-based web_search (e.g. Ollama models without function calling).
+    if let Some(search_results) = web_search_augment(manifest, user_message, web_ctx).await {
+        messages.insert(
+            0,
+            Message::user(format!(
+                "[Web search results — use these to inform your response]\n{search_results}"
+            )),
+        );
+    }
 
     let mut total_usage = TokenUsage::default();
     let final_response;
@@ -3157,6 +3211,17 @@ pub async fn run_agent_loop_streaming(
         &effective_user_message,
         memory_context_msg,
     );
+
+    // Web search augmentation: inject search results into context for models
+    // that cannot use tool-based web_search (e.g. Ollama models without function calling).
+    if let Some(search_results) = web_search_augment(manifest, user_message, web_ctx).await {
+        messages.insert(
+            0,
+            Message::user(format!(
+                "[Web search results — use these to inform your response]\n{search_results}"
+            )),
+        );
+    }
 
     let mut total_usage = TokenUsage::default();
     let final_response;
