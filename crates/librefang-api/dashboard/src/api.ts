@@ -778,13 +778,14 @@ export interface AgentDetail {
   mode?: string;
   thinking?: { budget_tokens?: number; stream_thinking?: boolean };
   is_hand?: boolean;
+  web_search_augmentation?: "off" | "auto" | "always";
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
-export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string; temperature?: number }): Promise<ApiActionResponse> {
+export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string; temperature?: number; web_search_augmentation?: "off" | "auto" | "always" }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 

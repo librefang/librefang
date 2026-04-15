@@ -1835,27 +1835,151 @@ fn should_augment_web_search(manifest: &AgentManifest) -> bool {
     }
 }
 
-/// Perform web search augmentation — search the web using the user's message
-/// and return formatted results for context injection.
+/// System prompt for LLM-based search query generation.
+/// Designed to work with small local models (Gemma, Llama, Qwen, etc.).
+const SEARCH_QUERY_GEN_PROMPT: &str = r#"You are a search query generator. Analyze the conversation and generate 1-3 concise, diverse web search queries that would help answer the user's latest message.
+
+Rules:
+- Respond ONLY with a JSON object: {"queries": ["query1", "query2"]}
+- Each query should be concise (3-8 words) and search-engine-friendly
+- Generate queries in the same language as the user's message
+- If the question is purely conversational (greetings, thanks, etc.), return: {"queries": []}
+- Prioritize queries that retrieve factual, up-to-date information
+- Today's date: "#;
+
+/// Use the LLM to generate focused search queries from the conversation history.
+/// Falls back to `None` on any failure (caller uses raw user message instead).
+async fn generate_search_queries(
+    driver: &dyn LlmDriver,
+    manifest: &AgentManifest,
+    session_messages: &[Message],
+    user_message: &str,
+) -> Option<Vec<String>> {
+    // Build a compact conversation summary from the last few messages
+    let recent: Vec<&Message> = session_messages
+        .iter()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    let mut history = String::new();
+    for msg in &recent {
+        let role = match msg.role {
+            Role::System => continue,
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+        };
+        let text = msg.content.text_content();
+        if !text.is_empty() {
+            history.push_str(&format!("{role}: {text}\n"));
+        }
+    }
+
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let system = format!("{SEARCH_QUERY_GEN_PROMPT}{today}");
+
+    let request = CompletionRequest {
+        model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
+        messages: vec![Message::user(format!("{history}\nUser: {user_message}"))],
+        tools: vec![],
+        max_tokens: 200,
+        temperature: 0.0,
+        system: Some(system),
+        thinking: None,
+        prompt_caching: false,
+        response_format: None,
+        timeout_secs: Some(15),
+        extra_body: None,
+    };
+
+    let response =
+        match tokio::time::timeout(std::time::Duration::from_secs(15), driver.complete(request))
+            .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                debug!("Search query generation LLM error: {e}");
+                return None;
+            }
+            Err(_) => {
+                debug!("Search query generation timed out");
+                return None;
+            }
+        };
+
+    let text = response.text();
+    // Extract JSON from response — find the outermost { }
+    let start = text.find('{')?;
+    let end = text.rfind('}')? + 1;
+    let json_str = &text[start..end];
+
+    let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let queries: Vec<String> = parsed["queries"]
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if queries.is_empty() {
+        debug!("LLM determined no search needed for this message");
+        // Return empty vec to signal "no search needed" (distinct from None = "generation failed")
+        Some(Vec::new())
+    } else {
+        debug!(
+            count = queries.len(),
+            "Generated search queries: {:?}", queries
+        );
+        Some(queries)
+    }
+}
+
+/// Perform web search augmentation — optionally generate queries via LLM,
+/// search the web, and return formatted results for context injection.
 async fn web_search_augment(
     manifest: &AgentManifest,
     user_message: &str,
     web_ctx: Option<&WebToolsContext>,
+    driver: &dyn LlmDriver,
+    session_messages: &[Message],
 ) -> Option<String> {
     if !should_augment_web_search(manifest) {
         return None;
     }
     let ctx = web_ctx?;
-    match ctx.search.search(user_message, 5).await {
-        Ok(results) if !results.trim().is_empty() => {
-            debug!("Web search augmentation: injecting search results");
-            Some(results)
+
+    // Try LLM-based query generation.
+    // Some(vec![...]) = generated queries, Some(vec![]) = no search needed, None = generation failed
+    let queries =
+        match generate_search_queries(driver, manifest, session_messages, user_message).await {
+            Some(q) if q.is_empty() => return None, // LLM says no search needed
+            Some(q) => q,
+            None => vec![user_message.to_string()], // Generation failed, fall back to raw message
+        };
+
+    // Search with each query and collect results
+    let mut all_results = String::new();
+    for query in &queries {
+        match ctx.search.search(query, 3).await {
+            Ok(results) if !results.trim().is_empty() => {
+                all_results.push_str(&results);
+                all_results.push('\n');
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(%query, "Web search augmentation query failed: {e}");
+            }
         }
-        Ok(_) => None,
-        Err(e) => {
-            warn!("Web search augmentation failed: {e}");
-            None
-        }
+    }
+
+    if all_results.trim().is_empty() {
+        None
+    } else {
+        debug!("Web search augmentation: injecting search results");
+        Some(all_results)
     }
 }
 
@@ -2264,9 +2388,17 @@ pub async fn run_agent_loop(
         memory_context_msg,
     );
 
-    // Web search augmentation: inject search results into context for models
-    // that cannot use tool-based web_search (e.g. Ollama models without function calling).
-    if let Some(search_results) = web_search_augment(manifest, user_message, web_ctx).await {
+    // Web search augmentation: generate search queries via LLM, search the web,
+    // and inject results into context for models without tool/function calling.
+    if let Some(search_results) = web_search_augment(
+        manifest,
+        user_message,
+        web_ctx,
+        driver.as_ref(),
+        &session.messages,
+    )
+    .await
+    {
         messages.insert(
             0,
             Message::user(format!(
@@ -3212,9 +3344,17 @@ pub async fn run_agent_loop_streaming(
         memory_context_msg,
     );
 
-    // Web search augmentation: inject search results into context for models
-    // that cannot use tool-based web_search (e.g. Ollama models without function calling).
-    if let Some(search_results) = web_search_augment(manifest, user_message, web_ctx).await {
+    // Web search augmentation: generate search queries via LLM, search the web,
+    // and inject results into context for models without tool/function calling.
+    if let Some(search_results) = web_search_augment(
+        manifest,
+        user_message,
+        web_ctx,
+        driver.as_ref(),
+        &session.messages,
+    )
+    .await
+    {
         messages.insert(
             0,
             Message::user(format!(
@@ -8272,5 +8412,123 @@ mod tests {
             }
             other => panic!("expected blocks message, got {other:?}"),
         }
+    }
+
+    // ── Web search augmentation tests ───────────────────────────
+
+    #[test]
+    fn test_should_augment_web_search_off() {
+        let manifest = AgentManifest::default();
+        // Default is Off
+        assert!(!should_augment_web_search(&manifest));
+    }
+
+    #[test]
+    fn test_should_augment_web_search_always() {
+        let mut manifest = AgentManifest::default();
+        manifest.web_search_augmentation =
+            librefang_types::agent::WebSearchAugmentationMode::Always;
+        assert!(should_augment_web_search(&manifest));
+    }
+
+    #[test]
+    fn test_should_augment_web_search_auto_with_tools() {
+        let mut manifest = AgentManifest::default();
+        manifest.web_search_augmentation = librefang_types::agent::WebSearchAugmentationMode::Auto;
+        // model_supports_tools = true → don't augment
+        manifest.metadata.insert(
+            "model_supports_tools".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        assert!(!should_augment_web_search(&manifest));
+    }
+
+    #[test]
+    fn test_should_augment_web_search_auto_without_tools() {
+        let mut manifest = AgentManifest::default();
+        manifest.web_search_augmentation = librefang_types::agent::WebSearchAugmentationMode::Auto;
+        // model_supports_tools = false → augment
+        manifest.metadata.insert(
+            "model_supports_tools".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        assert!(should_augment_web_search(&manifest));
+    }
+
+    #[test]
+    fn test_should_augment_web_search_auto_no_metadata() {
+        let mut manifest = AgentManifest::default();
+        manifest.web_search_augmentation = librefang_types::agent::WebSearchAugmentationMode::Auto;
+        // No metadata → assume tools supported → don't augment (conservative)
+        assert!(!should_augment_web_search(&manifest));
+    }
+
+    #[test]
+    fn test_search_query_gen_prompt_not_empty() {
+        assert!(!SEARCH_QUERY_GEN_PROMPT.is_empty());
+        assert!(SEARCH_QUERY_GEN_PROMPT.contains("queries"));
+    }
+
+    #[test]
+    fn test_web_search_augmentation_mode_serde_roundtrip() {
+        use librefang_types::agent::WebSearchAugmentationMode;
+
+        for mode in [
+            WebSearchAugmentationMode::Off,
+            WebSearchAugmentationMode::Auto,
+            WebSearchAugmentationMode::Always,
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: WebSearchAugmentationMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back);
+        }
+    }
+
+    #[test]
+    fn test_web_search_augmentation_mode_toml_roundtrip() {
+        #[derive(serde::Deserialize)]
+        struct W {
+            mode: librefang_types::agent::WebSearchAugmentationMode,
+        }
+        for label in ["off", "auto", "always"] {
+            let toml_str = format!("mode = \"{label}\"");
+            let w: W = toml::from_str(&toml_str).unwrap();
+            let json = serde_json::to_string(&w.mode).unwrap();
+            assert_eq!(json, format!("\"{label}\""));
+        }
+    }
+
+    #[test]
+    fn test_manifest_default_web_search_augmentation_is_off() {
+        let manifest = AgentManifest::default();
+        assert_eq!(
+            manifest.web_search_augmentation,
+            librefang_types::agent::WebSearchAugmentationMode::Off,
+        );
+    }
+
+    #[test]
+    fn test_manifest_with_web_search_augmentation_toml() {
+        let toml_str = r#"
+            name = "search-bot"
+            web_search_augmentation = "always"
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            manifest.web_search_augmentation,
+            librefang_types::agent::WebSearchAugmentationMode::Always,
+        );
+    }
+
+    #[test]
+    fn test_manifest_without_web_search_augmentation_toml() {
+        let toml_str = r#"
+            name = "plain-bot"
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            manifest.web_search_augmentation,
+            librefang_types::agent::WebSearchAugmentationMode::Off,
+        );
     }
 }

@@ -1781,6 +1781,7 @@ pub async fn get_agent(
             "mcp_servers": entry.manifest.mcp_servers,
             "mcp_servers_mode": if entry.manifest.mcp_servers.is_empty() { "all" } else { "allowlist" },
             "fallback_models": entry.manifest.fallback_models,
+            "web_search_augmentation": entry.manifest.web_search_augmentation,
         })),
     )
 }
@@ -3184,6 +3185,9 @@ pub struct PatchAgentConfigRequest {
     pub temperature: Option<f32>,
     #[schema(value_type = Option<Vec<serde_json::Value>>)]
     pub fallback_models: Option<Vec<librefang_types::agent::FallbackModel>>,
+    /// Web search augmentation mode: "off", "auto", or "always".
+    #[schema(value_type = Option<String>)]
+    pub web_search_augmentation: Option<librefang_types::agent::WebSearchAugmentationMode>,
 }
 
 /// PATCH /api/agents/{id}/config — Hot-update agent name, description, system prompt, and identity.
@@ -3432,6 +3436,21 @@ pub async fn patch_agent_config(
             .kernel
             .agent_registry()
             .update_fallback_models(agent_id, fallbacks)
+            .is_err()
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    }
+
+    // Update web search augmentation mode
+    if let Some(mode) = req.web_search_augmentation {
+        if state
+            .kernel
+            .agent_registry()
+            .update_web_search_augmentation(agent_id, mode)
             .is_err()
         {
             return (
