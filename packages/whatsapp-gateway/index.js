@@ -1609,7 +1609,11 @@ async function startConnection() {
         } else if (isStranger) {
           const strangerContext = buildStrangerContext(pushName, phone, sender);
           messageToSend = strangerContext + messageText;
-        } else if (isOwner && activeConversations.size > 0) {
+        } else if (isOwner && activeConversations.size > 0 && ownerIntentsRelay(messageText)) {
+          // Only inject the relay system instruction when the owner's text
+          // expresses an explicit delegated-speech intent. A neutral greeting
+          // from the owner to the agent during an active stranger conversation
+          // must NOT be forced into relay mode.
           const context = buildConversationsContext();
           systemPrefix = buildRelaySystemInstruction();
           messageToSend = context + '\n\n[OWNER_MESSAGE]\n' + messageText;
@@ -2113,6 +2117,29 @@ async function processMediaMessage(fullMsg, innerMsg, agentId) {
     console.error(`[gateway] Media processing failed for ${filename}: ${err.message}`);
     return null; // Caller will fall back to text descriptor
   }
+}
+
+// ---------------------------------------------------------------------------
+// Detect whether an owner message expresses relay intent.
+//
+// Before this guard, `buildRelaySystemInstruction` was injected for every
+// owner turn whenever any stranger conversation was active — which forced
+// the model to interpret neutral owner-to-bot messages ("saludos", "hola",
+// "come stai?") as requests to relay a reply to the last stranger. Result
+// observed in production: owner writing "saludos" to the bot triggered a
+// RELAY_TO_STRANGER to an unrelated namesake contact.
+//
+// Only inject the relay instruction when the owner's message expresses an
+// explicit delegated-speech intent. Everything else is treated as owner
+// talking directly to the agent.
+function ownerIntentsRelay(text) {
+  const t = (text || '').trim().toLowerCase();
+  if (!t) return false;
+  if (t.startsWith('/relay') || t.startsWith('/reply')) return true;
+  if (/(^|\s)@[\w.+-]+/.test(t)) return true;
+  return /\b(rispondi a|scrivi a|scrivigli|digli|dille|dica|saluta|manda a|inoltra|chiedi a|reply to|tell|write to|forward to|relay to)\b/.test(
+    t,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2986,6 +3013,7 @@ module.exports = {
   markdownToWhatsApp,
   extractNotifyOwner,
   extractRelayCommands,
+  ownerIntentsRelay,
   buildConversationsContext,
   isRateLimited,
   buildCorsHeaders,

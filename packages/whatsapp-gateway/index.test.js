@@ -17,6 +17,7 @@ const {
   markdownToWhatsApp,
   extractNotifyOwner,
   extractRelayCommands,
+  ownerIntentsRelay,
   buildConversationsContext,
   isRateLimited,
   buildCorsHeaders,
@@ -1157,5 +1158,57 @@ describe('createHoldbackAccumulator (OB-07 streaming hold-back)', () => {
     await acc.push('partial');
     assert.equal(acc.buffered, 'partial');
     assert.equal(acc.hasFlushed, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ownerIntentsRelay — guards the RELAY system-instruction injection so that
+// neutral owner-to-agent messages don't get forced into relay mode when a
+// stranger conversation happens to be active.
+// ---------------------------------------------------------------------------
+describe('ownerIntentsRelay', () => {
+  it('returns false for neutral greetings', () => {
+    assert.equal(ownerIntentsRelay('saludos'), false);
+    assert.equal(ownerIntentsRelay('hola'), false);
+    assert.equal(ownerIntentsRelay('ciao'), false);
+    assert.equal(ownerIntentsRelay('Buondì'), false);
+    assert.equal(ownerIntentsRelay('come stai?'), false);
+    assert.equal(ownerIntentsRelay(''), false);
+    assert.equal(ownerIntentsRelay('   '), false);
+  });
+
+  it('returns true for explicit /relay or /reply command', () => {
+    assert.equal(ownerIntentsRelay('/relay tell him I will be late'), true);
+    assert.equal(ownerIntentsRelay('/reply ok grazie'), true);
+  });
+
+  it('returns true for @mention', () => {
+    assert.equal(ownerIntentsRelay('@alice hi there'), true);
+    assert.equal(ownerIntentsRelay('please say @bob hi'), true);
+  });
+
+  it('returns true for Italian delegated-speech verbs', () => {
+    assert.equal(ownerIntentsRelay('rispondi a Federico che sto bene'), true);
+    assert.equal(ownerIntentsRelay('digli che arrivo'), true);
+    assert.equal(ownerIntentsRelay('saluta Caterina per me'), true);
+    assert.equal(ownerIntentsRelay('scrivi a Paolo'), true);
+    assert.equal(ownerIntentsRelay('chiedi a Mario il prezzo'), true);
+    assert.equal(ownerIntentsRelay('inoltra a tutti la comunicazione'), true);
+  });
+
+  it('returns true for English delegated-speech verbs', () => {
+    assert.equal(ownerIntentsRelay('reply to Bob that I agree'), true);
+    assert.equal(ownerIntentsRelay('tell Alice I am busy'), true);
+    assert.equal(ownerIntentsRelay('write to the team'), true);
+  });
+
+  it('is case-insensitive and whitespace-tolerant', () => {
+    assert.equal(ownerIntentsRelay('  RISPONDI A Mario ok'), true);
+    assert.equal(ownerIntentsRelay('DIGLI che sto arrivando'), true);
+  });
+
+  it('does not match partial words', () => {
+    assert.equal(ownerIntentsRelay('salutami la zia'), false);
+    assert.equal(ownerIntentsRelay('rispostaok'), false);
   });
 });
