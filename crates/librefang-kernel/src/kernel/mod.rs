@@ -11896,6 +11896,9 @@ impl LibreFangKernel {
             allowed_tools: deferred.allowed_tools.as_deref(),
             caller_agent_id: Some(deferred.agent_id.as_str()),
             skill_registry: Some(skill_snapshot),
+            // Deferred tools have already passed the approval gate; skill
+            // allowlist is not available here so we skip the check (None).
+            allowed_skills: None,
             mcp_connections: Some(&self.mcp_connections),
             web_ctx: Some(&self.web_ctx),
             browser_ctx: Some(&self.browser_ctx),

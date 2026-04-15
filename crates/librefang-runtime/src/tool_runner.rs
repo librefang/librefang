@@ -304,6 +304,8 @@ pub struct ToolExecContext<'a> {
     pub allowed_tools: Option<&'a [String]>,
     pub caller_agent_id: Option<&'a str>,
     pub skill_registry: Option<&'a SkillRegistry>,
+    /// Skill allowlist for the calling agent. Empty slice = all skills allowed.
+    pub allowed_skills: Option<&'a [String]>,
     pub mcp_connections: Option<&'a tokio::sync::Mutex<Vec<mcp::McpConnection>>>,
     pub web_ctx: Option<&'a WebToolsContext>,
     pub browser_ctx: Option<&'a crate::browser::BrowserManager>,
@@ -337,6 +339,7 @@ pub async fn execute_tool_raw(
         allowed_tools,
         caller_agent_id,
         skill_registry,
+        allowed_skills,
         mcp_connections,
         web_ctx,
         browser_ctx,
@@ -569,7 +572,7 @@ pub async fn execute_tool_raw(
         "system_time" => Ok(tool_system_time()),
 
         // Skill file read tool
-        "skill_read_file" => tool_skill_read_file(input, *skill_registry).await,
+        "skill_read_file" => tool_skill_read_file(input, *skill_registry, *allowed_skills).await,
 
         // Cron scheduling tools
         "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id).await,
@@ -828,6 +831,7 @@ pub async fn execute_tool(
     allowed_tools: Option<&[String]>,
     caller_agent_id: Option<&str>,
     skill_registry: Option<&SkillRegistry>,
+    allowed_skills: Option<&[String]>,
     mcp_connections: Option<&tokio::sync::Mutex<Vec<mcp::McpConnection>>>,
     web_ctx: Option<&WebToolsContext>,
     browser_ctx: Option<&crate::browser::BrowserManager>,
@@ -970,6 +974,7 @@ pub async fn execute_tool(
         allowed_tools,
         caller_agent_id,
         skill_registry,
+        allowed_skills,
         mcp_connections,
         web_ctx,
         browser_ctx,
@@ -4703,10 +4708,21 @@ pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, Stri
 async fn tool_skill_read_file(
     input: &serde_json::Value,
     skill_registry: Option<&SkillRegistry>,
+    allowed_skills: Option<&[String]>,
 ) -> Result<String, String> {
     let registry = skill_registry.ok_or("Skill registry not available")?;
     let skill_name = input["skill"].as_str().ok_or("Missing 'skill' parameter")?;
     let rel_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+
+    // Enforce agent skill allowlist: if the agent specifies allowed skills
+    // (non-empty list), only those skills can be read. Empty = all allowed.
+    if let Some(allowed) = allowed_skills {
+        if !allowed.is_empty() && !allowed.iter().any(|s| s == skill_name) {
+            return Err(format!(
+                "Access denied: agent is not allowed to access skill '{skill_name}'"
+            ));
+        }
+    }
 
     // Reject absolute paths early — Path::join replaces the base when given
     // an absolute path, which would bypass the skill directory containment.
@@ -5308,6 +5324,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5341,6 +5358,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5371,6 +5389,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5401,6 +5420,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5430,6 +5450,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5459,6 +5480,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5488,6 +5510,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5519,6 +5542,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5550,6 +5574,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5607,6 +5632,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5642,6 +5668,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5685,6 +5712,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             Some(workspace.path()),
@@ -5728,6 +5756,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5781,6 +5810,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5970,6 +6000,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6022,6 +6053,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6233,6 +6265,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6270,6 +6303,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6307,6 +6341,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6356,6 +6391,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None, // media_engine
@@ -6406,6 +6442,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None, // media_engine
@@ -6497,6 +6534,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6533,6 +6571,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6578,6 +6617,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6613,6 +6653,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6648,6 +6689,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6682,6 +6724,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6716,6 +6759,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -7042,7 +7086,7 @@ description = "test"
             create_skill_registry_with_file(dir.path(), "my-skill", "refs/guide.md", "hello world");
 
         let input = serde_json::json!({ "skill": "my-skill", "path": "refs/guide.md" });
-        let result = tool_skill_read_file(&input, Some(&registry)).await;
+        let result = tool_skill_read_file(&input, Some(&registry), None).await;
         assert_eq!(result.unwrap(), "hello world");
     }
 
@@ -7052,7 +7096,7 @@ description = "test"
         let registry = create_skill_registry_with_file(dir.path(), "evil", "dummy.txt", "ok");
 
         let input = serde_json::json!({ "skill": "evil", "path": "../../etc/passwd" });
-        let result = tool_skill_read_file(&input, Some(&registry)).await;
+        let result = tool_skill_read_file(&input, Some(&registry), None).await;
         assert!(result.is_err());
     }
 
@@ -7062,7 +7106,7 @@ description = "test"
         let registry = create_skill_registry_with_file(dir.path(), "exists", "f.txt", "ok");
 
         let input = serde_json::json!({ "skill": "nope", "path": "f.txt" });
-        let result = tool_skill_read_file(&input, Some(&registry)).await;
+        let result = tool_skill_read_file(&input, Some(&registry), None).await;
         assert!(result.unwrap_err().contains("not found"));
     }
 
@@ -7072,8 +7116,30 @@ description = "test"
         let registry = create_skill_registry_with_file(dir.path(), "abs", "dummy.txt", "ok");
 
         let input = serde_json::json!({ "skill": "abs", "path": "/etc/passwd" });
-        let result = tool_skill_read_file(&input, Some(&registry)).await;
+        let result = tool_skill_read_file(&input, Some(&registry), None).await;
         assert!(result.unwrap_err().contains("absolute paths"));
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_enforces_allowlist() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let registry =
+            create_skill_registry_with_file(dir.path(), "secret", "data.txt", "classified");
+
+        // Agent only allowed "other-skill", not "secret"
+        let allowed = vec!["other-skill".to_string()];
+        let input = serde_json::json!({ "skill": "secret", "path": "data.txt" });
+        let result = tool_skill_read_file(&input, Some(&registry), Some(&allowed)).await;
+        assert!(result.unwrap_err().contains("not allowed"));
+
+        // Empty allowlist means all skills are accessible
+        let empty: Vec<String> = vec![];
+        let result = tool_skill_read_file(&input, Some(&registry), Some(&empty)).await;
+        assert!(result.is_ok());
+
+        // None allowlist (deferred context) also allows access
+        let result = tool_skill_read_file(&input, Some(&registry), None).await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -7084,7 +7150,9 @@ description = "test"
         let registry = create_skill_registry_with_file(dir.path(), "big", "large.txt", &content);
 
         let input = serde_json::json!({ "skill": "big", "path": "large.txt" });
-        let result = tool_skill_read_file(&input, Some(&registry)).await.unwrap();
+        let result = tool_skill_read_file(&input, Some(&registry), None)
+            .await
+            .unwrap();
         assert!(result.contains("truncated"));
         // Must not panic — the point of this test
     }
