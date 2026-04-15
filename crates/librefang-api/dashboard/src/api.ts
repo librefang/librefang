@@ -953,6 +953,20 @@ export async function synthesizeSpeech(req: { text: string; provider?: string; m
   return post<SpeechResult>("/api/media/speech", req);
 }
 
+export async function transcribeAudio(audioBlob: Blob): Promise<{ text: string; provider: string; model: string }> {
+  const response = await fetch("/api/media/transcribe", {
+    method: "POST",
+    headers: buildHeaders({
+      "Content-Type": audioBlob.type || "audio/webm",
+    }),
+    body: audioBlob,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as { text: string; provider: string; model: string };
+}
+
 export async function submitVideo(req: { prompt: string; provider?: string; model?: string }): Promise<MediaVideoSubmitResult> {
   return post<MediaVideoSubmitResult>("/api/media/video", req);
 }

@@ -10,13 +10,14 @@ import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } f
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { ToolCallCard } from "../components/ui/ToolCallCard";
 import { filterVisible } from "../lib/hiddenModels";
+import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
 import "katex/dist/katex.min.css";
 
@@ -793,6 +794,10 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
   const setDeepThinking = useUIStore((s) => s.setDeepThinking);
   const setShowThinkingProcess = useUIStore((s) => s.setShowThinkingProcess);
 
+  const voiceInput = useVoiceInput(useCallback((text: string) => {
+    setMessage((prev) => (prev ? prev + " " + text : text));
+  }, []));
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (message.trim() && !effectiveDisabled) {
@@ -878,12 +883,29 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
                 handleSubmit(e);
               }
             }}
-            placeholder={placeholder}
+            placeholder={voiceInput.isRecording ? t("chat.voice_recording") : voiceInput.isTranscribing ? t("chat.voice_transcribing") : placeholder}
             disabled={effectiveDisabled}
             rows={1}
             className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
         </div>
+        {voiceInput.isSupported && (
+          <button
+            type="button"
+            onClick={voiceInput.toggleRecording}
+            disabled={effectiveDisabled || voiceInput.isTranscribing}
+            title={voiceInput.isRecording ? t("chat.voice_stop") : t("chat.voice_input")}
+            className={`group relative px-3 sm:px-3.5 py-2.5 sm:py-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed ${
+              voiceInput.isRecording
+                ? "bg-error/10 text-error border border-error/30 animate-pulse"
+                : voiceInput.isTranscribing
+                  ? "bg-warning/10 text-warning border border-warning/30"
+                  : "bg-surface text-text-dim border border-border-subtle hover:text-text hover:border-border hover:-translate-y-0.5"
+            }`}
+          >
+            {voiceInput.isRecording ? <MicOff className="h-4 w-4" /> : voiceInput.isTranscribing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mic className="h-4 w-4" />}
+          </button>
+        )}
         <button
           type="submit"
           disabled={!message.trim() || effectiveDisabled}
