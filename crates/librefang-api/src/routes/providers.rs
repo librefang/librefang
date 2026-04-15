@@ -305,8 +305,7 @@ pub async fn get_model_overrides(
         .model_catalog_ref()
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let key = id.clone();
-    match catalog.get_overrides(&key) {
+    match catalog.get_overrides(&id) {
         Some(o) => (StatusCode::OK, Json(serde_json::to_value(o).unwrap())),
         None => (StatusCode::OK, Json(serde_json::json!({}))),
     }
@@ -324,9 +323,17 @@ pub async fn set_model_overrides(
         .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner());
+    let previous = catalog.get_overrides(&id).cloned();
     catalog.set_overrides(id.clone(), body);
     if let Err(e) = catalog.save_overrides(&overrides_path) {
         tracing::warn!("Failed to persist model overrides: {e}");
+        // Roll back in-memory change so catalog stays consistent with disk.
+        match previous {
+            Some(prev) => catalog.set_overrides(id, prev),
+            None => {
+                catalog.remove_overrides(&id);
+            }
+        }
         return ApiErrorResponse::internal(format!("Failed to persist overrides: {e}"))
             .into_json_tuple();
     }

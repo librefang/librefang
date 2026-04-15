@@ -1637,6 +1637,7 @@
     "supports_tools": "工具调用",
     "supports_vision": "视觉能力",
     "supports_streaming": "流式输出",
+    "supports_thinking": "推理",
     "custom": "自定义",
     "delete_model": "删除自定义模型",
     "model_added": "模型添加成功",

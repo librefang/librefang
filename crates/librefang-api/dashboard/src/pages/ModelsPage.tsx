@@ -730,7 +730,8 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
 
   const handleSave = useCallback(async () => {
     setSaving(true);
-    const overrides: ModelOverrides = { model_type: modelType };
+    const overrides: ModelOverrides = {};
+    if (modelType !== "chat") overrides.model_type = modelType;
     if (tempEnabled) overrides.temperature = temperature;
     if (topPEnabled) overrides.top_p = topP;
     if (maxTokensEnabled) overrides.max_tokens = maxTokens;
@@ -825,7 +826,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
                 supported ? "border-success/30 bg-success/10 text-success" : "border-border-subtle text-text-dim/40"
               }`}>
                 <Icon className="w-3.5 h-3.5" />
-                {t(`models.supports_${key === "tools" ? "tools" : key === "vision" ? "vision" : "streaming"}`)}
+                {t(`models.supports_${key}`)}
               </span>
             ))}
           </div>
