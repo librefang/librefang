@@ -302,10 +302,9 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         ]);
       };
       if (trimmed === "/help") {
-        const rows = SLASH_COMMANDS.map(c =>
-          `| \`${c.cmd}${c.argsHint ? " " + c.argsHint : ""}\` | ${t(`chat.${c.descKey}`)} |`
-        ).join("\n");
-        sysMsg(`| ${t("chat.cmd_col_command", "命令")} | ${t("chat.cmd_col_desc", "说明")} |\n|---|---|\n${rows}`);
+        sysMsg(SLASH_COMMANDS.map(c =>
+          `- \`${c.cmd}${c.argsHint ? " " + c.argsHint : ""}\` — ${t(`chat.${c.descKey}`)}`
+        ).join("\n"));
         return;
       }
       if (trimmed === "/clear") { setMessages([]); return; }
@@ -615,12 +614,10 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
     const isMultiLine = message.content.includes("\n");
     if (isMultiLine) {
       return (
-        <div className="flex flex-col items-center gap-2 py-4 px-6">
-          <div className="h-px w-24 bg-gradient-to-r from-transparent via-border-subtle to-transparent" />
-          <div className="w-full max-w-lg text-[11px] text-text-dim/60 [&_table]:w-full [&_table]:border-collapse [&_td]:py-0.5 [&_td]:px-2 [&_td:first-child]:text-brand [&_td:first-child]:font-mono [&_td:first-child]:font-bold [&_th]:text-[9px] [&_th]:uppercase [&_th]:tracking-widest [&_th]:text-text-dim/40 [&_th]:pb-1 [&_th]:px-2 [&_code]:text-brand [&_code]:font-mono">
+        <div className="flex justify-start py-2">
+          <div className="max-w-[min(90%,56ch)] text-xs text-text-dim/70 [&_code]:text-brand [&_code]:font-mono [&_ul]:space-y-1 [&_li]:list-none [&_li]:flex [&_li]:gap-2">
             <MarkdownContent>{message.content}</MarkdownContent>
           </div>
-          <div className="h-px w-24 bg-gradient-to-r from-transparent via-border-subtle to-transparent" />
         </div>
       );
     }
