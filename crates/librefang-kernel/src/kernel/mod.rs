@@ -7346,12 +7346,12 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Uses the default driver with low max_tokens and 0 temperature.
     /// Returns `None` on error or timeout (caller should fail-open).
-    pub async fn one_shot_llm_call(&self, _model: &str, prompt: &str) -> Result<String, String> {
+    pub async fn one_shot_llm_call(&self, model: &str, prompt: &str) -> Result<String, String> {
         use librefang_runtime::llm_driver::CompletionRequest;
         use librefang_types::message::Message;
 
         let request = CompletionRequest {
-            model: String::new(), // use driver default
+            model: model.to_string(),
             messages: vec![Message::user(prompt.to_string())],
             tools: vec![],
             max_tokens: 10,
