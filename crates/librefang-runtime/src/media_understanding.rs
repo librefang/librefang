@@ -265,8 +265,6 @@ fn detect_vision_provider() -> Option<&'static str> {
     None
 }
 
-/// Map a known audio MIME type to the extension Whisper expects.
-/// Returns `None` for MIME types that aren't in Whisper's supported set so
 // ── STT provider helpers ──────────────────────────────────────────────
 
 /// Resolve Whisper-compatible API URL and key for a provider.
