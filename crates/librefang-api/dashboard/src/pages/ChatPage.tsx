@@ -615,10 +615,12 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
     const isMultiLine = message.content.includes("\n");
     if (isMultiLine) {
       return (
-        <div className="flex justify-center py-3 px-4">
-          <div className="w-full max-w-xl rounded-xl border border-border-subtle bg-surface/60 px-4 py-3 text-sm">
+        <div className="flex flex-col items-center gap-2 py-4 px-6">
+          <div className="h-px w-24 bg-gradient-to-r from-transparent via-border-subtle to-transparent" />
+          <div className="w-full max-w-lg text-[11px] text-text-dim/60 [&_table]:w-full [&_table]:border-collapse [&_td]:py-0.5 [&_td]:px-2 [&_td:first-child]:text-brand [&_td:first-child]:font-mono [&_td:first-child]:font-bold [&_th]:text-[9px] [&_th]:uppercase [&_th]:tracking-widest [&_th]:text-text-dim/40 [&_th]:pb-1 [&_th]:px-2 [&_code]:text-brand [&_code]:font-mono">
             <MarkdownContent>{message.content}</MarkdownContent>
           </div>
+          <div className="h-px w-24 bg-gradient-to-r from-transparent via-border-subtle to-transparent" />
         </div>
       );
     }
