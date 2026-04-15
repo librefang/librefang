@@ -351,6 +351,7 @@ mod tests {
         assert_eq!(AuthStatus::ConfiguredCli.to_string(), "configured_cli");
         assert_eq!(AuthStatus::Missing.to_string(), "missing");
         assert_eq!(AuthStatus::NotRequired.to_string(), "not_required");
+        assert_eq!(AuthStatus::AutoDetected.to_string(), "auto_detected");
         assert_eq!(AuthStatus::CliNotInstalled.to_string(), "cli_not_installed");
     }
 

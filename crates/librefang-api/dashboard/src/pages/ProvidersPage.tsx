@@ -666,7 +666,7 @@ export function ProvidersPage() {
     setConfigProvider(provider);
     setKeyInput("");
     setUrlInput(provider.base_url || "");
-    setHasStoredKey(provider.auth_status === "configured" || provider.auth_status === "validated_key" || provider.auth_status === "invalid_key");
+    setHasStoredKey(provider.auth_status === "configured" || provider.auth_status === "validated_key" || provider.auth_status === "invalid_key" || provider.auth_status === "auto_detected");
     setKeyError(null);
     setKeyTestResult(null);
   };
