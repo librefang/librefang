@@ -93,10 +93,11 @@ impl DriverCache {
         let key_hash = hasher.finish();
 
         format!(
-            "{}|{}|{}",
+            "{}|{}|{}|{}",
             config.provider,
             key_hash,
-            config.base_url.as_deref().unwrap_or("")
+            config.base_url.as_deref().unwrap_or(""),
+            config.proxy_url.as_deref().unwrap_or("")
         )
     }
 }

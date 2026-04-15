@@ -1326,6 +1326,19 @@ pub async fn set_provider_url(
 
     // Optional proxy_url in same request
     let proxy_url = body["proxy_url"].as_str().map(|s| s.trim().to_string());
+    if let Some(ref pu) = proxy_url {
+        if !pu.is_empty()
+            && !pu.starts_with("http://")
+            && !pu.starts_with("https://")
+            && !pu.starts_with("socks5://")
+            && !pu.starts_with("socks5h://")
+        {
+            return ApiErrorResponse::bad_request(
+                "proxy_url must start with http://, https://, socks5://, or socks5h://",
+            )
+            .into_json_tuple();
+        }
+    }
 
     // Update catalog in memory
     {
