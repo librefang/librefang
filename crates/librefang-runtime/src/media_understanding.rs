@@ -133,7 +133,11 @@ impl MediaEngine {
 
         let filename = format!("audio.{}", ext);
 
-        let model = default_audio_model(provider);
+        let model = self
+            .config
+            .audio_model
+            .as_deref()
+            .unwrap_or_else(|| default_audio_model(provider));
 
         info!(provider, model, filename = %filename, size = audio_bytes.len(), "Sending audio for transcription");
 

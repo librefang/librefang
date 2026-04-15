@@ -899,6 +899,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "max_concurrency": config.media.max_concurrency,
         "image_provider": config.media.image_provider,
         "audio_provider": config.media.audio_provider,
+        "audio_model": config.media.audio_model,
         "stt_available": stt_available,
     });
 
@@ -1649,7 +1650,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     sec!("media", { "fields": {
         "image_description": "boolean", "audio_transcription": "boolean",
         "video_description": "boolean", "max_concurrency": "number",
-        "image_provider": "string", "audio_provider": "string"
+        "image_provider": "string", "audio_provider": "string", "audio_model": "string"
     }});
     sec!("links", { "fields": {
         "enabled": "boolean", "max_links": "number",
