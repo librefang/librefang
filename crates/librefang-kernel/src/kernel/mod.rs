@@ -7345,7 +7345,7 @@ system_prompt = "You are a helpful assistant."
     /// Lightweight one-shot LLM call for classification tasks (e.g., reply precheck).
     ///
     /// Uses the default driver with low max_tokens and 0 temperature.
-    /// Returns `None` on error or timeout (caller should fail-open).
+    /// Returns `Err` on LLM error or timeout (caller should fail-open).
     pub async fn one_shot_llm_call(&self, model: &str, prompt: &str) -> Result<String, String> {
         use librefang_runtime::llm_driver::CompletionRequest;
         use librefang_types::message::Message;
