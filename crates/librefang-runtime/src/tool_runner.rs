@@ -568,6 +568,9 @@ pub async fn execute_tool_raw(
         // System time tool
         "system_time" => Ok(tool_system_time()),
 
+        // Skill file read tool
+        "skill_read_file" => tool_skill_read_file(input, *skill_registry).await,
+
         // Cron scheduling tools
         "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id).await,
         "cron_list" => tool_cron_list(*kernel, *caller_agent_id).await,
@@ -1237,6 +1240,19 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "payload": { "type": "object", "description": "JSON payload data for the event" }
                 },
                 "required": ["event_type"]
+            }),
+        },
+        // --- Skill file read tool ---
+        ToolDefinition {
+            name: "skill_read_file".to_string(),
+            description: "Read a companion file from an installed skill. Use when a skill's prompt context references additional files by relative path (e.g. 'see references/syntax.md').".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "skill": { "type": "string", "description": "The skill name as listed in Available Skills" },
+                    "path": { "type": "string", "description": "Path relative to the skill directory, e.g. 'references/query-syntax.md'" }
+                },
+                "required": ["skill", "path"]
             }),
         },
         // --- Scheduling tools ---
@@ -4679,6 +4695,60 @@ pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, Stri
 }
 
 /// Canvas presentation tool handler.
+/// Read a companion file from an installed skill directory.
+///
+/// Security: resolves the path relative to the skill's installed directory and
+/// rejects any path that escapes via `..` or absolute components.
+async fn tool_skill_read_file(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+) -> Result<String, String> {
+    let registry = skill_registry.ok_or("Skill registry not available")?;
+    let skill_name = input["skill"].as_str().ok_or("Missing 'skill' parameter")?;
+    let rel_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+
+    // Look up the skill
+    let skill = registry
+        .get(skill_name)
+        .ok_or_else(|| format!("Skill '{}' not found", skill_name))?;
+
+    // Resolve the path relative to the skill directory
+    let requested = skill.path.join(rel_path);
+    let canonical = requested
+        .canonicalize()
+        .map_err(|e| format!("File not found: {}", e))?;
+    let skill_root = skill
+        .path
+        .canonicalize()
+        .map_err(|e| format!("Skill directory error: {}", e))?;
+
+    // Security: ensure the resolved path is within the skill directory
+    if !canonical.starts_with(&skill_root) {
+        return Err(format!(
+            "Access denied: '{}' is outside the skill directory",
+            rel_path
+        ));
+    }
+
+    // Read the file
+    let content = tokio::fs::read_to_string(&canonical)
+        .await
+        .map_err(|e| format!("Failed to read '{}': {}", rel_path, e))?;
+
+    // Cap output to avoid flooding the context
+    const MAX_CHARS: usize = 32_000;
+    if content.len() > MAX_CHARS {
+        Ok(format!(
+            "{}\n\n... (truncated at {} chars, file is {} chars total)",
+            &content[..MAX_CHARS],
+            MAX_CHARS,
+            content.len()
+        ))
+    } else {
+        Ok(content)
+    }
+}
+
 async fn tool_canvas_present(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
