@@ -341,7 +341,7 @@ export function TerminalPage() {
             tmuxAvailable={tmuxAvailable}
             maxWindows={maxWindows}
             activeWindowId={activeWindowId}
-            onSwitchWindow={(id) => setActiveWindowId(id)}
+            onSwitchWindow={useCallback((id: string) => setActiveWindowId(id), [])}
             terminalRef={terminalRef}
             fitAddonRef={fitAddonRef}
             shellName={shellName}

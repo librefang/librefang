@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Plus, X, AlertCircle } from "lucide-react";
 import { authHeader } from "../api";
+import { useUIStore } from "../lib/store";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 
@@ -86,6 +87,19 @@ export function TerminalTabs({
     };
   }, []);
 
+  useEffect(() => {
+    if (showNameInput) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [showNameInput]);
+
+  useEffect(() => {
+    if (activeWindowId !== null || windows.length === 0) return;
+    const active = windows.find((w) => w.active);
+    onSwitchWindow(active ? active.id : windows[0].id);
+  }, [windows, activeWindowId, onSwitchWindow]);
+
   const handleCreate = useCallback(async () => {
     const name = newName.trim();
     if (name && !WINDOW_NAME_RE.test(name)) return;
@@ -114,6 +128,8 @@ export function TerminalTabs({
     }
   }, [newName, queryClient, t]);
 
+  const addToast = useUIStore((s) => s.addToast);
+
   const handleCloseTab = useCallback(
     async (windowId: string, e: React.MouseEvent) => {
       e.stopPropagation();
@@ -124,13 +140,30 @@ export function TerminalTabs({
           { method: "DELETE", headers: authHeader() }
         );
         if (res.ok) {
+          const isActive = activeWindowId === windowId;
+          if (isActive) {
+            const remaining = windows.filter((w) => w.id !== windowId);
+            if (remaining.length > 0) {
+              const next = remaining[0];
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "switch_window", window: next.id }));
+              }
+              onSwitchWindow(next.id);
+            } else {
+              onSwitchWindow("");
+            }
+          }
           queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
+        } else {
+          console.error("Failed to delete terminal window", res.status);
+          addToast(t("terminal.tabs.delete_failed"), "error");
         }
-      } catch {
-        /* ignore */
+      } catch (err) {
+        console.error("Failed to delete terminal window", err);
+        addToast(t("terminal.tabs.delete_failed"), "error");
       }
     },
-    [queryClient, windows.length]
+    [queryClient, windows, activeWindowId, ws, onSwitchWindow, addToast, t]
   );
 
   if (!tmuxAvailable) return null;
@@ -219,7 +252,6 @@ export function TerminalTabs({
             onClick={() => {
               setNewName(`${shellName}_${windows.length + 1}`);
               setShowNameInput(true);
-              inputRef.current?.select();
             }}
             className="p-1 text-gray-500 hover:text-gray-300 transition-colors"
             title={t("terminal.tabs.new")}

@@ -153,17 +153,31 @@ impl fmt::Display for ServerMessage {
     }
 }
 
-pub async fn terminal_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let cfg = state.kernel.config_ref();
-    let tmux_path =
-        std::path::PathBuf::from(cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux"));
-    let tmux_available =
-        cfg.terminal.tmux_enabled && TmuxController::is_available(&tmux_path).await;
+pub async fn terminal_health(
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(resp) = authorize_terminal_request(&headers, &uri, addr, &state).await {
+        return resp;
+    }
+
+    let (tmux_enabled, max_windows, tmux_path) = {
+        let cfg = state.kernel.config_ref();
+        (
+            cfg.terminal.tmux_enabled,
+            cfg.terminal.max_windows,
+            std::path::PathBuf::from(cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux")),
+        )
+    };
+    let tmux_available = tmux_enabled && TmuxController::is_available(&tmux_path).await;
     Json(serde_json::json!({
         "ok": true,
         "tmux": tmux_available,
-        "max_windows": cfg.terminal.max_windows,
+        "max_windows": max_windows,
     }))
+    .into_response()
 }
 
 /// Authentication method recorded for a successful terminal WS connection.
@@ -519,6 +533,10 @@ async fn create_window(
     }
 
     // Enforce window limit.
+    // NOTE: The list_windows() check and new_window() call are two separate tmux
+    // subprocess invocations, so a concurrent caller could slip in between. This
+    // is accepted as a soft limit — the global GCRA rate limiter makes this race
+    // benign in practice.
     let max_windows = state.kernel.config_ref().terminal.max_windows;
     match ctrl.list_windows().await {
         Ok(existing) => {
@@ -553,6 +571,14 @@ async fn delete_window(
     axum::extract::Path(window_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     use axum::response::IntoResponse as _;
+
+    if !crate::terminal_tmux::validate_window_id(&window_id) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid_window_id"})),
+        )
+            .into_response();
+    }
 
     if let Err(resp) = authorize_terminal_request(&headers, &uri, addr, &state).await {
         return resp;
@@ -699,11 +725,12 @@ async fn handle_terminal_ws(
         // Ensure tmux session exists and optionally select a window.
         let ctrl = crate::terminal_tmux::TmuxController::new(tmux_path_buf, "main".to_string());
         if let Err(e) = ctrl.ensure_session().await {
+            warn!(error = %e, "tmux session init failed");
             let _ = send_json(
                 &sender,
                 &serde_json::json!({
                     "type": "error",
-                    "content": format!("tmux session init failed: {}", e)
+                    "content": "tmux session init failed"
                 }),
             )
             .await;
@@ -711,11 +738,12 @@ async fn handle_terminal_ws(
         }
         if let Some(wid) = &valid_window {
             if let Err(e) = ctrl.select_window(wid).await {
+                warn!(error = %e, window = %wid, "tmux select window failed");
                 let _ = send_json(
                     &sender,
                     &serde_json::json!({
                         "type": "error",
-                        "content": format!("tmux select window failed: {}", e)
+                        "content": "tmux select window failed"
                     }),
                 )
                 .await;
@@ -725,11 +753,12 @@ async fn handle_terminal_ws(
         match PtySession::spawn_tmux_attached(&tmux_path_val, "main", initial_cols, initial_rows) {
             Ok((pty, rx)) => (pty, rx),
             Err(e) => {
+                warn!(error = %e, "Failed to spawn tmux terminal");
                 let _ = send_json(
                     &sender,
                     &serde_json::json!({
                         "type": "error",
-                        "content": format!("Failed to spawn tmux terminal: {}", e)
+                        "content": "Failed to spawn tmux terminal"
                     }),
                 )
                 .await;
@@ -740,11 +769,12 @@ async fn handle_terminal_ws(
         match PtySession::spawn(initial_cols, initial_rows) {
             Ok((pty, rx)) => (pty, rx),
             Err(e) => {
+                warn!(error = %e, "Failed to spawn terminal");
                 let _ = send_json(
                     &sender,
                     &serde_json::json!({
                         "type": "error",
-                        "content": format!("Failed to spawn terminal: {}", e)
+                        "content": "Failed to spawn terminal"
                     }),
                 )
                 .await;
@@ -891,11 +921,12 @@ async fn handle_terminal_ws(
                                         input_times.push(now);
 
                                         if let Err(e) = pty.write(data.as_bytes()) {
+                                            warn!(error = %e, "PTY write failed");
                                             let _ = send_json(
                                                 &sender,
                                                 &serde_json::json!({
                                                     "type": "error",
-                                                    "content": format!("Write error: {}", e)
+                                                    "content": "PTY write failed"
                                                 }),
                                             )
                                             .await;
@@ -905,11 +936,12 @@ async fn handle_terminal_ws(
                                         current_cols = *cols;
                                         current_rows = *rows;
                                         if let Err(e) = pty.resize(*cols, *rows) {
+                                            warn!(error = %e, "PTY resize failed");
                                             let _ = send_json(
                                                 &sender,
                                                 &serde_json::json!({
                                                     "type": "error",
-                                                    "content": format!("Resize error: {}", e)
+                                                    "content": "PTY resize failed"
                                                 }),
                                             )
                                             .await;
@@ -917,11 +949,16 @@ async fn handle_terminal_ws(
                                     }
                                     ClientMessage::SwitchWindow { window } => {
                                         let window_id = window.clone();
-                                        let cfg = state.kernel.config_ref();
-                                        let tmux_path = std::path::PathBuf::from(
-                                            cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux"),
-                                        );
-                                        if cfg.terminal.tmux_enabled
+                                        let (tmux_enabled, tmux_path) = {
+                                            let cfg = state.kernel.config_ref();
+                                            (
+                                                cfg.terminal.tmux_enabled,
+                                                std::path::PathBuf::from(
+                                                    cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux"),
+                                                ),
+                                            )
+                                        };
+                                        if tmux_enabled
                                             && crate::terminal_tmux::TmuxController::is_available(&tmux_path).await
                                         {
                                             let ctrl = crate::terminal_tmux::TmuxController::new(
@@ -931,7 +968,14 @@ async fn handle_terminal_ws(
                                             match ctrl.select_window(&window_id).await {
                                                 Ok(()) => {
                                                     // Re-resize PTY after tmux window switch.
-                                                    let _ = pty.resize(current_cols, current_rows);
+                                                    if let Err(e) = pty.resize(current_cols, current_rows) {
+                                                        warn!(
+                                                            error = %e,
+                                                            cols = current_cols,
+                                                            rows = current_rows,
+                                                            "failed to resize PTY after window switch"
+                                                        );
+                                                    }
                                                     let _ = send_json(
                                                         &sender,
                                                         &serde_json::to_value(
@@ -944,11 +988,12 @@ async fn handle_terminal_ws(
                                                     .await;
                                                 }
                                                 Err(e) => {
+                                                    warn!(error = %e, "tmux switch window failed");
                                                     let _ = send_json(
                                                         &sender,
                                                         &serde_json::json!({
                                                             "type": "error",
-                                                            "content": format!("Switch failed: {}", e)
+                                                            "content": "Switch failed"
                                                         }),
                                                     )
                                                     .await;

@@ -1222,6 +1222,22 @@ pub async fn run_daemon(
         }
     }
 
+    // Clean up tmux session so child shell processes don't linger after shutdown.
+    {
+        let cfg = kernel.config_ref();
+        if cfg.terminal.tmux_enabled {
+            let tmux_path = std::path::PathBuf::from(
+                cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux"),
+            );
+            let ctrl = crate::terminal_tmux::TmuxController::new(tmux_path, "main".to_string());
+            if let Err(e) = ctrl.kill_session().await {
+                tracing::debug!("tmux session cleanup: {e}");
+            } else {
+                info!("tmux session cleaned up");
+            }
+        }
+    }
+
     // Shutdown kernel
     kernel.shutdown();
 

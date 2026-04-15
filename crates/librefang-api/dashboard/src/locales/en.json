@@ -1924,6 +1924,7 @@
       "limit_reached": "Window limit reached",
       "switch_failed": "Failed to switch window",
       "create_failed": "Failed to create window",
+      "delete_failed": "Failed to close window",
       "tmux_unavailable": "tmux is not available on this host"
     }
   },

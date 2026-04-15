@@ -75,6 +75,7 @@ impl TmuxController {
     /// requires: `-L <socket>` and `-f /dev/null`.
     fn base_cmd(&self) -> Command {
         let mut cmd = Command::new(&self.tmux_path);
+        cmd.kill_on_drop(true);
         cmd.arg("-L").arg(self.socket_name);
         cmd.arg("-f").arg("/dev/null");
         cmd
@@ -114,6 +115,7 @@ impl TmuxController {
     /// `tmux -V` within 2 seconds.
     pub async fn is_available(tmux_path: &Path) -> bool {
         let mut cmd = Command::new(tmux_path);
+        cmd.kill_on_drop(true);
         cmd.arg("-V")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
