@@ -1546,15 +1546,7 @@ export function ChatPage() {
     staleTime: 30000,
   });
   // Check if web search is available (any search API key configured)
-  const configQuery = useQuery({
-    queryKey: ["config", "web-search-available"],
-    queryFn: async () => {
-      const cfg = await getFullConfig();
-      return (cfg as any)?.web?.search_available === true;
-    },
-    staleTime: 60000,
-  });
-  const webSearchAvailable = configQuery.data ?? false;
+  const webSearchAvailable = ((configQuery.data as any)?.web?.search_available === true);
   const handsQuery = useQuery({
     queryKey: ["hands", "active", "chat"],
     queryFn: listActiveHands,
