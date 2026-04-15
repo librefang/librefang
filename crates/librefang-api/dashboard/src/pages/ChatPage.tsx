@@ -889,12 +889,12 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
             className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
         </div>
-        {voiceInput.isSupported && sttAvailable && (
+        {voiceInput.isSupported && (
           <button
             type="button"
-            onClick={voiceInput.toggleRecording}
-            disabled={effectiveDisabled || voiceInput.isTranscribing}
-            title={voiceInput.isRecording ? t("chat.voice_stop") : t("chat.voice_input")}
+            onClick={sttAvailable ? voiceInput.toggleRecording : undefined}
+            disabled={!sttAvailable || effectiveDisabled || voiceInput.isTranscribing}
+            title={!sttAvailable ? t("chat.voice_not_configured") : voiceInput.isRecording ? t("chat.voice_stop") : t("chat.voice_input")}
             className={`group relative px-3 sm:px-3.5 py-2.5 sm:py-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed ${
               voiceInput.isRecording
                 ? "bg-error/10 text-error border border-error/30 animate-pulse"

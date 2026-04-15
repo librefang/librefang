@@ -1408,6 +1408,7 @@
     "voice_stop": "停止录音",
     "voice_recording": "正在聆听...",
     "voice_transcribing": "正在转写...",
+    "voice_not_configured": "语音输入需要配置 STT 服务商，请在 配置 → Tools → Media 中配置",
     "deep_thinking": "深度思考",
     "deep_thinking_hint": "启用后请求模型进行深度推理（仅支持 reasoning 模型）",
     "show_thinking": "显示思考过程",
