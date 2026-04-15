@@ -317,6 +317,7 @@ pub struct ToolExecContext<'a> {
     pub process_manager: Option<&'a crate::process_manager::ProcessManager>,
     pub sender_id: Option<&'a str>,
     pub channel: Option<&'a str>,
+    pub chat_id: Option<&'a str>,
 }
 
 /// Execute a tool without running the approval / capability / taint gate.
@@ -350,6 +351,7 @@ pub async fn execute_tool_raw(
         process_manager,
         sender_id,
         channel: _,
+        chat_id: _,
     } = ctx;
 
     let result = match tool_name {
@@ -980,6 +982,7 @@ pub async fn execute_tool(
         process_manager,
         sender_id,
         channel,
+        chat_id: None,
     };
     execute_tool_raw(tool_use_id, tool_name, input, &ctx).await
 }

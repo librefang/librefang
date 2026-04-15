@@ -276,8 +276,8 @@
     },
     {
       "path": "crates/librefang-channels/src/bridge.rs",
-      "accessCount": 57,
-      "lastAccessed": 1776246918041,
+      "accessCount": 56,
+      "lastAccessed": 1776246330983,
       "type": "file"
     },
     {
@@ -293,16 +293,16 @@
       "type": "file"
     },
     {
-      "path": "crates/librefang-api/src/channel_bridge.rs",
-      "accessCount": 16,
-      "lastAccessed": 1776246907530,
-      "type": "file"
-    },
-    {
       "path": "crates/librefang-channels/src/types.rs",
       "accessCount": 15,
       "lastAccessed": 1776245851066,
       "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/src/channel_bridge.rs",
+      "accessCount": 12,
+      "lastAccessed": 1776246395496,
+      "type": "file"
     },
     {
       "path": "crates/librefang-runtime/src",

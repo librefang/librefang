@@ -270,32 +270,26 @@
     },
     {
       "path": "crates/librefang-runtime/src/session_repair.rs",
-      "accessCount": 67,
-      "lastAccessed": 1776246198861,
+      "accessCount": 50,
+      "lastAccessed": 1776245523644,
       "type": "file"
     },
     {
       "path": "crates/librefang-channels/src/bridge.rs",
-      "accessCount": 57,
-      "lastAccessed": 1776246918041,
+      "accessCount": 38,
+      "lastAccessed": 1776245480193,
       "type": "file"
     },
     {
       "path": "crates/librefang-runtime/src/tool_runner.rs",
-      "accessCount": 27,
-      "lastAccessed": 1776246035253,
+      "accessCount": 22,
+      "lastAccessed": 1776245323672,
       "type": "directory"
     },
     {
       "path": "crates/librefang-channels/src/roster.rs",
       "accessCount": 16,
       "lastAccessed": 1776245582694,
-      "type": "file"
-    },
-    {
-      "path": "crates/librefang-api/src/channel_bridge.rs",
-      "accessCount": 16,
-      "lastAccessed": 1776246907530,
       "type": "file"
     },
     {
@@ -311,9 +305,9 @@
       "type": "directory"
     },
     {
-      "path": "crates/librefang-kernel/src/kernel/mod.rs",
-      "accessCount": 9,
-      "lastAccessed": 1776246143692,
+      "path": "crates/librefang-api/src/channel_bridge.rs",
+      "accessCount": 5,
+      "lastAccessed": 1776109452763,
       "type": "file"
     },
     {
@@ -326,6 +320,12 @@
       "path": "crates",
       "accessCount": 3,
       "lastAccessed": 1776122603204,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-kernel/src",
+      "accessCount": 3,
+      "lastAccessed": 1776245862529,
       "type": "directory"
     },
     {
@@ -347,28 +347,16 @@
       "type": "directory"
     },
     {
-      "path": "crates/librefang-kernel/src",
-      "accessCount": 2,
-      "lastAccessed": 1776112503252,
-      "type": "directory"
-    },
-    {
       "path": "crates/librefang-channels",
       "accessCount": 2,
       "lastAccessed": 1776245819833,
       "type": "directory"
     },
     {
-      "path": "crates/librefang-api/src/routes/network.rs",
+      "path": "crates/librefang-kernel/src/kernel/mod.rs",
       "accessCount": 2,
-      "lastAccessed": 1776246214744,
+      "lastAccessed": 1776245856315,
       "type": "file"
-    },
-    {
-      "path": "",
-      "accessCount": 2,
-      "lastAccessed": 1776246223360,
-      "type": "directory"
     },
     {
       "path": "rodela/k8s/kustomization.yaml",
@@ -401,9 +389,9 @@
       "type": "directory"
     },
     {
-      "path": "crates/librefang-api",
+      "path": "",
       "accessCount": 1,
-      "lastAccessed": 1776246218835,
+      "lastAccessed": 1776245294464,
       "type": "directory"
     }
   ],

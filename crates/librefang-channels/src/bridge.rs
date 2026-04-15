@@ -354,6 +354,46 @@ pub trait ChannelBridgeHandle: Send + Sync {
     ) -> Result<String, String> {
         Err("Channel push not available".to_string())
     }
+
+    /// Get agent aliases for the given agent.
+    async fn get_agent_aliases(&self, _agent_id: AgentId) -> Vec<String> {
+        vec![]
+    }
+
+    /// Upsert a participant into the group roster.
+    async fn roster_upsert(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+        _display_name: &str,
+        _username: Option<&str>,
+    ) {
+    }
+
+    /// Classify the reply intent for a message.
+    #[allow(unused_variables)]
+    async fn classify_reply_intent(
+        &self,
+        _agent_id: AgentId,
+        _message: &str,
+        _sender_id: &str,
+        _is_group: bool,
+        _was_mentioned: bool,
+        _sender_aliases: &[String],
+    ) -> i32 {
+        0
+    }
+
+    /// Get custom precheck prompt for an agent.
+    async fn get_precheck_prompt(&self, _agent_id: AgentId) -> Option<String> {
+        None
+    }
+
+    /// Get the agent's upload directory.
+    async fn agent_upload_dir(&self, _agent_id: AgentId) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 struct PendingMessage {
@@ -1668,6 +1708,11 @@ fn build_sender_context(
         // sock.groupMetadata). Empty for non-WhatsApp channels — addressee
         // guard then becomes a no-op (BC-01).
         group_participants: extract_group_participants(message),
+        // Additional fields for backward compatibility
+        bot_username: None,
+        sender_username: None,
+        group_members: Vec::new(),
+        chat_id_legacy: None,
     }
 }
 

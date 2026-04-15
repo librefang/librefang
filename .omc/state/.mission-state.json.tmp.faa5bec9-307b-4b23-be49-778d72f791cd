@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-04-15T09:54:35.311Z",
+  "updatedAt": "2026-04-15T09:37:42.528Z",
   "missions": [
     {
       "id": "session:571d8be8-a5d7-468e-bfcf-5d76686e0b46:none",
@@ -281,15 +281,15 @@
       "name": "none",
       "objective": "Session mission",
       "createdAt": "2026-04-15T09:15:16.550Z",
-      "updatedAt": "2026-04-15T09:54:35.311Z",
+      "updatedAt": "2026-04-15T09:37:42.528Z",
       "status": "running",
-      "workerCount": 19,
+      "workerCount": 16,
       "taskCounts": {
-        "total": 19,
+        "total": 16,
         "pending": 0,
         "blocked": 0,
-        "inProgress": 1,
-        "completed": 18,
+        "inProgress": 2,
+        "completed": 14,
         "failed": 0
       },
       "agents": [
@@ -301,7 +301,7 @@
           "currentStep": null,
           "latestUpdate": "completed",
           "completedSummary": null,
-          "updatedAt": "2026-04-15T09:50:51.341Z"
+          "updatedAt": "2026-04-15T09:17:25.263Z"
         },
         {
           "name": "github-checker:abd342e",
@@ -367,11 +367,11 @@
           "name": "session-repair-resolver:a4b04a6",
           "role": "session-repair-resolver",
           "ownership": "a4b04a661606ccd84",
-          "status": "done",
+          "status": "running",
           "currentStep": null,
-          "latestUpdate": "completed",
+          "latestUpdate": null,
           "completedSummary": null,
-          "updatedAt": "2026-04-15T09:43:32.461Z"
+          "updatedAt": "2026-04-15T09:26:34.640Z"
         },
         {
           "name": "bridge-resolver:a7489eb",
@@ -397,11 +397,11 @@
           "name": "types-resolver:a62c173",
           "role": "types-resolver",
           "ownership": "a62c173515ccc2cd9",
-          "status": "running",
+          "status": "done",
           "currentStep": null,
-          "latestUpdate": null,
+          "latestUpdate": "completed",
           "completedSummary": null,
-          "updatedAt": "2026-04-15T09:26:34.760Z"
+          "updatedAt": "2026-04-15T09:37:42.528Z"
         },
         {
           "name": "agent-loop-resolver:a1b8725",
@@ -417,11 +417,11 @@
           "name": "merge-master:ac85811",
           "role": "merge-master",
           "ownership": "ac8581101ad61477a",
-          "status": "done",
+          "status": "running",
           "currentStep": null,
-          "latestUpdate": "completed",
+          "latestUpdate": null,
           "completedSummary": null,
-          "updatedAt": "2026-04-15T09:54:24.369Z"
+          "updatedAt": "2026-04-15T09:28:30.346Z"
         },
         {
           "name": "agent-loop-resolver:a7b4c8c",
@@ -452,70 +452,48 @@
           "latestUpdate": "completed",
           "completedSummary": null,
           "updatedAt": "2026-04-15T09:37:22.802Z"
-        },
-        {
-          "name": "types-resolver:a29f692",
-          "role": "types-resolver",
-          "ownership": "a29f6921ad09680b4",
-          "status": "done",
-          "currentStep": null,
-          "latestUpdate": "completed",
-          "completedSummary": null,
-          "updatedAt": "2026-04-15T09:37:59.780Z"
-        },
-        {
-          "name": "session-repair-resolver:a549df8",
-          "role": "session-repair-resolver",
-          "ownership": "a549df849402be5e2",
-          "status": "done",
-          "currentStep": null,
-          "latestUpdate": "completed",
-          "completedSummary": null,
-          "updatedAt": "2026-04-15T09:43:47.247Z"
-        },
-        {
-          "name": "merge-master:aafbba3",
-          "role": "merge-master",
-          "ownership": "aafbba3077398198a",
-          "status": "done",
-          "currentStep": null,
-          "latestUpdate": "completed",
-          "completedSummary": null,
-          "updatedAt": "2026-04-15T09:54:35.311Z"
         }
       ],
       "timeline": [
         {
-          "id": "session-stop:a775bce47871b0d79:2026-04-15T09:50:51.341Z",
-          "at": "2026-04-15T09:50:51.341Z",
+          "id": "session-stop:a8d481a184c473a23:2026-04-15T09:31:31.215Z",
+          "at": "2026-04-15T09:31:31.215Z",
           "kind": "completion",
-          "agent": "rpi-investigator:a25a124",
+          "agent": "tool-runner-resolver:a8d481a",
           "detail": "completed",
-          "sourceKey": "session-stop:a775bce47871b0d79"
+          "sourceKey": "session-stop:a8d481a184c473a23"
         },
         {
-          "id": "session-stop:ac8581101ad61477a:2026-04-15T09:54:24.369Z",
-          "at": "2026-04-15T09:54:24.369Z",
+          "id": "session-stop:a7489eb00111c6f0e:2026-04-15T09:37:17.722Z",
+          "at": "2026-04-15T09:37:17.722Z",
           "kind": "completion",
-          "agent": "merge-master:ac85811",
+          "agent": "bridge-resolver:a7489eb",
           "detail": "completed",
-          "sourceKey": "session-stop:ac8581101ad61477a"
+          "sourceKey": "session-stop:a7489eb00111c6f0e"
         },
         {
-          "id": "session-start:aafbba3077398198a:2026-04-15T09:54:24.556Z",
-          "at": "2026-04-15T09:54:24.556Z",
+          "id": "session-start:ab6275a00e6956db8:2026-04-15T09:37:17.921Z",
+          "at": "2026-04-15T09:37:17.921Z",
           "kind": "update",
-          "agent": "merge-master:aafbba3",
-          "detail": "started merge-master:aafbba3",
-          "sourceKey": "session-start:aafbba3077398198a"
+          "agent": "bridge-resolver:ab6275a",
+          "detail": "started bridge-resolver:ab6275a",
+          "sourceKey": "session-start:ab6275a00e6956db8"
         },
         {
-          "id": "session-stop:aafbba3077398198a:2026-04-15T09:54:35.311Z",
-          "at": "2026-04-15T09:54:35.311Z",
+          "id": "session-stop:ab6275a00e6956db8:2026-04-15T09:37:22.802Z",
+          "at": "2026-04-15T09:37:22.802Z",
           "kind": "completion",
-          "agent": "merge-master:aafbba3",
+          "agent": "bridge-resolver:ab6275a",
           "detail": "completed",
-          "sourceKey": "session-stop:aafbba3077398198a"
+          "sourceKey": "session-stop:ab6275a00e6956db8"
+        },
+        {
+          "id": "session-stop:a62c173515ccc2cd9:2026-04-15T09:37:42.528Z",
+          "at": "2026-04-15T09:37:42.528Z",
+          "kind": "completion",
+          "agent": "types-resolver:a62c173",
+          "detail": "completed",
+          "sourceKey": "session-stop:a62c173515ccc2cd9"
         }
       ]
     }

@@ -316,6 +316,18 @@ pub struct SenderContext {
     /// this field still deserialize cleanly.
     #[serde(default)]
     pub group_participants: Vec<ParticipantRef>,
+    /// Bot username for this channel (if applicable).
+    #[serde(default)]
+    pub bot_username: Option<String>,
+    /// Sender's username/handle for this channel (if applicable).
+    #[serde(default)]
+    pub sender_username: Option<String>,
+    /// Group members (legacy field, prefer group_participants).
+    #[serde(default)]
+    pub group_members: Vec<ParticipantRef>,
+    /// Chat ID for this context (legacy field, prefer chat_id).
+    #[serde(default)]
+    pub chat_id_legacy: Option<String>,
 }
 
 /// Reference to a participant in a group chat.

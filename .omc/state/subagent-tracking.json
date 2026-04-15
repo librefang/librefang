@@ -23,21 +23,27 @@
       "agent_type": "session-repair-resolver",
       "started_at": "2026-04-15T09:26:34.640Z",
       "parent_mode": "none",
-      "status": "running"
+      "status": "completed",
+      "completed_at": "2026-04-15T09:43:32.461Z",
+      "duration_ms": 1017821
     },
     {
       "agent_id": "a7489eb00111c6f0e",
       "agent_type": "bridge-resolver",
       "started_at": "2026-04-15T09:26:34.679Z",
       "parent_mode": "none",
-      "status": "running"
+      "status": "completed",
+      "completed_at": "2026-04-15T09:37:17.722Z",
+      "duration_ms": 643043
     },
     {
       "agent_id": "ab811a64e4059b1f1",
       "agent_type": "tool-runner-resolver",
       "started_at": "2026-04-15T09:26:34.710Z",
       "parent_mode": "none",
-      "status": "running"
+      "status": "completed",
+      "completed_at": "2026-04-15T09:31:11.788Z",
+      "duration_ms": 277078
     },
     {
       "agent_id": "a62c173515ccc2cd9",
@@ -51,18 +57,76 @@
       "agent_type": "agent-loop-resolver",
       "started_at": "2026-04-15T09:26:34.862Z",
       "parent_mode": "none",
-      "status": "running"
+      "status": "completed",
+      "completed_at": "2026-04-15T09:31:05.313Z",
+      "duration_ms": 270451
     },
     {
       "agent_id": "ac8581101ad61477a",
       "agent_type": "merge-master",
       "started_at": "2026-04-15T09:28:30.346Z",
       "parent_mode": "none",
-      "status": "running"
+      "status": "completed",
+      "completed_at": "2026-04-15T09:54:24.369Z",
+      "duration_ms": 1554023
+    },
+    {
+      "agent_id": "a7b4c8c8abf0fc609",
+      "agent_type": "agent-loop-resolver",
+      "started_at": "2026-04-15T09:31:05.501Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-04-15T09:31:30.270Z",
+      "duration_ms": 24769
+    },
+    {
+      "agent_id": "a8d481a184c473a23",
+      "agent_type": "tool-runner-resolver",
+      "started_at": "2026-04-15T09:31:11.971Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-04-15T09:31:31.215Z",
+      "duration_ms": 19244
+    },
+    {
+      "agent_id": "ab6275a00e6956db8",
+      "agent_type": "bridge-resolver",
+      "started_at": "2026-04-15T09:37:17.921Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-04-15T09:37:22.802Z",
+      "duration_ms": 4881
+    },
+    {
+      "agent_id": "a29f6921ad09680b4",
+      "agent_type": "types-resolver",
+      "started_at": "2026-04-15T09:37:52.327Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-04-15T09:37:59.780Z",
+      "duration_ms": 7453
+    },
+    {
+      "agent_id": "a549df849402be5e2",
+      "agent_type": "session-repair-resolver",
+      "started_at": "2026-04-15T09:43:32.647Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-04-15T09:43:47.247Z",
+      "duration_ms": 14600
+    },
+    {
+      "agent_id": "aafbba3077398198a",
+      "agent_type": "merge-master",
+      "started_at": "2026-04-15T09:54:24.556Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-04-15T09:54:35.311Z",
+      "duration_ms": 10755
     }
   ],
-  "total_spawned": 6,
-  "total_completed": 2,
+  "total_spawned": 12,
+  "total_completed": 13,
   "total_failed": 0,
-  "last_updated": "2026-04-15T09:28:30.448Z"
+  "last_updated": "2026-04-15T09:54:35.413Z"
 }

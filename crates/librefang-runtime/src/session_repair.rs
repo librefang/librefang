@@ -37,6 +37,8 @@ pub struct RepairStats {
     /// Number of ToolResult blocks found inside assistant-role messages
     /// and ignored (they are not honored as satisfying tool_call_ids).
     pub misplaced_results_ignored: usize,
+    /// Number of ToolResult blocks rescued from assistant-role messages.
+    pub misplaced_results_rescued: usize,
 }
 
 /// Validate and repair a message history for LLM consumption.
@@ -132,6 +134,13 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
     stats.positional_synthetic_inserted = positional_synthetic;
     stats.misplaced_results_ignored = misplaced_ignored;
 
+    // Phase 2a2: Rescue ToolResult blocks stuck in assistant-role messages.
+    // After a crash, ToolResult blocks may end up inside assistant messages
+    // instead of user messages. Extract them and place them in a proper
+    // user-role message immediately after the assistant message.
+    let rescued_count = rescue_misplaced_tool_results(&mut cleaned);
+    stats.misplaced_results_rescued = rescued_count;
+
     // Phase 2b: Reorder misplaced ToolResults
     let reordered_count = reorder_tool_results(&mut cleaned);
     stats.results_reordered = reordered_count;
@@ -210,11 +219,97 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
             duplicates = stats.duplicates_removed,
             positional_synthetic = stats.positional_synthetic_inserted,
             misplaced_ignored = stats.misplaced_results_ignored,
+            rescued = stats.misplaced_results_rescued,
             "Session repair applied fixes"
         );
     }
 
     (merged, stats)
+}
+
+/// Phase 2a2: Rescue ToolResult blocks from assistant-role messages.
+///
+/// After a crash, ToolResult blocks may end up inside an assistant-role message
+/// instead of a user-role message. Per OpenAI/Moonshot API contract, tool results
+/// MUST be in user-role messages. This pass extracts such misplaced ToolResult
+/// blocks and moves them into a user-role message immediately after the assistant
+/// message they were found in.
+fn rescue_misplaced_tool_results(messages: &mut Vec<Message>) -> usize {
+    // Collect (assistant_msg_idx, Vec<ToolResult blocks>) for assistant messages
+    // that contain ToolResult blocks.
+    let mut to_rescue: Vec<(usize, Vec<ContentBlock>)> = Vec::new();
+
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role != Role::Assistant {
+            continue;
+        }
+        if let MessageContent::Blocks(blocks) = &msg.content {
+            let misplaced: Vec<ContentBlock> = blocks
+                .iter()
+                .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                .cloned()
+                .collect();
+            if !misplaced.is_empty() {
+                to_rescue.push((idx, misplaced));
+            }
+        }
+    }
+
+    if to_rescue.is_empty() {
+        return 0;
+    }
+
+    let total_rescued: usize = to_rescue.iter().map(|(_, blocks)| blocks.len()).sum();
+
+    // Remove ToolResult blocks from assistant messages
+    for (idx, _) in &to_rescue {
+        if let MessageContent::Blocks(blocks) = &mut messages[*idx].content {
+            blocks.retain(|b| !matches!(b, ContentBlock::ToolResult { .. }));
+        }
+    }
+
+    // Insert rescued blocks into user-role messages after each assistant message.
+    // Process in reverse order so indices stay valid during insertion.
+    for (assistant_idx, rescued_blocks) in to_rescue.into_iter().rev() {
+        let insert_pos = assistant_idx + 1;
+        if insert_pos < messages.len() && messages[insert_pos].role == Role::User {
+            // Append to existing user message
+            if let MessageContent::Blocks(existing) = &mut messages[insert_pos].content {
+                existing.extend(rescued_blocks);
+            } else {
+                let old = std::mem::replace(
+                    &mut messages[insert_pos].content,
+                    MessageContent::Text(String::new()),
+                );
+                let mut new_blocks = content_to_blocks(old);
+                new_blocks.extend(rescued_blocks);
+                messages[insert_pos].content = MessageContent::Blocks(new_blocks);
+            }
+        } else {
+            // Create a new user message for the rescued blocks
+            messages.insert(
+                insert_pos.min(messages.len()),
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Blocks(rescued_blocks),
+                    pinned: false,
+                },
+            );
+        }
+
+        debug!(
+            assistant_idx,
+            "Rescued ToolResult blocks from assistant-role message"
+        );
+    }
+
+    // Remove any assistant messages that became empty after extraction
+    messages.retain(|m| match &m.content {
+        MessageContent::Text(s) => !s.is_empty(),
+        MessageContent::Blocks(b) => !b.is_empty(),
+    });
+
+    total_rescued
 }
 
 /// Phase 2b: Reorder misplaced ToolResults -- ensure each result follows its use.

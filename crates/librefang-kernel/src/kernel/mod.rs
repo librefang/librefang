@@ -3888,15 +3888,9 @@ system_prompt = "You are a helpful assistant."
                 bot_username: sender_context.and_then(|s| s.bot_username.clone()),
                 group_members: sender_context
                     .map(|s| {
-                        s.group_members
+                        s.group_participants
                             .iter()
-                            .map(|m| {
-                                (
-                                    m.user_id.clone(),
-                                    m.display_name.clone(),
-                                    m.username.clone(),
-                                )
-                            })
+                            .map(|m| (m.jid.clone(), m.display_name.clone(), None::<String>))
                             .collect()
                     })
                     .unwrap_or_default(),
@@ -5049,15 +5043,9 @@ system_prompt = "You are a helpful assistant."
                 bot_username: sender_context.and_then(|s| s.bot_username.clone()),
                 group_members: sender_context
                     .map(|s| {
-                        s.group_members
+                        s.group_participants
                             .iter()
-                            .map(|m| {
-                                (
-                                    m.user_id.clone(),
-                                    m.display_name.clone(),
-                                    m.username.clone(),
-                                )
-                            })
+                            .map(|m| (m.jid.clone(), m.display_name.clone(), None::<String>))
                             .collect()
                     })
                     .unwrap_or_default(),

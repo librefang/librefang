@@ -951,7 +951,6 @@ pub async fn mcp_http(
             Some(state.kernel.processes()),
             None, // sender_id (MCP HTTP has no sender context)
             None, // channel
-            None, // chat_id
         )
         .await;
 

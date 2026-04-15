@@ -692,8 +692,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         &self,
         agent_id: AgentId,
         message: &str,
-        context: Option<&str>,
-    ) -> Result<bool, String> {
+        _sender_id: &str,
+        _is_group: bool,
+        was_mentioned: bool,
+        _sender_aliases: &[String],
+    ) -> i32 {
         // Use the agent's custom PRECHECK.md prompt if it exists, otherwise a
         // sensible default.  This lets operators tune sensitivity per-agent
         // without recompiling.
@@ -711,21 +714,18 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
         let system = custom_prompt.as_deref().unwrap_or(DEFAULT_SYSTEM);
 
-        // Build the user message, optionally prepending conversation context
-        // so the classifier can detect replies/continuations.
-        let user_msg = match context {
-            Some(ctx) => format!("{ctx}\n\n{message}"),
-            None => message.to_string(),
-        };
-
         match self
             .kernel
-            .classify_text(agent_id, system, &user_msg, 10)
+            .classify_text(agent_id, system, message, 10)
             .await
         {
             Ok(response) => {
                 let trimmed = response.trim().to_uppercase();
-                Ok(!trimmed.contains("NO_REPLY"))
+                if trimmed.contains("NO_REPLY") {
+                    0
+                } else {
+                    1
+                }
             }
             Err(e) => {
                 // Fail-open: if LLM fails, fall back to heuristic
@@ -734,19 +734,23 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     "LLM reply-intent classification failed — falling back to heuristic"
                 );
                 // If replying to the bot, always respond
-                if context.is_some() {
-                    return Ok(true);
+                if was_mentioned {
+                    return 1;
                 }
                 let trimmed = message.trim();
                 if trimmed.len() < 5 {
-                    return Ok(false);
+                    return 0;
                 }
                 if trimmed.contains('?') {
-                    return Ok(true);
+                    return 1;
                 }
                 let lower = trimmed.to_lowercase();
                 let greetings = ["hola", "buenas", "hey", "hi", "hello", "oye", "ayuda"];
-                Ok(greetings.iter().any(|g| lower.starts_with(g)))
+                if greetings.iter().any(|g| lower.starts_with(g)) {
+                    1
+                } else {
+                    0
+                }
             }
         }
     }
