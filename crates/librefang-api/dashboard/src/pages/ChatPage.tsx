@@ -149,7 +149,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0) {
+function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void) {
   const { t } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Per-agent loading state. A single shared `isLoading` would freeze the
@@ -340,6 +340,10 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                   setMessages(prev => [...prev,
                     { id: `sys-${Date.now()}`, role: "system" as const, content: responseText, timestamp: new Date() },
                   ]);
+                }
+                // Refresh agent data so model/provider badge reflects the change
+                if (data.type === "command_result" && cmd === "model") {
+                  onModelSwitch?.();
                 }
               }
             } catch { /* ignore non-JSON */ }
@@ -1587,7 +1591,12 @@ export function ChatPage() {
   );
   // Session state — bump version to force message reload after switch
   const [sessionVersion, setSessionVersion] = useState(0);
-  const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents, sessionVersion);
+  const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(
+    selectedAgentId || null,
+    agents,
+    sessionVersion,
+    () => queryClient.invalidateQueries({ queryKey: ["agents", "list"] }),
+  );
 
   // Export current conversation as a markdown file. Keeps the local
   // timestamp, role, content, and (when present) tool call summaries
