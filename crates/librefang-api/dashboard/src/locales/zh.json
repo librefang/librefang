@@ -1525,6 +1525,8 @@
     "cmd_peers": "显示已连接节点",
     "cmd_a2a": "显示 A2A Agent",
     "cmd_queue": "显示 Agent 队列状态",
+    "cmd_col_command": "命令",
+    "cmd_col_desc": "说明",
     "no_agents_available": "没有可用的 Agent。",
     "no_agent_selected": "未选择 Agent。",
     "info_model": "模型",

@@ -302,7 +302,10 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         ]);
       };
       if (trimmed === "/help") {
-        sysMsg(SLASH_COMMANDS.map(c => `**${c.cmd}** — ${t(`chat.${c.descKey}`)}`).join("\n"));
+        const rows = SLASH_COMMANDS.map(c =>
+          `| \`${c.cmd}${c.argsHint ? " " + c.argsHint : ""}\` | ${t(`chat.${c.descKey}`)} |`
+        ).join("\n");
+        sysMsg(`| ${t("chat.cmd_col_command", "命令")} | ${t("chat.cmd_col_desc", "说明")} |\n|---|---|\n${rows}`);
         return;
       }
       if (trimmed === "/clear") { setMessages([]); return; }
@@ -609,6 +612,16 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
   const [thinkingExpanded, setThinkingExpanded] = useState(() => !(message.thinkingCollapsed ?? false));
 
   if (message.role === "system") {
+    const isMultiLine = message.content.includes("\n");
+    if (isMultiLine) {
+      return (
+        <div className="flex justify-center py-3 px-4">
+          <div className="w-full max-w-xl rounded-xl border border-border-subtle bg-surface/60 px-4 py-3 text-sm">
+            <MarkdownContent>{message.content}</MarkdownContent>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="flex justify-center py-6">
         <div className="flex items-center gap-4">

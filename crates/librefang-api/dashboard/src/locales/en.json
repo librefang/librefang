@@ -1550,6 +1550,8 @@
     "cmd_peers": "Show connected peers",
     "cmd_a2a": "Show A2A agents",
     "cmd_queue": "Show agent queue status",
+    "cmd_col_command": "Command",
+    "cmd_col_desc": "Description",
     "no_agents_available": "No agents available.",
     "no_agent_selected": "No agent selected.",
     "info_model": "Model",
