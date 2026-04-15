@@ -1441,7 +1441,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             };
         }
 
-        match channel_type {
+        let mut overrides = match channel_type {
             "telegram" => find_overrides!(telegram),
             "discord" => find_overrides!(discord),
             "slack" => find_overrides!(slack),
@@ -1489,7 +1489,54 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "wechat" => find_overrides!(wechat),
             "wecom" => find_overrides!(wecom),
             _ => None,
+        };
+
+        // Merge the default agent's routing aliases into group_trigger_patterns
+        // so aliases trigger the bot in group chats without needing a formal
+        // @mention. Issue #2292.
+        if let Some(ref mut ov) = overrides {
+            macro_rules! find_default_agent {
+                ($field:ident) => {
+                    channels
+                        .$field
+                        .first()
+                        .and_then(|c| c.default_agent.clone())
+                };
+            }
+            let default_agent_name: Option<String> = match channel_type {
+                "telegram" => find_default_agent!(telegram),
+                "discord" => find_default_agent!(discord),
+                "slack" => find_default_agent!(slack),
+                "whatsapp" => find_default_agent!(whatsapp),
+                "signal" => find_default_agent!(signal),
+                "matrix" => find_default_agent!(matrix),
+                "feishu" => find_default_agent!(feishu),
+                _ => None,
+            };
+            if let Some(agent_name) = default_agent_name {
+                if let Some(entry) = self.kernel.agent_registry().find_by_name(&agent_name) {
+                    if let Some(routing) = entry.manifest.metadata.get("routing") {
+                        let aliases: Vec<String> = routing
+                            .get("aliases")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        let weak: Vec<String> = routing
+                            .get("weak_aliases")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        for alias in aliases.into_iter().chain(weak) {
+                            if !alias.is_empty()
+                                && !ov.group_trigger_patterns.iter().any(|p| p == &alias)
+                            {
+                                ov.group_trigger_patterns.push(alias);
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        overrides
     }
 
     async fn authorize_channel_user(
