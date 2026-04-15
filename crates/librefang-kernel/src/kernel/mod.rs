@@ -4878,8 +4878,9 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Apply per-model inference parameter overrides from the catalog.
-        // These act as a middle layer: agent manifest > model overrides > system defaults.
-        // Only fill in values the agent manifest hasn't explicitly set.
+        // Priority: model overrides > agent manifest > system defaults.
+        // Model overrides represent the user's explicit per-model configuration
+        // via the dashboard, so they take precedence over agent defaults.
         {
             let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
             let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
@@ -4896,33 +4897,30 @@ system_prompt = "You are a helpful assistant."
                 if let Some(mt) = mo.max_tokens {
                     manifest.model.max_tokens = mt;
                 }
-                // Provider-specific params go through extra_params.  entry().or_insert
-                // ensures agent-level extra_params (from agent.toml [model] section
-                // unknown fields captured by #[serde(flatten)]) take precedence.
+                // Provider-specific params go through extra_params.
+                // insert() overwrites any agent-level value, matching the
+                // priority of the struct-level fields above.
                 let ep = &mut manifest.model.extra_params;
                 if let Some(tp) = mo.top_p {
-                    ep.entry("top_p".to_string())
-                        .or_insert(serde_json::json!(tp));
+                    ep.insert("top_p".to_string(), serde_json::json!(tp));
                 }
                 if let Some(fp) = mo.frequency_penalty {
-                    ep.entry("frequency_penalty".to_string())
-                        .or_insert(serde_json::json!(fp));
+                    ep.insert("frequency_penalty".to_string(), serde_json::json!(fp));
                 }
                 if let Some(pp) = mo.presence_penalty {
-                    ep.entry("presence_penalty".to_string())
-                        .or_insert(serde_json::json!(pp));
+                    ep.insert("presence_penalty".to_string(), serde_json::json!(pp));
                 }
                 if let Some(ref re) = mo.reasoning_effort {
-                    ep.entry("reasoning_effort".to_string())
-                        .or_insert(serde_json::json!(re));
+                    ep.insert("reasoning_effort".to_string(), serde_json::json!(re));
                 }
                 if mo.use_max_completion_tokens == Some(true) {
-                    ep.entry("use_max_completion_tokens".to_string())
-                        .or_insert(serde_json::json!(true));
+                    ep.insert(
+                        "use_max_completion_tokens".to_string(),
+                        serde_json::json!(true),
+                    );
                 }
                 if mo.force_max_tokens == Some(true) {
-                    ep.entry("force_max_tokens".to_string())
-                        .or_insert(serde_json::json!(true));
+                    ep.insert("force_max_tokens".to_string(), serde_json::json!(true));
                 }
             }
         }
