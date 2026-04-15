@@ -251,7 +251,7 @@ impl SessionStore {
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
-            .prepare("SELECT id FROM sessions WHERE agent_id = ?1")
+            .prepare("SELECT id FROM sessions WHERE agent_id = ?1 ORDER BY created_at DESC")
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
