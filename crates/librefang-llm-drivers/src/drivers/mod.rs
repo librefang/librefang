@@ -722,7 +722,9 @@ fn create_driver_from_entry(
             config.base_url.clone(),
             config.skip_permissions,
         ))),
-        ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::new(api_key, base_url))),
+        ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::with_proxy(
+            api_key, base_url, proxy_url,
+        ))),
         ApiFormat::Copilot => Ok(Arc::new(copilot::CopilotDriver::new(api_key, base_url))),
         ApiFormat::VertexAI => Ok(Arc::new(vertex_ai::VertexAiDriver::new(config)?)),
         ApiFormat::AzureOpenAI => {
@@ -748,11 +750,12 @@ fn create_driver_from_entry(
                 .clone()
                 .or_else(|| std::env::var("AZURE_OPENAI_API_VERSION").ok())
                 .unwrap_or_else(|| "2024-02-01".to_string());
-            Ok(Arc::new(openai::OpenAIDriver::new_azure(
+            Ok(Arc::new(openai::OpenAIDriver::new_azure_with_proxy(
                 api_key,
                 endpoint,
                 deployment,
                 api_version,
+                proxy_url,
             )))
         }
     }

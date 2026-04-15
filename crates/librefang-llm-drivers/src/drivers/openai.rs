@@ -60,15 +60,29 @@ impl OpenAIDriver {
         deployment: String,
         api_version: String,
     ) -> Self {
+        Self::new_azure_with_proxy(api_key, endpoint, deployment, api_version, None)
+    }
+
+    pub fn new_azure_with_proxy(
+        api_key: String,
+        endpoint: String,
+        deployment: String,
+        api_version: String,
+        proxy_url: Option<&str>,
+    ) -> Self {
         let base_url = format!(
             "{}/openai/deployments/{}",
             endpoint.trim_end_matches('/'),
             deployment
         );
+        let client = match proxy_url {
+            Some(url) => librefang_http::proxied_client_with_override(url),
+            None => librefang_http::proxied_client(),
+        };
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
-            client: librefang_http::proxied_client(),
+            client,
             extra_headers: Vec::new(),
             use_api_key_header: true,
             url_query: Some(format!("api-version={}", api_version)),
