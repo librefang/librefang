@@ -1635,9 +1635,11 @@
     "col_tier": "Tier",
     "col_context": "Context",
     "col_input": "Input $/M",
+    "col_output": "Output $/M",
     "col_tools": "Tools",
     "col_vision": "Vision",
     "col_streaming": "Streaming",
+    "col_thinking": "Thinking",
     "help": "Browse all available LLM models across providers. Filter by tier, provider, and availability. Compare capabilities and pricing.",
     "add_model": "Add Model",
     "add_custom_model": "Add Custom Model",
@@ -1663,7 +1665,12 @@
     "show_hidden": "Hidden",
     "hidden_count": "{{count}} hidden",
     "model_hidden": "Model hidden",
-    "model_unhidden": "Model unhidden"
+    "model_unhidden": "Model unhidden",
+    "expand_all": "Expand All",
+    "collapse_all": "Collapse All",
+    "aliases": "Aliases",
+    "max_output_tokens": "Max Output",
+    "cost_range": "Cost"
   },
   "media": {
     "section": "Media",

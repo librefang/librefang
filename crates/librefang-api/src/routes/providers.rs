@@ -128,6 +128,7 @@ pub async fn list_models(
                 "supports_vision": m.supports_vision,
                 "supports_streaming": m.supports_streaming,
                 "supports_thinking": m.supports_thinking,
+                "aliases": m.aliases,
                 "available": available,
             })
         })
