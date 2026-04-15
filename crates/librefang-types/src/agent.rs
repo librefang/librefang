@@ -127,9 +127,10 @@ pub enum HookEvent {
 pub struct AgentId(pub Uuid);
 
 impl AgentId {
-    /// A fixed namespace UUID for deriving deterministic hand-agent IDs.
-    /// Generated once via UUID v4; never changes.
-    const HAND_NAMESPACE: Uuid = Uuid::from_bytes([
+    /// Fixed namespace UUID for all deterministic agent ID derivation.
+    /// Uses a single namespace with typed prefixes to avoid collisions
+    /// between agents, hands, and hand-roles sharing the same name.
+    const NAMESPACE: Uuid = Uuid::from_bytes([
         0x9b, 0x6a, 0xe3, 0x2d, 0x7a, 0x4f, 0x4c, 0x1e, 0x8d, 0x0f, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5,
         0xf6,
     ]);
@@ -139,26 +140,25 @@ impl AgentId {
         Self(Uuid::new_v4())
     }
 
-    /// Generate a deterministic AgentId for a hand agent.
-    ///
-    /// Uses UUID v5 (SHA-1) with a fixed namespace so the same `hand_id`
-    /// always maps to the same UUID across daemon restarts.
-    pub fn from_hand_id(hand_id: &str) -> Self {
-        Self(Uuid::new_v5(&Self::HAND_NAMESPACE, hand_id.as_bytes()))
-    }
-
-    /// A fixed namespace UUID for deriving deterministic agent IDs from names.
-    const AGENT_NAMESPACE: Uuid = Uuid::from_bytes([
-        0xa7, 0x3e, 0xf1, 0x4b, 0x5c, 0x2d, 0x48, 0x9a, 0xb6, 0x1e, 0xd8, 0x4a, 0x9c, 0x0f, 0x7b,
-        0xe2,
-    ]);
-
     /// Generate a deterministic AgentId from an agent name.
     ///
     /// Uses UUID v5 (SHA-1) so the same agent name always produces the same
     /// ID across daemon restarts, preserving session history associations.
     pub fn from_name(name: &str) -> Self {
-        Self(Uuid::new_v5(&Self::AGENT_NAMESPACE, name.as_bytes()))
+        Self(Uuid::new_v5(
+            &Self::NAMESPACE,
+            format!("agent:{name}").as_bytes(),
+        ))
+    }
+
+    /// Generate a deterministic AgentId for a hand.
+    ///
+    /// Uses UUID v5 with a `hand:` prefix so the same `hand_id`
+    /// always maps to the same UUID across daemon restarts.
+    pub fn from_hand_id(hand_id: &str) -> Self {
+        // Backward compat: existing hands used bare hand_id without prefix.
+        // Keep the same input to preserve existing IDs.
+        Self(Uuid::new_v5(&Self::NAMESPACE, hand_id.as_bytes()))
     }
 
     /// Generate a deterministic agent ID for a specific role within a multi-agent hand instance.
@@ -173,7 +173,7 @@ impl AgentId {
             Some(id) => format!("{hand_id}:{role}:{id}"),
             None => format!("{hand_id}:{role}"),
         };
-        Self(Uuid::new_v5(&Self::HAND_NAMESPACE, input.as_bytes()))
+        Self(Uuid::new_v5(&Self::NAMESPACE, input.as_bytes()))
     }
 }
 
