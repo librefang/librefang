@@ -373,14 +373,39 @@ jobs:
                 }
               }
             } else if (context.eventName === 'pull_request_target' && context.payload.action === 'synchronize') {
-              // New push after changes_requested → remove needs-changes, add ready-for-review (if no blockers)
+              // New push — check whether any changes_requested reviews are still
+              // pending (not superseded by a later approved/dismissed review from
+              // the same reviewer). Only clear needs-changes when all such reviews
+              // have been resolved.
               if (labels.includes(NEEDS)) {
-                await removeLabel(NEEDS);
-                if (!hasBlocker) {
-                  await addLabel(READY);
-                  core.info(`#${prNumber}: new push → -${NEEDS} +${READY}`);
+                const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  per_page: 100,
+                });
+
+                // Build per-reviewer latest state (last review wins)
+                const latestByReviewer = new Map();
+                for (const r of reviews) {
+                  if (!r.user || r.state === 'COMMENTED' || r.state === 'PENDING') continue;
+                  latestByReviewer.set(r.user.login, r.state);
+                }
+
+                const hasPendingChangesRequested = [...latestByReviewer.values()].some(
+                  s => s === 'CHANGES_REQUESTED'
+                );
+
+                if (hasPendingChangesRequested) {
+                  core.info(`#${prNumber}: new push but changes_requested still pending, keeping ${NEEDS}`);
                 } else {
-                  core.info(`#${prNumber}: new push → -${NEEDS}, skipping ${READY} (blockers)`);
+                  await removeLabel(NEEDS);
+                  if (!hasBlocker) {
+                    await addLabel(READY);
+                    core.info(`#${prNumber}: new push, all reviews resolved → -${NEEDS} +${READY}`);
+                  } else {
+                    core.info(`#${prNumber}: new push → -${NEEDS}, skipping ${READY} (blockers)`);
+                  }
                 }
               }
             }
