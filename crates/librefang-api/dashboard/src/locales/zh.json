@@ -1610,9 +1610,11 @@
     "col_tier": "等级",
     "col_context": "上下文",
     "col_input": "输入 $/M",
+    "col_output": "输出 $/M",
     "col_tools": "工具",
     "col_vision": "视觉",
     "col_streaming": "流式",
+    "col_thinking": "思考",
     "help": "浏览所有供应商的可用 LLM 模型。按等级、供应商和可用性筛选，比较模型能力和价格。",
     "add_model": "添加模型",
     "add_custom_model": "添加自定义模型",
@@ -1638,7 +1640,12 @@
     "show_hidden": "已隐藏",
     "hidden_count": "{{count}} 个已隐藏",
     "model_hidden": "模型已隐藏",
-    "model_unhidden": "模型已取消隐藏"
+    "model_unhidden": "模型已取消隐藏",
+    "expand_all": "全部展开",
+    "collapse_all": "全部折叠",
+    "aliases": "别名",
+    "max_output_tokens": "最大输出",
+    "cost_range": "价格"
   },
   "media": {
     "section": "媒体生成",

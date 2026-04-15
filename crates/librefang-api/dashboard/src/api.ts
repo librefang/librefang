@@ -882,6 +882,7 @@ export interface ModelItem {
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  aliases?: string[];
   available?: boolean;
 }
 
