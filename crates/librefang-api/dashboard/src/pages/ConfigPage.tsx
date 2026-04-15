@@ -4,7 +4,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
-import { RefreshCw, Save, Zap, Settings, Search, RotateCcw, AlertTriangle, X } from "lucide-react";
+import {
+  RefreshCw, Save, Zap, Settings, Search, RotateCcw,
+  AlertTriangle, X, Copy, Check,
+} from "lucide-react";
 import {
   getConfigSchema, getFullConfig, setConfigValue, reloadConfig,
   type ConfigFieldSchema,
@@ -49,6 +52,75 @@ function getNestedValue(obj: Record<string, unknown>, section: string, field: st
   if (rootLevel) return obj[field];
   const sec = obj[section] as Record<string, unknown> | undefined;
   return sec?.[field];
+}
+
+/* ------------------------------------------------------------------ */
+/*  Highlight matching text in search results                          */
+/* ------------------------------------------------------------------ */
+
+function Highlight({ text, query }: { text: string; query: string }) {
+  if (!query) return <>{text}</>;
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="bg-brand/20 text-brand rounded-sm not-italic">{text.slice(idx, idx + query.length)}</mark>
+      {text.slice(idx + query.length)}
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Field type badge                                                   */
+/* ------------------------------------------------------------------ */
+
+const TYPE_COLORS: Record<string, string> = {
+  boolean: "text-blue-500 bg-blue-500/10",
+  number:  "text-purple-500 bg-purple-500/10",
+  select:  "text-amber-500 bg-amber-500/10",
+  array:   "text-teal-500 bg-teal-500/10",
+  "string[]": "text-teal-500 bg-teal-500/10",
+  object:  "text-orange-500 bg-orange-500/10",
+  string:  "text-text-dim bg-border-subtle/50",
+};
+
+function FieldTypeBadge({ type }: { type: string }) {
+  const cls = TYPE_COLORS[type] ?? TYPE_COLORS.string;
+  return (
+    <span className={`inline-block text-[9px] font-mono px-1 rounded leading-4 ${cls}`}>
+      {type}
+    </span>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Copy path button                                                   */
+/* ------------------------------------------------------------------ */
+
+function CopyPathButton({ path }: { path: string }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(path).then(() => {
+      setCopied(true);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setCopied(false), 1500);
+    });
+  }, [path]);
+
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+
+  return (
+    <button
+      onClick={handleCopy}
+      className="p-1 rounded-md text-text-dim/50 hover:text-text-dim hover:bg-surface-hover transition-colors"
+      title={`Copy path: ${path}`}
+    >
+      {copied ? <Check className="w-2.5 h-2.5 text-success" /> : <Copy className="w-2.5 h-2.5" />}
+    </button>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -115,13 +187,16 @@ function ConfigFieldInput({
     "w-full px-3 py-1.5 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand transition-colors";
 
   if (fieldType === "boolean") {
+    // Wrap in a fixed-height container so it aligns with other input rows
     return (
-      <button
-        onClick={() => onChange(!value)}
-        className={`relative w-10 h-5 rounded-full transition-colors ${value ? "bg-brand" : "bg-border-subtle"}`}
-      >
-        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value ? "left-5" : "left-0.5"}`} />
-      </button>
+      <div className="flex items-center h-[30px]">
+        <button
+          onClick={() => onChange(!value)}
+          className={`relative w-10 h-5 rounded-full transition-colors ${value ? "bg-brand" : "bg-border-subtle"}`}
+        >
+          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value ? "left-5" : "left-0.5"}`} />
+        </button>
+      </div>
     );
   }
 
@@ -201,6 +276,24 @@ export function ConfigPage({ category }: { category: string }) {
   const searchRef = useRef<HTMLInputElement>(null);
 
   const hasPendingChanges = Object.keys(pendingChanges).length > 0;
+
+  // ── Global keyboard shortcuts: / to focus search, Esc to clear ────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const inInput = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT";
+      if (e.key === "/" && !inInput) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+      if (e.key === "Escape" && inInput && target === searchRef.current) {
+        setSearchQuery("");
+        searchRef.current?.blur();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   useEffect(() => {
     if (!hasPendingChanges) return;
@@ -290,6 +383,20 @@ export function ConfigPage({ category }: { category: string }) {
     []
   );
 
+  const handleResetSection = useCallback(
+    (sectionKey: string, fieldKeys: string[], rootLevel?: boolean) => {
+      setPendingChanges((p) => {
+        const next = { ...p };
+        for (const fKey of fieldKeys) {
+          const path = rootLevel ? fKey : `${sectionKey}.${fKey}`;
+          next[path] = null;
+        }
+        return next;
+      });
+    },
+    []
+  );
+
   const reloadMutation = useMutation({
     mutationFn: reloadConfig,
     onSuccess: () => {
@@ -319,6 +426,15 @@ export function ConfigPage({ category }: { category: string }) {
   const effectiveTab = isSearching
     ? null
     : (activeSection && sectionKeys.includes(activeSection) ? activeSection : sectionKeys[0] ?? null);
+
+  // Which sections have pending changes (for tab dot indicators)
+  const sectionHasPending = useCallback((sKey: string): boolean => {
+    const sec = allSections[sKey];
+    if (!sec) return false;
+    return Object.keys(pendingChanges).some((path) =>
+      sec.root_level ? path in sec.fields : path.startsWith(sKey + ".")
+    );
+  }, [allSections, pendingChanges]);
 
   const filteredSections = useMemo(() => {
     const keysToShow = effectiveTab ? [effectiveTab] : sectionKeys;
@@ -367,7 +483,7 @@ export function ConfigPage({ category }: { category: string }) {
 
   // ── Render ─────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col p-6 max-w-5xl gap-4">
+    <div className="flex flex-col p-6 max-w-5xl gap-4 pb-24">
 
       {/* Row 1: title + reload */}
       <div className="flex items-center justify-between gap-4">
@@ -391,17 +507,18 @@ export function ConfigPage({ category }: { category: string }) {
         </div>
       </div>
 
-      {/* Row 2: tabs — always visible when >1 section; grayed during search */}
+      {/* Row 2: tabs — always visible when >1 section; grayed/disabled during search */}
       {sectionKeys.length > 1 && (
-        <div className="flex items-center gap-0 border-b border-border-subtle -mx-6 px-6">
+        <div className="flex items-center border-b border-border-subtle -mx-6 px-6">
           {sectionKeys.map((sKey) => {
             const isActive = !isSearching && effectiveTab === sKey;
+            const hasDot = sectionHasPending(sKey);
             return (
               <button
                 key={sKey}
                 onClick={() => { setActiveSection(sKey); setSearchQuery(""); }}
                 disabled={isSearching}
-                className={`px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
+                className={`relative px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap flex items-center gap-1.5 ${
                   isActive
                     ? "border-brand text-brand"
                     : isSearching
@@ -410,6 +527,9 @@ export function ConfigPage({ category }: { category: string }) {
                 }`}
               >
                 {t(`config.sec_${sKey}`, sectionLabelFallback(sKey))}
+                {hasDot && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-warning shrink-0" />
+                )}
               </button>
             );
           })}
@@ -421,42 +541,25 @@ export function ConfigPage({ category }: { category: string }) {
         </div>
       )}
 
-      {/* Row 3: search + unsaved actions */}
-      <div className="flex items-center gap-3">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-dim pointer-events-none" />
-          <input
-            ref={searchRef}
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={t("config.search_placeholder", "Search fields...")}
-            className="w-full pl-9 pr-8 py-2 rounded-xl border border-border-subtle bg-surface text-xs outline-none focus:border-brand transition-colors"
-          />
-          {isSearching && (
-            <button
-              onClick={() => setSearchQuery("")}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-text-dim hover:text-text transition-colors"
-              aria-label="Clear search"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-        {hasPendingChanges && (
-          <div className="flex items-center gap-2 shrink-0">
-            <Badge variant="warning">
-              <AlertTriangle className="w-2.5 h-2.5 mr-1" />
-              {Object.keys(pendingChanges).length} {t("config.unsaved", "unsaved")}
-            </Badge>
-            <Button variant="ghost" size="sm" onClick={() => setPendingChanges({})}>
-              {t("config.discard", "Discard")}
-            </Button>
-            <Button variant="primary" size="sm" onClick={handleBatchSave} isLoading={batchSaving} disabled={batchSaving}>
-              <Save className="w-3 h-3 mr-1" />
-              {t("config.save_all", "Save All")}
-            </Button>
-          </div>
+      {/* Row 3: search */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-dim pointer-events-none" />
+        <input
+          ref={searchRef}
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder={t("config.search_placeholder", "Search fields…  (/)")}
+          className="w-full pl-9 pr-8 py-2 rounded-xl border border-border-subtle bg-surface text-xs outline-none focus:border-brand transition-colors"
+        />
+        {isSearching && (
+          <button
+            onClick={() => setSearchQuery("")}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-text-dim hover:text-text transition-colors"
+            aria-label="Clear search"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         )}
       </div>
 
@@ -475,9 +578,10 @@ export function ConfigPage({ category }: { category: string }) {
             : allFields;
 
           const hasBadges = sec.hot_reloadable || sec.root_level;
-          // Only show section header when searching (to identify which section fields belong to)
-          // or when there are metadata badges to display
           const showSectionHeader = isSearching || hasBadges;
+
+          // Check whether any field in this section has a description (to show desc column)
+          const hasAnyDesc = fieldsToShow.some(([fKey]) => !!t(`config.desc_${fKey}`, ""));
 
           return (
             <div key={sKey} className="rounded-2xl border border-border-subtle bg-surface overflow-hidden">
@@ -494,11 +598,27 @@ export function ConfigPage({ category }: { category: string }) {
                   {sec.root_level && (
                     <Badge variant="info">{t("config.root_level", "Root Level")}</Badge>
                   )}
-                  {isSearching && (
-                    <span className="text-[10px] text-text-dim ml-auto">
-                      {fieldsToShow.length}/{allFields.length} {t("config.fields_unit")}
-                    </span>
-                  )}
+                  <div className="ml-auto flex items-center gap-2">
+                    {isSearching && (
+                      <span className="text-[10px] text-text-dim">
+                        {fieldsToShow.length}/{allFields.length} {t("config.fields_unit")}
+                      </span>
+                    )}
+                    {/* Section-level reset: only show when any field in this section has a pending change */}
+                    {fieldsToShow.some(([fKey]) => {
+                      const p = sec.root_level ? fKey : `${sKey}.${fKey}`;
+                      return p in pendingChanges;
+                    }) && (
+                      <button
+                        onClick={() => handleResetSection(sKey, fieldsToShow.map(([fKey]) => fKey), sec.root_level)}
+                        className="text-[10px] text-text-dim hover:text-warning transition-colors flex items-center gap-1"
+                        title={t("config.reset_section", "Reset section to defaults")}
+                      >
+                        <RotateCcw className="w-2.5 h-2.5" />
+                        {t("config.reset_all", "Reset all")}
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
               <div className="divide-y divide-border-subtle/30">
@@ -512,15 +632,24 @@ export function ConfigPage({ category }: { category: string }) {
                   const isSaving = saveMutation.isPending && saveMutation.variables?.path === path;
                   const statusForField = saveStatus[path] ?? null;
                   const fieldDesc = t(`config.desc_${fieldKey}`, "");
+                  const fieldLabel = t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey));
 
                   return (
-                    <div key={fieldKey} className="flex items-center gap-4 px-5 py-3">
-                      {/* Label + key */}
+                    <div key={fieldKey} className="flex items-center gap-4 px-5 py-3 group">
+                      {/* Label + key + type badge */}
                       <div className="w-44 shrink-0">
                         <p className="text-xs font-semibold leading-tight">
-                          {t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey))}
+                          <Highlight text={fieldLabel} query={q} />
                         </p>
-                        <p className="text-[10px] text-text-dim font-mono leading-tight mt-0.5">{fieldKey}</p>
+                        <div className="flex items-center gap-1 mt-0.5">
+                          <p className="text-[10px] text-text-dim font-mono leading-tight">
+                            <Highlight text={fieldKey} query={q} />
+                          </p>
+                          <CopyPathButton path={path} />
+                        </div>
+                        <div className="mt-0.5">
+                          <FieldTypeBadge type={fieldType} />
+                        </div>
                       </div>
                       {/* Input */}
                       <div className="flex-1 min-w-0">
@@ -532,12 +661,14 @@ export function ConfigPage({ category }: { category: string }) {
                           onChange={(v) => handleFieldChange(sKey, fieldKey, v, sec.root_level)}
                         />
                       </div>
-                      {/* Description — right of input, hidden on narrow screens */}
-                      <div className="w-52 shrink-0 hidden xl:block">
-                        {fieldDesc && (
-                          <p className="text-[10px] text-text-dim leading-relaxed">{fieldDesc}</p>
-                        )}
-                      </div>
+                      {/* Description — right of input, only rendered if section has any descriptions */}
+                      {hasAnyDesc && (
+                        <div className="w-52 shrink-0 hidden xl:block">
+                          {fieldDesc && (
+                            <p className="text-[10px] text-text-dim leading-relaxed">{fieldDesc}</p>
+                          )}
+                        </div>
+                      )}
                       {/* Actions */}
                       <div className="w-24 shrink-0 flex items-center justify-end gap-1">
                         {statusForField ? (
@@ -578,6 +709,26 @@ export function ConfigPage({ category }: { category: string }) {
           );
         })}
       </div>
+
+      {/* Sticky unsaved changes bar */}
+      {hasPendingChanges && (
+        <div className="fixed bottom-0 left-0 right-0 z-40 flex justify-center pointer-events-none">
+          <div className="mb-5 flex items-center gap-3 px-4 py-2.5 rounded-2xl border border-warning/30 bg-surface shadow-lg pointer-events-auto">
+            <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0" />
+            <span className="text-xs font-semibold text-warning">
+              {Object.keys(pendingChanges).length} {t("config.unsaved", "unsaved")} {t("config.changes", "changes")}
+            </span>
+            <div className="w-px h-4 bg-border-subtle" />
+            <Button variant="ghost" size="sm" onClick={() => setPendingChanges({})}>
+              {t("config.discard", "Discard")}
+            </Button>
+            <Button variant="primary" size="sm" onClick={handleBatchSave} isLoading={batchSaving} disabled={batchSaving}>
+              <Save className="w-3 h-3 mr-1" />
+              {t("config.save_all", "Save All")}
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
