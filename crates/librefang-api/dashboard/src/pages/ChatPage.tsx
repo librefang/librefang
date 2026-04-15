@@ -785,7 +785,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 });
 
 // Input box - with shortcut hints
-function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, supportsThinking }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string; supportsThinking?: boolean }) {
+function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, supportsThinking, sttAvailable }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -889,7 +889,7 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
             className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
         </div>
-        {voiceInput.isSupported && (
+        {voiceInput.isSupported && sttAvailable && (
           <button
             type="button"
             onClick={voiceInput.toggleRecording}
@@ -1371,6 +1371,8 @@ export function ChatPage() {
 
   const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
   const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "full";
+  const mediaConfigRaw = (configQuery.data as Record<string, unknown>)?.media as Record<string, unknown> | undefined;
+  const sttAvailable = mediaConfigRaw?.stt_available === true;
   const ttsConfigRaw = (configQuery.data as Record<string, unknown>)?.tts as Record<string, unknown> | undefined;
   const ttsProvider = ttsConfigRaw?.provider as string | undefined;
   const ttsSpeechConfig = useMemo(() => {
@@ -1811,6 +1813,7 @@ export function ChatPage() {
               authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
               providerName={selectedAgent?.model_provider}
               supportsThinking={selectedAgent?.supports_thinking}
+              sttAvailable={sttAvailable}
             />
           </div>
         </main>

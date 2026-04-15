@@ -879,6 +879,10 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "path": config.vault.path.as_ref().map(|p| p.to_string_lossy().to_string()),
     });
 
+    let stt_available = config.media.audio_provider.is_some() || {
+        let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
+        has_key("GROQ_API_KEY") || has_key("OPENAI_API_KEY")
+    };
     set!("media", {
         "image_description": config.media.image_description,
         "audio_transcription": config.media.audio_transcription,
@@ -886,6 +890,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "max_concurrency": config.media.max_concurrency,
         "image_provider": config.media.image_provider,
         "audio_provider": config.media.audio_provider,
+        "stt_available": stt_available,
     });
 
     set!("links", {
