@@ -918,7 +918,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "timeout_secs": config.approval.timeout_secs,
         "auto_approve_autonomous": config.approval.auto_approve_autonomous,
         "auto_approve": config.approval.auto_approve,
-        "second_factor": serde_json::to_value(&config.approval.second_factor).unwrap_or(serde_json::json!("none")),
+        "second_factor": serde_json::to_value(config.approval.second_factor).unwrap_or(serde_json::json!("none")),
         "totp_issuer": config.approval.totp_issuer,
     });
 
