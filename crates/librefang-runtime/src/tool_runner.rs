@@ -4694,11 +4694,12 @@ pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, Stri
     Ok(html.to_string())
 }
 
-/// Canvas presentation tool handler.
 /// Read a companion file from an installed skill directory.
 ///
 /// Security: resolves the path relative to the skill's installed directory and
-/// rejects any path that escapes via `..` or absolute components.
+/// rejects any path that escapes via `..` or absolute components. Symlinks are
+/// resolved by `canonicalize()` before the containment check, so a symlink
+/// pointing outside the skill directory is correctly rejected.
 async fn tool_skill_read_file(
     input: &serde_json::Value,
     skill_registry: Option<&SkillRegistry>,
@@ -4706,6 +4707,12 @@ async fn tool_skill_read_file(
     let registry = skill_registry.ok_or("Skill registry not available")?;
     let skill_name = input["skill"].as_str().ok_or("Missing 'skill' parameter")?;
     let rel_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+
+    // Reject absolute paths early — Path::join replaces the base when given
+    // an absolute path, which would bypass the skill directory containment.
+    if std::path::Path::new(rel_path).is_absolute() {
+        return Err("Access denied: absolute paths are not allowed".to_string());
+    }
 
     // Look up the skill
     let skill = registry
@@ -4735,13 +4742,15 @@ async fn tool_skill_read_file(
         .await
         .map_err(|e| format!("Failed to read '{}': {}", rel_path, e))?;
 
-    // Cap output to avoid flooding the context
-    const MAX_CHARS: usize = 32_000;
-    if content.len() > MAX_CHARS {
+    // Cap output to avoid flooding the context.
+    // Use floor_char_boundary to avoid panicking on multi-byte UTF-8.
+    const MAX_BYTES: usize = 32_000;
+    if content.len() > MAX_BYTES {
+        let truncate_at = content.floor_char_boundary(MAX_BYTES);
         Ok(format!(
-            "{}\n\n... (truncated at {} chars, file is {} chars total)",
-            &content[..MAX_CHARS],
-            MAX_CHARS,
+            "{}\n\n... (truncated at {} bytes, file is {} bytes total)",
+            &content[..truncate_at],
+            truncate_at,
             content.len()
         ))
     } else {
@@ -4749,6 +4758,7 @@ async fn tool_skill_read_file(
     }
 }
 
+/// Canvas presentation tool handler.
 async fn tool_canvas_present(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
@@ -6988,5 +6998,94 @@ mod tests {
         let raw = serde_json::json!("not an array");
         let err = parse_poll_options(Some(&raw)).expect_err("string should fail");
         assert!(err.contains("must be an array"));
+    }
+
+    // ── skill_read_file ────────────────────────────────────────────────
+
+    fn create_skill_registry_with_file(
+        dir: &std::path::Path,
+        skill_name: &str,
+        file_rel: &str,
+        content: &str,
+    ) -> SkillRegistry {
+        let skill_dir = dir.join(skill_name);
+        std::fs::create_dir_all(
+            skill_dir.join(
+                std::path::Path::new(file_rel)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("")),
+            ),
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join(file_rel), content).unwrap();
+        std::fs::write(
+            skill_dir.join("skill.toml"),
+            format!(
+                r#"[skill]
+name = "{skill_name}"
+version = "0.1.0"
+description = "test"
+"#
+            ),
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.to_path_buf());
+        registry.load_all().unwrap();
+        registry
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_reads_companion() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let registry =
+            create_skill_registry_with_file(dir.path(), "my-skill", "refs/guide.md", "hello world");
+
+        let input = serde_json::json!({ "skill": "my-skill", "path": "refs/guide.md" });
+        let result = tool_skill_read_file(&input, Some(&registry)).await;
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_rejects_traversal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let registry = create_skill_registry_with_file(dir.path(), "evil", "dummy.txt", "ok");
+
+        let input = serde_json::json!({ "skill": "evil", "path": "../../etc/passwd" });
+        let result = tool_skill_read_file(&input, Some(&registry)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_rejects_unknown_skill() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let registry = create_skill_registry_with_file(dir.path(), "exists", "f.txt", "ok");
+
+        let input = serde_json::json!({ "skill": "nope", "path": "f.txt" });
+        let result = tool_skill_read_file(&input, Some(&registry)).await;
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_rejects_absolute_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let registry = create_skill_registry_with_file(dir.path(), "abs", "dummy.txt", "ok");
+
+        let input = serde_json::json!({ "skill": "abs", "path": "/etc/passwd" });
+        let result = tool_skill_read_file(&input, Some(&registry)).await;
+        assert!(result.unwrap_err().contains("absolute paths"));
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_truncates_without_panic() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Create content with multi-byte chars that exceeds 32K bytes
+        let content = "é".repeat(20_000); // 2 bytes each = 40K bytes
+        let registry = create_skill_registry_with_file(dir.path(), "big", "large.txt", &content);
+
+        let input = serde_json::json!({ "skill": "big", "path": "large.txt" });
+        let result = tool_skill_read_file(&input, Some(&registry)).await.unwrap();
+        assert!(result.contains("truncated"));
+        // Must not panic — the point of this test
     }
 }
