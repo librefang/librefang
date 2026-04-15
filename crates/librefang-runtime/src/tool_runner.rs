@@ -1575,7 +1575,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Cron scheduling tools ---
         ToolDefinition {
             name: "cron_create".to_string(),
-            description: "Create a scheduled/cron job. Supports one-shot (at), recurring (every N seconds), and cron expressions. Max 50 jobs per agent.".to_string(),
+            description: "Create a scheduled/cron job. Supports one-shot (at), recurring (every N seconds), and cron expressions. Max 50 jobs per agent. IMPORTANT: For AgentTurn actions, set session_mode to 'new' unless the cron specifically needs to remember previous executions. Persistent sessions accumulate tokens and will fail after many executions.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1595,7 +1595,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "session_mode": {
                         "type": "string",
                         "enum": ["persistent", "new"],
-                        "description": "Session mode for AgentTurn actions. 'persistent' (default) reuses the cron session across executions. 'new' creates a fresh session each time, preventing token accumulation for long-running crons."
+                        "description": "Session mode for AgentTurn actions. USE 'new' for simple repeated tasks (e.g., 'send reminder', 'check status', 'post update') that don't need conversation history. USE 'persistent' (default) only if the cron needs to remember previous executions (e.g., 'summarize what we discussed yesterday'). WARNING: 'persistent' sessions grow indefinitely and will eventually fail with token limit exceeded after many executions. When in doubt, use 'new'."
                     },
                     "one_shot": { "type": "boolean", "description": "If true, auto-delete after execution. Default: false" }
                 },
