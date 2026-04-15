@@ -1424,166 +1424,105 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let cfg = self.kernel.config_ref();
         let channels = &cfg.channels;
 
-        /// Look up channel overrides, preferring the entry whose `account_id`
-        /// matches the message's account_id. Falls back to the first entry
-        /// when no account_id is provided.
-        macro_rules! find_overrides {
-            ($field:ident) => {
-                if let Some(aid) = account_id {
+        /// Look up channel overrides and default_agent from the matching
+        /// channel config entry. Prefers the entry whose `account_id` matches;
+        /// falls back to the first entry when no account_id is provided.
+        macro_rules! find_channel_info {
+            ($field:ident) => {{
+                let entry = if let Some(aid) = account_id {
                     channels
                         .$field
                         .iter()
                         .find(|c| c.account_id.as_deref() == Some(aid))
-                        .map(|c| c.overrides.clone())
                 } else {
-                    channels.$field.first().map(|c| c.overrides.clone())
-                }
-            };
+                    channels.$field.first()
+                };
+                (
+                    entry.map(|c| c.overrides.clone()),
+                    entry.and_then(|c| c.default_agent.clone()),
+                )
+            }};
         }
 
-        let mut overrides = match channel_type {
-            "telegram" => find_overrides!(telegram),
-            "discord" => find_overrides!(discord),
-            "slack" => find_overrides!(slack),
-            "whatsapp" => find_overrides!(whatsapp),
-            "signal" => find_overrides!(signal),
-            "matrix" => find_overrides!(matrix),
-            "email" => find_overrides!(email),
-            "teams" => find_overrides!(teams),
-            "mattermost" => find_overrides!(mattermost),
-            "irc" => find_overrides!(irc),
-            "google_chat" => find_overrides!(google_chat),
-            "twitch" => find_overrides!(twitch),
-            "rocketchat" => find_overrides!(rocketchat),
-            "zulip" => find_overrides!(zulip),
-            "xmpp" => find_overrides!(xmpp),
+        let (mut overrides, default_agent_name) = match channel_type {
+            "telegram" => find_channel_info!(telegram),
+            "discord" => find_channel_info!(discord),
+            "slack" => find_channel_info!(slack),
+            "whatsapp" => find_channel_info!(whatsapp),
+            "signal" => find_channel_info!(signal),
+            "matrix" => find_channel_info!(matrix),
+            "email" => find_channel_info!(email),
+            "teams" => find_channel_info!(teams),
+            "mattermost" => find_channel_info!(mattermost),
+            "irc" => find_channel_info!(irc),
+            "google_chat" => find_channel_info!(google_chat),
+            "twitch" => find_channel_info!(twitch),
+            "rocketchat" => find_channel_info!(rocketchat),
+            "zulip" => find_channel_info!(zulip),
+            "xmpp" => find_channel_info!(xmpp),
             // Wave 3
-            "line" => find_overrides!(line),
-            "viber" => find_overrides!(viber),
-            "messenger" => find_overrides!(messenger),
-            "reddit" => find_overrides!(reddit),
-            "mastodon" => find_overrides!(mastodon),
-            "bluesky" => find_overrides!(bluesky),
-            "feishu" => find_overrides!(feishu),
-            "revolt" => find_overrides!(revolt),
+            "line" => find_channel_info!(line),
+            "viber" => find_channel_info!(viber),
+            "messenger" => find_channel_info!(messenger),
+            "reddit" => find_channel_info!(reddit),
+            "mastodon" => find_channel_info!(mastodon),
+            "bluesky" => find_channel_info!(bluesky),
+            "feishu" => find_channel_info!(feishu),
+            "revolt" => find_channel_info!(revolt),
             // Wave 4
-            "nextcloud" => find_overrides!(nextcloud),
-            "guilded" => find_overrides!(guilded),
-            "keybase" => find_overrides!(keybase),
-            "threema" => find_overrides!(threema),
-            "nostr" => find_overrides!(nostr),
-            "webex" => find_overrides!(webex),
-            "pumble" => find_overrides!(pumble),
-            "flock" => find_overrides!(flock),
-            "twist" => find_overrides!(twist),
+            "nextcloud" => find_channel_info!(nextcloud),
+            "guilded" => find_channel_info!(guilded),
+            "keybase" => find_channel_info!(keybase),
+            "threema" => find_channel_info!(threema),
+            "nostr" => find_channel_info!(nostr),
+            "webex" => find_channel_info!(webex),
+            "pumble" => find_channel_info!(pumble),
+            "flock" => find_channel_info!(flock),
+            "twist" => find_channel_info!(twist),
             // Wave 5
-            "mumble" => find_overrides!(mumble),
-            "dingtalk" => find_overrides!(dingtalk),
-            "discourse" => find_overrides!(discourse),
-            "gitter" => find_overrides!(gitter),
-            "ntfy" => find_overrides!(ntfy),
-            "gotify" => find_overrides!(gotify),
-            "webhook" => find_overrides!(webhook),
-            "voice" => find_overrides!(voice),
-            "linkedin" => find_overrides!(linkedin),
-            "wechat" => find_overrides!(wechat),
-            "wecom" => find_overrides!(wecom),
-            _ => None,
+            "mumble" => find_channel_info!(mumble),
+            "dingtalk" => find_channel_info!(dingtalk),
+            "discourse" => find_channel_info!(discourse),
+            "gitter" => find_channel_info!(gitter),
+            "ntfy" => find_channel_info!(ntfy),
+            "gotify" => find_channel_info!(gotify),
+            "webhook" => find_channel_info!(webhook),
+            "voice" => find_channel_info!(voice),
+            "linkedin" => find_channel_info!(linkedin),
+            "wechat" => find_channel_info!(wechat),
+            "wecom" => find_channel_info!(wecom),
+            _ => (None, None),
         };
 
         // Merge the default agent's routing aliases into group_trigger_patterns
         // so aliases trigger the bot in group chats without needing a formal
         // @mention. Issue #2292.
-        if let Some(ref mut ov) = overrides {
-            macro_rules! find_default_agent {
-                ($field:ident) => {
-                    if let Some(aid) = account_id {
-                        channels
-                            .$field
-                            .iter()
-                            .find(|c| c.account_id.as_deref() == Some(aid))
-                            .and_then(|c| c.default_agent.clone())
-                    } else {
-                        channels
-                            .$field
-                            .first()
-                            .and_then(|c| c.default_agent.clone())
-                    }
-                };
-            }
-            let default_agent_name: Option<String> = match channel_type {
-                "telegram" => find_default_agent!(telegram),
-                "discord" => find_default_agent!(discord),
-                "slack" => find_default_agent!(slack),
-                "whatsapp" => find_default_agent!(whatsapp),
-                "signal" => find_default_agent!(signal),
-                "matrix" => find_default_agent!(matrix),
-                "email" => find_default_agent!(email),
-                "teams" => find_default_agent!(teams),
-                "mattermost" => find_default_agent!(mattermost),
-                "irc" => find_default_agent!(irc),
-                "google_chat" => find_default_agent!(google_chat),
-                "twitch" => find_default_agent!(twitch),
-                "rocketchat" => find_default_agent!(rocketchat),
-                "zulip" => find_default_agent!(zulip),
-                "xmpp" => find_default_agent!(xmpp),
-                "line" => find_default_agent!(line),
-                "viber" => find_default_agent!(viber),
-                "messenger" => find_default_agent!(messenger),
-                "reddit" => find_default_agent!(reddit),
-                "mastodon" => find_default_agent!(mastodon),
-                "bluesky" => find_default_agent!(bluesky),
-                "feishu" => find_default_agent!(feishu),
-                "revolt" => find_default_agent!(revolt),
-                "nextcloud" => find_default_agent!(nextcloud),
-                "guilded" => find_default_agent!(guilded),
-                "keybase" => find_default_agent!(keybase),
-                "threema" => find_default_agent!(threema),
-                "nostr" => find_default_agent!(nostr),
-                "webex" => find_default_agent!(webex),
-                "pumble" => find_default_agent!(pumble),
-                "flock" => find_default_agent!(flock),
-                "twist" => find_default_agent!(twist),
-                "mumble" => find_default_agent!(mumble),
-                "dingtalk" => find_default_agent!(dingtalk),
-                "discourse" => find_default_agent!(discourse),
-                "gitter" => find_default_agent!(gitter),
-                "ntfy" => find_default_agent!(ntfy),
-                "gotify" => find_default_agent!(gotify),
-                "webhook" => find_default_agent!(webhook),
-                "voice" => find_default_agent!(voice),
-                "linkedin" => find_default_agent!(linkedin),
-                "wechat" => find_default_agent!(wechat),
-                "wecom" => find_default_agent!(wecom),
-                _ => None,
-            };
-            if let Some(agent_name) = default_agent_name {
-                if let Some(entry) = self.kernel.agent_registry().find_by_name(&agent_name) {
-                    if let Some(routing) = entry.manifest.metadata.get("routing") {
-                        let aliases: Vec<String> = routing
-                            .get("aliases")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            .unwrap_or_default();
-                        let weak: Vec<String> = routing
-                            .get("weak_aliases")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            .unwrap_or_default();
-                        for alias in aliases.into_iter().chain(weak) {
-                            if !alias.is_empty() {
-                                let escaped_alias: String = alias
-                                    .chars()
-                                    .flat_map(|c| {
-                                        if ".+*?^$()[]{}|\\".contains(c) {
-                                            vec!['\\', c]
-                                        } else {
-                                            vec![c]
-                                        }
-                                    })
-                                    .collect();
-                                let escaped = format!("(?i)\\b{}\\b", escaped_alias);
-                                if !ov.group_trigger_patterns.iter().any(|p| p == &escaped) {
-                                    ov.group_trigger_patterns.push(escaped);
-                                }
+        if let (Some(ref mut ov), Some(agent_name)) = (&mut overrides, default_agent_name) {
+            if let Some(entry) = self.kernel.agent_registry().find_by_name(&agent_name) {
+                if let Some(routing) = entry.manifest.metadata.get("routing") {
+                    let aliases: Vec<String> = routing
+                        .get("aliases")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    let weak: Vec<String> = routing
+                        .get("weak_aliases")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    for alias in aliases.into_iter().chain(weak) {
+                        if !alias.is_empty() {
+                            let escaped_alias: String = alias
+                                .chars()
+                                .flat_map(|c| {
+                                    if ".+*?^$()[]{}|\\".contains(c) {
+                                        vec!['\\', c]
+                                    } else {
+                                        vec![c]
+                                    }
+                                })
+                                .collect();
+                            let escaped = format!("(?i)\\b{}\\b", escaped_alias);
+                            if !ov.group_trigger_patterns.iter().any(|p| p == &escaped) {
+                                ov.group_trigger_patterns.push(escaped);
                             }
                         }
                     }
