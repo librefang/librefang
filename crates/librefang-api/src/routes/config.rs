@@ -881,7 +881,13 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
     let stt_available = config.media.audio_provider.is_some() || {
         let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
-        has_key("GROQ_API_KEY") || has_key("OPENAI_API_KEY")
+        has_key("GROQ_API_KEY")
+            || has_key("OPENAI_API_KEY")
+            || has_key("GEMINI_API_KEY")
+            || has_key("GOOGLE_API_KEY")
+            || has_key("ELEVENLABS_API_KEY")
+            || has_key("MINIMAX_API_KEY")
+            || has_key("MINIMAX_CN_API_KEY")
     };
     set!("media", {
         "image_description": config.media.image_description,

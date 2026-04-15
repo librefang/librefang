@@ -72,7 +72,7 @@ impl MediaEngine {
             .as_deref()
             .or_else(|| detect_audio_provider())
             .ok_or(
-                "No audio transcription provider configured. Set GROQ_API_KEY or OPENAI_API_KEY",
+                "No audio transcription provider configured. Set GROQ_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, ELEVENLABS_API_KEY, or MINIMAX_API_KEY",
             )?;
 
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
@@ -135,51 +135,36 @@ impl MediaEngine {
 
         let model = default_audio_model(provider);
 
-        // Build API request
-        let (api_url, api_key) = match provider {
-            "groq" => (
-                "https://api.groq.com/openai/v1/audio/transcriptions",
-                std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set")?,
-            ),
-            "openai" => (
-                "https://api.openai.com/v1/audio/transcriptions",
-                std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?,
-            ),
-            other => return Err(format!("Unsupported audio provider: {}", other)),
-        };
-
         info!(provider, model, filename = %filename, size = audio_bytes.len(), "Sending audio for transcription");
 
-        let file_part = reqwest::multipart::Part::bytes(audio_bytes)
-            .file_name(filename)
-            .mime_str(&mime)
-            .map_err(|e| format!("Failed to set MIME type: {}", e))?;
-
-        let form = reqwest::multipart::Form::new()
-            .part("file", file_part)
-            .text("model", model.to_string())
-            .text("response_format", "text");
-
-        let client = crate::http_client::proxied_client();
-        let resp = client
-            .post(api_url)
-            .bearer_auth(&api_key)
-            .multipart(form)
-            .timeout(std::time::Duration::from_secs(60))
-            .send()
-            .await
-            .map_err(|e| format!("Transcription request failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Transcription API error ({}): {}", status, body));
-        }
-
-        let transcription = resp
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read transcription response: {}", e))?;
+        let transcription = match provider {
+            // Whisper-compatible providers (OpenAI multipart protocol)
+            "groq" | "openai" | "minimax" => {
+                let (api_url, api_key) = match provider {
+                    "groq" => (
+                        "https://api.groq.com/openai/v1/audio/transcriptions",
+                        std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set")?,
+                    ),
+                    "openai" => (
+                        "https://api.openai.com/v1/audio/transcriptions",
+                        std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?,
+                    ),
+                    "minimax" => (
+                        "https://api.minimax.io/v1/audio/transcriptions",
+                        std::env::var("MINIMAX_API_KEY")
+                            .or_else(|_| std::env::var("MINIMAX_CN_API_KEY"))
+                            .map_err(|_| "MINIMAX_API_KEY not set")?,
+                    ),
+                    _ => unreachable!(),
+                };
+                whisper_transcribe(&api_url, &api_key, model, audio_bytes, &filename, &mime).await?
+            }
+            // Gemini — multimodal content generation with audio input
+            "gemini" => gemini_transcribe(model, audio_bytes, &mime).await?,
+            // ElevenLabs — Speech-to-Text API
+            "elevenlabs" => elevenlabs_transcribe(model, audio_bytes, &mime).await?,
+            other => return Err(format!("Unsupported audio provider: {}", other)),
+        };
 
         let transcription = transcription.trim().to_string();
         if transcription.is_empty() {
@@ -294,6 +279,153 @@ fn detect_vision_provider() -> Option<&'static str> {
 
 /// Map a known audio MIME type to the extension Whisper expects.
 /// Returns `None` for MIME types that aren't in Whisper's supported set so
+// ── STT provider helpers ──────────────────────────────────────────────
+
+/// Transcribe using an OpenAI-compatible Whisper endpoint (Groq, OpenAI).
+async fn whisper_transcribe(
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    audio_bytes: Vec<u8>,
+    filename: &str,
+    mime: &str,
+) -> Result<String, String> {
+    let file_part = reqwest::multipart::Part::bytes(audio_bytes)
+        .file_name(filename.to_string())
+        .mime_str(mime)
+        .map_err(|e| format!("Failed to set MIME type: {}", e))?;
+
+    let form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("model", model.to_string())
+        .text("response_format", "text");
+
+    let client = crate::http_client::proxied_client();
+    let resp = client
+        .post(api_url)
+        .bearer_auth(api_key)
+        .multipart(form)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("Transcription request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Transcription API error ({}): {}", status, body));
+    }
+
+    resp.text()
+        .await
+        .map_err(|e| format!("Failed to read transcription response: {}", e))
+}
+
+/// Transcribe using Gemini's multimodal generateContent API.
+async fn gemini_transcribe(
+    model: &str,
+    audio_bytes: Vec<u8>,
+    mime: &str,
+) -> Result<String, String> {
+    use base64::Engine;
+
+    let api_key = std::env::var("GEMINI_API_KEY")
+        .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+        .map_err(|_| "GEMINI_API_KEY or GOOGLE_API_KEY not set")?;
+
+    let audio_b64 = base64::engine::general_purpose::STANDARD.encode(&audio_bytes);
+
+    let body = serde_json::json!({
+        "contents": [{
+            "parts": [
+                {
+                    "inline_data": {
+                        "mime_type": mime,
+                        "data": audio_b64,
+                    }
+                },
+                {
+                    "text": "Transcribe this audio exactly as spoken. Output only the transcription text, nothing else."
+                }
+            ]
+        }]
+    });
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        model, api_key
+    );
+
+    let client = crate::http_client::proxied_client();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("Gemini transcription request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("Gemini API error ({}): {}", status, err_body));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Gemini response: {}", e))?;
+
+    json["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Gemini returned no transcription text".to_string())
+}
+
+/// Transcribe using ElevenLabs Speech-to-Text API.
+async fn elevenlabs_transcribe(
+    model: &str,
+    audio_bytes: Vec<u8>,
+    mime: &str,
+) -> Result<String, String> {
+    let api_key = std::env::var("ELEVENLABS_API_KEY").map_err(|_| "ELEVENLABS_API_KEY not set")?;
+
+    let file_part = reqwest::multipart::Part::bytes(audio_bytes)
+        .file_name("audio.webm".to_string())
+        .mime_str(mime)
+        .map_err(|e| format!("Failed to set MIME type: {}", e))?;
+
+    let form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("model_id", model.to_string());
+
+    let client = crate::http_client::proxied_client();
+    let resp = client
+        .post("https://api.elevenlabs.io/v1/speech-to-text")
+        .header("xi-api-key", &api_key)
+        .multipart(form)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("ElevenLabs STT request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("ElevenLabs API error ({}): {}", status, err_body));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse ElevenLabs response: {}", e))?;
+
+    json["text"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "ElevenLabs returned no transcription text".to_string())
+}
+
 /// the caller can fall back to the source file extension.
 fn mime_to_ext(mime: &str) -> Option<String> {
     match mime.to_ascii_lowercase().as_str() {
@@ -410,6 +542,15 @@ fn detect_audio_provider() -> Option<&'static str> {
     if has_key("OPENAI_API_KEY") {
         return Some("openai");
     }
+    if has_key("GEMINI_API_KEY") || has_key("GOOGLE_API_KEY") {
+        return Some("gemini");
+    }
+    if has_key("ELEVENLABS_API_KEY") {
+        return Some("elevenlabs");
+    }
+    if has_key("MINIMAX_API_KEY") || has_key("MINIMAX_CN_API_KEY") {
+        return Some("minimax");
+    }
     None
 }
 
@@ -428,6 +569,9 @@ fn default_audio_model(provider: &str) -> &str {
     match provider {
         "groq" => "whisper-large-v3-turbo",
         "openai" => "whisper-1",
+        "gemini" => "gemini-2.0-flash",
+        "elevenlabs" => "scribe_v1",
+        "minimax" => "speech-01-turbo",
         _ => "unknown",
     }
 }
