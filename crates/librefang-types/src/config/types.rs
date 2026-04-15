@@ -90,6 +90,14 @@ pub struct ChannelOverrides {
     /// `group_policy` is `mention_only`.
     #[serde(default)]
     pub group_trigger_patterns: Vec<String>,
+    /// Enable LLM-based reply-intent precheck for group messages.
+    /// When true and group_policy is "all", a lightweight classifier decides
+    /// whether to reply before running the full agent loop.
+    #[serde(default)]
+    pub reply_precheck: bool,
+    /// Model override for the reply precheck classifier (default: agent's model).
+    #[serde(default)]
+    pub reply_precheck_model: Option<String>,
     /// Global rate limit for this channel (messages per minute, 0 = unlimited).
     #[serde(default)]
     pub rate_limit_per_minute: u32,
@@ -170,6 +178,8 @@ impl Default for ChannelOverrides {
             dm_policy: DmPolicy::default(),
             group_policy: GroupPolicy::default(),
             group_trigger_patterns: Vec::new(),
+            reply_precheck: false,
+            reply_precheck_model: None,
             rate_limit_per_minute: 0,
             rate_limit_per_user: 0,
             threading: false,
