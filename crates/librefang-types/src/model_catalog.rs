@@ -58,6 +58,10 @@ pub enum AuthStatus {
     NotRequired,
     /// CLI-based provider but CLI is not installed.
     CliNotInstalled,
+    /// Local provider was probed and found offline (port not listening).
+    /// Unlike `Missing`, `detect_auth()` will not reset this — the probe
+    /// owns the transition back to `NotRequired` when the service comes up.
+    LocalOffline,
 }
 
 impl AuthStatus {
@@ -87,6 +91,7 @@ impl fmt::Display for AuthStatus {
             AuthStatus::Missing => write!(f, "missing"),
             AuthStatus::NotRequired => write!(f, "not_required"),
             AuthStatus::CliNotInstalled => write!(f, "cli_not_installed"),
+            AuthStatus::LocalOffline => write!(f, "local_offline"),
         }
     }
 }

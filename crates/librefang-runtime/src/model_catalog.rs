@@ -183,10 +183,14 @@ impl ModelCatalog {
                 // Local providers (ollama, vllm, etc.) have their status set by
                 // the async probe at startup. Only set NotRequired as a fallback
                 // when the probe hasn't run yet (status still Missing).
+                // LocalOffline means the probe ran and found the service down —
+                // do NOT reset it here, or offline providers would re-appear in
+                // the model switcher after any unrelated detect_auth() call.
                 if crate::provider_health::is_local_provider(&provider.id) {
                     if provider.auth_status == AuthStatus::Missing {
                         provider.auth_status = AuthStatus::NotRequired;
                     }
+                    // LocalOffline: leave unchanged — owned by the probe
                 } else if !provider.base_url.is_empty() {
                     // Has a base_url, no key needed (e.g. custom local proxy).
                     provider.auth_status = AuthStatus::NotRequired;

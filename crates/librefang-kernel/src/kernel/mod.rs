@@ -8023,11 +8023,14 @@ system_prompt = "You are a helpful assistant."
                             error = result.error.as_deref().unwrap_or("unknown"),
                             "Local provider offline"
                         );
-                        // Mark unreachable local providers so dashboard doesn't show "configured"
+                        // Mark unreachable local providers as LocalOffline (not Missing).
+                        // Using Missing would cause detect_auth() to reset the status back
+                        // to NotRequired on the next unrelated auth check, making offline
+                        // providers reappear in the model switcher.
                         if let Ok(mut catalog) = kernel.model_catalog.write() {
                             catalog.set_provider_auth_status(
                                 provider_id,
-                                librefang_types::model_catalog::AuthStatus::Missing,
+                                librefang_types::model_catalog::AuthStatus::LocalOffline,
                             );
                         }
                     }
