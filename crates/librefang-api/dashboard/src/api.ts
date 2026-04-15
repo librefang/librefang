@@ -1534,7 +1534,10 @@ export async function getFullConfig(): Promise<Record<string, unknown>> {
 
 export interface ConfigFieldSchema {
   type?: string;
-  options?: (string | { id: string; name: string; provider: string })[];
+  options?: (string | { id: string; name: string; provider: string } | { value: string; label: string })[];
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 export interface ConfigSectionSchema {

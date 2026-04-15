@@ -1350,7 +1350,7 @@ impl LibreFangKernel {
             .unwrap_or_else(|| config.data_dir.join("librefang.db"));
         let mut substrate = MemorySubstrate::open_with_chunking(
             &db_path,
-            config.memory.decay_rate,
+            config.memory.decay_rate as f32,
             config.memory.chunking.clone(),
         )
         .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?;

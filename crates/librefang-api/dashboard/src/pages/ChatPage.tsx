@@ -1940,7 +1940,7 @@ export function ChatPage() {
             <ChatInput
               onSend={sendMessage}
               disabled={isLoading}
-              placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
+              placeholder={isLoading ? t("chat.generating") : selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
               authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
               providerName={selectedAgent?.model_provider}
               supportsThinking={selectedAgent?.supports_thinking}
