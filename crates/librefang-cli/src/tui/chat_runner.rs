@@ -158,6 +158,11 @@ impl StandaloneChat {
             } => {
                 self.chat.tool_result(&name, &result_preview, is_error);
             }
+            StreamEvent::ResetAccumulator => {
+                // Agent loop retrying (nudge/hallucination) — discard streamed
+                // text so the retry's output is not concatenated to this one.
+                self.chat.streaming_text.clear();
+            }
         }
     }
 

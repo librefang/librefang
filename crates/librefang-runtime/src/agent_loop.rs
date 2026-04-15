@@ -3518,6 +3518,9 @@ pub async fn run_agent_loop_streaming(
                             silent_failure = is_silent_failure,
                             "Empty response (streaming), retrying once"
                         );
+                        // Tell the gateway to discard accumulated text before
+                        // we stream iteration N+1 — prevents concatenation.
+                        let _ = stream_tx.send(StreamEvent::ResetAccumulator).await;
                         if is_silent_failure {
                             messages = crate::session_repair::validate_and_repair(&messages);
                         }
@@ -3532,6 +3535,9 @@ pub async fn run_agent_loop_streaming(
                             iteration,
                             "Detected hallucinated action (streaming) — agent claimed action without tool calls, retrying"
                         );
+                        // Tell the gateway to discard accumulated text before
+                        // we stream iteration N+1 — prevents concatenation.
+                        let _ = stream_tx.send(StreamEvent::ResetAccumulator).await;
                         messages.push(Message::assistant(&text));
                         messages.push(Message::user(
                             "[System: You described performing an action but did not actually call any tools. \
@@ -3546,6 +3552,9 @@ pub async fn run_agent_loop_streaming(
                             iteration,
                             "User requested action but LLM responded without tool calls (streaming) — nudging retry"
                         );
+                        // Tell the gateway to discard accumulated text before
+                        // we stream iteration N+1 — prevents concatenation.
+                        let _ = stream_tx.send(StreamEvent::ResetAccumulator).await;
                         messages.push(Message::assistant(&text));
                         messages.push(Message::user(
                             "[System: You described actions but didn't execute them. \
@@ -4660,14 +4669,12 @@ mod tests {
     /// to the allow-list with rationale.
     ///
     /// Allow-list rationale:
-    /// - silent_response.rs           — canonical detector + tests
-    /// - agent_loop.rs                — kept for the heartbeat back-write
-    ///                                  ("[no reply needed]") and tests
-    /// - session_repair.rs            — heartbeat-prune predicate (delegates)
-    /// - reply_directives.rs          — back-compat parse-through test
-    /// - prompt_builder.rs            — explanatory prompt text (post-rewrite
-    ///                                  references the token internally)
-    /// - drivers/claude_code.rs       — driver-side suppression (delegates)
+    /// - silent_response.rs: canonical detector + tests
+    /// - agent_loop.rs: kept for the heartbeat back-write ("[no reply needed]") and tests
+    /// - session_repair.rs: heartbeat-prune predicate (delegates)
+    /// - reply_directives.rs: back-compat parse-through test
+    /// - prompt_builder.rs: explanatory prompt text (post-rewrite references the token internally)
+    /// - drivers/claude_code.rs: driver-side suppression (delegates)
     #[test]
     fn silent_response_single_source_of_truth() {
         use std::process::Command;

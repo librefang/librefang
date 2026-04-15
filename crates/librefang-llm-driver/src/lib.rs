@@ -164,6 +164,10 @@ pub enum StreamEvent {
         result_preview: String,
         is_error: bool,
     },
+    /// Discard all accumulated text so far (emitted by agent loop before a
+    /// nudge/hallucination retry so the gateway resets its accumulator and
+    /// does not concatenate iteration-N text with iteration-N+1 text).
+    ResetAccumulator,
 }
 
 /// Trait for LLM drivers.

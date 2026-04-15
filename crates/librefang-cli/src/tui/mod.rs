@@ -1187,6 +1187,11 @@ impl App {
             } => {
                 self.chat.tool_result(&name, &result_preview, is_error);
             }
+            StreamEvent::ResetAccumulator => {
+                // Agent loop retrying — discard streamed text so the retry's
+                // output is not concatenated to this iteration's output.
+                self.chat.streaming_text.clear();
+            }
         }
     }
 

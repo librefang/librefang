@@ -2590,6 +2590,13 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
                   onProgress(display).catch(() => {});
                 }
               } catch { /* ignore */ }
+            } else if (eventType === 'reset') {
+              // Agent loop is retrying (nudge/hallucination retry) — discard
+              // accumulated text so iteration-N text is not prepended to
+              // iteration-N+1 text in the final WhatsApp message.
+              accumulated = '';
+              clearTimeout(pendingEdit);
+              pendingEdit = null;
             } else if (eventType === 'chunk') {
               try {
                 const parsed = JSON.parse(dataStr);

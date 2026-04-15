@@ -1919,6 +1919,10 @@ pub async fn send_message_stream(
                         "detail": detail,
                     }))
                     .unwrap_or_else(|_| Event::default().data("error")),
+                StreamEvent::ResetAccumulator => Event::default()
+                    .event("reset")
+                    .json_data(serde_json::json!({"reset": true}))
+                    .unwrap_or_else(|_| Event::default().data("error")),
                 _ => Event::default().comment("skip"),
             });
             return Some((sse_event, (rx, dedup)));
