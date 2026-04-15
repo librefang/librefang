@@ -2,25 +2,33 @@ import { lazy, Suspense, type ComponentType } from "react";
 import { Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { App } from "./App";
 
+// Matches chunk load failures across browsers:
+// Chrome:  "Failed to fetch dynamically imported module: ..."
+// Firefox: "error loading dynamically imported module: ..."
+// Safari:  "Importing a module script failed"
+// Webpack: "Loading chunk ... failed"
+const CHUNK_ERROR_RE = /dynamically imported module|importing a module script|Loading chunk .* failed/i;
+
 // Auto-reload on stale chunk — when the dashboard is rebuilt (dev HMR, sync,
 // or version upgrade) the old chunk hashes no longer exist on the server.
-// Detect the "Failed to fetch dynamically imported module" error and reload
-// once so the browser picks up the new index.html with correct chunk hashes.
-// A sessionStorage guard prevents infinite reload loops.
+// Detect the chunk error and reload once so the browser picks up the new
+// index.html with correct chunk hashes. A sessionStorage guard prevents
+// infinite reload loops.
 function lazyWithReload<T extends ComponentType<any>>(
   factory: () => Promise<{ default: T }>,
 ): React.LazyExoticComponent<T> {
   return lazy(() =>
     factory().catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
-      if (
-        /Failed to fetch dynamically imported module|Loading chunk .* failed|import .* from .* failed/i.test(msg)
-      ) {
+      if (CHUNK_ERROR_RE.test(msg)) {
         const key = "__chunk_reload";
         const last = Number(sessionStorage.getItem(key) || "0");
         if (Date.now() - last > 10_000) {
           sessionStorage.setItem(key, String(Date.now()));
           window.location.reload();
+          // Return a never-resolving promise so React doesn't render the
+          // error boundary before the reload takes effect.
+          return new Promise<never>(() => {});
         }
       }
       throw err;
@@ -329,10 +337,35 @@ const routeTree = rootRoute.addChildren([
   configInfraRoute,
 ]);
 
+function ChunkErrorBoundary({ error }: { error: Error }) {
+  const isChunkError = CHUNK_ERROR_RE.test(error.message);
+  return (
+    <div className="flex h-[60vh] items-center justify-center">
+      <div className="max-w-md text-center space-y-4">
+        <p className="text-lg font-semibold">
+          {isChunkError ? "Page assets have been updated" : "Something went wrong"}
+        </p>
+        <p className="text-sm text-gray-500">
+          {isChunkError
+            ? "A new version is available. Reload to get the latest."
+            : error.message}
+        </p>
+        <button
+          onClick={() => window.location.reload()}
+          className="rounded-xl bg-sky-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-sky-600 transition-colors"
+        >
+          Reload
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export const router = createRouter({
   routeTree,
   basepath: "/dashboard",
   defaultPreload: "intent",
+  defaultErrorComponent: ChunkErrorBoundary as any,
 });
 
 declare module "@tanstack/react-router" {
