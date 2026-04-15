@@ -156,6 +156,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 use crate::middleware::RequestLanguage;
+use crate::stream_dedup::StreamDedup;
 use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -1870,44 +1871,57 @@ pub async fn send_message_stream(
         }
     };
 
-    let sse_stream = stream::unfold(rx, |mut rx| async move {
-        match rx.recv().await {
-            Some(event) => {
-                let sse_event: Result<Event, std::convert::Infallible> = Ok(match event {
-                    StreamEvent::TextDelta { text } => Event::default()
+    // Defense against the agent loop emitting the same text span twice in a
+    // single streaming turn (observed when multi-iteration loops re-assert a
+    // final sentence after a tool step). The dedup window is per-request, so
+    // legitimate repetitions across turns stay unaffected.
+    let sse_stream = stream::unfold((rx, StreamDedup::new()), |(mut rx, mut dedup)| async move {
+        loop {
+            let event = rx.recv().await?;
+            let sse_event: Result<Event, std::convert::Infallible> = Ok(match event {
+                StreamEvent::TextDelta { text } => {
+                    if dedup.is_duplicate(&text) {
+                        tracing::debug!(
+                            len = text.len(),
+                            preview = %text.chars().take(40).collect::<String>(),
+                            "stream dedup: dropping duplicate TextDelta",
+                        );
+                        continue;
+                    }
+                    dedup.record_sent(&text);
+                    Event::default()
                         .event("chunk")
                         .json_data(serde_json::json!({"content": text, "done": false}))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::ToolUseStart { name, .. } => Event::default()
-                        .event("tool_use")
-                        .json_data(serde_json::json!({"tool": name}))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::ToolUseEnd { name, input, .. } => Event::default()
-                        .event("tool_result")
-                        .json_data(serde_json::json!({"tool": name, "input": input}))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::ContentComplete { usage, .. } => Event::default()
-                        .event("done")
-                        .json_data(serde_json::json!({
-                            "done": true,
-                            "usage": {
-                                "input_tokens": usage.input_tokens,
-                                "output_tokens": usage.output_tokens,
-                            }
-                        }))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::PhaseChange { phase, detail } => Event::default()
-                        .event("phase")
-                        .json_data(serde_json::json!({
-                            "phase": phase,
-                            "detail": detail,
-                        }))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    _ => Event::default().comment("skip"),
-                });
-                Some((sse_event, rx))
-            }
-            None => None,
+                        .unwrap_or_else(|_| Event::default().data("error"))
+                }
+                StreamEvent::ToolUseStart { name, .. } => Event::default()
+                    .event("tool_use")
+                    .json_data(serde_json::json!({"tool": name}))
+                    .unwrap_or_else(|_| Event::default().data("error")),
+                StreamEvent::ToolUseEnd { name, input, .. } => Event::default()
+                    .event("tool_result")
+                    .json_data(serde_json::json!({"tool": name, "input": input}))
+                    .unwrap_or_else(|_| Event::default().data("error")),
+                StreamEvent::ContentComplete { usage, .. } => Event::default()
+                    .event("done")
+                    .json_data(serde_json::json!({
+                        "done": true,
+                        "usage": {
+                            "input_tokens": usage.input_tokens,
+                            "output_tokens": usage.output_tokens,
+                        }
+                    }))
+                    .unwrap_or_else(|_| Event::default().data("error")),
+                StreamEvent::PhaseChange { phase, detail } => Event::default()
+                    .event("phase")
+                    .json_data(serde_json::json!({
+                        "phase": phase,
+                        "detail": detail,
+                    }))
+                    .unwrap_or_else(|_| Event::default().data("error")),
+                _ => Event::default().comment("skip"),
+            });
+            return Some((sse_event, (rx, dedup)));
         }
     });
 
