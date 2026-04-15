@@ -4884,19 +4884,22 @@ system_prompt = "You are a helpful assistant."
             let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
             let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
             if let Some(mo) = catalog.get_overrides(&override_key) {
-                // All overrides are injected via extra_params using entry().or_insert(),
-                // which means agent-level extra_params always take precedence.
-                // The driver merges extra_body on top of the serialized request,
-                // so extra_params values override the struct-level temperature/max_tokens.
-                let ep = &mut manifest.model.extra_params;
+                // temperature & max_tokens: set directly on the struct so all
+                // drivers (OpenAI, Anthropic, Gemini) pick them up.  These always
+                // override the agent default since there's no way to distinguish
+                // "agent didn't set it" from "agent set the default value".
+                // This is intentional — model overrides are the user's explicit
+                // choice for this specific model.
                 if let Some(t) = mo.temperature {
-                    ep.entry("temperature".to_string())
-                        .or_insert(serde_json::json!(t));
+                    manifest.model.temperature = t;
                 }
                 if let Some(mt) = mo.max_tokens {
-                    ep.entry("max_tokens".to_string())
-                        .or_insert(serde_json::json!(mt));
+                    manifest.model.max_tokens = mt;
                 }
+                // Provider-specific params go through extra_params.  entry().or_insert
+                // ensures agent-level extra_params (from agent.toml [model] section
+                // unknown fields captured by #[serde(flatten)]) take precedence.
+                let ep = &mut manifest.model.extra_params;
                 if let Some(tp) = mo.top_p {
                     ep.entry("top_p".to_string())
                         .or_insert(serde_json::json!(tp));
