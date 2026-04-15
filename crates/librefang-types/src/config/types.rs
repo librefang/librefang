@@ -1985,6 +1985,11 @@ pub struct KernelConfig {
     /// e.g. `ollama = "http://192.168.1.100:11434/v1"`
     #[serde(default)]
     pub provider_urls: HashMap<String, String>,
+    /// Per-provider proxy URL overrides (provider ID → proxy URL).
+    /// Allows routing specific providers through a proxy while others connect directly.
+    /// e.g. `openai = "http://proxy.corp:8080"`, `ollama = ""` (direct)
+    #[serde(default)]
+    pub provider_proxy_urls: HashMap<String, String>,
     /// Provider region selection (provider ID → region name).
     /// Selects a regional endpoint from the provider's `[provider.regions]` map.
     /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
@@ -3533,6 +3538,7 @@ impl Default for KernelConfig {
             thinking: None,
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
+            provider_proxy_urls: HashMap::new(),
             provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
             vertex_ai: VertexAiConfig::default(),

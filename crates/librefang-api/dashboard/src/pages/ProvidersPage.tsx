@@ -152,6 +152,7 @@ interface ProviderConfigState {
   provider: ProviderItem | null;
   keyInput: string;
   urlInput: string;
+  proxyInput: string;
   hasStoredKey: boolean;
   saving: boolean;
   error: string | null;
@@ -168,13 +169,13 @@ function useProviderConfig(
   setActiveTab: (tab: "configured" | "unconfigured") => void,
 ) {
   const [state, setState] = useState<ProviderConfigState>({
-    provider: null, keyInput: "", urlInput: "", hasStoredKey: false,
+    provider: null, keyInput: "", urlInput: "", proxyInput: "", hasStoredKey: false,
     saving: false, error: null, testing: false, testResult: null,
   });
 
   const open = useCallback((p: ProviderItem) => {
     setState({
-      provider: p, keyInput: "", urlInput: p.base_url || "",
+      provider: p, keyInput: "", urlInput: p.base_url || "", proxyInput: p.proxy_url || "",
       hasStoredKey: p.auth_status === "configured" || p.auth_status === "validated_key" || p.auth_status === "invalid_key" || p.auth_status === "auto_detected",
       saving: false, error: null, testing: false, testResult: null,
     });
@@ -184,13 +185,16 @@ function useProviderConfig(
 
   const setKeyInput = useCallback((v: string) => setState(s => ({ ...s, keyInput: v })), []);
   const setUrlInput = useCallback((v: string) => setState(s => ({ ...s, urlInput: v })), []);
+  const setProxyInput = useCallback((v: string) => setState(s => ({ ...s, proxyInput: v })), []);
 
   const saveKey = useCallback(async () => {
     if (!state.provider) return;
     setState(s => ({ ...s, saving: true, error: null }));
     try {
-      if (state.urlInput.trim() && state.urlInput !== state.provider.base_url) {
-        await setProviderUrl(state.provider.id, state.urlInput.trim());
+      const urlChanged = state.urlInput.trim() && state.urlInput !== state.provider.base_url;
+      const proxyChanged = state.proxyInput !== (state.provider.proxy_url || "");
+      if (urlChanged || proxyChanged) {
+        await setProviderUrl(state.provider.id, state.urlInput.trim() || state.provider.base_url || "", proxyChanged ? state.proxyInput.trim() : undefined);
       }
       if (state.keyInput.trim()) {
         await setProviderKey(state.provider.id, state.keyInput.trim());
@@ -204,7 +208,7 @@ function useProviderConfig(
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, refetchProviders, addToast, t, activeTab, setActiveTab]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, refetchProviders, addToast, t, activeTab, setActiveTab]);
 
   const removeKey = useCallback(async () => {
     if (!state.provider) return;
@@ -229,8 +233,10 @@ function useProviderConfig(
         await setProviderKey(state.provider.id, state.keyInput.trim());
         setState(s => ({ ...s, hasStoredKey: true, keyInput: "" }));
       }
-      if (state.urlInput.trim() && state.urlInput !== state.provider.base_url) {
-        await setProviderUrl(state.provider.id, state.urlInput.trim());
+      const urlChanged = state.urlInput.trim() && state.urlInput !== state.provider.base_url;
+      const proxyChanged = state.proxyInput !== (state.provider.proxy_url || "");
+      if (urlChanged || proxyChanged) {
+        await setProviderUrl(state.provider.id, state.urlInput.trim() || state.provider.base_url || "", proxyChanged ? state.proxyInput.trim() : undefined);
       }
       const result = await testMutation.mutateAsync(state.provider.id);
       if (result.status === "error") {
@@ -244,9 +250,9 @@ function useProviderConfig(
     } finally {
       setState(s => ({ ...s, testing: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, testMutation, refetchProviders, t]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, testMutation, refetchProviders, t]);
 
-  return { ...state, open, close, setKeyInput, setUrlInput, saveKey, removeKey, testKey };
+  return { ...state, open, close, setKeyInput, setUrlInput, setProxyInput, saveKey, removeKey, testKey };
 }
 
 // ── ProviderCard ─────────────────────────────────────────────────
@@ -1318,6 +1324,13 @@ export function ProvidersPage() {
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
             </div>
 
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.proxy_url")} <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
+              <input type="text" value={config.proxyInput} onChange={e => config.setProxyInput(e.target.value)}
+                placeholder={t("providers.proxy_url_placeholder")}
+                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
+            </div>
+
             {config.error && (
               <div className="flex items-center gap-2 text-error text-xs">
                 <AlertCircle className="w-4 h-4 shrink-0" />
@@ -1334,7 +1347,7 @@ export function ProvidersPage() {
 
             <div className="flex gap-2 pt-2">
               <Button variant="primary" className="flex-1" onClick={config.saveKey}
-                disabled={config.saving || config.testing || (!config.keyInput.trim() && config.urlInput === (config.provider.base_url || ""))}>
+                disabled={config.saving || config.testing || (!config.keyInput.trim() && config.urlInput === (config.provider.base_url || "") && config.proxyInput === (config.provider.proxy_url || ""))}>
                 {config.saving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
                 {t("common.save")}
               </Button>

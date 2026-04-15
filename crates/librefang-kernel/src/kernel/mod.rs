@@ -1456,6 +1456,10 @@ impl LibreFangKernel {
                 .cloned()
         });
         let mcp_bridge_cfg = build_mcp_bridge_cfg(&config);
+        let default_proxy_url = config
+            .provider_proxy_urls
+            .get(&config.default_model.provider)
+            .cloned();
         let driver_config = DriverConfig {
             provider: config.default_model.provider.clone(),
             api_key: default_api_key.clone(),
@@ -1465,6 +1469,7 @@ impl LibreFangKernel {
             skip_permissions: true,
             message_timeout_secs: config.default_model.message_timeout_secs,
             mcp_bridge: Some(mcp_bridge_cfg.clone()),
+            proxy_url: default_proxy_url.clone(),
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
         // even if the LLM provider is misconfigured. Users can fix config via dashboard.
@@ -1500,6 +1505,7 @@ impl LibreFangKernel {
                     skip_permissions: true,
                     message_timeout_secs: config.default_model.message_timeout_secs,
                     mcp_bridge: Some(mcp_bridge_cfg.clone()),
+                    proxy_url: default_proxy_url.clone(),
                 };
                 match drivers::create_driver(&profile_config) {
                     Ok(profile_driver) => {
@@ -1604,6 +1610,7 @@ impl LibreFangKernel {
                             skip_permissions: true,
                             message_timeout_secs: config.default_model.message_timeout_secs,
                             mcp_bridge: Some(mcp_bridge_cfg.clone()),
+                            proxy_url: config.provider_proxy_urls.get(provider).cloned(),
                         };
                         match drivers::create_driver(&auto_config) {
                             Ok(d) => {
@@ -1654,6 +1661,7 @@ impl LibreFangKernel {
                 skip_permissions: true,
                 message_timeout_secs: config.default_model.message_timeout_secs,
                 mcp_bridge: Some(mcp_bridge_cfg.clone()),
+                proxy_url: config.provider_proxy_urls.get(&fb.provider).cloned(),
             };
             match drivers::create_driver(&fb_config) {
                 Ok(d) => {
@@ -1755,6 +1763,13 @@ impl LibreFangKernel {
             info!(
                 "applied {} provider URL override(s)",
                 config.provider_urls.len()
+            );
+        }
+        if !config.provider_proxy_urls.is_empty() {
+            model_catalog.apply_proxy_url_overrides(&config.provider_proxy_urls);
+            info!(
+                "applied {} provider proxy URL override(s)",
+                config.provider_proxy_urls.len()
             );
         }
         // Load user's custom models from ~/.librefang/custom_models.json (highest priority)
@@ -7198,6 +7213,9 @@ system_prompt = "You are a helpful assistant."
                     if !new_config.provider_urls.is_empty() {
                         catalog.apply_url_overrides(&new_config.provider_urls);
                     }
+                    if !new_config.provider_proxy_urls.is_empty() {
+                        catalog.apply_proxy_url_overrides(&new_config.provider_proxy_urls);
+                    }
                     // Also update media driver cache with new provider URLs
                     self.media_drivers
                         .update_provider_urls(new_config.provider_urls.clone());
@@ -8820,6 +8838,7 @@ system_prompt = "You are a helpful assistant."
                 skip_permissions: true,
                 message_timeout_secs: cfg.default_model.message_timeout_secs,
                 mcp_bridge: Some(build_mcp_bridge_cfg(&cfg)),
+                proxy_url: cfg.provider_proxy_urls.get(agent_provider).cloned(),
             };
 
             match self.driver_cache.get_or_create(&driver_config) {
@@ -8904,6 +8923,7 @@ system_prompt = "You are a helpful assistant."
                     mcp_bridge: Some(build_mcp_bridge_cfg(&cfg)),
                     skip_permissions: true,
                     message_timeout_secs: cfg.default_model.message_timeout_secs,
+                    proxy_url: cfg.provider_proxy_urls.get(&fb_provider).cloned(),
                 };
                 match self.driver_cache.get_or_create(&config) {
                     Ok(d) => chain.push((d, strip_provider_prefix(&fb.model, &fb_provider))),

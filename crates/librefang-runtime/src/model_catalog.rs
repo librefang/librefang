@@ -523,6 +523,7 @@ impl ModelCatalog {
                 available_models: Vec::new(),
                 // Added at runtime via set_provider_url → always custom.
                 is_custom: true,
+                proxy_url: None,
             });
             // Re-detect auth for the newly added provider
             self.detect_auth();
@@ -546,6 +547,24 @@ impl ModelCatalog {
                     }
                 }
             }
+        }
+    }
+
+    /// Set a per-provider proxy URL override.
+    pub fn set_provider_proxy_url(&mut self, provider: &str, proxy_url: &str) {
+        if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider) {
+            p.proxy_url = if proxy_url.is_empty() {
+                None
+            } else {
+                Some(proxy_url.to_string())
+            };
+        }
+    }
+
+    /// Apply a batch of per-provider proxy URL overrides from config.
+    pub fn apply_proxy_url_overrides(&mut self, overrides: &HashMap<String, String>) {
+        for (provider, proxy_url) in overrides {
+            self.set_provider_proxy_url(provider, proxy_url);
         }
     }
 

@@ -375,6 +375,8 @@
     "optional": "optional",
     "remove_key": "Remove Key",
     "base_url": "Base URL",
+    "proxy_url": "Proxy URL",
+    "proxy_url_placeholder": "http://proxy:8080 or socks5://proxy:1080",
     "api_key": "API Key",
     "set_as_default": "Set as Default",
     "default_set": "Default provider updated",

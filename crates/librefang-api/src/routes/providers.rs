@@ -448,6 +448,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "key_required": p.key_required,
             "api_key_env": p.api_key_env,
             "base_url": p.base_url,
+            "proxy_url": p.proxy_url,
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
         });
@@ -559,6 +560,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             "key_required": p.key_required,
             "api_key_env": p.api_key_env,
             "base_url": p.base_url,
+            "proxy_url": p.proxy_url,
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
         });
@@ -634,6 +636,7 @@ pub async fn get_provider(
         "key_required": provider.key_required,
         "api_key_env": provider.api_key_env,
         "base_url": provider.base_url,
+        "proxy_url": provider.proxy_url,
         "models": models,
     });
 
@@ -1321,6 +1324,9 @@ pub async fn set_provider_url(
             .into_json_tuple();
     }
 
+    // Optional proxy_url in same request
+    let proxy_url = body["proxy_url"].as_str().map(|s| s.trim().to_string());
+
     // Update catalog in memory
     {
         let mut catalog = state
@@ -1329,12 +1335,20 @@ pub async fn set_provider_url(
             .write()
             .unwrap_or_else(|e| e.into_inner());
         catalog.set_provider_url(&name, &base_url);
+        if let Some(ref pu) = proxy_url {
+            catalog.set_provider_proxy_url(&name, pu);
+        }
     }
 
     // Persist to config.toml [provider_urls] section
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_provider_url(&config_path, &name, &base_url) {
         return ApiErrorResponse::internal(format!("Failed to save config: {e}")).into_json_tuple();
+    }
+    if let Some(ref pu) = proxy_url {
+        if let Err(e) = upsert_provider_proxy_url(&config_path, &name, pu) {
+            tracing::warn!("Failed to persist proxy_url: {e}");
+        }
     }
 
     // Probe reachability at the new URL
@@ -1565,6 +1579,50 @@ fn upsert_provider_url(
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
+/// Persist a per-provider proxy URL to `[provider_proxy_urls]` in config.toml.
+fn upsert_provider_proxy_url(
+    config_path: &std::path::Path,
+    provider: &str,
+    proxy_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let content = if config_path.exists() {
+        std::fs::read_to_string(config_path)?
+    } else {
+        String::new()
+    };
+
+    let mut doc: toml::Value = if content.trim().is_empty() {
+        toml::Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str(&content)?
+    };
+
+    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
+
+    if !root.contains_key("provider_proxy_urls") {
+        root.insert(
+            "provider_proxy_urls".to_string(),
+            toml::Value::Table(toml::map::Map::new()),
+        );
+    }
+    let table = root
+        .get_mut("provider_proxy_urls")
+        .and_then(|v| v.as_table_mut())
+        .ok_or("provider_proxy_urls is not a table")?;
+
+    if proxy_url.is_empty() {
+        table.remove(provider);
+    } else {
+        table.insert(
+            provider.to_string(),
+            toml::Value::String(proxy_url.to_string()),
+        );
     }
 
     std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;

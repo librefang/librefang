@@ -45,6 +45,7 @@ export interface ProviderItem {
   latency_ms?: number;
   api_key_env?: string;
   base_url?: string;
+  proxy_url?: string;
   key_required?: boolean;
   health?: string;
   media_capabilities?: string[];
@@ -952,8 +953,10 @@ export async function deleteProviderKey(providerId: string): Promise<ApiActionRe
   return del<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`);
 }
 
-export async function setProviderUrl(providerId: string, baseUrl: string): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, { base_url: baseUrl });
+export async function setProviderUrl(providerId: string, baseUrl: string, proxyUrl?: string): Promise<ApiActionResponse> {
+  const body: Record<string, string> = { base_url: baseUrl };
+  if (proxyUrl !== undefined) body.proxy_url = proxyUrl;
+  return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, body);
 }
 
 export async function setDefaultProvider(providerId: string, model?: string): Promise<ApiActionResponse> {

@@ -31,10 +31,19 @@ pub struct OpenAIDriver {
 impl OpenAIDriver {
     /// Create a new OpenAI-compatible driver.
     pub fn new(api_key: String, base_url: String) -> Self {
+        Self::with_proxy(api_key, base_url, None)
+    }
+
+    /// Create a new OpenAI-compatible driver with an optional per-provider proxy.
+    pub fn with_proxy(api_key: String, base_url: String, proxy_url: Option<&str>) -> Self {
+        let client = match proxy_url {
+            Some(url) => librefang_http::proxied_client_with_override(url),
+            None => librefang_http::proxied_client(),
+        };
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
-            client: librefang_http::proxied_client(),
+            client,
             extra_headers: Vec::new(),
             use_api_key_header: false,
             url_query: None,

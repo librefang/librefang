@@ -682,10 +682,18 @@ fn create_driver_from_entry(
         )));
     }
 
+    let proxy_url = config.proxy_url.as_deref();
+
     match entry.api_format {
-        ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::new(api_key, base_url))),
-        ApiFormat::Anthropic => Ok(Arc::new(anthropic::AnthropicDriver::new(api_key, base_url))),
-        ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::new(api_key, base_url))),
+        ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::with_proxy(
+            api_key, base_url, proxy_url,
+        ))),
+        ApiFormat::Anthropic => Ok(Arc::new(anthropic::AnthropicDriver::with_proxy(
+            api_key, base_url, proxy_url,
+        ))),
+        ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::with_proxy(
+            api_key, base_url, proxy_url,
+        ))),
         ApiFormat::ClaudeCode => {
             let mut d = claude_code::ClaudeCodeDriver::with_timeout(
                 config.base_url.clone(),
@@ -794,9 +802,10 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             let env_var = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
             std::env::var(&env_var).unwrap_or_default()
         });
-        return Ok(Arc::new(openai::OpenAIDriver::new(
+        return Ok(Arc::new(openai::OpenAIDriver::with_proxy(
             api_key,
             base_url.clone(),
+            config.proxy_url.as_deref(),
         )));
     }
 
@@ -1041,6 +1050,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1057,6 +1067,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1179,6 +1190,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1202,6 +1214,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1225,6 +1238,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let result = create_driver(&config);
         assert!(result.is_err());
@@ -1257,6 +1271,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1283,6 +1298,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
 
         let driver = create_driver(&config);
@@ -1321,6 +1337,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1340,6 +1357,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         // Clear any env var that might interfere
         std::env::remove_var("AZURE_OPENAI_ENDPOINT");
@@ -1368,6 +1386,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let d1 = cache.get_or_create(&config).unwrap();
         let d2 = cache.get_or_create(&config).unwrap();
@@ -1387,6 +1406,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let config_b = DriverConfig {
             provider: "ollama".to_string(),
@@ -1397,6 +1417,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let d_a = cache.get_or_create(&config_a).unwrap();
         let d_b = cache.get_or_create(&config_b).unwrap();
@@ -1419,6 +1440,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         cache.get_or_create(&config).unwrap();
         assert_eq!(cache.len(), 1);

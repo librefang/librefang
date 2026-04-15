@@ -375,6 +375,8 @@
     "optional": "可选",
     "remove_key": "移除 Key",
     "base_url": "Base URL",
+    "proxy_url": "代理 URL",
+    "proxy_url_placeholder": "http://proxy:8080 或 socks5://proxy:1080",
     "api_key": "API Key",
     "set_as_default": "设为默认",
     "default_set": "默认供应商已更新",

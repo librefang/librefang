@@ -282,6 +282,10 @@ pub struct ProviderInfo {
     /// re-create their TOML on the next boot anyway.
     #[serde(default)]
     pub is_custom: bool,
+    /// Per-provider proxy URL override. When set, API calls to this provider
+    /// are routed through this proxy instead of the global proxy config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
 }
 
 impl Default for ProviderInfo {
@@ -299,6 +303,7 @@ impl Default for ProviderInfo {
             media_capabilities: Vec::new(),
             available_models: Vec::new(),
             is_custom: false,
+            proxy_url: None,
         }
     }
 }
@@ -354,6 +359,7 @@ impl From<ProviderCatalogToml> for ProviderInfo {
             // Populated by the runtime catalog loader (classifies based on
             // whether the file is also present in registry/providers/).
             is_custom: false,
+            proxy_url: None,
         }
     }
 }
@@ -519,6 +525,7 @@ mod tests {
             media_capabilities: Vec::new(),
             available_models: Vec::new(),
             is_custom: false,
+            proxy_url: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: ProviderInfo = serde_json::from_str(&json).unwrap();
@@ -733,6 +740,7 @@ aliases = []
             media_capabilities: Vec::new(),
             available_models: Vec::new(),
             is_custom: false,
+            proxy_url: None,
         };
 
         // Simulate region selection: if user picks "us", use that region's base_url
