@@ -111,7 +111,9 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }:
   return (
     <div className="border-t border-border-subtle pt-3 mt-1 space-y-2">
       <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.set_as_default")}</label>
-      {models.length > 0 ? (
+      {modelsQuery.isLoading ? (
+        <div className="w-full h-10 rounded-xl bg-bg-subtle animate-pulse" />
+      ) : models.length > 0 ? (
         <select
           value={selectedModel}
           onChange={e => setSelectedModel(e.target.value)}

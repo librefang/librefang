@@ -1317,6 +1317,7 @@ pub async fn set_default_provider(
         .as_ref()
         .and_then(|b| b.get("model"))
         .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty() && s.len() <= 128)
         .map(String::from);
 
     // Verify the provider exists in the catalog
