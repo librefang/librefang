@@ -777,13 +777,18 @@ pub async fn set_provider_key(
     // Set env var in current process so detect_auth picks it up
     std::env::set_var(&env_var, &key);
 
-    // Refresh auth detection (sync, sets status to Configured if non-empty)
-    state
-        .kernel
-        .model_catalog_ref()
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .detect_auth();
+    // Re-enable fallback detection (user is adding a key, undo any prior suppress)
+    // and refresh auth status.
+    {
+        let mut catalog = state
+            .kernel
+            .model_catalog_ref()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog.unsuppress_provider(&name);
+        catalog.save_suppressed(&state.kernel.home_dir().join("suppressed_providers.json"));
+        catalog.detect_auth();
+    }
 
     // Kick off a background probe to validate the new key immediately so the
     // dashboard reflects ValidatedKey / InvalidKey without waiting for restart.
@@ -966,13 +971,17 @@ pub async fn delete_provider_key(
     // Remove from process environment
     std::env::remove_var(&env_var);
 
-    // Refresh auth detection
-    state
-        .kernel
-        .model_catalog_ref()
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .detect_auth();
+    // Suppress fallback/CLI detection for this provider and refresh auth
+    {
+        let mut catalog = state
+            .kernel
+            .model_catalog_ref()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog.suppress_provider(&name);
+        catalog.save_suppressed(&state.kernel.home_dir().join("suppressed_providers.json"));
+        catalog.detect_auth();
+    }
 
     (
         StatusCode::OK,
