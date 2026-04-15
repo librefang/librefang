@@ -4877,6 +4877,72 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Apply per-model inference parameter overrides from the catalog.
+        // These act as a middle layer: agent manifest > model overrides > system defaults.
+        // Only fill in values the agent manifest hasn't explicitly set.
+        {
+            let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
+            let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(mo) = catalog.get_overrides(&override_key) {
+                // temperature: agent default is 0.7 — only override if agent uses default
+                if let Some(t) = mo.temperature {
+                    if (manifest.model.temperature - 0.7).abs() < f32::EPSILON {
+                        manifest.model.temperature = t;
+                    }
+                }
+                // max_tokens: agent default is 4096 — only override if agent uses default
+                if let Some(mt) = mo.max_tokens {
+                    if manifest.model.max_tokens == 4096 {
+                        manifest.model.max_tokens = mt;
+                    }
+                }
+                // top_p, frequency_penalty, presence_penalty → inject via extra_params
+                // (entry().or_insert ensures agent-level params take precedence)
+                if let Some(tp) = mo.top_p {
+                    manifest
+                        .model
+                        .extra_params
+                        .entry("top_p".to_string())
+                        .or_insert(serde_json::json!(tp));
+                }
+                if let Some(fp) = mo.frequency_penalty {
+                    manifest
+                        .model
+                        .extra_params
+                        .entry("frequency_penalty".to_string())
+                        .or_insert(serde_json::json!(fp));
+                }
+                if let Some(pp) = mo.presence_penalty {
+                    manifest
+                        .model
+                        .extra_params
+                        .entry("presence_penalty".to_string())
+                        .or_insert(serde_json::json!(pp));
+                }
+                if let Some(ref re) = mo.reasoning_effort {
+                    manifest
+                        .model
+                        .extra_params
+                        .entry("reasoning_effort".to_string())
+                        .or_insert(serde_json::json!(re));
+                }
+                if mo.use_max_completion_tokens == Some(true) {
+                    manifest
+                        .model
+                        .extra_params
+                        .entry("use_max_completion_tokens".to_string())
+                        .or_insert(serde_json::json!(true));
+                }
+                if mo.force_max_tokens == Some(true) {
+                    manifest
+                        .model
+                        .extra_params
+                        .entry("force_max_tokens".to_string())
+                        .or_insert(serde_json::json!(true));
+                }
+            }
+        }
+
         // Backfill thinking config from global config if per-agent is not set
         if manifest.thinking.is_none() {
             manifest.thinking = cfg.thinking.clone();
