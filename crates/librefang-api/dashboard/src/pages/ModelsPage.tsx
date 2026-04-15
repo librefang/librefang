@@ -25,7 +25,7 @@ export function ModelsPage() {
   const [search, setSearch] = useState("");
   const [tierFilter, setTierFilter] = useState<string>("all");
   const [providerFilter, setProviderFilter] = useState<string>("all");
-  const [availableOnly, setAvailableOnly] = useState(false);
+  const [availableOnly, setAvailableOnly] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   useCreateShortcut(() => setShowAdd(true));
