@@ -47,24 +47,25 @@ interface ChatMessage {
 }
 
 // Slash commands — desc is an i18n key under "chat.cmd_*"
+// noArgs: clicking fills + sends immediately; argsHint: shown as placeholder after completion
 const SLASH_COMMANDS = [
-  { cmd: "/help", descKey: "cmd_help" },
-  { cmd: "/clear", descKey: "cmd_clear" },
-  { cmd: "/agents", descKey: "cmd_agents" },
-  { cmd: "/info", descKey: "cmd_info" },
-  { cmd: "/new", descKey: "cmd_new" },
-  { cmd: "/compact", descKey: "cmd_compact" },
-  { cmd: "/reset", descKey: "cmd_reset" },
-  { cmd: "/reboot", descKey: "cmd_reboot" },
-  { cmd: "/stop", descKey: "cmd_stop" },
-  { cmd: "/model", descKey: "cmd_model" },
-  { cmd: "/usage", descKey: "cmd_usage" },
-  { cmd: "/context", descKey: "cmd_context" },
-  { cmd: "/verbose", descKey: "cmd_verbose" },
-  { cmd: "/budget", descKey: "cmd_budget" },
-  { cmd: "/peers", descKey: "cmd_peers" },
-  { cmd: "/a2a", descKey: "cmd_a2a" },
-  { cmd: "/queue", descKey: "cmd_queue" },
+  { cmd: "/help",    descKey: "cmd_help",    noArgs: true },
+  { cmd: "/clear",   descKey: "cmd_clear",   noArgs: true },
+  { cmd: "/agents",  descKey: "cmd_agents",  noArgs: true },
+  { cmd: "/info",    descKey: "cmd_info",    noArgs: true },
+  { cmd: "/new",     descKey: "cmd_new",     noArgs: true },
+  { cmd: "/compact", descKey: "cmd_compact", noArgs: true },
+  { cmd: "/reset",   descKey: "cmd_reset",   noArgs: true },
+  { cmd: "/reboot",  descKey: "cmd_reboot",  noArgs: true },
+  { cmd: "/stop",    descKey: "cmd_stop",    noArgs: true },
+  { cmd: "/model",   descKey: "cmd_model",   argsHint: "<provider/model>" },
+  { cmd: "/usage",   descKey: "cmd_usage",   noArgs: true },
+  { cmd: "/context", descKey: "cmd_context", noArgs: true },
+  { cmd: "/verbose", descKey: "cmd_verbose", argsHint: "[level]" },
+  { cmd: "/budget",  descKey: "cmd_budget",  noArgs: true },
+  { cmd: "/peers",   descKey: "cmd_peers",   noArgs: true },
+  { cmd: "/a2a",     descKey: "cmd_a2a",     noArgs: true },
+  { cmd: "/queue",   descKey: "cmd_queue",   noArgs: true },
 ];
 
 // Commands that require backend processing via WebSocket command protocol
@@ -793,6 +794,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, supportsThinking, sttAvailable }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
+  const [activeIndex, setActiveIndex] = useState(-1);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
@@ -802,6 +804,78 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
   const voiceInput = useVoiceInput(useCallback((text: string) => {
     setMessage((prev) => (prev ? prev + " " + text : text));
   }, []));
+
+  // ── Slash command completion ──────────────────────────────────────────────
+  const isSlashPrefix = message.startsWith("/") && !message.includes(" ");
+  const isModelArg = /^\/model\s/i.test(message);
+
+  const filteredCmds = useMemo(
+    () => isSlashPrefix ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(message.toLowerCase())) : [],
+    [isSlashPrefix, message],
+  );
+
+  const modelQuery = useQuery({
+    queryKey: ["models", "completion"],
+    queryFn: () => listModels(),
+    enabled: isModelArg,
+    staleTime: 60_000,
+  });
+
+  const modelArg = isModelArg ? message.slice(message.indexOf(" ") + 1).toLowerCase() : "";
+  const filteredModels = useMemo(() => {
+    if (!isModelArg || !modelQuery.data?.models) return [];
+    const all = modelQuery.data.models;
+    const q = modelArg.trim();
+    const matched = q
+      ? all.filter(m =>
+          m.id.toLowerCase().includes(q) ||
+          m.provider.toLowerCase().includes(q) ||
+          (m.display_name || "").toLowerCase().includes(q),
+        )
+      : all;
+    return matched.slice(0, 12);
+  }, [isModelArg, modelQuery.data, modelArg]);
+
+  const hasDropdown = (isSlashPrefix && filteredCmds.length > 0) || (isModelArg && filteredModels.length > 0);
+  const dropdownLen = isSlashPrefix ? filteredCmds.length : filteredModels.length;
+
+  // Reset selection when list changes
+  useEffect(() => { setActiveIndex(-1); }, [message]);
+
+  const selectCmd = useCallback((c: typeof SLASH_COMMANDS[number]) => {
+    if (c.noArgs) {
+      onSend(c.cmd);
+      setMessage("");
+    } else {
+      setMessage(c.cmd + " ");
+      setTimeout(() => textareaRef.current?.focus(), 0);
+    }
+  }, [onSend]);
+
+  const selectModel = useCallback((m: ModelItem) => {
+    onSend(`/model ${m.provider}/${m.id}`);
+    setMessage("");
+  }, [onSend]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!hasDropdown) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIndex(i => Math.min(i + 1, dropdownLen - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIndex(i => Math.max(i - 1, 0));
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      setMessage("");
+    } else if ((e.key === "Enter" || e.key === "Tab") && activeIndex >= 0) {
+      e.preventDefault();
+      if (isSlashPrefix) selectCmd(filteredCmds[activeIndex]);
+      else if (isModelArg) selectModel(filteredModels[activeIndex]);
+    }
+  }, [hasDropdown, dropdownLen, activeIndex, isSlashPrefix, isModelArg, filteredCmds, filteredModels, selectCmd, selectModel]);
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -818,9 +892,6 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
     }
   }, [message]);
 
-  const showingSlash = message.startsWith("/") && !message.includes(" ");
-  const filteredCmds = showingSlash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(message)) : [];
-
   const effectiveDisabled = disabled || !!authMissing;
 
   return (
@@ -833,14 +904,30 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
         </div>
       )}
       {/* Slash command autocomplete */}
-      {showingSlash && filteredCmds.length > 0 && (
+      {isSlashPrefix && filteredCmds.length > 0 && (
         <div className="rounded-xl border border-border-subtle bg-surface shadow-lg p-1 mb-1">
-          {filteredCmds.map(c => (
+          {filteredCmds.map((c, i) => (
             <button key={c.cmd} type="button"
-              onClick={() => { setMessage(c.cmd); onSend(c.cmd); setMessage(""); }}
-              className="w-full flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-main text-left transition-colors">
+              onClick={() => selectCmd(c)}
+              className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-left transition-colors ${i === activeIndex ? "bg-main" : "hover:bg-main"}`}>
               <span className="text-xs font-mono font-bold text-brand">{c.cmd}</span>
-              <span className="text-[10px] text-text-dim">{t(`chat.${c.descKey}`)}</span>
+              {c.argsHint && <span className="text-[10px] font-mono text-text-dim/60">{c.argsHint}</span>}
+              <span className="text-[10px] text-text-dim ml-auto">{t(`chat.${c.descKey}`)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {/* /model second-level model completion */}
+      {isModelArg && filteredModels.length > 0 && (
+        <div className="rounded-xl border border-border-subtle bg-surface shadow-lg p-1 mb-1 max-h-48 overflow-y-auto">
+          {filteredModels.map((m, i) => (
+            <button key={`${m.provider}/${m.id}`} type="button"
+              onClick={() => selectModel(m)}
+              className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-left transition-colors ${i === activeIndex ? "bg-main" : "hover:bg-main"}`}>
+              <span className="text-xs font-mono font-bold text-brand">{m.provider}</span>
+              <span className="text-xs font-mono text-text">/</span>
+              <span className="text-xs font-mono text-text">{m.id}</span>
+              {m.display_name && <span className="text-[10px] text-text-dim ml-auto truncate max-w-[120px]">{m.display_name}</span>}
             </button>
           ))}
         </div>
@@ -883,6 +970,11 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={(e) => {
+              // Dropdown navigation takes priority
+              if (hasDropdown) {
+                handleKeyDown(e);
+                if (e.defaultPrevented) return;
+              }
               if (e.key === "Enter" && !e.shiftKey && !e.metaKey) {
                 e.preventDefault();
                 handleSubmit(e);
