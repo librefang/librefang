@@ -4,7 +4,6 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl, createRegistryContent, setDefaultProvider } from "../api";
 import { isProviderAvailable } from "../lib/status";
-import { SchemaForm } from "../components/SchemaForm";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -12,13 +11,15 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
+import { Select } from "../components/ui/Select";
 import { Modal } from "../components/ui/Modal";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
-  ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2
+  ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2,
+  Check, ChevronLeft
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -517,6 +518,434 @@ function FilterChips({ activeFilter, onChange, t }: {
           {f.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+// ── Create Provider Wizard ──────────────────────────────────────────────
+
+interface ModelEntry {
+  id: string;
+  display_name: string;
+  tier: string;
+  context_window: number | "";
+  max_output_tokens: number | "";
+  input_cost_per_m: number | "";
+  output_cost_per_m: number | "";
+}
+
+function toTitleCase(id: string): string {
+  return id
+    .split("-")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+function toEnvVar(id: string): string {
+  return id.toUpperCase().replace(/-/g, "_") + "_API_KEY";
+}
+
+const EMPTY_MODEL: ModelEntry = {
+  id: "",
+  display_name: "",
+  tier: "balanced",
+  context_window: "",
+  max_output_tokens: "",
+  input_cost_per_m: "",
+  output_cost_per_m: "",
+};
+
+const TIER_OPTIONS = [
+  { value: "fast", label: "Fast" },
+  { value: "balanced", label: "Balanced" },
+  { value: "smart", label: "Smart" },
+  { value: "reasoning", label: "Reasoning" },
+];
+
+function CreateProviderWizard({
+  onSubmit,
+  onCancel,
+}: {
+  onSubmit: (values: Record<string, unknown>) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const { t } = useTranslation();
+  const [step, setStep] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // Step 1 fields
+  const [id, setId] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+
+  // Step 2 fields (auto-derived, user can override)
+  const [displayName, setDisplayName] = useState("");
+  const [apiKeyEnv, setApiKeyEnv] = useState("");
+  const [keyRequired, setKeyRequired] = useState(true);
+  const [derivedOverridden, setDerivedOverridden] = useState(false);
+
+  // Step 3 fields
+  const [models, setModels] = useState<ModelEntry[]>([]);
+
+  // Validation
+  const [errors, setErrors] = useState<string[]>([]);
+
+  // Sync derived values when id changes (unless user has manually overridden)
+  const derivedDisplayName = toTitleCase(id);
+  const derivedApiKeyEnv = toEnvVar(id);
+  const effectiveDisplayName = derivedOverridden ? displayName : derivedDisplayName;
+  const effectiveApiKeyEnv = derivedOverridden ? apiKeyEnv : derivedApiKeyEnv;
+  const effectiveKeyRequired = derivedOverridden ? keyRequired : apiKey.trim().length > 0;
+
+  const steps = [
+    t("providers.wizard_step_basics"),
+    t("providers.wizard_step_advanced"),
+    t("providers.wizard_step_models"),
+  ];
+
+  const validateStep0 = () => {
+    const errs: string[] = [];
+    if (!id.trim()) errs.push("id");
+    if (!baseUrl.trim()) errs.push("base_url");
+    setErrors(errs);
+    return errs.length === 0;
+  };
+
+  const handleNext = () => {
+    if (step === 0 && !validateStep0()) return;
+    // When entering step 2 for the first time, sync derived values
+    if (step === 0 && !derivedOverridden) {
+      setDisplayName(derivedDisplayName);
+      setApiKeyEnv(derivedApiKeyEnv);
+      setKeyRequired(apiKey.trim().length > 0);
+    }
+    setStep((s) => Math.min(s + 1, 2));
+    setErrors([]);
+  };
+
+  const handleBack = () => {
+    setStep((s) => Math.max(s - 1, 0));
+    setErrors([]);
+  };
+
+  const buildValues = () => {
+    const values: Record<string, unknown> = {
+      id: id.trim(),
+      display_name: effectiveDisplayName,
+      api_key_env: effectiveApiKeyEnv,
+      base_url: baseUrl.trim(),
+      key_required: effectiveKeyRequired,
+    };
+    if (apiKey.trim()) {
+      values.api_key = apiKey.trim();
+    }
+    if (models.length > 0) {
+      values.models = models
+        .filter((m) => m.id.trim())
+        .map((m) => ({
+          id: m.id.trim(),
+          display_name: m.display_name.trim() || m.id.trim(),
+          tier: m.tier,
+          context_window: typeof m.context_window === "number" ? m.context_window : 128000,
+          max_output_tokens: typeof m.max_output_tokens === "number" ? m.max_output_tokens : 4096,
+          input_cost_per_m: typeof m.input_cost_per_m === "number" ? m.input_cost_per_m : 0,
+          output_cost_per_m: typeof m.output_cost_per_m === "number" ? m.output_cost_per_m : 0,
+        }));
+    }
+    return values;
+  };
+
+  const handleCreate = async () => {
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await onSubmit(buildValues());
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const updateModel = (idx: number, field: keyof ModelEntry, value: unknown) => {
+    setModels((prev) =>
+      prev.map((m, i) => (i === idx ? { ...m, [field]: value } : m)),
+    );
+  };
+
+  const removeModel = (idx: number) => {
+    setModels((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  return (
+    <div>
+      {/* Header */}
+      <div className="px-5 py-3 border-b border-border-subtle flex items-center justify-between">
+        <h3 className="text-sm font-bold">{t("providers.add")}</h3>
+        <button onClick={onCancel} className="p-1 rounded hover:bg-main" aria-label={t("common.close")}>
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Step indicator */}
+      <div className="px-5 pt-4 pb-2">
+        <div className="flex items-center gap-1">
+          {steps.map((label, i) => (
+            <button
+              key={i}
+              className="flex items-center gap-1 flex-1 group"
+              onClick={() => { if (i < step) setStep(i); }}
+              disabled={i > step}
+            >
+              <div className={`
+                w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 transition-colors
+                ${i < step ? "bg-success text-white cursor-pointer" : i === step ? "bg-brand text-white" : "bg-main text-text-dim"}
+              `}>
+                {i < step ? <Check className="w-3 h-3" /> : i + 1}
+              </div>
+              <span className={`text-[10px] font-bold uppercase tracking-wider truncate ${i === step ? "text-text-main" : "text-text-dim"}`}>
+                {label}
+              </span>
+              {i < steps.length - 1 && <div className={`flex-1 h-px ${i < step ? "bg-success" : "bg-border-subtle"}`} />}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="p-5 space-y-4">
+        {/* Step 1: Basics */}
+        {step === 0 && (
+          <>
+            <Input
+              label={t("providers.wizard_id_label") + " *"}
+              value={id}
+              onChange={(e) => {
+                const v = e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "");
+                setId(v);
+                setErrors((prev) => prev.filter((e) => e !== "id"));
+              }}
+              placeholder={t("providers.wizard_id_placeholder")}
+              className={errors.includes("id") ? "border-error" : ""}
+            />
+            {errors.includes("id") && (
+              <p className="text-[10px] text-error -mt-2">{t("providers.wizard_id_required")}</p>
+            )}
+            <p className="text-[10px] text-text-dim/60 -mt-2">{t("providers.wizard_id_hint")}</p>
+
+            <Input
+              label={t("providers.wizard_base_url_label") + " *"}
+              value={baseUrl}
+              onChange={(e) => {
+                setBaseUrl(e.target.value);
+                setErrors((prev) => prev.filter((e) => e !== "base_url"));
+              }}
+              placeholder={t("providers.wizard_base_url_placeholder")}
+              className={errors.includes("base_url") ? "border-error" : ""}
+            />
+            {errors.includes("base_url") && (
+              <p className="text-[10px] text-error -mt-2">{t("providers.wizard_base_url_required")}</p>
+            )}
+
+            <Input
+              label={t("providers.wizard_api_key_label")}
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={t("providers.wizard_api_key_placeholder")}
+            />
+            <p className="text-[10px] text-text-dim/60 -mt-2">{t("providers.wizard_api_key_hint")}</p>
+
+            {/* Preview derived values */}
+            {id.trim() && (
+              <div className="p-3 rounded-xl bg-main/40 border border-border-subtle/50 space-y-1.5">
+                <p className="text-[9px] font-bold uppercase tracking-wider text-text-dim/60">Auto-derived</p>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-text-dim w-24 shrink-0">Display Name</span>
+                  <span className="font-mono text-text-main">{derivedDisplayName}</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-text-dim w-24 shrink-0">Env Var</span>
+                  <span className="font-mono text-text-main">{derivedApiKeyEnv}</span>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Step 2: Advanced */}
+        {step === 1 && (
+          <>
+            <p className="text-[10px] text-text-dim/60">{t("providers.wizard_advanced_hint")}</p>
+
+            <Input
+              label={t("providers.wizard_display_name_label")}
+              value={displayName}
+              onChange={(e) => { setDisplayName(e.target.value); setDerivedOverridden(true); }}
+              placeholder={derivedDisplayName}
+            />
+
+            <Input
+              label={t("providers.wizard_api_key_env_label")}
+              value={apiKeyEnv}
+              onChange={(e) => { setApiKeyEnv(e.target.value); setDerivedOverridden(true); }}
+              placeholder={derivedApiKeyEnv}
+            />
+
+            <div className="space-y-1">
+              <label className="flex items-center gap-3 cursor-pointer">
+                <button
+                  type="button"
+                  role="checkbox"
+                  aria-checked={keyRequired}
+                  onClick={() => { setKeyRequired(!keyRequired); setDerivedOverridden(true); }}
+                  className={`
+                    relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0
+                    ${keyRequired ? "bg-brand" : "bg-main border border-border-subtle"}
+                  `}
+                >
+                  <span className={`
+                    absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200
+                    ${keyRequired ? "translate-x-5" : "translate-x-0"}
+                  `} />
+                </button>
+                <span className="text-xs font-bold text-text-main">
+                  {t("providers.wizard_key_required_label")}
+                </span>
+              </label>
+            </div>
+          </>
+        )}
+
+        {/* Step 3: Models */}
+        {step === 2 && (
+          <>
+            <p className="text-[10px] text-text-dim/60">{t("providers.wizard_models_hint")}</p>
+
+            {models.map((m, idx) => (
+              <div key={idx} className="p-3 rounded-xl border border-border-subtle/50 bg-main/20 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-text-dim uppercase tracking-widest">#{idx + 1}</span>
+                  <button onClick={() => removeModel(idx)} className="p-1 rounded hover:bg-error/10 text-text-dim hover:text-error transition-colors">
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Input
+                    label={t("providers.wizard_model_id") + " *"}
+                    value={m.id}
+                    onChange={(e) => updateModel(idx, "id", e.target.value)}
+                    placeholder="gpt-4o"
+                  />
+                  <Input
+                    label={t("providers.wizard_model_name")}
+                    value={m.display_name}
+                    onChange={(e) => updateModel(idx, "display_name", e.target.value)}
+                    placeholder="GPT-4o"
+                  />
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <Select
+                    label={t("providers.wizard_model_tier")}
+                    options={TIER_OPTIONS}
+                    value={m.tier}
+                    onChange={(e) => updateModel(idx, "tier", e.target.value)}
+                  />
+                  <Input
+                    label={t("providers.wizard_model_context")}
+                    type="number"
+                    value={m.context_window === "" ? "" : String(m.context_window)}
+                    onChange={(e) => updateModel(idx, "context_window", e.target.value === "" ? "" : Number(e.target.value))}
+                    placeholder="128000"
+                  />
+                  <Input
+                    label={t("providers.wizard_model_max_output")}
+                    type="number"
+                    value={m.max_output_tokens === "" ? "" : String(m.max_output_tokens)}
+                    onChange={(e) => updateModel(idx, "max_output_tokens", e.target.value === "" ? "" : Number(e.target.value))}
+                    placeholder="4096"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Input
+                    label={t("providers.wizard_model_input_cost")}
+                    type="number"
+                    value={m.input_cost_per_m === "" ? "" : String(m.input_cost_per_m)}
+                    onChange={(e) => updateModel(idx, "input_cost_per_m", e.target.value === "" ? "" : Number(e.target.value))}
+                    placeholder="2.5"
+                  />
+                  <Input
+                    label={t("providers.wizard_model_output_cost")}
+                    type="number"
+                    value={m.output_cost_per_m === "" ? "" : String(m.output_cost_per_m)}
+                    onChange={(e) => updateModel(idx, "output_cost_per_m", e.target.value === "" ? "" : Number(e.target.value))}
+                    placeholder="10.0"
+                  />
+                </div>
+              </div>
+            ))}
+
+            <button
+              type="button"
+              onClick={() => setModels((prev) => [...prev, { ...EMPTY_MODEL }])}
+              className="w-full py-2 rounded-xl border border-dashed border-border-subtle text-xs font-bold text-text-dim hover:text-brand hover:border-brand transition-colors flex items-center justify-center gap-1.5"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              {t("schema_form.add_item")}
+            </button>
+          </>
+        )}
+
+        {/* Submit error */}
+        {submitError && (
+          <div className="flex items-center gap-2 text-error text-xs">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            {submitError}
+          </div>
+        )}
+
+        {/* Navigation */}
+        <div className="flex gap-2 pt-2">
+          {step > 0 && (
+            <Button variant="ghost" onClick={handleBack} disabled={submitting}>
+              <ChevronLeft className="w-4 h-4 mr-1" />
+              {t("providers.wizard_back")}
+            </Button>
+          )}
+          <div className="flex-1" />
+          {step < 2 && (
+            <>
+              {step === 1 && (
+                <Button variant="ghost" onClick={handleCreate} disabled={submitting}>
+                  {submitting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}
+                  {t("providers.wizard_skip_create")}
+                </Button>
+              )}
+              <Button variant="primary" onClick={handleNext}>
+                {t("providers.wizard_next")}
+                <ChevronRight className="w-4 h-4 ml-1" />
+              </Button>
+            </>
+          )}
+          {step === 2 && (
+            <>
+              {models.length === 0 && (
+                <Button variant="ghost" onClick={handleCreate} disabled={submitting}>
+                  {submitting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}
+                  {t("providers.wizard_skip_create")}
+                </Button>
+              )}
+              <Button variant="primary" onClick={handleCreate} disabled={submitting}>
+                {submitting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
+                {submitting ? t("providers.wizard_creating") : t("providers.wizard_create")}
+              </Button>
+            </>
+          )}
+          <Button variant="secondary" onClick={onCancel} disabled={submitting}>
+            {t("common.cancel")}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1061,14 +1490,11 @@ export function ProvidersPage() {
         </div>
       )}
 
-      {/* Create Provider Modal */}
+      {/* Create Provider Wizard */}
       {showCreateForm && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreateForm(false)}>
           <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[540px] max-w-[90vw] max-h-[85vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-            <SchemaForm
-              contentType="provider"
-              title={t("providers.add")}
-              submitLabel={t("common.create")}
+            <CreateProviderWizard
               onSubmit={async (values) => {
                 await createRegistryContent("provider", values);
                 setShowCreateForm(false);
