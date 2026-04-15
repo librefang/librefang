@@ -634,8 +634,8 @@ export function ConfigPage({ category }: { category: string }) {
 
                   return (
                     <div key={fieldKey} className="flex items-start gap-4 px-5 py-3 group">
-                      {/* Label + key + type badge + description */}
-                      <div className="w-52 shrink-0 pt-1">
+                      {/* Label + key + type badge */}
+                      <div className="w-44 shrink-0 pt-1">
                         <p className="text-xs font-semibold leading-tight">
                           <Highlight text={fieldLabel} query={q} />
                         </p>
@@ -648,12 +648,9 @@ export function ConfigPage({ category }: { category: string }) {
                         <div className="mt-0.5">
                           <FieldTypeBadge type={fieldType} />
                         </div>
-                        {fieldDesc && (
-                          <p className="text-[10px] text-text-dim leading-relaxed mt-1">{fieldDesc}</p>
-                        )}
                       </div>
-                      {/* Input */}
-                      <div className="flex-1 min-w-0 pt-1">
+                      {/* Input + description below */}
+                      <div className="flex-1 min-w-0 flex flex-col gap-1 pt-1">
                         <ConfigFieldInput
                           fieldKey={fieldKey}
                           fieldType={fieldType}
@@ -661,6 +658,9 @@ export function ConfigPage({ category }: { category: string }) {
                           value={currentValue}
                           onChange={(v) => handleFieldChange(sKey, fieldKey, v, sec.root_level)}
                         />
+                        {fieldDesc && (
+                          <p className="text-[10px] text-text-dim leading-relaxed">{fieldDesc}</p>
+                        )}
                       </div>
                       {/* Actions */}
                       <div className="w-24 shrink-0 flex items-center justify-end gap-1">
