@@ -7122,7 +7122,12 @@ description = "test"
         let dir = tempfile::TempDir::new().unwrap();
         let registry = create_skill_registry_with_file(dir.path(), "abs", "dummy.txt", "ok");
 
-        let input = serde_json::json!({ "skill": "abs", "path": "/etc/passwd" });
+        // Use a platform-appropriate absolute path so the test passes on Windows too.
+        let abs_path = std::env::temp_dir()
+            .join("passwd")
+            .to_string_lossy()
+            .into_owned();
+        let input = serde_json::json!({ "skill": "abs", "path": abs_path });
         let result = tool_skill_read_file(&input, Some(&registry), None).await;
         assert!(result.unwrap_err().contains("absolute paths"));
     }
