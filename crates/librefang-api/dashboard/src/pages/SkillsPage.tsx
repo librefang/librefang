@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, fanghubListSkills, installSkill, listHands, getSkillDetail, createSkill, type ClawHubBrowseItem, type FangHubSkill, type HandDefinitionItem, type SkillDetail } from "../api";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -175,12 +175,60 @@ function CreateSkillModal({ isOpen, onClose, onCreated, t }: {
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
 
+  // Track mounted state to prevent state updates after unmount
+  const mountedRef = useRef(true);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      // Cancel any in-flight request when component unmounts
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
+  // Reset form state when modal closes
+  useEffect(() => {
+    if (!isOpen) {
+      setError("");
+      setCreating(false);
+    }
+  }, [isOpen]);
+
+  /// Map common API error messages to user-friendly localized strings
+  const formatApiError = useCallback((e: any): string => {
+    const msg = (e?.message || "").toLowerCase();
+    if (msg.includes("already installed") || msg.includes("already exists")) {
+      return t("skills.err_name_conflict", { defaultValue: "A skill with this name already exists. Please choose a different name." });
+    }
+    if (msg.includes("description too long")) {
+      return t("skills.err_desc_too_long", { defaultValue: "Description is too long (max 1024 characters)." });
+    }
+    if (msg.includes("prompt context too large")) {
+      return t("skills.err_prompt_too_large", { defaultValue: "Prompt context is too large (max 160,000 characters)." });
+    }
+    if (msg.includes("security") || msg.includes("blocked")) {
+      return t("skills.err_security_blocked", { defaultValue: "Content was blocked by security scan. Please remove potentially dangerous patterns." });
+    }
+    if (msg.includes("invalid") && msg.includes("name")) {
+      return t("skills.err_invalid_name", { defaultValue: "Invalid skill name. Use lowercase letters, numbers, hyphens, and underscores only." });
+    }
+    return e?.message || t("skills.err_create_failed", { defaultValue: "Failed to create skill. Please try again." });
+  }, [t]);
+
   const handleCreate = async () => {
     setError("");
     if (!name.trim() || !description.trim()) {
       setError(t("skills.evo_fill_required", { defaultValue: "Name and description are required" }));
       return;
     }
+
+    // Abort any previous in-flight request
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     setCreating(true);
     try {
       await createSkill({
@@ -189,13 +237,22 @@ function CreateSkillModal({ isOpen, onClose, onCreated, t }: {
         prompt_context: promptContext.trim(),
         tags: tags.split(",").map(t => t.trim()).filter(Boolean),
       });
-      onCreated();
-      onClose();
-      setName(""); setDescription(""); setPromptContext(""); setTags("");
+      // Only update state if still mounted and not aborted
+      if (mountedRef.current && !controller.signal.aborted) {
+        onCreated();
+        onClose();
+        setName(""); setDescription(""); setPromptContext(""); setTags("");
+      }
     } catch (e: any) {
-      setError(e.message || "Failed to create skill");
+      // Ignore abort errors
+      if (e?.name === "AbortError") return;
+      if (mountedRef.current && !controller.signal.aborted) {
+        setError(formatApiError(e));
+      }
     } finally {
-      setCreating(false);
+      if (mountedRef.current && !controller.signal.aborted) {
+        setCreating(false);
+      }
     }
   };
 

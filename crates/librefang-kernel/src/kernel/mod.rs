@@ -450,9 +450,10 @@ pub struct LibreFangKernel {
     /// Generation counter for skill registry — bumped on every hot-reload.
     /// Used by the tool list cache to detect staleness.
     skill_generation: std::sync::atomic::AtomicU64,
-    /// Unix epoch (seconds) of the last background skill review. Used to
-    /// enforce a cooldown so we don't spam LLM calls on busy systems.
-    last_skill_review_epoch: std::sync::atomic::AtomicI64,
+    /// Per-agent cooldown tracker for background skill reviews. Maps agent_id
+    /// to the Unix epoch (seconds) of their last review. This prevents spamming
+    /// LLM calls while allowing different agents to independently trigger reviews.
+    skill_review_cooldowns: dashmap::DashMap<String, i64>,
     /// Generation counter for MCP tool definitions — bumped whenever mcp_tools
     /// are modified (connect, disconnect, rebuild). Used by the tool list cache.
     mcp_generation: std::sync::atomic::AtomicU64,
@@ -2228,7 +2229,7 @@ impl LibreFangKernel {
             config_reload_lock: tokio::sync::RwLock::new(()),
             prompt_metadata_cache: PromptMetadataCache::new(),
             skill_generation: std::sync::atomic::AtomicU64::new(0),
-            last_skill_review_epoch: std::sync::atomic::AtomicI64::new(0),
+            skill_review_cooldowns: dashmap::DashMap::new(),
             mcp_generation: std::sync::atomic::AtomicU64::new(0),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
             budget_config: std::sync::RwLock::new(initial_budget),
@@ -3521,31 +3522,67 @@ system_prompt = "You are a helpful assistant."
                 // to evaluate whether the approach should be saved as a skill.
                 // Runs AFTER the response is delivered so it never competes with
                 // the user's task for model attention.
-                // Cooldown: at most one review every 5 minutes to avoid spamming.
+                // Cooldown: per-agent, at most one review every 5 minutes.
                 let now_epoch = chrono::Utc::now().timestamp();
+                let agent_id_str = agent_id.to_string();
                 let last_review = self
-                    .last_skill_review_epoch
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                    .skill_review_cooldowns
+                    .get(&agent_id_str)
+                    .map(|v| *v)
+                    .unwrap_or(0);
                 let cooldown_ok = now_epoch - last_review >= 300;
                 if result.skill_evolution_suggested && !used_evolution_tool && cooldown_ok {
-                    self.last_skill_review_epoch
-                        .store(now_epoch, std::sync::atomic::Ordering::Relaxed);
+                    self.skill_review_cooldowns
+                        .insert(agent_id_str.clone(), now_epoch);
                     let driver = self.default_driver.clone();
                     let skills_dir = self.home_dir_boot.join("skills");
                     let trace_summary = Self::summarize_traces_for_review(&result.decision_traces);
                     let response_summary = result.response.chars().take(2000).collect::<String>();
                     let kernel_weak = self.self_handle.get().cloned();
+                    let audit_log = self.audit_log.clone();
+                    let agent_id_for_task = agent_id_str.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = Self::background_skill_review(
-                            driver,
-                            &skills_dir,
-                            &trace_summary,
-                            &response_summary,
-                            kernel_weak,
-                        )
-                        .await
-                        {
-                            tracing::debug!(error = %e, "Background skill review failed (best-effort)");
+                        // Retry up to 2 times with exponential backoff
+                        let mut last_err = String::new();
+                        for attempt in 0..3 {
+                            if attempt > 0 {
+                                tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt as u32))).await;
+                            }
+                            match Self::background_skill_review(
+                                driver.clone(),
+                                &skills_dir,
+                                &trace_summary,
+                                &response_summary,
+                                kernel_weak.clone(),
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    last_err.clear();
+                                    break;
+                                }
+                                Err(e) => {
+                                    last_err = e;
+                                    tracing::debug!(
+                                        attempt = attempt + 1,
+                                        error = %last_err,
+                                        "Background skill review attempt failed"
+                                    );
+                                }
+                            }
+                        }
+                        if !last_err.is_empty() {
+                            tracing::warn!(
+                                agent_id = %agent_id_for_task,
+                                error = %last_err,
+                                "Background skill review failed after 3 attempts"
+                            );
+                            // Record failure in audit log for later investigation
+                            audit_log.record(
+                                agent_id_for_task,
+                                librefang_runtime::audit::AuditAction::AgentMessage,
+                                &format!("skill review failed: {last_err}"),
+                            );
                         }
                     });
                 }
@@ -9962,13 +9999,14 @@ system_prompt = "You are a helpful assistant."
 
         let text = response.text();
 
-        // Extract JSON from response (may be wrapped in ```json ... ```)
-        let json_str = text
-            .find('{')
-            .and_then(|start| text.rfind('}').map(|end| &text[start..=end]))
-            .unwrap_or(&text);
+        // Extract JSON from response using multiple strategies:
+        // 1. Try to extract from ```json ... ``` code block (most reliable)
+        // 2. Try balanced brace matching to find the outermost JSON object
+        // 3. Fall back to raw text
+        let json_str = Self::extract_json_from_llm_response(&text)
+            .ok_or_else(|| "No valid JSON found in review response".to_string())?;
 
-        let parsed: serde_json::Value = serde_json::from_str(json_str)
+        let parsed: serde_json::Value = serde_json::from_str(&json_str)
             .map_err(|e| format!("Failed to parse review response: {e}"))?;
 
         let action = parsed["action"].as_str().unwrap_or("skip");
@@ -10027,6 +10065,69 @@ system_prompt = "You are a helpful assistant."
         }
 
         Ok(())
+    }
+
+    /// Extract a JSON object from an LLM response using multiple strategies.
+    ///
+    /// Strategy order (most reliable first):
+    /// 1. Extract from ``` ```json ... ``` ``` Markdown code block
+    /// 2. Find the outermost balanced `{...}` using brace counting
+    /// 3. Return None if no valid JSON object can be found
+    fn extract_json_from_llm_response(text: &str) -> Option<String> {
+        // Strategy 1: Extract from Markdown code block (```json ... ``` or ``` ... ```)
+        let code_block_re = regex::Regex::new(r"(?s)```(?:json)?\s*\n?(\{.*?\})\s*```").ok()?;
+        if let Some(caps) = code_block_re.captures(text) {
+            let candidate = caps.get(1)?.as_str().to_string();
+            if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
+                return Some(candidate);
+            }
+        }
+
+        // Strategy 2: Balanced brace matching — find the first '{' and track
+        // nesting depth to find the matching '}', handling strings correctly.
+        let chars: Vec<char> = text.chars().collect();
+        let start = chars.iter().position(|&c| c == '{')?;
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut end = None;
+
+        for (i, &ch) in chars.iter().enumerate().skip(start) {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            if ch == '\\' && in_string {
+                escape_next = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = !in_string;
+                continue;
+            }
+            if !in_string {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(end_idx) = end {
+            let candidate: String = chars[start..=end_idx].iter().collect();
+            if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
+                return Some(candidate);
+            }
+        }
+
+        None
     }
 
     /// Check whether the context engine plugin (if any) is allowed for an agent.

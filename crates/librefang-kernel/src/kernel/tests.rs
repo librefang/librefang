@@ -1311,3 +1311,94 @@ fn test_apply_thinking_override_force_on_keeps_existing_budget() {
     let cfg = manifest.thinking.as_ref().expect("thinking preserved");
     assert_eq!(cfg.budget_tokens, 1234);
 }
+
+// ── JSON extraction tests ──────────────────────────────────────────
+
+#[test]
+fn test_extract_json_from_code_block() {
+    let text = r#"Here's my analysis:
+
+```json
+{"action": "create", "name": "test-skill", "description": "A test"}
+```
+
+That's all."#;
+    let result = Kernel::extract_json_from_llm_response(text);
+    assert!(result.is_some());
+    let parsed: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(parsed["action"], "create");
+    assert_eq!(parsed["name"], "test-skill");
+}
+
+#[test]
+fn test_extract_json_bare_object() {
+    let text = r#"{"action": "skip", "reason": "nothing interesting"}"#;
+    let result = Kernel::extract_json_from_llm_response(text);
+    assert!(result.is_some());
+    let parsed: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(parsed["action"], "skip");
+}
+
+#[test]
+fn test_extract_json_with_surrounding_text() {
+    let text = r#"I think this should be saved.
+
+{"action": "create", "name": "my-skill", "description": "desc", "prompt_context": "# Title\n\nContent with {braces} inside", "tags": ["a", "b"]}
+
+Hope that helps!"#;
+    let result = Kernel::extract_json_from_llm_response(text);
+    assert!(result.is_some());
+    let parsed: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(parsed["action"], "create");
+    assert_eq!(parsed["name"], "my-skill");
+}
+
+#[test]
+fn test_extract_json_nested_braces_in_strings() {
+    // JSON with braces inside string values — the old find/rfind approach would fail here
+    let text = r#"```json
+{"action": "create", "prompt_context": "Use {placeholder} syntax for {variables}"}
+```"#;
+    let result = Kernel::extract_json_from_llm_response(text);
+    assert!(result.is_some());
+    let parsed: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(parsed["action"], "create");
+    assert!(parsed["prompt_context"]
+        .as_str()
+        .unwrap()
+        .contains("{placeholder}"));
+}
+
+#[test]
+fn test_extract_json_no_json() {
+    let text = "I don't think any skill should be created from this task.";
+    let result = Kernel::extract_json_from_llm_response(text);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_extract_json_malformed() {
+    let text = r#"{"action": "create", "name": }"#;
+    let result = Kernel::extract_json_from_llm_response(text);
+    // Should return None because the extracted JSON is invalid
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_extract_json_multiple_code_blocks() {
+    // Should extract from the first valid code block
+    let text = r#"Here's an example:
+```json
+{"action": "skip", "reason": "example only"}
+```
+
+And here's the real one:
+```json
+{"action": "create", "name": "real-skill"}
+```"#;
+    let result = Kernel::extract_json_from_llm_response(text);
+    assert!(result.is_some());
+    let parsed: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    // Should get the first valid JSON block
+    assert_eq!(parsed["action"], "skip");
+}

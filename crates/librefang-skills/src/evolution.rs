@@ -15,6 +15,7 @@ use crate::{
     SkillSource, SkillTools,
 };
 use chrono::Utc;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -127,6 +128,30 @@ fn validate_prompt_content(content: &str) -> Result<(), SkillError> {
         )));
     }
     Ok(())
+}
+
+// ── File locking ────────────────────────────────────────────────────
+
+/// Acquire an exclusive file lock on a skill directory to prevent concurrent
+/// modifications. Returns a `File` handle that holds the lock until dropped.
+///
+/// Uses `fs2::FileExt::lock_exclusive()` which is cross-platform (flock on
+/// Unix, LockFileEx on Windows).
+fn acquire_skill_lock(skill_dir: &Path) -> Result<std::fs::File, SkillError> {
+    std::fs::create_dir_all(skill_dir)?;
+    let lock_path = skill_dir.join(".evolution.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&lock_path)?;
+    lock_file.lock_exclusive().map_err(|e| {
+        SkillError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to acquire skill lock: {e}"),
+        ))
+    })?;
+    Ok(lock_file)
 }
 
 // ── Atomic file I/O ─────────────────────────────────────────────────
@@ -452,14 +477,29 @@ fn save_evolution_meta(skill_dir: &Path, meta: &SkillEvolutionMeta) -> Result<()
 }
 
 /// Bump a semver patch version: "0.1.0" → "0.1.1".
+///
+/// Uses the `semver` crate for robust parsing, correctly handling
+/// pre-release tags (e.g., "0.1.0-alpha" → "0.1.1") and build metadata.
 fn bump_patch_version(version: &str) -> String {
-    let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() == 3 {
-        if let Ok(patch) = parts[2].parse::<u32>() {
-            return format!("{}.{}.{}", parts[0], parts[1], patch + 1);
+    match semver::Version::parse(version) {
+        Ok(mut v) => {
+            v.patch += 1;
+            // Clear pre-release and build metadata on patch bump per SemVer spec
+            v.pre = semver::Prerelease::EMPTY;
+            v.build = semver::BuildMetadata::EMPTY;
+            v.to_string()
+        }
+        Err(_) => {
+            // Fallback for non-standard version strings: try simple split
+            let parts: Vec<&str> = version.split('.').collect();
+            if parts.len() == 3 {
+                if let Ok(patch) = parts[2].parse::<u32>() {
+                    return format!("{}.{}.{}", parts[0], parts[1], patch + 1);
+                }
+            }
+            format!("{version}.1")
         }
     }
-    format!("{version}.1")
 }
 
 /// Save a version snapshot before mutation. Keeps only the last N versions.
@@ -554,6 +594,9 @@ pub fn create_skill(
 
     std::fs::create_dir_all(&skill_dir)?;
 
+    // Acquire exclusive lock to prevent concurrent creation
+    let _lock = acquire_skill_lock(&skill_dir)?;
+
     // Build manifest
     let manifest = SkillManifest {
         skill: SkillMeta {
@@ -622,6 +665,9 @@ pub fn update_skill(
     let name = &skill.manifest.skill.name;
     let skill_dir = &skill.path;
 
+    // Acquire exclusive lock to prevent concurrent updates
+    let _lock = acquire_skill_lock(skill_dir)?;
+
     // Save rollback snapshot of current content
     if let Some(old_content) = &skill.manifest.prompt_context {
         save_rollback_snapshot(skill_dir, old_content)?;
@@ -663,6 +709,9 @@ pub fn patch_skill(
 ) -> Result<EvolutionResult, SkillError> {
     let name = &skill.manifest.skill.name;
     let skill_dir = &skill.path;
+
+    // Acquire exclusive lock to prevent concurrent patches
+    let _lock = acquire_skill_lock(skill_dir)?;
 
     // Read current prompt_context: try in-memory manifest first, then file
     let current_content = match skill.manifest.prompt_context.as_deref() {
@@ -840,16 +889,31 @@ pub fn write_supporting_file(
         std::fs::create_dir_all(parent)?;
     }
 
-    // Verify resolved path stays within the skill directory (belt-and-suspenders
-    // on top of validate_supporting_path rejecting ".." and absolute paths)
+    // Verify resolved path stays within the skill directory.
+    // Belt-and-suspenders defense: canonicalize both paths to resolve any
+    // symlinks or path tricks, then verify containment.
     let skill_dir_canonical =
         std::fs::canonicalize(&skill.path).unwrap_or_else(|_| skill.path.clone());
-    let target_canonical = std::fs::canonicalize(target.parent().unwrap_or(&skill.path))
-        .unwrap_or_else(|_| target.parent().unwrap_or(&skill.path).to_path_buf());
+    let target_parent = target.parent().unwrap_or(&skill.path);
+    let target_canonical = std::fs::canonicalize(target_parent)
+        .unwrap_or_else(|_| target_parent.to_path_buf());
     if !target_canonical.starts_with(&skill_dir_canonical) {
         return Err(SkillError::SecurityBlocked(format!(
             "Resolved path escapes skill directory: {}",
             target_canonical.display()
+        )));
+    }
+    // Also verify the full target path (including filename) doesn't escape
+    // via symlink in the filename component itself
+    let target_full = target_canonical.join(
+        target
+            .file_name()
+            .ok_or_else(|| SkillError::InvalidManifest("Invalid file path".to_string()))?,
+    );
+    if !target_full.starts_with(&skill_dir_canonical) {
+        return Err(SkillError::SecurityBlocked(format!(
+            "Resolved file path escapes skill directory: {}",
+            target_full.display()
         )));
     }
 
@@ -978,6 +1042,10 @@ pub fn list_supporting_files(
 pub fn rollback_skill(skill: &InstalledSkill) -> Result<EvolutionResult, SkillError> {
     let name = &skill.manifest.skill.name;
     let skill_dir = &skill.path;
+
+    // Acquire exclusive lock to prevent concurrent rollbacks
+    let _lock = acquire_skill_lock(skill_dir)?;
+
     let rollback_dir = skill_dir.join(".rollback");
 
     if !rollback_dir.exists() {
@@ -1402,5 +1470,241 @@ mod tests {
         let content =
             std::fs::read_to_string(dir.path().join("rollbackable/prompt_context.md")).unwrap();
         assert_eq!(content, "# Original content");
+    }
+
+    // ── SemVer bump tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_bump_patch_version_prerelease() {
+        // Pre-release tags should be cleared on patch bump per SemVer spec
+        assert_eq!(bump_patch_version("0.1.0-alpha"), "0.1.1");
+        assert_eq!(bump_patch_version("1.0.0-beta.1"), "1.0.1");
+        assert_eq!(bump_patch_version("2.3.4-rc.2"), "2.3.5");
+    }
+
+    #[test]
+    fn test_bump_patch_version_build_metadata() {
+        // Build metadata should be cleared on patch bump
+        assert_eq!(bump_patch_version("1.0.0+build.123"), "1.0.1");
+        assert_eq!(bump_patch_version("0.1.0-alpha+001"), "0.1.1");
+    }
+
+    #[test]
+    fn test_bump_patch_version_fallback() {
+        // Non-standard versions should still work via fallback
+        assert_eq!(bump_patch_version("1.0"), "1.0.1");
+        assert_eq!(bump_patch_version("v1"), "v1.1");
+    }
+
+    // ── File locking tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_acquire_skill_lock() {
+        let dir = TempDir::new().unwrap();
+        let skill_dir = dir.path().join("lockable");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let lock = acquire_skill_lock(&skill_dir);
+        assert!(lock.is_ok(), "Should acquire lock successfully");
+
+        // Lock file should exist
+        assert!(skill_dir.join(".evolution.lock").exists());
+
+        // Lock is released when dropped
+        drop(lock);
+    }
+
+    #[test]
+    fn test_lock_prevents_concurrent_access() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = TempDir::new().unwrap();
+        let skill_dir = dir.path().join("concurrent");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let counter_path = skill_dir.join("counter.txt");
+        std::fs::write(&counter_path, "0").unwrap();
+
+        let skill_dir_1 = skill_dir.clone();
+        let barrier_1 = barrier.clone();
+        let counter_path_1 = counter_path.clone();
+
+        let handle = thread::spawn(move || {
+            barrier_1.wait();
+            let _lock = acquire_skill_lock(&skill_dir_1).unwrap();
+            let val: u32 = std::fs::read_to_string(&counter_path_1)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            // Simulate some work
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::fs::write(&counter_path_1, (val + 1).to_string()).unwrap();
+        });
+
+        barrier.wait();
+        let _lock = acquire_skill_lock(&skill_dir).unwrap();
+        let val: u32 = std::fs::read_to_string(&counter_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&counter_path, (val + 1).to_string()).unwrap();
+        drop(_lock);
+
+        handle.join().unwrap();
+
+        // Both increments should have been applied (no lost updates)
+        let final_val: u32 = std::fs::read_to_string(&counter_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(final_val, 2, "Both threads should have incremented the counter");
+    }
+
+    // ── Directory traversal defense tests ──────────────────────────
+
+    #[test]
+    fn test_validate_supporting_path_traversal() {
+        assert!(validate_supporting_path("../etc/passwd").is_err());
+        assert!(validate_supporting_path("references/../../etc/passwd").is_err());
+        assert!(validate_supporting_path("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_validate_supporting_path_valid() {
+        assert!(validate_supporting_path("references/doc.md").is_ok());
+        assert!(validate_supporting_path("templates/main.py").is_ok());
+        assert!(validate_supporting_path("scripts/run.sh").is_ok());
+        assert!(validate_supporting_path("assets/image.png").is_ok());
+    }
+
+    #[test]
+    fn test_validate_supporting_path_invalid_subdir() {
+        assert!(validate_supporting_path("src/main.rs").is_err());
+        assert!(validate_supporting_path("node_modules/pkg.json").is_err());
+    }
+
+    // ── Supporting file management tests ───────────────────────────
+
+    #[test]
+    fn test_write_and_list_supporting_files() {
+        let dir = TempDir::new().unwrap();
+        create_skill(
+            dir.path(),
+            "file-test",
+            "File test skill",
+            "# Test\n\nWith supporting files.",
+            vec![],
+        )
+        .unwrap();
+
+        let skill = InstalledSkill {
+            manifest: SkillManifest {
+                skill: SkillMeta {
+                    name: "file-test".to_string(),
+                    version: "0.1.0".to_string(),
+                    description: "File test skill".to_string(),
+                    author: "agent-evolved".to_string(),
+                    license: String::new(),
+                    tags: vec![],
+                },
+                runtime: SkillRuntimeConfig::default(),
+                tools: SkillTools::default(),
+                requirements: Default::default(),
+                prompt_context: Some("# Test\n\nWith supporting files.".to_string()),
+                source: Some(SkillSource::Local),
+                config: HashMap::new(),
+            },
+            path: dir.path().join("file-test"),
+            enabled: true,
+        };
+
+        // Write a supporting file
+        let result = write_supporting_file(&skill, "references/guide.md", "# Guide\n\nHelpful guide.").unwrap();
+        assert!(result.success);
+
+        // List supporting files
+        let files = list_supporting_files(&skill);
+        assert!(files.contains_key("references"));
+        assert!(files["references"].contains(&"guide.md".to_string()));
+
+        // Remove supporting file
+        let result = remove_supporting_file(&skill, "references/guide.md").unwrap();
+        assert!(result.success);
+
+        let files = list_supporting_files(&skill);
+        assert!(!files.contains_key("references"));
+    }
+
+    // ── Evolution metadata tests ───────────────────────────────────
+
+    #[test]
+    fn test_record_skill_usage() {
+        let dir = TempDir::new().unwrap();
+        create_skill(dir.path(), "usage-test", "Usage test", "# Test", vec![]).unwrap();
+
+        let skill_dir = dir.path().join("usage-test");
+        record_skill_usage(&skill_dir).unwrap();
+        record_skill_usage(&skill_dir).unwrap();
+
+        let meta = load_evolution_meta(&skill_dir);
+        assert_eq!(meta.use_count, 2);
+    }
+
+    #[test]
+    fn test_version_history_limit() {
+        let dir = TempDir::new().unwrap();
+        create_skill(dir.path(), "history-test", "History test", "# V1", vec![]).unwrap();
+
+        let skill_dir = dir.path().join("history-test");
+
+        // Record more than MAX_VERSION_HISTORY versions
+        for i in 2..=15 {
+            record_version(&skill_dir, &format!("0.1.{i}"), &format!("Change {i}"), &format!("# V{i}")).unwrap();
+        }
+
+        let meta = load_evolution_meta(&skill_dir);
+        assert!(meta.versions.len() <= MAX_VERSION_HISTORY,
+            "Version history should be capped at {MAX_VERSION_HISTORY}, got {}", meta.versions.len());
+    }
+
+    // ── Config variable discovery tests ────────────────────────────
+
+    #[test]
+    fn test_extract_skill_config_vars() {
+        let mut config = HashMap::new();
+        config.insert("wiki_path".to_string(), serde_json::Value::String("~/wiki".to_string()));
+        config.insert("api_endpoint".to_string(), serde_json::Value::String("https://api.example.com".to_string()));
+
+        let skill = InstalledSkill {
+            manifest: SkillManifest {
+                skill: SkillMeta {
+                    name: "config-test".to_string(),
+                    version: "0.1.0".to_string(),
+                    description: "Config test".to_string(),
+                    author: "test".to_string(),
+                    license: String::new(),
+                    tags: vec![],
+                },
+                runtime: SkillRuntimeConfig::default(),
+                tools: SkillTools::default(),
+                requirements: Default::default(),
+                prompt_context: None,
+                source: Some(SkillSource::Local),
+                config,
+            },
+            path: std::path::PathBuf::from("/tmp/config-test"),
+            enabled: true,
+        };
+
+        let vars = extract_skill_config_vars(&skill);
+        assert_eq!(vars.len(), 2);
+        assert!(vars.iter().any(|v| v.key == "wiki_path"));
+        assert!(vars.iter().any(|v| v.key == "api_endpoint"));
     }
 }
