@@ -77,6 +77,11 @@ pub struct MediaConfig {
     pub audio_provider: Option<String>,
     /// Preferred audio transcription model (provider default if None).
     pub audio_model: Option<String>,
+    /// Optional ISO-639-1 language hint for STT (e.g. `"it"`, `"en"`).
+    /// Default: `None` → let Whisper auto-detect. Set only when every inbound
+    /// voice note is reliably in one language; otherwise auto-detect is
+    /// safer than a wrong hint (a wrong hint can *cause* hallucinations).
+    pub audio_language: Option<String>,
 }
 
 impl Default for MediaConfig {
@@ -89,6 +94,7 @@ impl Default for MediaConfig {
             image_provider: None,
             audio_provider: None,
             audio_model: None,
+            audio_language: None,
         }
     }
 }

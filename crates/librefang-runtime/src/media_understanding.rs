@@ -9,7 +9,39 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
-use tracing::info;
+use tracing::{debug, info, warn};
+
+/// Confidence thresholds for Whisper `verbose_json` output. Any single breach
+/// flags the transcription as low-confidence. Values picked from OpenAI's own
+/// hallucination-detection guidance in the Whisper paper / discuss forums.
+const LOW_AVG_LOGPROB: f64 = -0.5;
+const HIGH_NO_SPEECH_PROB: f64 = 0.5;
+const HIGH_COMPRESSION_RATIO: f64 = 2.4;
+/// Jaccard similarity below this across two independent STT runs = ambiguous.
+const AMBIGUOUS_JACCARD: f64 = 0.5;
+
+/// Raw Whisper transcription result. `confidence` is populated only when the
+/// provider path used `response_format=verbose_json` (groq + openai).
+#[derive(Debug, Clone)]
+struct WhisperResult {
+    text: String,
+    confidence: Option<ConfidenceScore>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConfidenceScore {
+    avg_logprob: f64,
+    no_speech_prob: f64,
+    compression_ratio: f64,
+}
+
+impl ConfidenceScore {
+    fn is_low(&self) -> bool {
+        self.avg_logprob < LOW_AVG_LOGPROB
+            || self.no_speech_prob > HIGH_NO_SPEECH_PROB
+            || self.compression_ratio > HIGH_COMPRESSION_RATIO
+    }
+}
 
 /// Media understanding engine.
 pub struct MediaEngine {
@@ -148,36 +180,152 @@ impl MediaEngine {
             .as_deref()
             .unwrap_or_else(|| default_audio_model(provider));
 
-        info!(provider, model, filename = %filename, size = audio_bytes.len(), "Sending audio for transcription");
-
-        let transcription = match provider {
-            // Whisper-compatible providers (OpenAI multipart protocol)
-            "groq" | "openai" | "minimax" | "fireworks" | "together" | "siliconflow" => {
-                let (api_url, api_key) = whisper_provider_config(provider)?;
-                whisper_transcribe(&api_url, &api_key, model, audio_bytes, &filename, &mime).await?
-            }
-            // Gemini — multimodal content generation with audio input
-            "gemini" => gemini_transcribe(model, audio_bytes, &mime).await?,
-            // ElevenLabs — Speech-to-Text API
-            "elevenlabs" => elevenlabs_transcribe(model, audio_bytes, &mime).await?,
-            other => return Err(format!("Unsupported audio provider: {}", other)),
-        };
-
-        let transcription = transcription.trim().to_string();
-        if transcription.is_empty() {
-            return Err("Transcription returned empty text".into());
-        }
+        let language = self.config.audio_language.as_deref();
 
         info!(
             provider,
             model,
-            chars = transcription.len(),
+            language = language.unwrap_or("auto"),
+            filename = %filename,
+            size = audio_bytes.len(),
+            "Sending audio for transcription"
+        );
+
+        let primary = match provider {
+            // Whisper verbose_json path — groq + openai return segment-level
+            // confidence fields we can validate against.
+            "groq" | "openai" => {
+                let (api_url, api_key) = whisper_provider_config(provider)?;
+                whisper_transcribe_verbose(
+                    &api_url,
+                    &api_key,
+                    model,
+                    audio_bytes.clone(),
+                    &filename,
+                    &mime,
+                    language,
+                )
+                .await?
+            }
+            // Other Whisper-compatible providers keep the legacy `text` path —
+            // not all of them implement `verbose_json` identically. No
+            // confidence available → no post-validation.
+            "minimax" | "fireworks" | "together" | "siliconflow" => {
+                let (api_url, api_key) = whisper_provider_config(provider)?;
+                let text = whisper_transcribe_text(
+                    &api_url,
+                    &api_key,
+                    model,
+                    audio_bytes.clone(),
+                    &filename,
+                    &mime,
+                )
+                .await?;
+                WhisperResult {
+                    text,
+                    confidence: None,
+                }
+            }
+            // Gemini — multimodal content generation with audio input
+            "gemini" => {
+                let text = gemini_transcribe(model, audio_bytes.clone(), &mime).await?;
+                WhisperResult {
+                    text,
+                    confidence: None,
+                }
+            }
+            // ElevenLabs — Speech-to-Text API
+            "elevenlabs" => {
+                let text = elevenlabs_transcribe(model, audio_bytes.clone(), &mime).await?;
+                WhisperResult {
+                    text,
+                    confidence: None,
+                }
+            }
+            other => return Err(format!("Unsupported audio provider: {}", other)),
+        };
+
+        let primary_text = primary.text.trim().to_string();
+        if primary_text.is_empty() {
+            return Err("Transcription returned empty text".into());
+        }
+
+        // Validate confidence. Only groq/openai populate `confidence`.
+        let low = primary.confidence.map(|c| c.is_low()).unwrap_or(false);
+
+        if low {
+            if let Some(c) = primary.confidence {
+                warn!(
+                    provider,
+                    model,
+                    avg_logprob = c.avg_logprob,
+                    no_speech_prob = c.no_speech_prob,
+                    compression_ratio = c.compression_ratio,
+                    "STT confidence below thresholds — likely hallucination"
+                );
+            }
+        }
+
+        // Fallback: only when primary is groq (most hallucination-prone on
+        // short audio) AND low-confidence AND an OpenAI key is available for
+        // cross-check. Skips if primary is already openai — a second
+        // whisper-1 call would add cost without independent signal.
+        let final_text = if low
+            && provider == "groq"
+            && std::env::var("OPENAI_API_KEY")
+                .ok()
+                .is_some_and(|v| !v.trim().is_empty())
+        {
+            info!("STT low-confidence on groq → cross-checking with openai/whisper-1");
+            let (api_url, api_key) = whisper_provider_config("openai")?;
+            match whisper_transcribe_verbose(
+                &api_url,
+                &api_key,
+                default_audio_model("openai"),
+                audio_bytes.clone(),
+                &filename,
+                &mime,
+                language,
+            )
+            .await
+            {
+                Ok(fallback) => {
+                    let fallback_text = fallback.text.trim().to_string();
+                    let similarity = jaccard_word_similarity(&primary_text, &fallback_text);
+                    info!(similarity, "STT cross-check Jaccard similarity");
+                    if similarity < AMBIGUOUS_JACCARD {
+                        format!(
+                            "[AMBIGUOUS primary=groq fallback=openai jaccard={:.2}]\nGroq: {}\nOpenAI: {}",
+                            similarity, primary_text, fallback_text
+                        )
+                    } else {
+                        // Agreement below threshold but above ambiguous — keep
+                        // primary transcription but still flag low confidence.
+                        format_low_confidence(&primary_text, primary.confidence)
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "STT fallback cross-check failed — keeping primary with low-confidence flag");
+                    format_low_confidence(&primary_text, primary.confidence)
+                }
+            }
+        } else if low {
+            format_low_confidence(&primary_text, primary.confidence)
+        } else {
+            primary_text
+        };
+
+        info!(
+            provider,
+            model,
+            chars = final_text.len(),
+            low_confidence = low,
             "Audio transcription complete"
         );
 
         Ok(MediaUnderstanding {
             media_type: MediaType::Audio,
-            description: transcription,
+            description: final_text,
             provider: provider.to_string(),
             model: model.to_string(),
         })
@@ -309,8 +457,80 @@ fn whisper_provider_config(provider: &str) -> Result<(String, String), String> {
     }
 }
 
-/// Transcribe using an OpenAI-compatible Whisper endpoint.
-async fn whisper_transcribe(
+/// Transcribe using an OpenAI-compatible Whisper endpoint with
+/// `response_format=verbose_json`. Returns text plus aggregated segment-level
+/// confidence fields (mean avg_logprob, max no_speech_prob, max
+/// compression_ratio).
+async fn whisper_transcribe_verbose(
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    audio_bytes: Vec<u8>,
+    filename: &str,
+    mime: &str,
+    language: Option<&str>,
+) -> Result<WhisperResult, String> {
+    let file_part = reqwest::multipart::Part::bytes(audio_bytes)
+        .file_name(filename.to_string())
+        .mime_str(mime)
+        .map_err(|e| format!("Failed to set MIME type: {}", e))?;
+
+    let mut form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("model", model.to_string())
+        .text("response_format", "verbose_json");
+
+    if let Some(lang) = language {
+        form = form.text("language", lang.to_string());
+    }
+
+    let client = crate::http_client::proxied_client();
+    let resp = client
+        .post(api_url)
+        .bearer_auth(api_key)
+        .multipart(form)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("Transcription request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Transcription API error ({}): {}", status, body));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read transcription response: {}", e))?;
+
+    // Sample the raw response once so operators can confirm the confidence
+    // fields are arriving. `debug` avoids log spam in production but lets
+    // `LIBREFANG_LOG=debug` surface it.
+    debug!(
+        len = body.len(),
+        sample = body.chars().take(400).collect::<String>().as_str(),
+        "Whisper verbose_json response"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse Whisper verbose_json response: {}", e))?;
+
+    let text = json["text"]
+        .as_str()
+        .ok_or("Whisper response missing `text` field")?
+        .to_string();
+
+    let confidence = aggregate_segment_confidence(&json);
+
+    Ok(WhisperResult { text, confidence })
+}
+
+/// Legacy `response_format=text` path — kept for providers whose
+/// `verbose_json` shape diverges from OpenAI's (minimax, fireworks, together,
+/// siliconflow). No confidence available.
+async fn whisper_transcribe_text(
     api_url: &str,
     api_key: &str,
     model: &str,
@@ -347,6 +567,84 @@ async fn whisper_transcribe(
     resp.text()
         .await
         .map_err(|e| format!("Failed to read transcription response: {}", e))
+}
+
+/// Collapse per-segment confidence into one aggregate. Mean of
+/// `avg_logprob` (sensitive to sustained low-probability runs) and max of
+/// the two red-flag fields (one bad segment is enough to taint the clip).
+/// Returns None when segments are missing or empty.
+fn aggregate_segment_confidence(json: &serde_json::Value) -> Option<ConfidenceScore> {
+    let segments = json["segments"].as_array()?;
+    if segments.is_empty() {
+        return None;
+    }
+    let mut logprob_sum = 0.0f64;
+    let mut logprob_n = 0usize;
+    let mut max_no_speech = 0.0f64;
+    let mut max_compression = 0.0f64;
+    for seg in segments {
+        if let Some(v) = seg["avg_logprob"].as_f64() {
+            logprob_sum += v;
+            logprob_n += 1;
+        }
+        if let Some(v) = seg["no_speech_prob"].as_f64() {
+            if v > max_no_speech {
+                max_no_speech = v;
+            }
+        }
+        if let Some(v) = seg["compression_ratio"].as_f64() {
+            if v > max_compression {
+                max_compression = v;
+            }
+        }
+    }
+    if logprob_n == 0 {
+        return None;
+    }
+    Some(ConfidenceScore {
+        avg_logprob: logprob_sum / logprob_n as f64,
+        no_speech_prob: max_no_speech,
+        compression_ratio: max_compression,
+    })
+}
+
+/// Prefix a transcription with a structured `[LOW_CONFIDENCE …]` marker the
+/// downstream agent can read and cite. Kept on one line so it doesn't
+/// interfere with user-facing rendering.
+fn format_low_confidence(text: &str, score: Option<ConfidenceScore>) -> String {
+    match score {
+        Some(c) => format!(
+            "[LOW_CONFIDENCE avg_logprob={:.2} no_speech_prob={:.2} compression_ratio={:.2}] {}",
+            c.avg_logprob, c.no_speech_prob, c.compression_ratio, text
+        ),
+        None => format!("[LOW_CONFIDENCE] {}", text),
+    }
+}
+
+/// Word-set Jaccard similarity on normalised tokens. Lowercased, punctuation
+/// stripped. Short reliable check — when two independent Whisper runs produce
+/// near-disjoint token sets the primary was almost certainly hallucinating.
+fn jaccard_word_similarity(a: &str, b: &str) -> f64 {
+    use std::collections::HashSet;
+    let normalise = |s: &str| -> HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect()
+    };
+    let set_a = normalise(a);
+    let set_b = normalise(b);
+    if set_a.is_empty() && set_b.is_empty() {
+        return 1.0;
+    }
+    let inter = set_a.intersection(&set_b).count() as f64;
+    let union = set_a.union(&set_b).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
 }
 
 /// Transcribe using Gemini's multimodal generateContent API.
@@ -602,9 +900,14 @@ fn default_vision_model(provider: &str) -> &str {
 }
 
 /// Get the default audio model for a provider.
+///
+/// Groq default is `whisper-large-v3` (not the `-turbo` variant): the turbo
+/// model trades accuracy for speed and is the worst offender for fluent
+/// hallucinations on short Italian voice notes. Operators who want speed can
+/// still override via `[media].audio_model`.
 fn default_audio_model(provider: &str) -> &str {
     match provider {
-        "groq" => "whisper-large-v3-turbo",
+        "groq" => "whisper-large-v3",
         "openai" => "whisper-1",
         "gemini" => "gemini-2.0-flash",
         "elevenlabs" => "scribe_v1",
@@ -850,8 +1153,120 @@ mod tests {
 
     #[test]
     fn test_default_audio_models() {
-        assert_eq!(default_audio_model("groq"), "whisper-large-v3-turbo");
+        assert_eq!(default_audio_model("groq"), "whisper-large-v3");
         assert_eq!(default_audio_model("openai"), "whisper-1");
+    }
+
+    #[test]
+    fn confidence_score_low_when_logprob_below_threshold() {
+        let c = ConfidenceScore {
+            avg_logprob: -0.6,
+            no_speech_prob: 0.1,
+            compression_ratio: 1.2,
+        };
+        assert!(c.is_low());
+    }
+
+    #[test]
+    fn confidence_score_low_when_no_speech_high() {
+        let c = ConfidenceScore {
+            avg_logprob: -0.1,
+            no_speech_prob: 0.7,
+            compression_ratio: 1.2,
+        };
+        assert!(c.is_low());
+    }
+
+    #[test]
+    fn confidence_score_low_when_compression_high() {
+        let c = ConfidenceScore {
+            avg_logprob: -0.1,
+            no_speech_prob: 0.1,
+            compression_ratio: 2.5,
+        };
+        assert!(c.is_low());
+    }
+
+    #[test]
+    fn confidence_score_ok_when_all_thresholds_met() {
+        let c = ConfidenceScore {
+            avg_logprob: -0.3,
+            no_speech_prob: 0.3,
+            compression_ratio: 2.0,
+        };
+        assert!(!c.is_low());
+    }
+
+    #[test]
+    fn aggregate_confidence_mean_logprob_max_others() {
+        let json = serde_json::json!({
+            "segments": [
+                {"avg_logprob": -0.2, "no_speech_prob": 0.1, "compression_ratio": 1.5},
+                {"avg_logprob": -0.4, "no_speech_prob": 0.8, "compression_ratio": 2.9},
+            ]
+        });
+        let c = aggregate_segment_confidence(&json).unwrap();
+        assert!((c.avg_logprob - (-0.3)).abs() < 1e-9);
+        assert!((c.no_speech_prob - 0.8).abs() < 1e-9);
+        assert!((c.compression_ratio - 2.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_confidence_returns_none_without_segments() {
+        let json = serde_json::json!({"text": "hello"});
+        assert!(aggregate_segment_confidence(&json).is_none());
+    }
+
+    #[test]
+    fn aggregate_confidence_returns_none_when_segments_empty() {
+        let json = serde_json::json!({"segments": []});
+        assert!(aggregate_segment_confidence(&json).is_none());
+    }
+
+    #[test]
+    fn format_low_confidence_with_score() {
+        let c = ConfidenceScore {
+            avg_logprob: -0.6,
+            no_speech_prob: 0.7,
+            compression_ratio: 2.5,
+        };
+        let out = format_low_confidence("ciao mondo", Some(c));
+        assert!(out.starts_with("[LOW_CONFIDENCE avg_logprob=-0.60"));
+        assert!(out.contains("ciao mondo"));
+    }
+
+    #[test]
+    fn format_low_confidence_without_score() {
+        let out = format_low_confidence("ciao", None);
+        assert_eq!(out, "[LOW_CONFIDENCE] ciao");
+    }
+
+    #[test]
+    fn jaccard_identical_is_one() {
+        assert_eq!(jaccard_word_similarity("hello world", "hello world"), 1.0);
+    }
+
+    #[test]
+    fn jaccard_disjoint_is_zero() {
+        assert_eq!(jaccard_word_similarity("hello", "goodbye"), 0.0);
+    }
+
+    #[test]
+    fn jaccard_ignores_punctuation_and_case() {
+        let s = jaccard_word_similarity("Hello, World!", "hello world");
+        assert!((s - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn jaccard_partial_overlap() {
+        // tokens: {a, b, c} vs {b, c, d} → intersection 2, union 4 → 0.5
+        let s = jaccard_word_similarity("a b c", "b c d");
+        assert!((s - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn jaccard_both_empty_is_one() {
+        assert_eq!(jaccard_word_similarity("", ""), 1.0);
     }
 
     #[tokio::test]
