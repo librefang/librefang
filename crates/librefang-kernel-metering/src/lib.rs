@@ -635,7 +635,7 @@ mod tests {
         let local_id = catalog
             .list_models()
             .into_iter()
-            .find(|m| m.tier == librefang_runtime::model_catalog::ModelTier::Local)
+            .find(|m| m.tier == librefang_types::model_catalog::ModelTier::Local)
             .expect("registry must contain at least one local-tier model")
             .id
             .clone();
