@@ -20,7 +20,7 @@ import { Input } from "../components/ui/Input";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
-  Plug, Plus, Trash2, Settings, ChevronDown, ChevronUp, Wrench, Terminal, Globe, Radio,
+  Plug, Plus, X, Trash2, Settings, ChevronDown, ChevronUp, Wrench, Terminal, Globe, Radio,
   Shield, ShieldCheck, ShieldAlert, ShieldX, Check, ExternalLink,
   Search, Clock, Filter, Store, Key, Download,
 } from "lucide-react";
@@ -34,10 +34,10 @@ interface ServerFormState {
   name: string;
   transportType: TransportType;
   command: string;
-  args: string;
+  args: string[];
   url: string;
   timeout: number;
-  env: string;
+  env: string[];
   headers: string;
 }
 
@@ -45,10 +45,10 @@ const defaultForm: ServerFormState = {
   name: "",
   transportType: "stdio",
   command: "",
-  args: "",
+  args: [],
   url: "",
   timeout: 30,
-  env: "",
+  env: [],
   headers: "",
 };
 
@@ -58,7 +58,7 @@ function formToPayload(form: ServerFormState): McpServerConfigured {
     transport = {
       type: "stdio",
       command: form.command,
-      args: form.args.split("\n").map(s => s.trim()).filter(Boolean),
+      args: form.args.filter(Boolean),
     };
   } else {
     transport = { type: form.transportType, url: form.url };
@@ -69,7 +69,7 @@ function formToPayload(form: ServerFormState): McpServerConfigured {
     name: form.name,
     transport,
     timeout_secs: form.timeout || 30,
-    env: form.env.split("\n").map(s => s.trim()).filter(Boolean),
+    env: form.env.filter(Boolean),
   };
   // Only include headers if user explicitly entered values, to avoid
   // overwriting server-side headers that the list API may not return.
@@ -85,10 +85,10 @@ function configuredToForm(server: McpServerConfigured): ServerFormState {
     name: server.name,
     transportType: transport.type ?? "stdio",
     command: transport.command ?? "",
-    args: (transport.args ?? []).join("\n"),
+    args: transport.args ?? [],
     url: transport.url ?? "",
     timeout: server.timeout_secs ?? 30,
-    env: (server.env ?? []).join("\n"),
+    env: server.env ?? [],
     headers: (server.headers ?? []).join("\n"),
   };
 }
@@ -104,6 +104,122 @@ function getTransportDetail(server: McpServerConfigured): string {
   }
   return server.transport.url ?? "\u2014";
 }
+
+// ── ArgsEditor ──────────────────────────────────────────────────────
+
+function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: string[]) => void }) {
+  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  function addItem() {
+    const next = [...items, ""];
+    onChange(next);
+    // Focus the newly added input after render
+    setTimeout(() => {
+      inputRefs.current[next.length - 1]?.focus();
+    }, 0);
+  }
+
+  function removeItem(idx: number) {
+    onChange(items.filter((_, i) => i !== idx));
+  }
+
+  function updateItem(idx: number, value: string) {
+    const next = [...items];
+    next[idx] = value;
+    onChange(next);
+  }
+
+  return (
+    <div className="space-y-1.5">
+      {items.map((item, idx) => (
+        <div key={idx} className="flex items-center gap-1.5">
+          <input
+            ref={el => { inputRefs.current[idx] = el; }}
+            type="text"
+            value={item}
+            onChange={(e) => updateItem(idx, e.target.value)}
+            className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
+          />
+          <button
+            type="button"
+            onClick={() => removeItem(idx)}
+            className="shrink-0 flex items-center justify-center w-6 h-6 rounded-md text-text-dim hover:text-error hover:bg-error/8 transition-colors"
+            aria-label="Remove argument"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={addItem}
+        className="flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-brand transition-colors py-0.5"
+      >
+        <Plus className="h-3 w-3" />
+        Add argument
+      </button>
+    </div>
+  );
+}
+
+// ── EnvEditor ───────────────────────────────────────────────────────
+
+function EnvEditor({ items, onChange }: { items: string[]; onChange: (items: string[]) => void }) {
+  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  function addItem() {
+    const next = [...items, ""];
+    onChange(next);
+    setTimeout(() => {
+      inputRefs.current[next.length - 1]?.focus();
+    }, 0);
+  }
+
+  function removeItem(idx: number) {
+    onChange(items.filter((_, i) => i !== idx));
+  }
+
+  function updateItem(idx: number, value: string) {
+    const next = [...items];
+    next[idx] = value;
+    onChange(next);
+  }
+
+  return (
+    <div className="space-y-1.5">
+      {items.map((item, idx) => (
+        <div key={idx} className="flex items-center gap-1.5">
+          <input
+            ref={el => { inputRefs.current[idx] = el; }}
+            type="text"
+            value={item}
+            onChange={(e) => updateItem(idx, e.target.value)}
+            placeholder="KEY=VALUE"
+            className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
+          />
+          <button
+            type="button"
+            onClick={() => removeItem(idx)}
+            className="shrink-0 flex items-center justify-center w-6 h-6 rounded-md text-text-dim hover:text-error hover:bg-error/8 transition-colors"
+            aria-label="Remove variable"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={addItem}
+        className="flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-brand transition-colors py-0.5"
+      >
+        <Plus className="h-3 w-3" />
+        Add variable
+      </button>
+    </div>
+  );
+}
+
+// ── Transport Icon ───────────────────────────────────────────────────
 
 function TransportIcon({ type }: { type: TransportType }) {
   switch (type) {
@@ -929,13 +1045,7 @@ export function McpServersPage() {
                 <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
                   {t("mcp.args")}
                 </label>
-                <textarea
-                  value={form.args}
-                  onChange={(e) => updateField("args", e.target.value)}
-                  placeholder={t("mcp.args_placeholder")}
-                  rows={3}
-                  className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm resize-none"
-                />
+                <ArgsEditor items={form.args} onChange={(v) => updateField("args", v)} />
               </div>
             </div>
           )}
@@ -986,13 +1096,7 @@ export function McpServersPage() {
             <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
               {t("mcp.env")}
             </label>
-            <textarea
-              value={form.env}
-              onChange={(e) => updateField("env", e.target.value)}
-              placeholder={t("mcp.env_placeholder")}
-              rows={2}
-              className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm resize-none"
-            />
+            <EnvEditor items={form.env} onChange={(v) => updateField("env", v)} />
           </div>
 
           {/* Actions */}
