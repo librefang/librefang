@@ -8,6 +8,7 @@ const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const toml = require('toml');
 const { EchoTracker } = require('./lib/echo-tracker');
+const lidCache = require('./lib/lid-cache');
 const {
   isLidJid,
   isGroupJid,
@@ -17,6 +18,18 @@ const {
   resolvePeerId,
   deriveOwnerJids,
 } = require('./lib/identity');
+
+// ---------------------------------------------------------------------------
+// Persisted LID cache (ID-02, Phase 4 §B)
+// ---------------------------------------------------------------------------
+// The in-memory `lidToPnJid` Map is populated on every senderPn observation
+// and every successful `resolveLidProactively` call. To survive restarts, we
+// mirror every insertion into the SQLite `lid_cache` table (init'd below,
+// loaded into the Map at boot). Failures are logged as
+// `lid_cache_write_failed` and never block the caller.
+// Flag `LIBREFANG_LID_PERSIST=off` disables persistence (in-memory only) —
+// useful for ephemeral CI runs or debugging with a fresh map each boot.
+const LID_PERSIST_ENABLED = process.env.LIBREFANG_LID_PERSIST !== 'off';
 
 // ---------------------------------------------------------------------------
 // Echo tracker (EB-01, Phase 3 §A)
@@ -69,6 +82,18 @@ db.exec(`
     updated_at TEXT DEFAULT (datetime('now'))
   );
 `);
+
+// Phase 4 §B (ID-02): persisted LID → phone-number JID cache.
+if (LID_PERSIST_ENABLED) {
+  try {
+    lidCache.init(db);
+  } catch (err) {
+    console.warn(JSON.stringify({
+      event: 'lid_cache_init_failed',
+      error: err.message,
+    }));
+  }
+}
 
 console.log(`[gateway] SQLite message store initialized: ${DB_PATH}`);
 
@@ -308,6 +333,45 @@ let ownJid = null;
 //                       owner is recognised, even before any senderPn event.
 const lidToPnJid = new Map();    // '<digits>@lid' → '<digits>@s.whatsapp.net'
 const ownerLidJids = new Set();  // '<digits>@lid'
+
+// Phase 4 §B (ID-02): boot-time rehydrate from SQLite. Keeps the 10000 most
+// recently updated entries (prune runs before load so the eviction budget is
+// enforced immediately, independent of how large the on-disk table grew
+// between restarts).
+if (LID_PERSIST_ENABLED) {
+  try {
+    lidCache.prune(db, lidCache.DEFAULT_KEEP);
+    const persisted = lidCache.loadAll(db);
+    for (const [lid, pn] of persisted) lidToPnJid.set(lid, pn);
+    if (persisted.size > 0) {
+      console.log(`[gateway] LID cache hydrated from SQLite: ${persisted.size} entries`);
+    }
+  } catch (err) {
+    console.warn(JSON.stringify({
+      event: 'lid_cache_load_failed',
+      error: err.message,
+    }));
+  }
+}
+
+// Write-through helper. Updates the in-memory Map first (authoritative for
+// the hot path) then mirrors to SQLite best-effort. SQL failures are logged
+// but NEVER thrown — identity resolution must keep working even if the DB
+// becomes read-only mid-session.
+function lidMapSet(lid, pnJid) {
+  if (!lid || !pnJid) return;
+  lidToPnJid.set(lid, pnJid);
+  if (!LID_PERSIST_ENABLED) return;
+  try {
+    lidCache.upsert(db, lid, pnJid);
+  } catch (err) {
+    console.warn(JSON.stringify({
+      event: 'lid_cache_write_failed',
+      lid,
+      error: err.message,
+    }));
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Phase 2 §C — Group participant roster cache (GS-01 minimal)
@@ -1036,7 +1100,7 @@ async function startConnection() {
           for (const r of results || []) {
             if (r && r.exists && r.lid) {
               ownerLidJids.add(r.lid);
-              if (r.jid) lidToPnJid.set(r.lid, r.jid);
+              if (r.jid) lidMapSet(r.lid, r.jid);
             }
           }
           if (ownerLidJids.size > 0) {
@@ -1175,7 +1239,7 @@ async function startConnection() {
       // Cache LID → phone-number JID when we see both on the same message.
       // Side effect lives OUTSIDE resolvePeerId — Plan 01 §Concerns #1.
       if (isLid && senderPnRaw) {
-        lidToPnJid.set(sender, senderPnRaw);
+        lidMapSet(sender, senderPnRaw);
       }
 
       // CS-02: first-seen LID without senderPn AND not in cache — proactively
@@ -1183,7 +1247,14 @@ async function startConnection() {
       // the next message in the burst resolves synchronously.
       // Side effect lives OUTSIDE resolvePeerId — Plan 01 §Concerns #1.
       if (isLid && !senderPnRaw && !lidToPnJid.has(sender)) {
-        await resolveLidProactively(sock, sender, lidToPnJid, 5000);
+        const tag = await resolveLidProactively(sock, sender, lidToPnJid, 5000);
+        // On 'resolved' the function already wrote into the Map; mirror that
+        // into SQLite via the write-through helper. The double-set into the
+        // Map is a no-op (same key, same value).
+        if (tag === 'resolved') {
+          const pn = lidToPnJid.get(sender);
+          if (pn) lidMapSet(sender, pn);
+        }
       }
 
       // Centralized resolution — Phase 4 §A (ID-01).
@@ -2781,4 +2852,9 @@ module.exports = {
   echoTracker,
   ECHO_TRACKER_ENABLED,
   EchoTracker,
+  // Phase 4 §B (ID-02) — persisted LID cache (testing + introspection)
+  lidToPnJid,
+  lidMapSet,
+  db,
+  LID_PERSIST_ENABLED,
 };

@@ -33,6 +33,10 @@ const {
   echoTracker,
   ECHO_TRACKER_ENABLED,
   EchoTracker,
+  lidToPnJid,
+  lidMapSet,
+  db,
+  LID_PERSIST_ENABLED,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -885,6 +889,97 @@ describe('ID-03 identity_unresolved log shape', () => {
     assert.equal(parsed.reason, 'no_mapping_available');
     assert.equal(parsed.lid_cache_size, 0);
     assert.equal(parsed.confidence, 'lid_unresolved');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4 §B (ID-02) — persisted LID cache integration
+// ---------------------------------------------------------------------------
+// These tests exercise the real `db` handle owned by index.js together with
+// the in-memory `lidToPnJid` Map. Each test uses distinct LID keys so runs
+// remain independent.
+describe('ID-02 persisted LID cache wiring', () => {
+  it('exports the write-through helper and the persistence flag', () => {
+    assert.equal(typeof lidMapSet, 'function');
+    assert.ok(lidToPnJid instanceof Map);
+    assert.ok(db, 'db handle must be exported');
+    // Default enabled unless LIBREFANG_LID_PERSIST=off is set in the env.
+    assert.equal(LID_PERSIST_ENABLED, process.env.LIBREFANG_LID_PERSIST !== 'off');
+  });
+
+  it('creates the lid_cache table at boot', () => {
+    const row = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='lid_cache'")
+      .get();
+    assert.equal(row?.name, 'lid_cache');
+  });
+
+  it('mirrors a mapping observation into both the Map and SQLite', () => {
+    const LID = 'integration-a@lid';
+    const PN  = '391230000100@s.whatsapp.net';
+
+    lidMapSet(LID, PN);
+
+    // In-memory authoritative state.
+    assert.equal(lidToPnJid.get(LID), PN);
+
+    // Persisted mirror.
+    const row = db
+      .prepare('SELECT lid, pn_jid, updated_at FROM lid_cache WHERE lid = ?')
+      .get(LID);
+    assert.equal(row?.pn_jid, PN);
+    assert.equal(typeof row?.updated_at, 'number');
+    assert.ok(row.updated_at > 0);
+  });
+
+  it('ignores empty lid or empty pn_jid without touching SQLite', () => {
+    const beforeCount = db.prepare('SELECT COUNT(*) AS c FROM lid_cache').get().c;
+    lidMapSet('', '391230000200@s.whatsapp.net');
+    lidMapSet('integration-b@lid', '');
+    const afterCount = db.prepare('SELECT COUNT(*) AS c FROM lid_cache').get().c;
+    assert.equal(afterCount, beforeCount);
+    assert.equal(lidToPnJid.has('integration-b@lid'), false);
+  });
+
+  it('INSERT OR REPLACE updates pn_jid when the same lid reappears', () => {
+    const LID = 'integration-c@lid';
+    lidMapSet(LID, '391230000300@s.whatsapp.net');
+    lidMapSet(LID, '391230000301@s.whatsapp.net');
+
+    const rows = db
+      .prepare('SELECT pn_jid FROM lid_cache WHERE lid = ?')
+      .all(LID);
+    assert.equal(rows.length, 1, 'primary key must coalesce rows');
+    assert.equal(rows[0].pn_jid, '391230000301@s.whatsapp.net');
+    assert.equal(lidToPnJid.get(LID), '391230000301@s.whatsapp.net');
+  });
+});
+
+// Cross-restart: simulate shutdown + boot by opening a second DB handle at
+// the same path with the lid-cache module directly. We cannot reload
+// index.js in-process (it has module-level setInterval timers); instead we
+// assert that the SQL rows index.js wrote are visible to an independent
+// connection calling `loadAll`, which is exactly what boot-time hydration
+// does.
+describe('ID-02 cross-restart hydration', () => {
+  it('rows written via lidMapSet are visible to lidCache.loadAll on a fresh handle', () => {
+    const Database = require('better-sqlite3');
+    const lidCache = require('./lib/lid-cache');
+
+    const SEED_LID = 'restart-seed@lid';
+    const SEED_PN  = '391230000999@s.whatsapp.net';
+    lidMapSet(SEED_LID, SEED_PN);
+
+    // Open an independent connection against the same file. better-sqlite3
+    // with WAL mode lets readers see committed writes from another handle.
+    const dbPath = process.env.WHATSAPP_DB_PATH;
+    const db2 = new Database(dbPath, { readonly: true });
+    try {
+      const map = lidCache.loadAll(db2);
+      assert.equal(map.get(SEED_LID), SEED_PN);
+    } finally {
+      db2.close();
+    }
   });
 });
 

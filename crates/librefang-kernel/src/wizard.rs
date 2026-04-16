@@ -189,6 +189,7 @@ impl SetupWizard {
             inherit_parent_context: true,
             context_injection: vec![],
             is_hand: false,
+            web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::default(),
         };
 
         let skills_to_install: Vec<String> = intent

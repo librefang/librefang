@@ -19,7 +19,7 @@ import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
-  ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2,
+  Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2,
   Check, ChevronLeft
 } from "lucide-react";
 
@@ -79,12 +79,80 @@ type SortOrder = "asc" | "desc";
 type ViewMode = "grid" | "list";
 type FilterStatus = "all" | "reachable" | "unreachable";
 
+// ── SetDefaultModelSection — model picker + "set as default" in config modal ──
+
+function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }: {
+  providerId: string;
+  currentDefault?: string;
+  onSetDefault: (id: string, model?: string) => Promise<void>;
+  t: (key: string, opts?: any) => string;
+}) {
+  const [selectedModel, setSelectedModel] = useState("");
+  const [setting, setSetting] = useState(false);
+  const isDefault = currentDefault === providerId;
+
+  const modelsQuery = useQuery({
+    queryKey: ["models", "provider", providerId, { available: true }],
+    queryFn: () => listModels({ provider: providerId, available: true }),
+    staleTime: 60_000,
+  });
+
+  const models = modelsQuery.data?.models || [];
+
+  const handleSetDefault = async () => {
+    setSetting(true);
+    try {
+      await onSetDefault(providerId, selectedModel || undefined);
+    } finally {
+      setSetting(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-border-subtle pt-3 mt-1 space-y-2">
+      <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.set_as_default")}</label>
+      {modelsQuery.isLoading ? (
+        <div className="w-full h-10 rounded-xl bg-bg-subtle animate-pulse" />
+      ) : models.length > 0 ? (
+        <select
+          value={selectedModel}
+          onChange={e => setSelectedModel(e.target.value)}
+          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
+        >
+          <option value="">{t("providers.auto_select_model")}</option>
+          {models.map(m => (
+            <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
+          ))}
+        </select>
+      ) : (
+        <input
+          type="text"
+          value={selectedModel}
+          onChange={e => setSelectedModel(e.target.value)}
+          placeholder={t("providers.model_name_placeholder")}
+          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
+        />
+      )}
+      <Button
+        variant={isDefault ? "ghost" : "secondary"}
+        className="w-full"
+        onClick={handleSetDefault}
+        disabled={setting || isDefault}
+      >
+        {setting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Star className="w-4 h-4 mr-1" />}
+        {isDefault ? t("providers.is_default") : t("providers.set_as_default")}
+      </Button>
+    </div>
+  );
+}
+
 // ── useProviderConfig hook ────────────────────────────────────────
 
 interface ProviderConfigState {
   provider: ProviderItem | null;
   keyInput: string;
   urlInput: string;
+  proxyInput: string;
   hasStoredKey: boolean;
   saving: boolean;
   error: string | null;
@@ -101,13 +169,13 @@ function useProviderConfig(
   setActiveTab: (tab: "configured" | "unconfigured") => void,
 ) {
   const [state, setState] = useState<ProviderConfigState>({
-    provider: null, keyInput: "", urlInput: "", hasStoredKey: false,
+    provider: null, keyInput: "", urlInput: "", proxyInput: "", hasStoredKey: false,
     saving: false, error: null, testing: false, testResult: null,
   });
 
   const open = useCallback((p: ProviderItem) => {
     setState({
-      provider: p, keyInput: "", urlInput: p.base_url || "",
+      provider: p, keyInput: "", urlInput: p.base_url || "", proxyInput: p.proxy_url || "",
       hasStoredKey: p.auth_status === "configured" || p.auth_status === "validated_key" || p.auth_status === "invalid_key" || p.auth_status === "auto_detected",
       saving: false, error: null, testing: false, testResult: null,
     });
@@ -117,13 +185,16 @@ function useProviderConfig(
 
   const setKeyInput = useCallback((v: string) => setState(s => ({ ...s, keyInput: v })), []);
   const setUrlInput = useCallback((v: string) => setState(s => ({ ...s, urlInput: v })), []);
+  const setProxyInput = useCallback((v: string) => setState(s => ({ ...s, proxyInput: v })), []);
 
   const saveKey = useCallback(async () => {
     if (!state.provider) return;
     setState(s => ({ ...s, saving: true, error: null }));
     try {
-      if (state.urlInput.trim() && state.urlInput !== state.provider.base_url) {
-        await setProviderUrl(state.provider.id, state.urlInput.trim());
+      const urlChanged = state.urlInput.trim() && state.urlInput !== state.provider.base_url;
+      const proxyChanged = state.proxyInput !== (state.provider.proxy_url || "");
+      if (urlChanged || proxyChanged) {
+        await setProviderUrl(state.provider.id, state.urlInput.trim() || state.provider.base_url || "", proxyChanged ? state.proxyInput.trim() : undefined);
       }
       if (state.keyInput.trim()) {
         await setProviderKey(state.provider.id, state.keyInput.trim());
@@ -137,7 +208,7 @@ function useProviderConfig(
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, refetchProviders, addToast, t, activeTab, setActiveTab]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, refetchProviders, addToast, t, activeTab, setActiveTab]);
 
   const removeKey = useCallback(async () => {
     if (!state.provider) return;
@@ -162,8 +233,10 @@ function useProviderConfig(
         await setProviderKey(state.provider.id, state.keyInput.trim());
         setState(s => ({ ...s, hasStoredKey: true, keyInput: "" }));
       }
-      if (state.urlInput.trim() && state.urlInput !== state.provider.base_url) {
-        await setProviderUrl(state.provider.id, state.urlInput.trim());
+      const urlChanged = state.urlInput.trim() && state.urlInput !== state.provider.base_url;
+      const proxyChanged = state.proxyInput !== (state.provider.proxy_url || "");
+      if (urlChanged || proxyChanged) {
+        await setProviderUrl(state.provider.id, state.urlInput.trim() || state.provider.base_url || "", proxyChanged ? state.proxyInput.trim() : undefined);
       }
       const result = await testMutation.mutateAsync(state.provider.id);
       if (result.status === "error") {
@@ -177,9 +250,9 @@ function useProviderConfig(
     } finally {
       setState(s => ({ ...s, testing: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, testMutation, refetchProviders, t]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, testMutation, refetchProviders, t]);
 
-  return { ...state, open, close, setKeyInput, setUrlInput, saveKey, removeKey, testKey };
+  return { ...state, open, close, setKeyInput, setUrlInput, setProxyInput, saveKey, removeKey, testKey };
 }
 
 // ── ProviderCard ─────────────────────────────────────────────────
@@ -202,7 +275,6 @@ interface ProviderCardProps {
 function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onConfigure, onDelete, t }: ProviderCardProps) {
   const isConfigured = isProviderAvailable(p.auth_status);
   const isCli = p.auth_status === "configured_cli" || p.auth_status === "cli_not_installed" || (!p.base_url && !p.key_required);
-  const authBadge = getAuthBadge(p.auth_status);
 
   if (viewMode === "list") {
     return (
@@ -964,7 +1036,7 @@ export function ProvidersPage() {
   const providersQuery = useQuery({ queryKey: ["providers", "list"], queryFn: listProviders, refetchInterval: REFRESH_MS });
   const statusQuery = useQuery({ queryKey: ["status"], queryFn: getStatus, refetchInterval: REFRESH_MS });
   const testMutation = useMutation({ mutationFn: testProvider });
-  const defaultProviderMutation = useMutation({ mutationFn: setDefaultProvider });
+  const defaultProviderMutation = useMutation({ mutationFn: ({ id, model }: { id: string; model?: string }) => setDefaultProvider(id, model) });
 
   const config = useProviderConfig(
     () => void providersQuery.refetch(),
@@ -1052,9 +1124,9 @@ export function ProvidersPage() {
     }
   };
 
-  const handleSetDefault = async (id: string) => {
+  const handleSetDefault = async (id: string, model?: string) => {
     try {
-      await defaultProviderMutation.mutateAsync(id);
+      await defaultProviderMutation.mutateAsync({ id, model });
       await statusQuery.refetch();
       addToast(t("providers.default_set"), "success");
     } catch (e: any) {
@@ -1074,7 +1146,6 @@ export function ProvidersPage() {
     }
   };
 
-  const effectivePendingId = pendingId || (testingIds.size > 0 ? Array.from(testingIds)[0] : null);
   const allSelected = filteredProviders.length > 0 && selectedIds.size === filteredProviders.length;
 
   return (
@@ -1251,6 +1322,13 @@ export function ProvidersPage() {
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
             </div>
 
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.proxy_url")} <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
+              <input type="text" value={config.proxyInput} onChange={e => config.setProxyInput(e.target.value)}
+                placeholder={t("providers.proxy_url_placeholder")}
+                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
+            </div>
+
             {config.error && (
               <div className="flex items-center gap-2 text-error text-xs">
                 <AlertCircle className="w-4 h-4 shrink-0" />
@@ -1267,7 +1345,7 @@ export function ProvidersPage() {
 
             <div className="flex gap-2 pt-2">
               <Button variant="primary" className="flex-1" onClick={config.saveKey}
-                disabled={config.saving || config.testing || (!config.keyInput.trim() && config.urlInput === (config.provider.base_url || ""))}>
+                disabled={config.saving || config.testing || (!config.keyInput.trim() && config.urlInput === (config.provider.base_url || "") && config.proxyInput === (config.provider.proxy_url || ""))}>
                 {config.saving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
                 {t("common.save")}
               </Button>
@@ -1282,6 +1360,15 @@ export function ProvidersPage() {
                 </Button>
               )}
             </div>
+
+            {config.hasStoredKey && (
+              <SetDefaultModelSection
+                providerId={config.provider.id}
+                currentDefault={statusQuery.data?.default_provider}
+                onSetDefault={handleSetDefault}
+                t={t}
+              />
+            )}
           </div>
         )}
       </Modal>
