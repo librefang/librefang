@@ -167,6 +167,17 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       return next;
     });
   }, []);
+  // Tracks the bot message id of the most recent send per agent. Message
+  // handlers for an older turn must NOT clear `isLoading` when a newer turn
+  // is already in flight (user can now type + send while the previous turn's
+  // `response` event is still pending — see `ChatInput` inputDisabled split).
+  const latestTurnRef = useRef<Record<string, string>>({});
+  const finishTurnIfCurrent = useCallback((agent: string, botId: string) => {
+    if (latestTurnRef.current[agent] === botId) {
+      setAgentLoading(agent, false);
+      delete latestTurnRef.current[agent];
+    }
+  }, [setAgentLoading]);
   // Garbage-collect loading flags for agents that no longer exist so the
   // map doesn't accumulate dead entries over a long session.
   useEffect(() => {
@@ -179,6 +190,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       }
       return changed ? next : prev;
     });
+
+    const latestTurns = latestTurnRef.current;
+    for (const id of Object.keys(latestTurns)) {
+      if (!alive.has(id)) delete latestTurns[id];
+    }
   }, [agents]);
   const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
@@ -384,6 +400,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 
     setMessages(prev => [...prev, userMsg, botMsg]);
     setAgentLoading(sendAgentId, true);
+    latestTurnRef.current[sendAgentId] = botMsg.id;
 
     // Helper: send via HTTP (used as primary fallback and WS drop recovery)
     const sendViaHttp = async () => {
@@ -418,7 +435,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
           m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg } : m
         ));
       } finally {
-        setAgentLoading(sendAgentId, false);
+        finishTurnIfCurrent(sendAgentId, botMsg.id);
       }
     };
 
@@ -520,7 +537,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               }
             } else if (data.type === "silent_complete") {
               updateAgentMessages(sendAgentId, prev => prev.filter(m => m.id !== botMsg.id));
-              setAgentLoading(sendAgentId, false);
+              finishTurnIfCurrent(sendAgentId, botMsg.id);
               cleanup();
             } else if (data.type === "error") {
               const error = data.content || "WebSocket error";
@@ -548,7 +565,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                     }
                   : m
               ));
-              setAgentLoading(sendAgentId, false);
+              finishTurnIfCurrent(sendAgentId, botMsg.id);
               cleanup();
             }
           } catch {
@@ -586,7 +603,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess]);
+  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent]);
 
   const clearHistory = useCallback(() => setMessages([]), []);
 
@@ -803,7 +820,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 });
 
 // Input box - with shortcut hints
-function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
+function ChatInput({ onSend, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { onSend: (msg: string) => void; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -905,6 +922,12 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, pro
   }, [message]);
 
   const effectiveDisabled = disabled || !!authMissing;
+  // Textarea only locked while the agent is actively streaming text. Once the
+  // model emits `typing:stop` the user can start composing the next message
+  // even while background post-processing (memory save) is still running —
+  // the send button stays gated on `effectiveDisabled` until the `response`
+  // event arrives with final tokens/cost.
+  const textareaDisabled = (inputDisabled ?? disabled) || !!authMissing;
 
   return (
     <form onSubmit={handleSubmit} className="space-y-2">
@@ -995,7 +1018,7 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, pro
               }
             }}
             placeholder={voiceInput.isRecording ? t("chat.voice_recording") : voiceInput.isTranscribing ? t("chat.voice_transcribing") : placeholder}
-            disabled={effectiveDisabled}
+            disabled={textareaDisabled}
             rows={1}
             className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
@@ -1004,7 +1027,7 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, pro
           <button
             type="button"
             onClick={sttAvailable ? voiceInput.toggleRecording : undefined}
-            disabled={!sttAvailable || effectiveDisabled || voiceInput.isTranscribing}
+            disabled={!sttAvailable || textareaDisabled || voiceInput.isTranscribing}
             title={!sttAvailable ? t("chat.voice_not_configured") : voiceInput.isRecording ? t("chat.voice_stop") : t("chat.voice_input")}
             className={`group relative px-3 sm:px-3.5 py-2.5 sm:py-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed ${
               voiceInput.isRecording
@@ -1707,6 +1730,11 @@ export function ChatPage() {
     sessionVersion,
     () => queryClient.invalidateQueries({ queryKey: ["agents", "list"] }),
   );
+  // Track LLM text streaming (cleared on `typing:stop`) independently of
+  // `isLoading`, which stays true through post-processing until the final
+  // `response` event. Textarea unblocks as soon as streaming ends so the user
+  // can compose the next message immediately.
+  const isStreaming = messages.some(m => m.role === "assistant" && m.isStreaming);
 
   // Export current conversation as a markdown file. Keeps the local
   // timestamp, role, content, and (when present) tool call summaries
@@ -2059,7 +2087,8 @@ export function ChatPage() {
             <ChatInput
               onSend={sendMessage}
               disabled={isLoading}
-              placeholder={isLoading ? t("chat.generating") : selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
+              inputDisabled={isStreaming}
+              placeholder={isStreaming ? t("chat.generating") : selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
               authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
               authStatus={selectedAgent?.auth_status}
               providerName={selectedAgent?.model_provider}
