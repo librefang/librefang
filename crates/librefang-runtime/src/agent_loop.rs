@@ -1762,6 +1762,14 @@ fn build_prompt_setup(ctx: PromptSetupContext<'_>) -> PromptSetup {
         None
     };
 
+    // When extended thinking is enabled, instruct the model to think in the
+    // same language as the user's message so the reasoning trace is readable.
+    if ctx.manifest.thinking.is_some() {
+        system_prompt.push_str(
+            "\n\nIMPORTANT: Always use the same language as the user's message for both your thinking process and your response.",
+        );
+    }
+
     PromptSetup {
         system_prompt,
         memory_context_msg,
