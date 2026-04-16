@@ -127,9 +127,10 @@ pub enum HookEvent {
 pub struct AgentId(pub Uuid);
 
 impl AgentId {
-    /// A fixed namespace UUID for deriving deterministic hand-agent IDs.
-    /// Generated once via UUID v4; never changes.
-    const HAND_NAMESPACE: Uuid = Uuid::from_bytes([
+    /// Fixed namespace UUID for all deterministic agent ID derivation.
+    /// Uses a single namespace with typed prefixes to avoid collisions
+    /// between agents, hands, and hand-roles sharing the same name.
+    const NAMESPACE: Uuid = Uuid::from_bytes([
         0x9b, 0x6a, 0xe3, 0x2d, 0x7a, 0x4f, 0x4c, 0x1e, 0x8d, 0x0f, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5,
         0xf6,
     ]);
@@ -139,12 +140,25 @@ impl AgentId {
         Self(Uuid::new_v4())
     }
 
-    /// Generate a deterministic AgentId for a hand agent.
+    /// Generate a deterministic AgentId from an agent name.
     ///
-    /// Uses UUID v5 (SHA-1) with a fixed namespace so the same `hand_id`
+    /// Uses UUID v5 (SHA-1) so the same agent name always produces the same
+    /// ID across daemon restarts, preserving session history associations.
+    pub fn from_name(name: &str) -> Self {
+        Self(Uuid::new_v5(
+            &Self::NAMESPACE,
+            format!("agent:{name}").as_bytes(),
+        ))
+    }
+
+    /// Generate a deterministic AgentId for a hand.
+    ///
+    /// Uses UUID v5 with a `hand:` prefix so the same `hand_id`
     /// always maps to the same UUID across daemon restarts.
     pub fn from_hand_id(hand_id: &str) -> Self {
-        Self(Uuid::new_v5(&Self::HAND_NAMESPACE, hand_id.as_bytes()))
+        // Backward compat: existing hands used bare hand_id without prefix.
+        // Keep the same input to preserve existing IDs.
+        Self(Uuid::new_v5(&Self::NAMESPACE, hand_id.as_bytes()))
     }
 
     /// Generate a deterministic agent ID for a specific role within a multi-agent hand instance.
@@ -159,7 +173,7 @@ impl AgentId {
             Some(id) => format!("{hand_id}:{role}:{id}"),
             None => format!("{hand_id}:{role}"),
         };
-        Self(Uuid::new_v5(&Self::HAND_NAMESPACE, input.as_bytes()))
+        Self(Uuid::new_v5(&Self::NAMESPACE, input.as_bytes()))
     }
 }
 
@@ -238,6 +252,24 @@ pub enum SessionMode {
     Persistent,
     /// Create a fresh session for each invocation.
     New,
+}
+
+/// Web search augmentation mode.
+///
+/// Controls whether the agent loop automatically searches the web using the
+/// user's message and injects results into the LLM context before the call.
+/// This enables models that don't support tool/function calling (e.g. Ollama
+/// Gemma4) to benefit from web search without needing to invoke the `web_search` tool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchAugmentationMode {
+    /// Disabled.
+    Off,
+    /// Augment only when the model catalog reports `supports_tools == false` (default).
+    #[default]
+    Auto,
+    /// Always search the web before every LLM call.
+    Always,
 }
 
 /// The current lifecycle state of an agent.
@@ -649,6 +681,11 @@ pub struct AgentManifest {
     /// it survives restarts without requiring tag-based detection.
     #[serde(default)]
     pub is_hand: bool,
+    /// Web search augmentation mode — automatically search the web using the
+    /// user's message and inject results into the LLM context before the call.
+    /// Useful for models that don't support tool/function calling (e.g. Ollama).
+    #[serde(default)]
+    pub web_search_augmentation: WebSearchAugmentationMode,
 }
 
 fn default_true() -> bool {
@@ -693,6 +730,7 @@ impl Default for AgentManifest {
             thinking: None,
             context_injection: Vec::new(),
             is_hand: false,
+            web_search_augmentation: WebSearchAugmentationMode::default(),
         }
     }
 }

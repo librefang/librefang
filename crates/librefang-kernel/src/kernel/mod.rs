@@ -1350,7 +1350,7 @@ impl LibreFangKernel {
             .unwrap_or_else(|| config.data_dir.join("librefang.db"));
         let mut substrate = MemorySubstrate::open_with_chunking(
             &db_path,
-            config.memory.decay_rate,
+            config.memory.decay_rate as f32,
             config.memory.chunking.clone(),
         )
         .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?;
@@ -1456,6 +1456,10 @@ impl LibreFangKernel {
                 .cloned()
         });
         let mcp_bridge_cfg = build_mcp_bridge_cfg(&config);
+        let default_proxy_url = config
+            .provider_proxy_urls
+            .get(&config.default_model.provider)
+            .cloned();
         let driver_config = DriverConfig {
             provider: config.default_model.provider.clone(),
             api_key: default_api_key.clone(),
@@ -1465,6 +1469,7 @@ impl LibreFangKernel {
             skip_permissions: true,
             message_timeout_secs: config.default_model.message_timeout_secs,
             mcp_bridge: Some(mcp_bridge_cfg.clone()),
+            proxy_url: default_proxy_url.clone(),
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
         // even if the LLM provider is misconfigured. Users can fix config via dashboard.
@@ -1500,6 +1505,7 @@ impl LibreFangKernel {
                     skip_permissions: true,
                     message_timeout_secs: config.default_model.message_timeout_secs,
                     mcp_bridge: Some(mcp_bridge_cfg.clone()),
+                    proxy_url: default_proxy_url.clone(),
                 };
                 match drivers::create_driver(&profile_config) {
                     Ok(profile_driver) => {
@@ -1604,6 +1610,7 @@ impl LibreFangKernel {
                             skip_permissions: true,
                             message_timeout_secs: config.default_model.message_timeout_secs,
                             mcp_bridge: Some(mcp_bridge_cfg.clone()),
+                            proxy_url: config.provider_proxy_urls.get(provider).cloned(),
                         };
                         match drivers::create_driver(&auto_config) {
                             Ok(d) => {
@@ -1654,6 +1661,7 @@ impl LibreFangKernel {
                 skip_permissions: true,
                 message_timeout_secs: config.default_model.message_timeout_secs,
                 mcp_bridge: Some(mcp_bridge_cfg.clone()),
+                proxy_url: config.provider_proxy_urls.get(&fb.provider).cloned(),
             };
             match drivers::create_driver(&fb_config) {
                 Ok(d) => {
@@ -1729,6 +1737,7 @@ impl LibreFangKernel {
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
         model_catalog.load_suppressed(&config.home_dir.join("suppressed_providers.json"));
+        model_catalog.load_overrides(&config.home_dir.join("model_overrides.json"));
         model_catalog.detect_auth();
         // Apply region selections first (lower priority than explicit provider_urls)
         if !config.provider_regions.is_empty() {
@@ -1754,6 +1763,13 @@ impl LibreFangKernel {
             info!(
                 "applied {} provider URL override(s)",
                 config.provider_urls.len()
+            );
+        }
+        if !config.provider_proxy_urls.is_empty() {
+            model_catalog.apply_proxy_url_overrides(&config.provider_proxy_urls);
+            info!(
+                "applied {} provider proxy URL override(s)",
+                config.provider_proxy_urls.len()
             );
         }
         // Load user's custom models from ~/.librefang/custom_models.json (highest priority)
@@ -2639,9 +2655,27 @@ system_prompt = "You are a helpful assistant."
         source_toml_path: Option<PathBuf>,
         predetermined_id: Option<AgentId>,
     ) -> KernelResult<AgentId> {
-        let agent_id = predetermined_id.unwrap_or_default();
-        let session_id = SessionId::new();
         let name = manifest.name.clone();
+        // Use a deterministic agent ID derived from the agent name so the
+        // same agent gets the same UUID across daemon restarts. This preserves
+        // session history associations in SQLite. Child agents spawned at
+        // runtime still use random IDs (via predetermined_id = None + parent).
+        let agent_id = predetermined_id.unwrap_or_else(|| {
+            if parent.is_none() {
+                AgentId::from_name(&name)
+            } else {
+                AgentId::new()
+            }
+        });
+
+        // Restore the most recent session for this agent if one exists in the
+        // database, so conversation history survives daemon restarts.
+        let session_id = self
+            .memory
+            .get_agent_session_ids(agent_id)
+            .ok()
+            .and_then(|ids| ids.into_iter().next())
+            .unwrap_or_default();
 
         // SECURITY: If this spawn is linked to a running parent agent,
         // enforce that the child's capabilities are a subset of the
@@ -3254,6 +3288,17 @@ system_prompt = "You are a helpful assistant."
                 .map(|m| m.context_window as usize)
         });
 
+        // Inject model_supports_tools for auto web search augmentation
+        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&manifest.model.model)
+                .map(|m| m.supports_tools)
+        }) {
+            manifest.metadata.insert(
+                "model_supports_tools".to_string(),
+                serde_json::Value::Bool(supports),
+            );
+        }
+
         // Create a temporary in-memory session (empty — no history loaded)
         let ephemeral_session_id = SessionId::new();
         let mut ephemeral_session = librefang_memory::session::Session {
@@ -3784,6 +3829,17 @@ system_prompt = "You are a helpful assistant."
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
         let mut manifest = entry.manifest.clone();
+
+        // Inject model_supports_tools for auto web search augmentation
+        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&manifest.model.model)
+                .map(|m| m.supports_tools)
+        }) {
+            manifest.metadata.insert(
+                "model_supports_tools".to_string(),
+                serde_json::Value::Bool(supports),
+            );
+        }
 
         // Backfill thinking config from global config if per-agent is not set
         if manifest.thinking.is_none() {
@@ -5169,6 +5225,45 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Apply per-model inference parameter overrides from the catalog.
+        // Placed AFTER model routing so overrides match the final model, not
+        // the pre-routing one (e.g. routing may switch sonnet → haiku).
+        // Priority: model overrides > agent manifest > system defaults.
+        {
+            let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
+            let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(mo) = catalog.get_overrides(&override_key) {
+                if let Some(t) = mo.temperature {
+                    manifest.model.temperature = t;
+                }
+                if let Some(mt) = mo.max_tokens {
+                    manifest.model.max_tokens = mt;
+                }
+                let ep = &mut manifest.model.extra_params;
+                if let Some(tp) = mo.top_p {
+                    ep.insert("top_p".to_string(), serde_json::json!(tp));
+                }
+                if let Some(fp) = mo.frequency_penalty {
+                    ep.insert("frequency_penalty".to_string(), serde_json::json!(fp));
+                }
+                if let Some(pp) = mo.presence_penalty {
+                    ep.insert("presence_penalty".to_string(), serde_json::json!(pp));
+                }
+                if let Some(ref re) = mo.reasoning_effort {
+                    ep.insert("reasoning_effort".to_string(), serde_json::json!(re));
+                }
+                if mo.use_max_completion_tokens == Some(true) {
+                    ep.insert(
+                        "use_max_completion_tokens".to_string(),
+                        serde_json::json!(true),
+                    );
+                }
+                if mo.force_max_tokens == Some(true) {
+                    ep.insert("force_max_tokens".to_string(), serde_json::json!(true));
+                }
+            }
+        }
+
         let driver = self.resolve_driver(&manifest)?;
 
         // Look up model's actual context window from the catalog
@@ -5176,6 +5271,17 @@ system_prompt = "You are a helpful assistant."
             cat.find_model(&manifest.model.model)
                 .map(|m| m.context_window as usize)
         });
+
+        // Inject model_supports_tools for auto web search augmentation
+        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&manifest.model.model)
+                .map(|m| m.supports_tools)
+        }) {
+            manifest.metadata.insert(
+                "model_supports_tools".to_string(),
+                serde_json::Value::Bool(supports),
+            );
+        }
 
         // Snapshot skill registry before async call (RwLockReadGuard is !Send)
         let mut skill_snapshot = self
@@ -7241,6 +7347,9 @@ system_prompt = "You are a helpful assistant."
                     if !new_config.provider_urls.is_empty() {
                         catalog.apply_url_overrides(&new_config.provider_urls);
                     }
+                    if !new_config.provider_proxy_urls.is_empty() {
+                        catalog.apply_proxy_url_overrides(&new_config.provider_proxy_urls);
+                    }
                     // Also update media driver cache with new provider URLs
                     self.media_drivers
                         .update_provider_urls(new_config.provider_urls.clone());
@@ -7423,6 +7532,42 @@ system_prompt = "You are a helpful assistant."
         // agents are picked up on the next routing call.
         router::invalidate_manifest_cache();
         router::invalidate_hand_route_cache();
+    }
+
+    /// Lightweight one-shot LLM call for classification tasks (e.g., reply precheck).
+    ///
+    /// Uses the default driver with low max_tokens and 0 temperature.
+    /// Returns `Err` on LLM error or timeout (caller should fail-open).
+    pub async fn one_shot_llm_call(&self, model: &str, prompt: &str) -> Result<String, String> {
+        use librefang_runtime::llm_driver::CompletionRequest;
+        use librefang_types::message::Message;
+
+        let request = CompletionRequest {
+            model: model.to_string(),
+            messages: vec![Message::user(prompt.to_string())],
+            tools: vec![],
+            max_tokens: 10,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+        };
+
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.default_driver.complete(request),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => return Err(format!("LLM call failed: {e}")),
+            Err(_) => return Err("LLM call timed out (5s)".to_string()),
+        };
+
+        Ok(result.text())
     }
 
     /// Publish an event to the bus and evaluate triggers.
@@ -7961,11 +8106,14 @@ system_prompt = "You are a helpful assistant."
                             error = result.error.as_deref().unwrap_or("unknown"),
                             "Local provider offline"
                         );
-                        // Mark unreachable local providers so dashboard doesn't show "configured"
+                        // Mark unreachable local providers as LocalOffline (not Missing).
+                        // Using Missing would cause detect_auth() to reset the status back
+                        // to NotRequired on the next unrelated auth check, making offline
+                        // providers reappear in the model switcher.
                         if let Ok(mut catalog) = kernel.model_catalog.write() {
                             catalog.set_provider_auth_status(
                                 provider_id,
-                                librefang_types::model_catalog::AuthStatus::Missing,
+                                librefang_types::model_catalog::AuthStatus::LocalOffline,
                             );
                         }
                     }
@@ -8829,6 +8977,7 @@ system_prompt = "You are a helpful assistant."
                 skip_permissions: true,
                 message_timeout_secs: cfg.default_model.message_timeout_secs,
                 mcp_bridge: Some(build_mcp_bridge_cfg(&cfg)),
+                proxy_url: cfg.provider_proxy_urls.get(agent_provider).cloned(),
             };
 
             match self.driver_cache.get_or_create(&driver_config) {
@@ -8913,6 +9062,7 @@ system_prompt = "You are a helpful assistant."
                     mcp_bridge: Some(build_mcp_bridge_cfg(&cfg)),
                     skip_permissions: true,
                     message_timeout_secs: cfg.default_model.message_timeout_secs,
+                    proxy_url: cfg.provider_proxy_urls.get(&fb_provider).cloned(),
                 };
                 match self.driver_cache.get_or_create(&config) {
                     Ok(d) => chain.push((d, strip_provider_prefix(&fb.model, &fb_provider))),
@@ -12094,6 +12244,9 @@ impl LibreFangKernel {
             allowed_tools: deferred.allowed_tools.as_deref(),
             caller_agent_id: Some(deferred.agent_id.as_str()),
             skill_registry: Some(skill_snapshot),
+            // Deferred tools have already passed the approval gate; skill
+            // allowlist is not available here so we skip the check (None).
+            allowed_skills: None,
             mcp_connections: Some(&self.mcp_connections),
             web_ctx: Some(&self.web_ctx),
             browser_ctx: Some(&self.browser_ctx),

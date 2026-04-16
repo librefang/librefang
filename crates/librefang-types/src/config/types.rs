@@ -90,6 +90,14 @@ pub struct ChannelOverrides {
     /// `group_policy` is `mention_only`.
     #[serde(default)]
     pub group_trigger_patterns: Vec<String>,
+    /// Enable LLM-based reply-intent precheck for group messages.
+    /// When true and group_policy is "all", a lightweight classifier decides
+    /// whether to reply before running the full agent loop.
+    #[serde(default)]
+    pub reply_precheck: bool,
+    /// Model override for the reply precheck classifier (default: agent's model).
+    #[serde(default)]
+    pub reply_precheck_model: Option<String>,
     /// Global rate limit for this channel (messages per minute, 0 = unlimited).
     #[serde(default)]
     pub rate_limit_per_minute: u32,
@@ -175,6 +183,8 @@ impl Default for ChannelOverrides {
             dm_policy: DmPolicy::default(),
             group_policy: GroupPolicy::default(),
             group_trigger_patterns: Vec::new(),
+            reply_precheck: false,
+            reply_precheck_model: None,
             rate_limit_per_minute: 0,
             rate_limit_per_user: 0,
             threading: false,
@@ -1981,6 +1991,11 @@ pub struct KernelConfig {
     /// e.g. `ollama = "http://192.168.1.100:11434/v1"`
     #[serde(default)]
     pub provider_urls: HashMap<String, String>,
+    /// Per-provider proxy URL overrides (provider ID → proxy URL).
+    /// Allows routing specific providers through a proxy while others connect directly.
+    /// e.g. `openai = "http://proxy.corp:8080"`, `ollama = ""` (direct)
+    #[serde(default)]
+    pub provider_proxy_urls: HashMap<String, String>,
     /// Provider region selection (provider ID → region name).
     /// Selects a regional endpoint from the provider's `[provider.regions]` map.
     /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
@@ -3529,6 +3544,7 @@ impl Default for KernelConfig {
             thinking: None,
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
+            provider_proxy_urls: HashMap::new(),
             provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
             vertex_ai: VertexAiConfig::default(),
@@ -3792,7 +3808,7 @@ pub struct MemoryConfig {
     /// Maximum memories before consolidation is triggered.
     pub consolidation_threshold: u64,
     /// Memory decay rate (0.0 = no decay, 1.0 = aggressive decay).
-    pub decay_rate: f32,
+    pub decay_rate: f64,
     /// Embedding provider. Valid values: `"openai"`, `"groq"`, `"mistral"`,
     /// `"together"`, `"fireworks"`, `"cohere"`, `"ollama"`, `"bedrock"`,
     /// `"vllm"`, `"lmstudio"`, or `"auto"`.
