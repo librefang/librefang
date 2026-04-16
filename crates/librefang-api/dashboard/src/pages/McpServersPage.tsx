@@ -21,8 +21,8 @@ import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Plug, Plus, Trash2, Settings, ChevronDown, ChevronUp, Wrench, Terminal, Globe, Radio,
-  Shield, ShieldCheck, ShieldAlert, ShieldX, Package, Check, ExternalLink,
-  Search, Clock, Filter,
+  Shield, ShieldCheck, ShieldAlert, ShieldX, Check, ExternalLink,
+  Search, Clock, Filter, Store, Key, Download,
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -426,6 +426,7 @@ export function McpServersPage() {
   const [form, setForm] = useState<ServerFormState>(defaultForm);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [marketplaceSearch, setMarketplaceSearch] = useState("");
 
   useCreateShortcut(() => setShowAddModal(true));
 
@@ -554,7 +555,19 @@ export function McpServersPage() {
   }
 
   const registryTemplates = registryQuery.data?.integrations ?? [];
-  const configuredNames = new Set(configured.map(s => s.name));
+  const configuredNames = useMemo(() => new Set(configured.map(s => s.name)), [configured]);
+
+  const filteredTemplates = useMemo(() => {
+    if (!marketplaceSearch.trim()) return registryTemplates;
+    const q = marketplaceSearch.toLowerCase();
+    return registryTemplates.filter(tpl =>
+      tpl.name.toLowerCase().includes(q) ||
+      tpl.id.toLowerCase().includes(q) ||
+      (tpl.description || "").toLowerCase().includes(q) ||
+      (tpl.category || "").toLowerCase().includes(q) ||
+      (tpl.tags ?? []).some(tag => tag.toLowerCase().includes(q))
+    );
+  }, [registryTemplates, marketplaceSearch]);
 
   const connectedCount = useMemo(
     () => configured.filter(s => connectedMap.get(s.name)?.connected).length,
@@ -568,7 +581,7 @@ export function McpServersPage() {
         icon={<Plug className="h-5 w-5" />}
         badge="MCP"
         title={t("mcp.title")}
-        subtitle={tab === "registry" ? t("mcp.registry_subtitle") : t("mcp.subtitle")}
+        subtitle={tab === "registry" ? t("mcp.marketplace_subtitle") : t("mcp.subtitle")}
         isFetching={serversQuery.isFetching || registryQuery.isFetching}
         onRefresh={() => { serversQuery.refetch(); if (tab === "registry") registryQuery.refetch(); }}
         helpText={t("mcp.help")}
@@ -601,8 +614,8 @@ export function McpServersPage() {
             tab === "registry" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
           }`}
         >
-          <Package className="h-3.5 w-3.5" />
-          {t("mcp.tab_registry")}
+          <Store className="h-3.5 w-3.5" />
+          {t("mcp.tab_marketplace")}
         </button>
       </div>
 
@@ -671,8 +684,8 @@ export function McpServersPage() {
               title={t("mcp.empty")}
               description={t("mcp.empty_desc")}
               action={
-                <Button size="sm" leftIcon={<Package className="h-3.5 w-3.5" />} onClick={() => setTab("registry")}>
-                  {t("mcp.tab_registry")}
+                <Button size="sm" leftIcon={<Store className="h-3.5 w-3.5" />} onClick={() => setTab("registry")}>
+                  {t("mcp.tab_marketplace")}
                 </Button>
               }
             />
@@ -708,32 +721,67 @@ export function McpServersPage() {
         </>
       )}
 
-      {/* Registry tab */}
+      {/* Marketplace tab */}
       {tab === "registry" && (
         <>
           {registryQuery.isLoading && <ListSkeleton rows={3} />}
+
+          {/* Marketplace search — visible once data has loaded */}
+          {!registryQuery.isLoading && registryTemplates.length > 0 && (
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-text-dim/50" />
+              <input
+                type="text"
+                value={marketplaceSearch}
+                onChange={(e) => setMarketplaceSearch(e.target.value)}
+                placeholder={t("mcp.marketplace_search_placeholder")}
+                className="w-full rounded-xl border border-border-subtle bg-surface pl-10 pr-4 py-2.5 text-sm font-medium text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
+              />
+            </div>
+          )}
           {!registryQuery.isLoading && registryTemplates.length === 0 && (
             <EmptyState
-              icon={<Package className="h-10 w-10" />}
-              title={t("mcp.registry_empty")}
-              description={t("mcp.registry_empty_desc")}
+              icon={<Store className="h-10 w-10" />}
+              title={t("mcp.marketplace_empty")}
+              description={t("mcp.marketplace_empty_desc")}
             />
           )}
-          {registryTemplates.length > 0 && (
+          {!registryQuery.isLoading && registryTemplates.length > 0 && filteredTemplates.length === 0 && (
+            <EmptyState
+              icon={<Search className="h-10 w-10" />}
+              title={t("mcp.no_results")}
+              description={t("mcp.no_results_desc")}
+            />
+          )}
+          {filteredTemplates.length > 0 && (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
-              {registryTemplates.map((tpl) => {
+              {filteredTemplates.map((tpl) => {
                 const alreadyAdded = configuredNames.has(tpl.id);
                 return (
-                  <Card key={tpl.id} padding="none" className="flex flex-col overflow-hidden">
-                    <div className="h-1.5 bg-gradient-to-r from-brand via-brand/60 to-brand/30" />
-                    <div className="p-5 flex flex-col gap-3 flex-1">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <div className="w-10 h-10 rounded-lg flex items-center justify-center text-xl bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20">
-                            {tpl.icon || <Plug className="w-5 h-5 text-brand" />}
+                  <Card key={tpl.id} hover={!alreadyAdded} padding="none" className={`flex flex-col overflow-hidden group ${alreadyAdded ? "opacity-75" : ""}`}>
+                    <div className={`h-1.5 bg-gradient-to-r ${
+                      alreadyAdded
+                        ? "from-success via-success/60 to-success/30"
+                        : "from-brand via-brand/60 to-brand/30"
+                    }`} />
+                    <div className="p-5 flex-1 flex flex-col">
+                      {/* Header */}
+                      <div className="flex items-start justify-between gap-3 mb-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
+                            alreadyAdded
+                              ? "bg-gradient-to-br from-success/10 to-success/5 border border-success/20"
+                              : "bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20"
+                          }`}>
+                            {tpl.icon
+                              ? <span className="text-xl">{tpl.icon}</span>
+                              : <Plug className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-brand"}`} />
+                            }
                           </div>
                           <div className="min-w-0">
-                            <h3 className="text-sm font-black truncate">{tpl.name}</h3>
+                            <h3 className={`text-sm font-black truncate transition-colors ${
+                              alreadyAdded ? "" : "group-hover:text-brand"
+                            }`}>{tpl.name}</h3>
                             {tpl.category && (
                               <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{tpl.category}</span>
                             )}
@@ -742,41 +790,56 @@ export function McpServersPage() {
                         {alreadyAdded && (
                           <Badge variant="success" dot>
                             <Check className="h-3 w-3 mr-0.5" />
-                            {t("mcp.registry_installed")}
+                            {t("mcp.marketplace_installed")}
                           </Badge>
                         )}
                       </div>
-                      <p className="text-xs text-text-dim leading-relaxed line-clamp-2">{tpl.description}</p>
+
+                      {/* Description */}
+                      <p className="text-xs text-text-dim leading-relaxed line-clamp-2 mb-3 flex-1">{tpl.description}</p>
+
+                      {/* Tags */}
                       {(tpl.tags ?? []).length > 0 && (
-                        <div className="flex flex-wrap gap-1">
+                        <div className="flex flex-wrap gap-1 mb-3">
                           {tpl.tags!.slice(0, 4).map(tag => (
-                            <span key={tag} className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-brand/10 text-brand">{tag}</span>
+                            <span key={tag} className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-brand/8 text-brand/70">{tag}</span>
                           ))}
                         </div>
                       )}
+
+                      {/* Required env vars */}
                       {(tpl.required_env ?? []).length > 0 && (
-                        <div className="text-[10px] text-text-dim">
+                        <div className="space-y-1 mb-2">
                           {(tpl.required_env ?? []).map(e => (
-                            <div key={e.name} className="flex items-center gap-1">
-                              <span className="font-mono font-bold">{e.name}</span>
-                              {e.get_url && <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline"><ExternalLink className="h-2.5 w-2.5 inline" /></a>}
+                            <div key={e.name} className="flex items-center gap-1.5 text-[10px]">
+                              <Key className="w-3 h-3 text-text-dim/50 shrink-0" />
+                              <span className="font-mono font-bold text-text-dim">{e.name}</span>
+                              {e.get_url && (
+                                <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline ml-auto">
+                                  <ExternalLink className="h-3 w-3" />
+                                </a>
+                              )}
                             </div>
                           ))}
                         </div>
                       )}
                     </div>
+
+                    {/* Action */}
                     <div className="border-t border-border-subtle">
                       <button
                         onClick={() => installFromTemplate(tpl)}
                         disabled={alreadyAdded}
-                        className={`w-full flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold transition-colors rounded-b-xl sm:rounded-b-2xl ${
+                        className={`w-full flex items-center justify-center gap-1.5 py-3 text-xs font-bold transition-colors rounded-b-xl sm:rounded-b-2xl ${
                           alreadyAdded
                             ? "text-text-dim/30 cursor-not-allowed"
                             : "text-brand hover:bg-brand/5"
                         }`}
                       >
-                        {alreadyAdded ? <Check className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
-                        {alreadyAdded ? t("mcp.registry_installed") : t("mcp.registry_add")}
+                        {alreadyAdded
+                          ? <><Check className="h-3.5 w-3.5" /> {t("mcp.marketplace_installed")}</>
+                          : <><Download className="h-3.5 w-3.5" /> {t("mcp.marketplace_add")}</>
+                        }
                       </button>
                     </div>
                   </Card>
