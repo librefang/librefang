@@ -242,28 +242,30 @@ export function AgentsPage() {
   const renderAgentCard = (agent: any) => {
     const isSuspended = (agent.state || "").toLowerCase() === "suspended";
     return (
-      <Card key={agent.id} hover padding="lg" className={`cursor-pointer ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
+      <Card key={agent.id} hover padding="lg" className={`cursor-pointer overflow-hidden min-w-0 ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
         setDetailLoading(true);
         try { const d = await getAgentDetail(agent.id); setDetailAgent(mergeHandFlag(d, agent.is_hand)); } catch { setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand }); }
         setDetailLoading(false);
       }}>
-        <div className="flex items-start justify-between gap-4 mb-5">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="relative">
-              <Avatar fallback={agent.name} size="lg" />
-              {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" />}
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 min-w-0">
-                <h2 className="text-base font-black tracking-tight truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</h2>
-                {agent.is_hand && <Badge variant="info">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
+        <div className="flex flex-col gap-3 mb-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="relative shrink-0">
+                <Avatar fallback={agent.name} size="lg" />
+                {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" />}
               </div>
-              <p className="text-[10px] font-mono text-text-dim/50 truncate mt-0.5">{truncateId(agent.id)}</p>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 min-w-0">
+                  <h2 className="text-sm sm:text-base font-black tracking-tight truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</h2>
+                  {agent.is_hand && <Badge variant="info" className="shrink-0">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
+                </div>
+                <p className="text-[10px] font-mono text-text-dim/50 truncate mt-0.5">{truncateId(agent.id)}</p>
+              </div>
             </div>
+            <Badge variant={getStatusVariant(agent.state)} dot className="shrink-0">
+              {agent.state ? t(`common.${agent.state.toLowerCase()}`, { defaultValue: agent.state }) : t("common.idle")}
+            </Badge>
           </div>
-          <Badge variant={getStatusVariant(agent.state)} dot>
-            {agent.state ? t(`common.${agent.state.toLowerCase()}`, { defaultValue: agent.state }) : t("common.idle")}
-          </Badge>
         </div>
         <div className="space-y-2.5 mb-5">
           <div className="flex items-center gap-3 text-xs">
@@ -282,23 +284,24 @@ export function AgentsPage() {
             <span className="font-mono text-[10px]">{agent.last_active ? formatTime(agent.last_active) : t("common.never")}</span>
           </div>
         </div>
-        <div className="pt-4 border-t border-border-subtle/30 flex gap-2">
+        <div className="pt-4 border-t border-border-subtle/30 flex flex-wrap gap-2">
           {isSuspended ? (
-            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); try { await resumeAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
-              <Play className="h-3.5 w-3.5 mr-1" /> {t("agents.resume")}
+            <Button variant="secondary" size="sm" className="flex-1 min-w-[100px]" onClick={async (e) => { e.stopPropagation(); try { await resumeAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
+              <Play className="h-3.5 w-3.5 mr-1 shrink-0" /> <span className="truncate">{t("agents.resume")}</span>
             </Button>
           ) : (
-            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); try { await suspendAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
-              <Pause className="h-3.5 w-3.5 mr-1" /> {t("agents.suspend")}
+            <Button variant="secondary" size="sm" className="flex-1 min-w-[100px]" onClick={async (e) => { e.stopPropagation(); try { await suspendAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
+              <Pause className="h-3.5 w-3.5 mr-1 shrink-0" /> <span className="truncate">{t("agents.suspend")}</span>
             </Button>
           )}
-          <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
-            <MessageCircle className="h-3.5 w-3.5 mr-1" /> {t("common.interact")}
+          <Button variant="primary" size="sm" className="flex-1 min-w-[100px]" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
+            <MessageCircle className="h-3.5 w-3.5 mr-1 shrink-0" /> <span className="truncate">{t("common.interact")}</span>
           </Button>
           {!agent.is_hand && (
             <Button
               variant="secondary"
               size="sm"
+              className="shrink-0"
               onClick={(e) => {
                 e.stopPropagation();
                 setConfirmDialog({
@@ -400,7 +403,7 @@ export function AgentsPage() {
       </div>
 
       {agentsQuery.isLoading ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
+        <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]">
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : filteredAgents.length === 0 ? (
@@ -431,7 +434,7 @@ export function AgentsPage() {
           />
         )
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6 stagger-children">
+        <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))] stagger-children">
           {coreAgents.map(agent => renderAgentCard(agent))}
         </div>
       )}
