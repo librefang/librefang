@@ -1955,9 +1955,16 @@ function ownerIntentsRelay(text) {
   if (!t) return false;
   if (t.startsWith('/relay') || t.startsWith('/reply')) return true;
   if (/(^|\s)@[\w.+-]+/.test(t)) return true;
-  return /\b(rispondi a|scrivi a|scrivigli|digli|dille|dica|saluta|manda a|inoltra|chiedi a|reply to|tell|write to|forward to|relay to)\b/.test(
-    t,
-  );
+  // Phrases that always imply a third-party recipient.
+  if (/\b(rispondi a|scrivi a|scrivigli|digli|dille|dica|saluta|manda a|inoltra|chiedi a|reply to|write to|relay to)\b/.test(t)) {
+    return true;
+  }
+  // `tell` and `forward to` have legitimate non-relay uses
+  // ("tell me a joke", "looking forward to meeting you"), so require them
+  // to name an addressee rather than matching the verb alone.
+  if (/\btell\s+(?!me\b|us\b|you\b)\w+/.test(t)) return true;
+  if (/\bforward\s+(?:it|this|that|the\s+\w+|a\s+\w+)\s+to\s+\w+/.test(t)) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------

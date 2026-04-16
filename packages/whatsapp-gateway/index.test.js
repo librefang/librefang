@@ -1047,4 +1047,23 @@ describe('ownerIntentsRelay', () => {
     assert.equal(ownerIntentsRelay('salutami la zia'), false);
     assert.equal(ownerIntentsRelay('rispostaok'), false);
   });
+
+  it('does not treat "tell me/us/you" as relay intent (owner → agent)', () => {
+    assert.equal(ownerIntentsRelay('tell me a joke'), false);
+    assert.equal(ownerIntentsRelay('can you tell me about this'), false);
+    assert.equal(ownerIntentsRelay('tell us the news'), false);
+    assert.equal(ownerIntentsRelay('tell you what'), false);
+  });
+
+  it('does not treat "looking forward to" as relay intent', () => {
+    assert.equal(ownerIntentsRelay('I look forward to meeting you'), false);
+    assert.equal(ownerIntentsRelay('looking forward to the call'), false);
+    assert.equal(ownerIntentsRelay('I am forward to hearing from you'), false);
+  });
+
+  it('still matches "forward <it|this|the X> to <recipient>"', () => {
+    assert.equal(ownerIntentsRelay('forward it to Bob'), true);
+    assert.equal(ownerIntentsRelay('forward this to Alice'), true);
+    assert.equal(ownerIntentsRelay('forward the message to the team'), true);
+  });
 });
