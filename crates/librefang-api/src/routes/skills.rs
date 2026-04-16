@@ -3024,6 +3024,10 @@ pub async fn add_mcp_server(
         Err(_) => "saved_reload_failed",
     };
 
+    // Establish connection to the newly added server in the background.
+    let kernel = std::sync::Arc::clone(&state.kernel);
+    tokio::spawn(async move { kernel.connect_mcp_servers().await });
+
     state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
@@ -3123,6 +3127,11 @@ pub async fn update_mcp_server(
         }
         Err(_) => "saved_reload_failed",
     };
+
+    // Disconnect the old connection so connect_mcp_servers picks up the new config.
+    state.kernel.disconnect_mcp_server(&name).await;
+    let kernel = std::sync::Arc::clone(&state.kernel);
+    tokio::spawn(async move { kernel.connect_mcp_servers().await });
 
     state.kernel.audit().record(
         "system",
