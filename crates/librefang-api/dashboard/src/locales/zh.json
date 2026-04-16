@@ -1983,6 +1983,16 @@
     "registry_empty_desc": "集成模板将在 Registry 同步后显示。",
     "registry_installed": "已安装",
     "registry_add": "添加",
-    "registry_add_success": "集成已添加为 MCP 服务器"
+    "registry_add_success": "集成已添加为 MCP 服务器",
+    "search_placeholder": "搜索服务器...",
+    "filter_all": "全部",
+    "filter_connected": "已连接",
+    "filter_disconnected": "未连接",
+    "no_results": "没有匹配的服务器",
+    "no_results_desc": "请尝试其他搜索词或筛选条件。",
+    "show_more_tools": "显示另外 {{count}} 个...",
+    "stdio_config": "Stdio 配置",
+    "connection": "连接",
+    "url_hint": "URL 必须以 http:// 或 https:// 开头"
   }
 }
