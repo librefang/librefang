@@ -530,7 +530,6 @@ async fn cross_check_with_openai(
         return None;
     }
 
-    info!("STT low-confidence on groq → cross-checking with openai/whisper-1");
     let (api_url, api_key) = whisper_provider_config("openai").ok()?;
     let fallback = whisper_transcribe_verbose(
         &api_url,
@@ -747,7 +746,8 @@ async fn elevenlabs_transcribe(
         .ok_or_else(|| "ElevenLabs returned no transcription text".to_string())
 }
 
-/// the caller can fall back to the source file extension.
+/// Map an audio MIME to a file extension. Returns `None` for unmapped types;
+/// the caller falls back to the source file extension.
 fn mime_to_ext(mime: &str) -> Option<String> {
     match mime.to_ascii_lowercase().as_str() {
         "audio/wav" | "audio/x-wav" => Some("wav".to_string()),
