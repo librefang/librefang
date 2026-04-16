@@ -427,6 +427,8 @@ export function McpServersPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [marketplaceSearch, setMarketplaceSearch] = useState("");
+  const [installingTemplate, setInstallingTemplate] = useState<IntegrationTemplate | null>(null);
+  const [envInputs, setEnvInputs] = useState<Record<string, string>>({});
 
   useCreateShortcut(() => setShowAddModal(true));
 
@@ -448,6 +450,8 @@ export function McpServersPage() {
       queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
       queryClient.invalidateQueries({ queryKey: ["integrations-available"] });
       setShowAddModal(false);
+      setInstallingTemplate(null);
+      setEnvInputs({});
       setForm(defaultForm);
       addToast(t("mcp.add_success"), "success");
     },
@@ -539,19 +543,37 @@ export function McpServersPage() {
   const updateField = <K extends keyof ServerFormState>(key: K, value: ServerFormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
 
-  function installFromTemplate(tpl: IntegrationTemplate) {
+  function buildPayloadFromTemplate(tpl: IntegrationTemplate, envOverrides?: Record<string, string>): McpServerConfigured {
     const transport = tpl.transport;
-    setForm({
-      name: tpl.id,
-      transportType: (transport?.type ?? "stdio") as TransportType,
-      command: transport?.command ?? "",
-      args: (transport?.args ?? []).join("\n"),
-      url: transport?.url ?? "",
-      timeout: 30,
-      env: (tpl.required_env ?? []).map(e => `${e.name}=`).join("\n"),
-      headers: "",
+    let mcpTransport: McpServerTransport;
+    const ttype = transport?.type ?? "stdio";
+    if (ttype === "stdio") {
+      mcpTransport = { type: "stdio", command: transport?.command ?? "", args: transport?.args ?? [] };
+    } else {
+      mcpTransport = { type: ttype as "sse" | "http", url: transport?.url ?? "" };
+    }
+    const env = (tpl.required_env ?? []).map(e => {
+      const val = envOverrides?.[e.name] ?? "";
+      return `${e.name}=${val}`;
     });
-    setShowAddModal(true);
+    return { name: tpl.id, transport: mcpTransport, timeout_secs: 30, env };
+  }
+
+  function installFromTemplate(tpl: IntegrationTemplate) {
+    const hasEnv = (tpl.required_env ?? []).length > 0;
+    if (hasEnv) {
+      const defaults: Record<string, string> = {};
+      for (const e of tpl.required_env ?? []) defaults[e.name] = "";
+      setEnvInputs(defaults);
+      setInstallingTemplate(tpl);
+    } else {
+      addMutation.mutate(buildPayloadFromTemplate(tpl));
+    }
+  }
+
+  function confirmTemplateInstall() {
+    if (!installingTemplate) return;
+    addMutation.mutate(buildPayloadFromTemplate(installingTemplate, envInputs));
   }
 
   const registryTemplates = registryQuery.data?.integrations ?? [];
@@ -989,6 +1011,56 @@ export function McpServersPage() {
               onClick={handleSubmit}
             >
               {t("common.save")}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Marketplace env setup modal */}
+      <Modal
+        isOpen={!!installingTemplate}
+        onClose={() => { setInstallingTemplate(null); setEnvInputs({}); }}
+        title={t("mcp.env_setup_title", { name: installingTemplate?.name ?? "" })}
+        size="md"
+      >
+        <div className="p-5 space-y-4">
+          <p className="text-xs text-text-dim">{t("mcp.env_setup_desc")}</p>
+          {(installingTemplate?.required_env ?? []).map(e => (
+            <div key={e.name} className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                  {e.name}
+                </label>
+                {e.get_url && (
+                  <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline">
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
+              </div>
+              <input
+                type="text"
+                value={envInputs[e.name] ?? ""}
+                onChange={(ev) => setEnvInputs(prev => ({ ...prev, [e.name]: ev.target.value }))}
+                placeholder={e.name}
+                className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
+              />
+            </div>
+          ))}
+          <div className="flex gap-3 pt-2">
+            <Button
+              variant="secondary"
+              className="flex-1"
+              onClick={() => { setInstallingTemplate(null); setEnvInputs({}); }}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              className="flex-1"
+              isLoading={addMutation.isPending}
+              leftIcon={<Download className="h-3.5 w-3.5" />}
+              onClick={confirmTemplateInstall}
+            >
+              {t("mcp.marketplace_add")}
             </Button>
           </div>
         </div>

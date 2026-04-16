@@ -2000,6 +2000,8 @@
     "show_more_tools": "显示另外 {{count}} 个...",
     "stdio_config": "Stdio 配置",
     "connection": "连接",
-    "url_hint": "URL 必须以 http:// 或 https:// 开头"
+    "url_hint": "URL 必须以 http:// 或 https:// 开头",
+    "env_setup_title": "配置 {{name}}",
+    "env_setup_desc": "输入所需的 API 密钥和环境变量以完成安装。"
   }
 }
