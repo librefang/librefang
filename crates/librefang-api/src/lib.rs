@@ -15,6 +15,7 @@ pub mod server;
 pub mod stream_chunker;
 pub mod stream_dedup;
 pub mod terminal;
+pub mod terminal_tmux;
 pub mod types;
 pub mod validation;
 pub mod versioning;

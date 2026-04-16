@@ -1092,6 +1092,12 @@ impl LlmDriver for ClaudeCodeDriver {
 
 /// Check if the Claude Code CLI is available.
 pub fn claude_code_available() -> bool {
+    if super::is_proxied_via_env(
+        &["ANTHROPIC_BASE_URL", "ANTHROPIC_API_URL"],
+        &["api.anthropic.com"],
+    ) {
+        return false;
+    }
     ClaudeCodeDriver::detect().is_some() || claude_credentials_exist()
 }
 

@@ -22,7 +22,7 @@ const CATEGORY_SECTIONS: Record<string, string[]> = {
   memory: ["memory", "proactive_memory"],
   tools: ["web", "browser", "links", "media", "tts", "canvas"],
   channels: ["channels", "broadcast", "auto_reply"],
-  security: ["approval", "exec_policy", "vault", "oauth", "external_auth"],
+  security: ["approval", "exec_policy", "vault", "oauth", "external_auth", "terminal"],
   network: ["network", "a2a", "pairing"],
   infra: ["docker", "extensions", "session", "queue", "webhook_triggers", "vertex_ai"],
 };
@@ -43,9 +43,9 @@ function fieldLabelFallback(key: string): string {
 
 function resolveFieldType(
   schema: string | ConfigFieldSchema
-): { type: string; options?: (string | { id: string; name: string; provider: string })[] } {
+): { type: string; options?: ConfigFieldSchema["options"]; min?: number; max?: number; step?: number } {
   if (typeof schema === "string") return { type: schema };
-  return { type: schema.type || "string", options: schema.options };
+  return { type: schema.type || "string", options: schema.options, min: schema.min, max: schema.max, step: schema.step };
 }
 
 function getNestedValue(obj: Record<string, unknown>, section: string, field: string, rootLevel?: boolean): unknown {
@@ -175,14 +175,18 @@ function JsonEditor({ value, onChange }: { value: unknown; onChange: (v: unknown
 const SENSITIVE_PATTERNS = /api_key|secret|password|token_env|client_secret|credentials/i;
 
 function ConfigFieldInput({
-  fieldKey, fieldType, options, value, onChange,
+  fieldKey, fieldType, options, min, max, step, value, onChange,
 }: {
   fieldKey: string;
   fieldType: string;
-  options?: (string | { id: string; name: string; provider: string })[];
+  options?: ConfigFieldSchema["options"];
+  min?: number;
+  max?: number;
+  step?: number;
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
+  const { t } = useTranslation();
   const inputClass =
     "w-full px-3 py-1.5 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand transition-colors";
 
@@ -200,14 +204,29 @@ function ConfigFieldInput({
     );
   }
 
-  if (fieldType === "select" && options) {
-    const strOptions = options.map((o) => (typeof o === "string" ? o : o.id));
+  if ((fieldType === "select" || fieldType === "number_select") && options) {
+    const normalizedOptions = options.map((o) => {
+      if (typeof o === "string") {
+        return { value: o, label: t(`config.${fieldKey}_${o}`, o) };
+      }
+      if ("value" in o && "label" in o) return { value: String((o as { value: unknown }).value), label: String((o as { label: unknown }).label) };
+      if ("id" in o) return { value: (o as { id: string; name?: string }).id, label: (o as { name?: string; id: string }).name ?? (o as { id: string }).id };
+      return { value: String(o), label: String(o) };
+    });
     const rawValue = String(value ?? "");
-    const matched = strOptions.find((o) => o.toLowerCase() === rawValue.toLowerCase()) ?? rawValue;
+    const matched = normalizedOptions.find((o) => o.value.toLowerCase() === rawValue.toLowerCase())?.value ?? rawValue;
+    const handleChange = (v: string) => {
+      if (fieldType === "number_select") {
+        const n = Number(v);
+        onChange(Number.isNaN(n) ? v : n);
+      } else {
+        onChange(v);
+      }
+    };
     return (
-      <select value={matched} onChange={(e) => onChange(e.target.value)} className={inputClass}>
-        {matched && !strOptions.includes(matched) && <option value={matched}>{matched}</option>}
-        {strOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+      <select value={matched} onChange={(e) => handleChange(e.target.value)} className={inputClass}>
+        {matched && !normalizedOptions.some((o) => o.value === matched) && <option value={matched}>{matched}</option>}
+        {normalizedOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
     );
   }
@@ -221,6 +240,7 @@ function ConfigFieldInput({
           const n = Number(v);
           if (!Number.isNaN(n)) onChange(n);
         }}
+        min={min} max={max} step={step}
         className={inputClass} />
     );
   }
@@ -318,19 +338,40 @@ export function ConfigPage({ category }: { category: string }) {
   const handleFieldChange = useCallback(
     (sectionKey: string, fieldKey: string, value: unknown, rootLevel?: boolean) => {
       const path = rootLevel ? fieldKey : `${sectionKey}.${fieldKey}`;
-      setPendingChanges((p) => ({ ...p, [path]: value }));
+      setPendingChanges((p) => {
+        const next = { ...p, [path]: value };
+        // Cascading: when provider changes in default_model, clear model if
+        // the current selection doesn't belong to the new provider.
+        if (sectionKey === "default_model" && fieldKey === "provider" && value) {
+          const modelPath = "default_model.model";
+          const currentModel = modelPath in p ? p[modelPath] : getNestedValue(configQuery.data ?? {}, "default_model", "model");
+          const modelOptions = (schemaQuery.data?.sections?.default_model?.fields?.model as ConfigFieldSchema)?.options;
+          if (modelOptions && currentModel) {
+            const modelBelongsToProvider = modelOptions.some((o: unknown) =>
+              typeof o === "object" && o !== null && "id" in o && "provider" in o
+              && (o as { id: string }).id === String(currentModel)
+              && (o as { provider: string }).provider === String(value)
+            );
+            if (!modelBelongsToProvider) {
+              next[modelPath] = null;
+            }
+          }
+        }
+        return next;
+      });
     },
-    []
+    [configQuery.data, schemaQuery.data]
   );
 
   const saveMutation = useMutation({
     mutationFn: ({ path, value }: { path: string; value: unknown }) => setConfigValue(path, value),
     onSuccess: (data, variables) => {
-      const reloadFailed = data.status !== "ok" && data.status !== "saved";
+      const reloadFailed = data.status === "saved_reload_failed";
+      const restartRequired = data.status === "applied_partial" || data.restart_required;
       if (reloadFailed) {
         setSaveStatus((s) => ({ ...s, [variables.path]: { ok: false, msg: t("config.saved_reload_failed", "Saved but reload failed") } }));
       } else {
-        const msg = data.restart_required ? t("config.saved_restart", "Saved (restart required)") : t("common.saved", "Saved");
+        const msg = restartRequired ? t("config.saved_restart", "Saved (restart required)") : t("common.saved", "Saved");
         setSaveStatus((s) => ({ ...s, [variables.path]: { ok: true, msg } }));
       }
       setPendingChanges((p) => {
@@ -357,10 +398,11 @@ export function ConfigPage({ category }: { category: string }) {
     for (const [path, value] of entries) {
       try {
         const data = await setConfigValue(path, value);
-        const reloadFailed = data.status !== "ok" && data.status !== "saved";
+        const reloadFailed = data.status === "saved_reload_failed";
+        const restartRequired = data.status === "applied_partial" || data.restart_required;
         const msg = reloadFailed
           ? t("config.saved_reload_failed", "Saved but reload failed")
-          : data.restart_required
+          : restartRequired
             ? t("config.saved_restart", "Saved (restart required)")
             : t("common.saved", "Saved");
         setSaveStatus((s) => ({ ...s, [path]: { ok: !reloadFailed, msg } }));
@@ -621,7 +663,7 @@ export function ConfigPage({ category }: { category: string }) {
               )}
               <div className="divide-y divide-border-subtle/30">
                 {fieldsToShow.map(([fieldKey, fieldSchema]) => {
-                  const { type: fieldType, options } = resolveFieldType(fieldSchema);
+                  const { type: fieldType, options: rawOptions, min, max, step } = resolveFieldType(fieldSchema);
                   const path = sec.root_level ? fieldKey : `${sKey}.${fieldKey}`;
                   const currentValue = path in pendingChanges
                     ? pendingChanges[path]
@@ -631,6 +673,24 @@ export function ConfigPage({ category }: { category: string }) {
                   const statusForField = saveStatus[path] ?? null;
                   const fieldDesc = t(`config.desc_${fieldKey}`, "");
                   const fieldLabel = t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey));
+
+                  // Cascading filter: when editing model in default_model,
+                  // only show models matching the selected provider.
+                  let options = rawOptions;
+                  if (sKey === "default_model" && fieldKey === "model" && rawOptions) {
+                    const providerPath = "default_model.provider";
+                    const selectedProvider = providerPath in pendingChanges
+                      ? String(pendingChanges[providerPath] ?? "")
+                      : String(getNestedValue(config, "default_model", "provider") ?? "");
+                    if (selectedProvider) {
+                      options = rawOptions.filter((o) => {
+                        if (typeof o === "object" && o !== null && "provider" in o) {
+                          return (o as { provider: string }).provider === selectedProvider;
+                        }
+                        return true;
+                      });
+                    }
+                  }
 
                   return (
                     <div key={fieldKey} className="flex items-start gap-4 px-5 py-3 group">
@@ -655,6 +715,9 @@ export function ConfigPage({ category }: { category: string }) {
                           fieldKey={fieldKey}
                           fieldType={fieldType}
                           options={options}
+                          min={min}
+                          max={max}
+                          step={step}
                           value={currentValue}
                           onChange={(v) => handleFieldChange(sKey, fieldKey, v, sec.root_level)}
                         />

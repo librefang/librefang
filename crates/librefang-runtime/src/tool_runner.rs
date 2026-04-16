@@ -304,6 +304,8 @@ pub struct ToolExecContext<'a> {
     pub allowed_tools: Option<&'a [String]>,
     pub caller_agent_id: Option<&'a str>,
     pub skill_registry: Option<&'a SkillRegistry>,
+    /// Skill allowlist for the calling agent. Empty slice = all skills allowed.
+    pub allowed_skills: Option<&'a [String]>,
     pub mcp_connections: Option<&'a tokio::sync::Mutex<Vec<mcp::McpConnection>>>,
     pub web_ctx: Option<&'a WebToolsContext>,
     pub browser_ctx: Option<&'a crate::browser::BrowserManager>,
@@ -337,6 +339,7 @@ pub async fn execute_tool_raw(
         allowed_tools,
         caller_agent_id,
         skill_registry,
+        allowed_skills,
         mcp_connections,
         web_ctx,
         browser_ctx,
@@ -567,6 +570,9 @@ pub async fn execute_tool_raw(
 
         // System time tool
         "system_time" => Ok(tool_system_time()),
+
+        // Skill file read tool
+        "skill_read_file" => tool_skill_read_file(input, *skill_registry, *allowed_skills).await,
 
         // Cron scheduling tools
         "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id).await,
@@ -825,6 +831,7 @@ pub async fn execute_tool(
     allowed_tools: Option<&[String]>,
     caller_agent_id: Option<&str>,
     skill_registry: Option<&SkillRegistry>,
+    allowed_skills: Option<&[String]>,
     mcp_connections: Option<&tokio::sync::Mutex<Vec<mcp::McpConnection>>>,
     web_ctx: Option<&WebToolsContext>,
     browser_ctx: Option<&crate::browser::BrowserManager>,
@@ -967,6 +974,7 @@ pub async fn execute_tool(
         allowed_tools,
         caller_agent_id,
         skill_registry,
+        allowed_skills,
         mcp_connections,
         web_ctx,
         browser_ctx,
@@ -1237,6 +1245,19 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "payload": { "type": "object", "description": "JSON payload data for the event" }
                 },
                 "required": ["event_type"]
+            }),
+        },
+        // --- Skill file read tool ---
+        ToolDefinition {
+            name: "skill_read_file".to_string(),
+            description: "Read a companion file from an installed skill. Use when a skill's prompt context references additional files by relative path (e.g. 'see references/syntax.md').".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "skill": { "type": "string", "description": "The skill name as listed in Available Skills" },
+                    "path": { "type": "string", "description": "Path relative to the skill directory, e.g. 'references/query-syntax.md'" }
+                },
+                "required": ["skill", "path"]
             }),
         },
         // --- Scheduling tools ---
@@ -4685,6 +4706,81 @@ pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, Stri
     Ok(html.to_string())
 }
 
+/// Read a companion file from an installed skill directory.
+///
+/// Security: resolves the path relative to the skill's installed directory and
+/// rejects any path that escapes via `..` or absolute components. Symlinks are
+/// resolved by `canonicalize()` before the containment check, so a symlink
+/// pointing outside the skill directory is correctly rejected.
+async fn tool_skill_read_file(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+    allowed_skills: Option<&[String]>,
+) -> Result<String, String> {
+    let registry = skill_registry.ok_or("Skill registry not available")?;
+    let skill_name = input["skill"].as_str().ok_or("Missing 'skill' parameter")?;
+    let rel_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+
+    // Enforce agent skill allowlist: if the agent specifies allowed skills
+    // (non-empty list), only those skills can be read. Empty = all allowed.
+    if let Some(allowed) = allowed_skills {
+        if !allowed.is_empty() && !allowed.iter().any(|s| s == skill_name) {
+            return Err(format!(
+                "Access denied: agent is not allowed to access skill '{skill_name}'"
+            ));
+        }
+    }
+
+    // Reject absolute paths early — Path::join replaces the base when given
+    // an absolute path, which would bypass the skill directory containment.
+    if std::path::Path::new(rel_path).is_absolute() {
+        return Err("Access denied: absolute paths are not allowed".to_string());
+    }
+
+    // Look up the skill
+    let skill = registry
+        .get(skill_name)
+        .ok_or_else(|| format!("Skill '{}' not found", skill_name))?;
+
+    // Resolve the path relative to the skill directory
+    let requested = skill.path.join(rel_path);
+    let canonical = requested
+        .canonicalize()
+        .map_err(|e| format!("File not found: {}", e))?;
+    let skill_root = skill
+        .path
+        .canonicalize()
+        .map_err(|e| format!("Skill directory error: {}", e))?;
+
+    // Security: ensure the resolved path is within the skill directory
+    if !canonical.starts_with(&skill_root) {
+        return Err(format!(
+            "Access denied: '{}' is outside the skill directory",
+            rel_path
+        ));
+    }
+
+    // Read the file
+    let content = tokio::fs::read_to_string(&canonical)
+        .await
+        .map_err(|e| format!("Failed to read '{}': {}", rel_path, e))?;
+
+    // Cap output to avoid flooding the context.
+    // Use floor_char_boundary to avoid panicking on multi-byte UTF-8.
+    const MAX_BYTES: usize = 32_000;
+    if content.len() > MAX_BYTES {
+        let truncate_at = content.floor_char_boundary(MAX_BYTES);
+        Ok(format!(
+            "{}\n\n... (truncated at {} bytes, file is {} bytes total)",
+            &content[..truncate_at],
+            truncate_at,
+            content.len()
+        ))
+    } else {
+        Ok(content)
+    }
+}
+
 /// Canvas presentation tool handler.
 async fn tool_canvas_present(
     input: &serde_json::Value,
@@ -5235,6 +5331,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5268,6 +5365,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5298,6 +5396,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5328,6 +5427,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5357,6 +5457,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5386,6 +5487,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5415,6 +5517,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5446,6 +5549,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5477,6 +5581,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5534,6 +5639,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5569,6 +5675,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5612,6 +5719,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             Some(workspace.path()),
@@ -5655,6 +5763,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5708,6 +5817,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5897,6 +6007,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -5949,6 +6060,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6160,6 +6272,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6197,6 +6310,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6234,6 +6348,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6283,6 +6398,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None, // media_engine
@@ -6333,6 +6449,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None, // media_engine
@@ -6424,6 +6541,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6460,6 +6578,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6505,6 +6624,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6540,6 +6660,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6575,6 +6696,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6609,6 +6731,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6643,6 +6766,7 @@ mod tests {
             None,
             None,
             None,
+            None, // allowed_skills
             None,
             None,
             None,
@@ -6925,5 +7049,123 @@ mod tests {
         let raw = serde_json::json!("not an array");
         let err = parse_poll_options(Some(&raw)).expect_err("string should fail");
         assert!(err.contains("must be an array"));
+    }
+
+    // ── skill_read_file ────────────────────────────────────────────────
+
+    fn create_skill_registry_with_file(
+        dir: &std::path::Path,
+        skill_name: &str,
+        file_rel: &str,
+        content: &str,
+    ) -> SkillRegistry {
+        let skill_dir = dir.join(skill_name);
+        std::fs::create_dir_all(
+            skill_dir.join(
+                std::path::Path::new(file_rel)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("")),
+            ),
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join(file_rel), content).unwrap();
+        std::fs::write(
+            skill_dir.join("skill.toml"),
+            format!(
+                r#"[skill]
+name = "{skill_name}"
+version = "0.1.0"
+description = "test"
+"#
+            ),
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.to_path_buf());
+        registry.load_all().unwrap();
+        registry
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_reads_companion() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let registry =
+            create_skill_registry_with_file(dir.path(), "my-skill", "refs/guide.md", "hello world");
+
+        let input = serde_json::json!({ "skill": "my-skill", "path": "refs/guide.md" });
+        let result = tool_skill_read_file(&input, Some(&registry), None).await;
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_rejects_traversal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let registry = create_skill_registry_with_file(dir.path(), "evil", "dummy.txt", "ok");
+
+        let input = serde_json::json!({ "skill": "evil", "path": "../../etc/passwd" });
+        let result = tool_skill_read_file(&input, Some(&registry), None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_rejects_unknown_skill() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let registry = create_skill_registry_with_file(dir.path(), "exists", "f.txt", "ok");
+
+        let input = serde_json::json!({ "skill": "nope", "path": "f.txt" });
+        let result = tool_skill_read_file(&input, Some(&registry), None).await;
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_rejects_absolute_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let registry = create_skill_registry_with_file(dir.path(), "abs", "dummy.txt", "ok");
+
+        // Use a platform-appropriate absolute path so the test passes on Windows too.
+        let abs_path = std::env::temp_dir()
+            .join("passwd")
+            .to_string_lossy()
+            .into_owned();
+        let input = serde_json::json!({ "skill": "abs", "path": abs_path });
+        let result = tool_skill_read_file(&input, Some(&registry), None).await;
+        assert!(result.unwrap_err().contains("absolute paths"));
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_enforces_allowlist() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let registry =
+            create_skill_registry_with_file(dir.path(), "secret", "data.txt", "classified");
+
+        // Agent only allowed "other-skill", not "secret"
+        let allowed = vec!["other-skill".to_string()];
+        let input = serde_json::json!({ "skill": "secret", "path": "data.txt" });
+        let result = tool_skill_read_file(&input, Some(&registry), Some(&allowed)).await;
+        assert!(result.unwrap_err().contains("not allowed"));
+
+        // Empty allowlist means all skills are accessible
+        let empty: Vec<String> = vec![];
+        let result = tool_skill_read_file(&input, Some(&registry), Some(&empty)).await;
+        assert!(result.is_ok());
+
+        // None allowlist (deferred context) also allows access
+        let result = tool_skill_read_file(&input, Some(&registry), None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn skill_read_file_truncates_without_panic() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Create content with multi-byte chars that exceeds 32K bytes
+        let content = "é".repeat(20_000); // 2 bytes each = 40K bytes
+        let registry = create_skill_registry_with_file(dir.path(), "big", "large.txt", &content);
+
+        let input = serde_json::json!({ "skill": "big", "path": "large.txt" });
+        let result = tool_skill_read_file(&input, Some(&registry), None)
+            .await
+            .unwrap();
+        assert!(result.contains("truncated"));
+        // Must not panic — the point of this test
     }
 }

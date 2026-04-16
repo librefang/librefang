@@ -90,6 +90,14 @@ pub struct ChannelOverrides {
     /// `group_policy` is `mention_only`.
     #[serde(default)]
     pub group_trigger_patterns: Vec<String>,
+    /// Enable LLM-based reply-intent precheck for group messages.
+    /// When true and group_policy is "all", a lightweight classifier decides
+    /// whether to reply before running the full agent loop.
+    #[serde(default)]
+    pub reply_precheck: bool,
+    /// Model override for the reply precheck classifier (default: agent's model).
+    #[serde(default)]
+    pub reply_precheck_model: Option<String>,
     /// Global rate limit for this channel (messages per minute, 0 = unlimited).
     #[serde(default)]
     pub rate_limit_per_minute: u32,
@@ -170,6 +178,8 @@ impl Default for ChannelOverrides {
             dm_policy: DmPolicy::default(),
             group_policy: GroupPolicy::default(),
             group_trigger_patterns: Vec::new(),
+            reply_precheck: false,
+            reply_precheck_model: None,
             rate_limit_per_minute: 0,
             rate_limit_per_user: 0,
             threading: false,
@@ -1975,6 +1985,11 @@ pub struct KernelConfig {
     /// e.g. `ollama = "http://192.168.1.100:11434/v1"`
     #[serde(default)]
     pub provider_urls: HashMap<String, String>,
+    /// Per-provider proxy URL overrides (provider ID → proxy URL).
+    /// Allows routing specific providers through a proxy while others connect directly.
+    /// e.g. `openai = "http://proxy.corp:8080"`, `ollama = ""` (direct)
+    #[serde(default)]
+    pub provider_proxy_urls: HashMap<String, String>,
     /// Provider region selection (provider ID → region name).
     /// Selects a regional endpoint from the provider's `[provider.regions]` map.
     /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
@@ -3268,6 +3283,18 @@ pub struct McpServerConfigEntry {
     // fails to deserialize back into `Option<McpOAuthConfig>` on reload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<McpOAuthConfig>,
+    /// Enable outbound taint scanning for this MCP server (default: true).
+    ///
+    /// Set to `false` to disable the credential/PII content heuristic for
+    /// trusted local servers (e.g. browser automation, database adapters)
+    /// whose tool results contain opaque session handles that would otherwise
+    /// trip the scanner. Key-name blocking remains active regardless.
+    #[serde(default = "default_taint_scanning")]
+    pub taint_scanning: bool,
+}
+
+fn default_taint_scanning() -> bool {
+    true
 }
 
 fn default_mcp_timeout() -> u64 {
@@ -3523,6 +3550,7 @@ impl Default for KernelConfig {
             thinking: None,
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
+            provider_proxy_urls: HashMap::new(),
             provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
             vertex_ai: VertexAiConfig::default(),
@@ -3786,7 +3814,7 @@ pub struct MemoryConfig {
     /// Maximum memories before consolidation is triggered.
     pub consolidation_threshold: u64,
     /// Memory decay rate (0.0 = no decay, 1.0 = aggressive decay).
-    pub decay_rate: f32,
+    pub decay_rate: f64,
     /// Embedding provider. Valid values: `"openai"`, `"groq"`, `"mistral"`,
     /// `"together"`, `"fireworks"`, `"cohere"`, `"ollama"`, `"bedrock"`,
     /// `"vllm"`, `"lmstudio"`, or `"auto"`.
@@ -5846,10 +5874,30 @@ pub struct TerminalConfig {
     /// Default: false.
     #[serde(default)]
     pub allow_unauthenticated_remote: bool,
+
+    /// Enable tmux-backed multi-window terminal. Only effective when `tmux` binary is available.
+    #[serde(default = "default_tmux_enabled")]
+    pub tmux_enabled: bool,
+
+    /// Maximum number of tmux windows that may exist simultaneously. Guards against DoS.
+    #[serde(default = "default_max_windows")]
+    pub max_windows: u32,
+
+    /// Optional explicit path to the `tmux` binary. If None, resolve via PATH.
+    #[serde(default)]
+    pub tmux_binary_path: Option<String>,
 }
 
 fn default_terminal_enabled() -> bool {
     true
+}
+
+fn default_tmux_enabled() -> bool {
+    true
+}
+
+fn default_max_windows() -> u32 {
+    16
 }
 
 impl Default for TerminalConfig {
@@ -5860,6 +5908,9 @@ impl Default for TerminalConfig {
             allow_remote: false,
             require_proxy_headers: false,
             allow_unauthenticated_remote: false,
+            tmux_enabled: true,
+            max_windows: 16,
+            tmux_binary_path: None,
         }
     }
 }
@@ -6111,5 +6162,39 @@ max_tokens_per_hour = 500000
             !s.contains("providers"),
             "empty providers map should be skipped: {s}"
         );
+    }
+
+    // ---- TerminalConfig tmux fields tests ----
+
+    #[test]
+    fn test_terminal_config_tmux_defaults() {
+        let tc = TerminalConfig::default();
+        assert!(tc.tmux_enabled, "tmux_enabled should default to true");
+        assert_eq!(tc.max_windows, 16, "max_windows should default to 16");
+        assert!(
+            tc.tmux_binary_path.is_none(),
+            "tmux_binary_path should default to None"
+        );
+    }
+
+    #[test]
+    fn test_terminal_config_empty_toml_uses_defaults() {
+        let tc: TerminalConfig = toml::from_str("").unwrap();
+        assert!(tc.tmux_enabled);
+        assert_eq!(tc.max_windows, 16);
+        assert!(tc.tmux_binary_path.is_none());
+    }
+
+    #[test]
+    fn test_terminal_config_toml_roundtrip() {
+        let toml_str = r#"
+            tmux_enabled = false
+            max_windows = 4
+            tmux_binary_path = "/usr/bin/tmux"
+        "#;
+        let tc: TerminalConfig = toml::from_str(toml_str).unwrap();
+        assert!(!tc.tmux_enabled);
+        assert_eq!(tc.max_windows, 4);
+        assert_eq!(tc.tmux_binary_path.as_deref(), Some("/usr/bin/tmux"));
     }
 }

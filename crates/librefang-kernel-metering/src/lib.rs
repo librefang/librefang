@@ -630,8 +630,17 @@ mod tests {
     #[test]
     fn test_estimate_cost_with_catalog_local_zero_price_stays_zero() {
         let catalog = test_catalog();
+        // Use a local model that always has zero cost; pick dynamically so this
+        // stays green regardless of which specific models the registry ships.
+        let local_id = catalog
+            .list_models()
+            .iter()
+            .find(|m| m.tier == librefang_types::model_catalog::ModelTier::Local)
+            .expect("registry must contain at least one local-tier model")
+            .id
+            .clone();
         let cost = MeteringEngine::estimate_cost_with_catalog(
-            &catalog, "llama3.2", 1_000_000, 1_000_000, 0, 0,
+            &catalog, &local_id, 1_000_000, 1_000_000, 0, 0,
         );
         assert!(cost.abs() < f64::EPSILON);
     }

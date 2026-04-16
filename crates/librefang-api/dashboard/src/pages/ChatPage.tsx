@@ -10,7 +10,7 @@ import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } f
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -47,24 +47,25 @@ interface ChatMessage {
 }
 
 // Slash commands — desc is an i18n key under "chat.cmd_*"
+// noArgs: clicking fills + sends immediately; argsHint: shown as placeholder after completion
 const SLASH_COMMANDS = [
-  { cmd: "/help", descKey: "cmd_help" },
-  { cmd: "/clear", descKey: "cmd_clear" },
-  { cmd: "/agents", descKey: "cmd_agents" },
-  { cmd: "/info", descKey: "cmd_info" },
-  { cmd: "/new", descKey: "cmd_new" },
-  { cmd: "/compact", descKey: "cmd_compact" },
-  { cmd: "/reset", descKey: "cmd_reset" },
-  { cmd: "/reboot", descKey: "cmd_reboot" },
-  { cmd: "/stop", descKey: "cmd_stop" },
-  { cmd: "/model", descKey: "cmd_model" },
-  { cmd: "/usage", descKey: "cmd_usage" },
-  { cmd: "/context", descKey: "cmd_context" },
-  { cmd: "/verbose", descKey: "cmd_verbose" },
-  { cmd: "/budget", descKey: "cmd_budget" },
-  { cmd: "/peers", descKey: "cmd_peers" },
-  { cmd: "/a2a", descKey: "cmd_a2a" },
-  { cmd: "/queue", descKey: "cmd_queue" },
+  { cmd: "/help",    descKey: "cmd_help",    noArgs: true },
+  { cmd: "/clear",   descKey: "cmd_clear",   noArgs: true },
+  { cmd: "/agents",  descKey: "cmd_agents",  noArgs: true },
+  { cmd: "/info",    descKey: "cmd_info",    noArgs: true },
+  { cmd: "/new",     descKey: "cmd_new",     noArgs: true },
+  { cmd: "/compact", descKey: "cmd_compact", noArgs: true },
+  { cmd: "/reset",   descKey: "cmd_reset",   noArgs: true },
+  { cmd: "/reboot",  descKey: "cmd_reboot",  noArgs: true },
+  { cmd: "/stop",    descKey: "cmd_stop",    noArgs: true },
+  { cmd: "/model",   descKey: "cmd_model",   argsHint: "<provider/model>" },
+  { cmd: "/usage",   descKey: "cmd_usage",   noArgs: true },
+  { cmd: "/context", descKey: "cmd_context", noArgs: true },
+  { cmd: "/verbose", descKey: "cmd_verbose", argsHint: "[level]" },
+  { cmd: "/budget",  descKey: "cmd_budget",  noArgs: true },
+  { cmd: "/peers",   descKey: "cmd_peers",   noArgs: true },
+  { cmd: "/a2a",     descKey: "cmd_a2a",     noArgs: true },
+  { cmd: "/queue",   descKey: "cmd_queue",   noArgs: true },
 ];
 
 // Commands that require backend processing via WebSocket command protocol
@@ -149,7 +150,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0) {
+function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void) {
   const { t } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Per-agent loading state. A single shared `isLoading` would freeze the
@@ -301,7 +302,9 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         ]);
       };
       if (trimmed === "/help") {
-        sysMsg(SLASH_COMMANDS.map(c => `**${c.cmd}** — ${t(`chat.${c.descKey}`)}`).join("\n"));
+        sysMsg(SLASH_COMMANDS.map(c =>
+          `- \`${c.cmd}${c.argsHint ? " " + c.argsHint : ""}\` — ${t(`chat.${c.descKey}`)}`
+        ).join("\n"));
         return;
       }
       if (trimmed === "/clear") { setMessages([]); return; }
@@ -340,6 +343,10 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                   setMessages(prev => [...prev,
                     { id: `sys-${Date.now()}`, role: "system" as const, content: responseText, timestamp: new Date() },
                   ]);
+                }
+                // Refresh agent data so model/provider badge reflects the change
+                if (data.type === "command_result" && cmd === "model") {
+                  onModelSwitch?.();
                 }
               }
             } catch { /* ignore non-JSON */ }
@@ -604,6 +611,16 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
   const [thinkingExpanded, setThinkingExpanded] = useState(() => !(message.thinkingCollapsed ?? false));
 
   if (message.role === "system") {
+    const isMultiLine = message.content.includes("\n");
+    if (isMultiLine) {
+      return (
+        <div className="flex justify-start py-2">
+          <div className="max-w-[min(90%,56ch)] text-xs text-text-dim/70 [&_code]:text-brand [&_code]:font-mono [&_ul]:space-y-1 [&_ul>li]:list-none [&_ul>li]:flex [&_ul>li]:gap-2">
+            <MarkdownContent>{message.content}</MarkdownContent>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="flex justify-center py-6">
         <div className="flex items-center gap-4">
@@ -654,8 +671,8 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               />
             </button>
             {thinkingExpanded && (
-              <div className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim whitespace-pre-wrap break-words">
-                {message.thinking}
+              <div className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim break-words prose-sm">
+                <MarkdownContent>{message.thinking ?? ""}</MarkdownContent>
               </div>
             )}
           </div>
@@ -786,9 +803,10 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 });
 
 // Input box - with shortcut hints
-function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, supportsThinking, sttAvailable }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
+function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
+  const [activeIndex, setActiveIndex] = useState(-1);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
@@ -798,6 +816,78 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
   const voiceInput = useVoiceInput(useCallback((text: string) => {
     setMessage((prev) => (prev ? prev + " " + text : text));
   }, []));
+
+  // ── Slash command completion ──────────────────────────────────────────────
+  const isSlashPrefix = message.startsWith("/") && !message.includes(" ");
+  const isModelArg = /^\/model\s/i.test(message);
+
+  const filteredCmds = useMemo(
+    () => isSlashPrefix ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(message.toLowerCase())) : [],
+    [isSlashPrefix, message],
+  );
+
+  const modelQuery = useQuery({
+    queryKey: ["models", "completion"],
+    queryFn: () => listModels(),
+    enabled: isModelArg,
+    staleTime: 60_000,
+  });
+
+  const modelArg = isModelArg ? message.slice(message.indexOf(" ") + 1).toLowerCase() : "";
+  const filteredModels = useMemo(() => {
+    if (!isModelArg || !modelQuery.data?.models) return [];
+    const all = modelQuery.data.models;
+    const q = modelArg.trim();
+    const matched = q
+      ? all.filter(m =>
+          m.id.toLowerCase().includes(q) ||
+          m.provider.toLowerCase().includes(q) ||
+          (m.display_name || "").toLowerCase().includes(q),
+        )
+      : all;
+    return matched.slice(0, 12);
+  }, [isModelArg, modelQuery.data, modelArg]);
+
+  const hasDropdown = (isSlashPrefix && filteredCmds.length > 0) || (isModelArg && filteredModels.length > 0);
+  const dropdownLen = isSlashPrefix ? filteredCmds.length : filteredModels.length;
+
+  // Reset selection when list changes
+  useEffect(() => { setActiveIndex(-1); }, [message]);
+
+  const selectCmd = useCallback((c: typeof SLASH_COMMANDS[number]) => {
+    if (c.noArgs) {
+      onSend(c.cmd);
+      setMessage("");
+    } else {
+      setMessage(c.cmd + " ");
+      setTimeout(() => textareaRef.current?.focus(), 0);
+    }
+  }, [onSend]);
+
+  const selectModel = useCallback((m: ModelItem) => {
+    onSend(`/model ${m.provider}/${m.id}`);
+    setMessage("");
+  }, [onSend]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!hasDropdown) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIndex(i => Math.min(i + 1, dropdownLen - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIndex(i => Math.max(i - 1, 0));
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      setMessage("");
+    } else if ((e.key === "Enter" || e.key === "Tab") && activeIndex >= 0) {
+      e.preventDefault();
+      if (isSlashPrefix) selectCmd(filteredCmds[activeIndex]);
+      else if (isModelArg) selectModel(filteredModels[activeIndex]);
+    }
+  }, [hasDropdown, dropdownLen, activeIndex, isSlashPrefix, isModelArg, filteredCmds, filteredModels, selectCmd, selectModel]);
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -814,9 +904,6 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
     }
   }, [message]);
 
-  const showingSlash = message.startsWith("/") && !message.includes(" ");
-  const filteredCmds = showingSlash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(message)) : [];
-
   const effectiveDisabled = disabled || !!authMissing;
 
   return (
@@ -825,18 +912,36 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
       {authMissing && (
         <div className="flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 px-4 py-2.5 text-sm text-warning">
           <AlertCircle className="h-4 w-4 flex-shrink-0" />
-          <span>{t("chat.auth_missing", { provider: providerName || "unknown" })}</span>
+          <span>{authStatus === "local_offline"
+            ? t("chat.provider_offline", { provider: providerName || "unknown" })
+            : t("chat.auth_missing", { provider: providerName || "unknown" })}</span>
         </div>
       )}
       {/* Slash command autocomplete */}
-      {showingSlash && filteredCmds.length > 0 && (
+      {isSlashPrefix && filteredCmds.length > 0 && (
         <div className="rounded-xl border border-border-subtle bg-surface shadow-lg p-1 mb-1">
-          {filteredCmds.map(c => (
+          {filteredCmds.map((c, i) => (
             <button key={c.cmd} type="button"
-              onClick={() => { setMessage(c.cmd); onSend(c.cmd); setMessage(""); }}
-              className="w-full flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-main text-left transition-colors">
+              onClick={() => selectCmd(c)}
+              className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-left transition-colors ${i === activeIndex ? "bg-main" : "hover:bg-main"}`}>
               <span className="text-xs font-mono font-bold text-brand">{c.cmd}</span>
-              <span className="text-[10px] text-text-dim">{t(`chat.${c.descKey}`)}</span>
+              {c.argsHint && <span className="text-[10px] font-mono text-text-dim/60">{c.argsHint}</span>}
+              <span className="text-[10px] text-text-dim ml-auto">{t(`chat.${c.descKey}`)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {/* /model second-level model completion */}
+      {isModelArg && filteredModels.length > 0 && (
+        <div className="rounded-xl border border-border-subtle bg-surface shadow-lg p-1 mb-1 max-h-48 overflow-y-auto">
+          {filteredModels.map((m, i) => (
+            <button key={`${m.provider}/${m.id}`} type="button"
+              onClick={() => selectModel(m)}
+              className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-left transition-colors ${i === activeIndex ? "bg-main" : "hover:bg-main"}`}>
+              <span className="text-xs font-mono font-bold text-brand">{m.provider}</span>
+              <span className="text-xs font-mono text-text">/</span>
+              <span className="text-xs font-mono text-text">{m.id}</span>
+              {m.display_name && <span className="text-[10px] text-text-dim ml-auto truncate max-w-[120px]">{m.display_name}</span>}
             </button>
           ))}
         </div>
@@ -879,6 +984,11 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={(e) => {
+              // Dropdown navigation takes priority
+              if (hasDropdown) {
+                handleKeyDown(e);
+                if (e.defaultPrevented) return;
+              }
               if (e.key === "Enter" && !e.shiftKey && !e.metaKey) {
                 e.preventDefault();
                 handleSubmit(e);
@@ -923,11 +1033,13 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName, s
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange }: {
-  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string;
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable }: {
+  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
   agentId: string; onModelChange: () => void;
+  webSearchAugmentation?: "off" | "auto" | "always"; onWebSearchChange?: (mode: "off" | "auto" | "always") => void;
+  webSearchAvailable?: boolean;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
@@ -943,6 +1055,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   const [patchError, setPatchError] = useState<string | null>(null);
   const [patchPending, setPatchPending] = useState(false);
   const [optimisticModel, setOptimisticModel] = useState<string | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<string>("");
 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
@@ -972,6 +1085,8 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     const handler = (e: MouseEvent) => {
       if (modelRef.current && !modelRef.current.contains(e.target as Node)) {
         setModelOpen(false);
+        setSelectedProvider("");
+        setModelSearch("");
       }
     };
     document.addEventListener("mousedown", handler);
@@ -990,9 +1105,37 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   }, [modelOpen, models.length, modelLoading]);
 
   const visibleModels = useMemo(() => filterVisible(models, hiddenSet), [models, hiddenSet]);
-  const filteredModels = visibleModels.filter(m =>
-    (m.provider + " " + (m.id || "")).toLowerCase().includes(modelSearch.toLowerCase())
-  );
+
+  // Unique providers derived from loaded models, sorted alphabetically
+  const providers = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const m of visibleModels) {
+      map.set(m.provider, (map.get(m.provider) ?? 0) + 1);
+    }
+    return Array.from(map.entries())
+      .map(([id, count]) => ({ id, count }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }, [visibleModels]);
+
+  // Models filtered by selected provider, then by search
+  const filteredModels = useMemo(() => {
+    let list = visibleModels;
+    if (selectedProvider) {
+      list = list.filter(m => m.provider === selectedProvider);
+    }
+    if (modelSearch) {
+      const q = modelSearch.toLowerCase();
+      list = list.filter(m => (m.id || "").toLowerCase().includes(q) || (m.display_name || "").toLowerCase().includes(q));
+    }
+    return list;
+  }, [visibleModels, selectedProvider, modelSearch]);
+
+  // Filter providers by search when in provider view
+  const filteredProviders = useMemo(() => {
+    if (!modelSearch) return providers;
+    const q = modelSearch.toLowerCase();
+    return providers.filter(p => p.id.toLowerCase().includes(q));
+  }, [providers, modelSearch]);
 
   async function handleSelectModel(model: ModelItem) {
     const prev = optimisticModel ?? modelName ?? null;
@@ -1002,6 +1145,8 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     try {
       await patchAgentConfig(agentId, { model: model.id, provider: model.provider });
       setModelOpen(false);
+      setSelectedProvider("");
+      setModelSearch("");
       onModelChange(); // invalidates queries; useEffect clears optimisticModel when modelName catches up
     } catch {
       setOptimisticModel(prev);
@@ -1037,7 +1182,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
         {/* Model switcher */}
         <div className="relative hidden sm:block" ref={modelRef}>
           <button
-            onClick={() => setModelOpen(v => !v)}
+            onClick={() => { setModelOpen(v => { if (v) { setSelectedProvider(""); setModelSearch(""); } return !v; }); }}
             className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono text-text-dim/50 hover:text-text hover:bg-surface-hover transition-colors truncate max-w-[200px]"
             title={t("chat.switch_model")}
           >
@@ -1046,16 +1191,28 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
           </button>
           {modelOpen && (
             <div className="absolute right-0 top-full mt-1 w-80 bg-surface border border-border-subtle rounded-xl shadow-xl z-50 overflow-hidden">
-              <div className="p-2 border-b border-border-subtle/50">
-                <span className="text-[10px] font-semibold text-text-dim/50 uppercase tracking-wider px-2">{t("chat.switch_model")}</span>
+              {/* Header */}
+              <div className="p-2 border-b border-border-subtle/50 flex items-center gap-2">
+                {selectedProvider && (
+                  <button
+                    onClick={() => { setSelectedProvider(""); setModelSearch(""); }}
+                    className="p-0.5 rounded hover:bg-surface-hover transition-colors"
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5 text-text-dim" />
+                  </button>
+                )}
+                <span className="text-[10px] font-semibold text-text-dim/50 uppercase tracking-wider px-1">
+                  {selectedProvider || t("chat.select_provider", { defaultValue: "Select Provider" })}
+                </span>
               </div>
+              {/* Search */}
               <div className="p-2 border-b border-border-subtle/50">
                 <input
                   autoFocus
                   type="text"
                   value={modelSearch}
                   onChange={e => setModelSearch(e.target.value)}
-                  placeholder={t("chat.search_models")}
+                  placeholder={selectedProvider ? t("chat.search_models") : t("chat.search_providers", { defaultValue: "Search providers..." })}
                   className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-main border border-border-subtle focus:outline-none focus:border-brand"
                 />
                 {patchError && (
@@ -1080,44 +1237,114 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                     </button>
                   </div>
                 )}
-                {!modelLoading && !modelFetchError && filteredModels.length === 0 && (
-                  <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
-                )}
-                {!modelLoading && !modelFetchError && modelName && !filteredModels.some(m => m.id === modelName) && (
-                  <div
-                    key={`fallback/${modelName}`}
-                    onClick={() => {}}
-                    className="flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors bg-brand/10 text-brand"
-                  >
-                    {patchPending
-                      ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
-                      : <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
-                    }
-                    <span className="text-xs font-medium truncate">{modelName}</span>
-                  </div>
-                )}
-                {!modelLoading && !modelFetchError && filteredModels.map(model => {
-                  const isActive = model.id === (optimisticModel ?? modelName);
+
+                {/* Provider list view */}
+                {!modelLoading && !modelFetchError && !selectedProvider && (() => {
+                  // Use the agent's known provider (from props) to highlight the current provider.
+                  // Falls back to scanning the model list only if the prop is unavailable.
+                  const agentProvider = modelProvider || models.find(m => m.id === (optimisticModel ?? modelName))?.provider;
                   return (
-                    <div
-                      key={`${model.provider}/${model.id}`}
-                      onClick={() => { if (!isActive) handleSelectModel(model); }}
-                      className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
-                    >
-                      {isActive && patchPending
-                        ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
-                        : isActive && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
-                      }
-                      <span className="text-[10px] text-text-dim/60 shrink-0">{model.provider}</span>
-                      <span className="text-[10px]">·</span>
-                      <span className="text-xs font-medium truncate">{model.id}</span>
-                    </div>
+                  <>
+                    {filteredProviders.length === 0 && (
+                      <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
+                    )}
+                    {filteredProviders.map(p => {
+                      const isCurrent = p.id === agentProvider;
+                      return (
+                        <div
+                          key={p.id}
+                          onClick={() => { setSelectedProvider(p.id); setModelSearch(""); }}
+                          className={`flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isCurrent ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            {isCurrent && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />}
+                            <span className="text-xs font-medium">{p.id}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-text-dim/40">{p.count} {p.count === 1 ? "model" : "models"}</span>
+                            <ArrowRight className="h-3 w-3 text-text-dim/30" />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </>
                   );
-                })}
+                })()}
+
+                {/* Model list view (filtered by selected provider) */}
+                {!modelLoading && !modelFetchError && selectedProvider && (
+                  <>
+                    {filteredModels.length === 0 && (
+                      <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
+                    )}
+                    {filteredModels.map(model => {
+                      const isActive = model.id === (optimisticModel ?? modelName) && model.provider === selectedProvider;
+                      return (
+                        <div
+                          key={`${model.provider}/${model.id}`}
+                          onClick={() => { if (!isActive) handleSelectModel(model); }}
+                          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
+                        >
+                          {isActive && patchPending
+                            ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                            : isActive && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
+                          }
+                          <span className="text-xs font-medium truncate">{model.display_name || model.id}</span>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
               </div>
             </div>
           )}
         </div>
+        {/* Web Search toggle (off → auto → always → off) with config check */}
+        {onWebSearchChange && (() => {
+          const mode = webSearchAugmentation || "auto";
+          const isActive = mode !== "off";
+          const noKey = !webSearchAvailable;
+          return (
+            <div className="hidden sm:flex items-center gap-1.5">
+              <button
+                onClick={() => {
+                  if (noKey && mode === "off") {
+                    // No search key configured — navigate to Config page Web section
+                    window.location.href = "/dashboard/config";
+                    return;
+                  }
+                  const cycle: Record<string, "off" | "auto" | "always"> = { off: "auto", auto: "always", always: "off" };
+                  onWebSearchChange(cycle[mode] || "auto");
+                }}
+                title={noKey ? t("chat.web_search_no_key", { defaultValue: "No search API key configured. Click to open settings." }) : undefined}
+                className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono transition-colors ${
+                  noKey && !isActive
+                    ? "text-warning/50 hover:text-warning hover:bg-warning/10"
+                    : mode === "always"
+                      ? "text-brand bg-brand/10 hover:bg-brand/20"
+                      : mode === "auto"
+                        ? "text-text-dim/50 hover:text-text hover:bg-surface-hover"
+                        : "text-text-dim/30 hover:text-text-dim/60 hover:bg-surface-hover"
+                }`}
+              >
+                <Globe className="h-3 w-3" />
+                <span>{noKey && !isActive
+                  ? t("chat.web_search_setup", { defaultValue: "Search" })
+                  : mode === "always" ? t("common.always", { defaultValue: "Always" }) : mode === "auto" ? t("common.auto", { defaultValue: "Auto" }) : t("common.off", { defaultValue: "Off" })
+                }</span>
+                {noKey && !isActive && <AlertCircle className="h-2.5 w-2.5 text-warning" />}
+              </button>
+              {isActive && noKey && (
+                <button
+                  onClick={() => { window.location.href = "/dashboard/config"; }}
+                  className="text-[9px] text-warning hover:text-warning/80 underline hidden xl:inline"
+                >
+                  {t("chat.web_search_configure", { defaultValue: "Configure API key" })}
+                </button>
+              )}
+            </div>
+          );
+        })()}
         {/* Session dropdown */}
         {sessions && sessions.length > 0 && (
           <div className="relative" ref={dropdownRef}>
@@ -1274,6 +1501,10 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
 
   const rs = riskStyle(approval.risk_level);
 
+  const riskLabel = approval.risk_level
+    ? t(`chat.approval_risk_${approval.risk_level}`, { defaultValue: approval.risk_level })
+    : null;
+
   return (
     <div className={`mx-auto w-full max-w-lg rounded-2xl border ${rs.border} ${rs.bg} p-4 shadow-lg animate-fade-in-up`}>
       {/* Header */}
@@ -1282,21 +1513,21 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
         <span className={`text-xs font-black uppercase tracking-widest ${rs.text}`}>
           {t("chat.approval_required")}
         </span>
-        {approval.risk_level && (
+        {riskLabel && (
           <span className={`ml-auto text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${rs.bg} ${rs.text} border ${rs.border}`}>
-            {approval.risk_level}
+            {riskLabel}
           </span>
         )}
       </div>
 
       {/* Tool info */}
-      <div className="space-y-1 mb-4">
+      <div className="space-y-2 mb-4">
         <div className="flex items-center gap-2">
           <span className="text-[10px] font-bold uppercase text-text-dim tracking-wider">{t("chat.approval_tool")}</span>
           <code className="text-xs font-mono font-bold px-1.5 py-0.5 rounded bg-main">{approval.tool_name || "unknown"}</code>
         </div>
         {(approval.description || approval.action_summary || approval.action) && (
-          <p className="text-sm text-text-dim leading-relaxed">
+          <p className="text-xs text-text-dim leading-relaxed bg-main/50 rounded-lg px-3 py-2 font-mono whitespace-pre-wrap break-all">
             {approval.description || approval.action_summary || approval.action}
           </p>
         )}
@@ -1428,6 +1659,8 @@ export function ChatPage() {
     queryFn: () => listAgents({ includeHands: showHandAgents }),
     staleTime: 30000,
   });
+  // Check if web search is available (any search API key configured)
+  const webSearchAvailable = ((configQuery.data as any)?.web?.search_available === true);
   const handsQuery = useQuery({
     queryKey: ["hands", "active", "chat"],
     queryFn: listActiveHands,
@@ -1468,7 +1701,12 @@ export function ChatPage() {
   );
   // Session state — bump version to force message reload after switch
   const [sessionVersion, setSessionVersion] = useState(0);
-  const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents, sessionVersion);
+  const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(
+    selectedAgentId || null,
+    agents,
+    sessionVersion,
+    () => queryClient.invalidateQueries({ queryKey: ["agents", "list"] }),
+  );
 
   // Export current conversation as a markdown file. Keeps the local
   // timestamp, role, content, and (when present) tool call summaries
@@ -1748,6 +1986,7 @@ export function ChatPage() {
               onExport={handleExport}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
+              modelProvider={selectedAgent?.model_provider}
               sessions={sessionsQuery.data}
               activeSessionId={activeSessionId}
               onSwitchSession={handleSwitchSession}
@@ -1755,6 +1994,15 @@ export function ChatPage() {
               onDeleteSession={handleDeleteSession}
               agentId={selectedAgentId}
               onModelChange={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
+              webSearchAugmentation={selectedAgent?.web_search_augmentation}
+              webSearchAvailable={webSearchAvailable}
+              onWebSearchChange={async (mode) => {
+                try {
+                  await patchAgentConfig(selectedAgentId, { web_search_augmentation: mode });
+                  queryClient.invalidateQueries({ queryKey: ["agents", "list"] });
+                  queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] });
+                } catch {}
+              }}
             />
           )}
 
@@ -1811,8 +2059,9 @@ export function ChatPage() {
             <ChatInput
               onSend={sendMessage}
               disabled={isLoading}
-              placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
+              placeholder={isLoading ? t("chat.generating") : selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
               authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
+              authStatus={selectedAgent?.auth_status}
               providerName={selectedAgent?.model_provider}
               supportsThinking={selectedAgent?.supports_thinking}
               sttAvailable={sttAvailable}

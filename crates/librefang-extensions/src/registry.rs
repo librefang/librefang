@@ -226,6 +226,7 @@ impl IntegrationRegistry {
                     env,
                     headers: Vec::new(),
                     oauth: None,
+                    taint_scanning: true,
                 })
             })
             .collect()
@@ -376,7 +377,12 @@ mod tests {
         let mut reg = IntegrationRegistry::new(dir.path());
         reg.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let devtools = reg.list_by_category(&IntegrationCategory::DevTools);
-        assert_eq!(devtools.len(), 6);
+        // Registry grows over time; assert a minimum rather than exact count.
+        assert!(
+            devtools.len() >= 6,
+            "expected at least 6 DevTools integrations, got {}",
+            devtools.len()
+        );
     }
 
     #[test]
