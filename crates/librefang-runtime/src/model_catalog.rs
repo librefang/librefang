@@ -201,8 +201,19 @@ impl ModelCatalog {
                 continue;
             }
 
-            // Primary: check the provider's declared env var (non-empty after trim)
-            let has_key = std::env::var(&provider.api_key_env).is_ok_and(|v| !v.trim().is_empty());
+            // Primary: check the provider's declared env var (non-empty after trim).
+            //
+            // GITHUB_TOKEN is a generic PAT shared by multiple services (Copilot,
+            // GitHub Models, git operations, CI/CD). Its mere presence does NOT
+            // prove the user has access to a specific provider, so we do not
+            // auto-detect it as "Configured".  Users who actually want these
+            // providers will authenticate via the dashboard OAuth flow, which
+            // validates access before marking the provider as configured.
+            let has_key = if provider.api_key_env == "GITHUB_TOKEN" {
+                false
+            } else {
+                std::env::var(&provider.api_key_env).is_ok_and(|v| !v.trim().is_empty())
+            };
 
             // If the user explicitly removed this provider's key, skip
             // fallback/CLI detection — only honour the primary env var.
