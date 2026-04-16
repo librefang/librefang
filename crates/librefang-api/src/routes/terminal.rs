@@ -349,35 +349,14 @@ pub(super) async fn authorize_terminal_request(
 
     let require_proxy_headers = cfg.terminal.require_proxy_headers;
     let listen_port = cfg.listen_port();
-    if let Err(reason) = validate_ws_origin(
-        headers,
-        listen_port,
-        &cfg.terminal.allowed_origins,
-        cfg.terminal.allow_remote,
-    ) {
-        if !cfg.terminal.allow_remote {
-            warn!(
-                ip = %locality.source_ip,
-                proxied = locality.is_proxied,
-                reason = "origin_mismatch",
-                origin = %reason,
-                "Terminal WebSocket rejected — origin validation failed"
-            );
-            return Err(axum::http::StatusCode::FORBIDDEN.into_response());
-        }
-        warn!(
-            ip = %locality.source_ip,
-            proxied = locality.is_proxied,
-            reason = "origin_mismatch",
-            origin = %reason,
-            "Terminal WebSocket origin mismatch — continuing to auth token check"
-        );
-    }
 
     let provided_token = ws_auth_token(headers, uri);
 
-    // Validate the token (if any) before consulting the policy matrix so the
-    // decision table can treat token-ok / token-bad / no-token uniformly.
+    // Validate the token (if any) before origin checks so that authenticated
+    // requests are never rejected on origin alone. Origin validation is a CSRF
+    // defense — it only matters when the browser silently attaches credentials
+    // (cookies). Explicit Bearer tokens cannot be forged cross-origin, so
+    // authenticated requests bypass origin checks entirely.
     let token_status = if let Some(token_str) = provided_token.as_deref() {
         let api_auth = {
             use subtle::ConstantTimeEq;
@@ -412,6 +391,37 @@ pub(super) async fn authorize_terminal_request(
     } else {
         TokenStatus::NoToken
     };
+
+    // Only enforce origin validation for unauthenticated requests.
+    // Authenticated requests (valid token) are already protected against CSRF
+    // because the token must be explicitly provided — browsers cannot inject it
+    // cross-origin.
+    if !matches!(token_status, TokenStatus::Valid(_)) {
+        if let Err(reason) = validate_ws_origin(
+            headers,
+            listen_port,
+            &cfg.terminal.allowed_origins,
+            cfg.terminal.allow_remote,
+        ) {
+            if !cfg.terminal.allow_remote {
+                warn!(
+                    ip = %locality.source_ip,
+                    proxied = locality.is_proxied,
+                    reason = "origin_mismatch",
+                    origin = %reason,
+                    "Terminal rejected — origin validation failed"
+                );
+                return Err(axum::http::StatusCode::FORBIDDEN.into_response());
+            }
+            warn!(
+                ip = %locality.source_ip,
+                proxied = locality.is_proxied,
+                reason = "origin_mismatch",
+                origin = %reason,
+                "Terminal origin mismatch — continuing to auth decision"
+            );
+        }
+    }
 
     let decision = decide_auth(
         token_status,
