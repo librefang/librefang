@@ -9,26 +9,17 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
-use tracing::{debug, info, warn};
+use tracing::{debug, enabled, info, warn, Level};
 
-/// Confidence thresholds for Whisper `verbose_json` output. Any single breach
-/// flags the transcription as low-confidence. Values picked from OpenAI's own
-/// hallucination-detection guidance in the Whisper paper / discuss forums.
+// Hallucination thresholds from Whisper's verbose_json guidance. Any single
+// breach flags the clip as low-confidence.
 const LOW_AVG_LOGPROB: f64 = -0.5;
 const HIGH_NO_SPEECH_PROB: f64 = 0.5;
 const HIGH_COMPRESSION_RATIO: f64 = 2.4;
-/// Jaccard similarity below this across two independent STT runs = ambiguous.
+// Two independent STT runs disagreeing below this Jaccard → ambiguous.
 const AMBIGUOUS_JACCARD: f64 = 0.5;
 
-/// Raw Whisper transcription result. `confidence` is populated only when the
-/// provider path used `response_format=verbose_json` (groq + openai).
-#[derive(Debug, Clone)]
-struct WhisperResult {
-    text: String,
-    confidence: Option<ConfidenceScore>,
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Copy, Clone)]
 struct ConfidenceScore {
     avg_logprob: f64,
     no_speech_prob: f64,
@@ -191,128 +182,79 @@ impl MediaEngine {
             "Sending audio for transcription"
         );
 
-        let primary = match provider {
-            // Whisper verbose_json path — groq + openai return segment-level
-            // confidence fields we can validate against.
+        // Groq is the only provider where the OpenAI cross-check is a net
+        // signal gain (openai-as-primary doesn't benefit from an openai
+        // second run), so we only keep a spare copy of the bytes on that
+        // branch.
+        let fallback_bytes: Option<Vec<u8>> = (provider == "groq").then(|| audio_bytes.clone());
+
+        let (primary_text, primary_confidence) = match provider {
             "groq" | "openai" => {
                 let (api_url, api_key) = whisper_provider_config(provider)?;
-                whisper_transcribe_verbose(
+                let (text, confidence) = whisper_transcribe_verbose(
                     &api_url,
                     &api_key,
                     model,
-                    audio_bytes.clone(),
+                    audio_bytes,
                     &filename,
                     &mime,
                     language,
                 )
-                .await?
+                .await?;
+                (text, confidence)
             }
             // Other Whisper-compatible providers keep the legacy `text` path —
-            // not all of them implement `verbose_json` identically. No
-            // confidence available → no post-validation.
+            // their `verbose_json` shapes diverge, so no confidence is
+            // available and no post-validation runs.
             "minimax" | "fireworks" | "together" | "siliconflow" => {
                 let (api_url, api_key) = whisper_provider_config(provider)?;
                 let text = whisper_transcribe_text(
                     &api_url,
                     &api_key,
                     model,
-                    audio_bytes.clone(),
+                    audio_bytes,
                     &filename,
                     &mime,
                 )
                 .await?;
-                WhisperResult {
-                    text,
-                    confidence: None,
-                }
+                (text, None)
             }
-            // Gemini — multimodal content generation with audio input
-            "gemini" => {
-                let text = gemini_transcribe(model, audio_bytes.clone(), &mime).await?;
-                WhisperResult {
-                    text,
-                    confidence: None,
-                }
-            }
-            // ElevenLabs — Speech-to-Text API
-            "elevenlabs" => {
-                let text = elevenlabs_transcribe(model, audio_bytes.clone(), &mime).await?;
-                WhisperResult {
-                    text,
-                    confidence: None,
-                }
-            }
+            "gemini" => (gemini_transcribe(model, audio_bytes, &mime).await?, None),
+            "elevenlabs" => (
+                elevenlabs_transcribe(model, audio_bytes, &mime).await?,
+                None,
+            ),
             other => return Err(format!("Unsupported audio provider: {}", other)),
         };
 
-        let primary_text = primary.text.trim().to_string();
+        let primary_text = primary_text.trim().to_string();
         if primary_text.is_empty() {
             return Err("Transcription returned empty text".into());
         }
 
-        // Validate confidence. Only groq/openai populate `confidence`.
-        let low = primary.confidence.map(|c| c.is_low()).unwrap_or(false);
-
-        if low {
-            if let Some(c) = primary.confidence {
-                warn!(
-                    provider,
-                    model,
-                    avg_logprob = c.avg_logprob,
-                    no_speech_prob = c.no_speech_prob,
-                    compression_ratio = c.compression_ratio,
-                    "STT confidence below thresholds — likely hallucination"
-                );
-            }
+        let low = primary_confidence.is_some_and(|c| c.is_low());
+        if let Some(c) = primary_confidence.filter(|_| low) {
+            warn!(
+                provider,
+                model,
+                avg_logprob = c.avg_logprob,
+                no_speech_prob = c.no_speech_prob,
+                compression_ratio = c.compression_ratio,
+                "STT confidence below thresholds — likely hallucination"
+            );
         }
 
-        // Fallback: only when primary is groq (most hallucination-prone on
-        // short audio) AND low-confidence AND an OpenAI key is available for
-        // cross-check. Skips if primary is already openai — a second
-        // whisper-1 call would add cost without independent signal.
-        let final_text = if low
-            && provider == "groq"
-            && std::env::var("OPENAI_API_KEY")
-                .ok()
-                .is_some_and(|v| !v.trim().is_empty())
-        {
-            info!("STT low-confidence on groq → cross-checking with openai/whisper-1");
-            let (api_url, api_key) = whisper_provider_config("openai")?;
-            match whisper_transcribe_verbose(
-                &api_url,
-                &api_key,
-                default_audio_model("openai"),
-                audio_bytes.clone(),
-                &filename,
-                &mime,
-                language,
-            )
-            .await
-            {
-                Ok(fallback) => {
-                    let fallback_text = fallback.text.trim().to_string();
-                    let similarity = jaccard_word_similarity(&primary_text, &fallback_text);
-                    info!(similarity, "STT cross-check Jaccard similarity");
-                    if similarity < AMBIGUOUS_JACCARD {
-                        format!(
-                            "[AMBIGUOUS primary=groq fallback=openai jaccard={:.2}]\nGroq: {}\nOpenAI: {}",
-                            similarity, primary_text, fallback_text
-                        )
-                    } else {
-                        // Agreement below threshold but above ambiguous — keep
-                        // primary transcription but still flag low confidence.
-                        format_low_confidence(&primary_text, primary.confidence)
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "STT fallback cross-check failed — keeping primary with low-confidence flag");
-                    format_low_confidence(&primary_text, primary.confidence)
-                }
+        let ambiguous = match (low, fallback_bytes) {
+            (true, Some(bytes)) => {
+                cross_check_with_openai(&primary_text, bytes, &filename, &mime, language).await
             }
-        } else if low {
-            format_low_confidence(&primary_text, primary.confidence)
-        } else {
-            primary_text
+            _ => None,
+        };
+
+        let final_text = match (low, ambiguous) {
+            (_, Some(text)) => text,
+            (true, None) => format_low_confidence(&primary_text, primary_confidence),
+            (false, None) => primary_text,
         };
 
         info!(
@@ -457,19 +399,20 @@ fn whisper_provider_config(provider: &str) -> Result<(String, String), String> {
     }
 }
 
-/// Transcribe using an OpenAI-compatible Whisper endpoint with
-/// `response_format=verbose_json`. Returns text plus aggregated segment-level
-/// confidence fields (mean avg_logprob, max no_speech_prob, max
-/// compression_ratio).
-async fn whisper_transcribe_verbose(
+/// Shared transport for both Whisper response-format paths. Returns the raw
+/// response body (JSON for verbose, plain text otherwise) — caller decides
+/// how to parse it.
+#[allow(clippy::too_many_arguments)]
+async fn whisper_post_multipart(
     api_url: &str,
     api_key: &str,
     model: &str,
     audio_bytes: Vec<u8>,
     filename: &str,
     mime: &str,
+    response_format: &str,
     language: Option<&str>,
-) -> Result<WhisperResult, String> {
+) -> Result<String, String> {
     let file_part = reqwest::multipart::Part::bytes(audio_bytes)
         .file_name(filename.to_string())
         .mime_str(mime)
@@ -478,78 +421,12 @@ async fn whisper_transcribe_verbose(
     let mut form = reqwest::multipart::Form::new()
         .part("file", file_part)
         .text("model", model.to_string())
-        .text("response_format", "verbose_json");
-
+        .text("response_format", response_format.to_string());
     if let Some(lang) = language {
         form = form.text("language", lang.to_string());
     }
 
-    let client = crate::http_client::proxied_client();
-    let resp = client
-        .post(api_url)
-        .bearer_auth(api_key)
-        .multipart(form)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await
-        .map_err(|e| format!("Transcription request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Transcription API error ({}): {}", status, body));
-    }
-
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read transcription response: {}", e))?;
-
-    // Sample the raw response once so operators can confirm the confidence
-    // fields are arriving. `debug` avoids log spam in production but lets
-    // `LIBREFANG_LOG=debug` surface it.
-    debug!(
-        len = body.len(),
-        sample = body.chars().take(400).collect::<String>().as_str(),
-        "Whisper verbose_json response"
-    );
-
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse Whisper verbose_json response: {}", e))?;
-
-    let text = json["text"]
-        .as_str()
-        .ok_or("Whisper response missing `text` field")?
-        .to_string();
-
-    let confidence = aggregate_segment_confidence(&json);
-
-    Ok(WhisperResult { text, confidence })
-}
-
-/// Legacy `response_format=text` path — kept for providers whose
-/// `verbose_json` shape diverges from OpenAI's (minimax, fireworks, together,
-/// siliconflow). No confidence available.
-async fn whisper_transcribe_text(
-    api_url: &str,
-    api_key: &str,
-    model: &str,
-    audio_bytes: Vec<u8>,
-    filename: &str,
-    mime: &str,
-) -> Result<String, String> {
-    let file_part = reqwest::multipart::Part::bytes(audio_bytes)
-        .file_name(filename.to_string())
-        .mime_str(mime)
-        .map_err(|e| format!("Failed to set MIME type: {}", e))?;
-
-    let form = reqwest::multipart::Form::new()
-        .part("file", file_part)
-        .text("model", model.to_string())
-        .text("response_format", "text");
-
-    let client = crate::http_client::proxied_client();
-    let resp = client
+    let resp = crate::http_client::proxied_client()
         .post(api_url)
         .bearer_auth(api_key)
         .multipart(form)
@@ -567,6 +444,124 @@ async fn whisper_transcribe_text(
     resp.text()
         .await
         .map_err(|e| format!("Failed to read transcription response: {}", e))
+}
+
+async fn whisper_transcribe_verbose(
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    audio_bytes: Vec<u8>,
+    filename: &str,
+    mime: &str,
+    language: Option<&str>,
+) -> Result<(String, Option<ConfidenceScore>), String> {
+    let body = whisper_post_multipart(
+        api_url,
+        api_key,
+        model,
+        audio_bytes,
+        filename,
+        mime,
+        "verbose_json",
+        language,
+    )
+    .await?;
+
+    // Sample the raw response once per call so operators verifying a
+    // verbose_json rollout can see the shape under `LIBREFANG_LOG=debug`.
+    // Skip the 400-char slice alloc when debug isn't enabled.
+    if enabled!(Level::DEBUG) {
+        debug!(
+            len = body.len(),
+            sample = body.chars().take(400).collect::<String>().as_str(),
+            "Whisper verbose_json response"
+        );
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse Whisper verbose_json response: {}", e))?;
+
+    let text = json["text"]
+        .as_str()
+        .ok_or("Whisper response missing `text` field")?
+        .to_string();
+
+    Ok((text, aggregate_segment_confidence(&json)))
+}
+
+/// Used for providers whose `verbose_json` diverges from OpenAI's shape
+/// (minimax, fireworks, together, siliconflow).
+async fn whisper_transcribe_text(
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    audio_bytes: Vec<u8>,
+    filename: &str,
+    mime: &str,
+) -> Result<String, String> {
+    whisper_post_multipart(
+        api_url,
+        api_key,
+        model,
+        audio_bytes,
+        filename,
+        mime,
+        "text",
+        None,
+    )
+    .await
+}
+
+/// Run the OpenAI Whisper cross-check on a primary-groq transcription flagged
+/// as low-confidence. Returns `Some(text)` only when the two transcriptions
+/// diverge enough to warrant the `[AMBIGUOUS …]` marker; returns `None` for
+/// close-enough agreement or a failed fallback call.
+async fn cross_check_with_openai(
+    primary_text: &str,
+    audio_bytes: Vec<u8>,
+    filename: &str,
+    mime: &str,
+    language: Option<&str>,
+) -> Option<String> {
+    let key_missing = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .is_none_or(|v| v.trim().is_empty());
+    if key_missing {
+        return None;
+    }
+
+    info!("STT low-confidence on groq → cross-checking with openai/whisper-1");
+    let (api_url, api_key) = whisper_provider_config("openai").ok()?;
+    let fallback = whisper_transcribe_verbose(
+        &api_url,
+        &api_key,
+        default_audio_model("openai"),
+        audio_bytes,
+        filename,
+        mime,
+        language,
+    )
+    .await;
+
+    match fallback {
+        Ok((text, _)) => {
+            let fallback_text = text.trim();
+            let similarity = jaccard_word_similarity(primary_text, fallback_text);
+            info!(similarity, "STT cross-check Jaccard similarity");
+            if similarity < AMBIGUOUS_JACCARD {
+                Some(format!(
+                    "[AMBIGUOUS primary=groq fallback=openai jaccard={:.2}]\nGroq: {}\nOpenAI: {}",
+                    similarity, primary_text, fallback_text
+                ))
+            } else {
+                None
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "STT fallback cross-check failed — keeping primary with low-confidence flag");
+            None
+        }
+    }
 }
 
 /// Collapse per-segment confidence into one aggregate. Mean of
@@ -1158,43 +1153,21 @@ mod tests {
     }
 
     #[test]
-    fn confidence_score_low_when_logprob_below_threshold() {
-        let c = ConfidenceScore {
-            avg_logprob: -0.6,
-            no_speech_prob: 0.1,
-            compression_ratio: 1.2,
-        };
-        assert!(c.is_low());
-    }
-
-    #[test]
-    fn confidence_score_low_when_no_speech_high() {
-        let c = ConfidenceScore {
-            avg_logprob: -0.1,
-            no_speech_prob: 0.7,
-            compression_ratio: 1.2,
-        };
-        assert!(c.is_low());
-    }
-
-    #[test]
-    fn confidence_score_low_when_compression_high() {
-        let c = ConfidenceScore {
-            avg_logprob: -0.1,
-            no_speech_prob: 0.1,
-            compression_ratio: 2.5,
-        };
-        assert!(c.is_low());
-    }
-
-    #[test]
-    fn confidence_score_ok_when_all_thresholds_met() {
-        let c = ConfidenceScore {
-            avg_logprob: -0.3,
-            no_speech_prob: 0.3,
-            compression_ratio: 2.0,
-        };
-        assert!(!c.is_low());
+    fn confidence_score_is_low_thresholds() {
+        let cases = [
+            (-0.6, 0.1, 1.2, true, "logprob below threshold"),
+            (-0.1, 0.7, 1.2, true, "no_speech above threshold"),
+            (-0.1, 0.1, 2.5, true, "compression above threshold"),
+            (-0.3, 0.3, 2.0, false, "all within thresholds"),
+        ];
+        for (lp, ns, cr, want, label) in cases {
+            let c = ConfidenceScore {
+                avg_logprob: lp,
+                no_speech_prob: ns,
+                compression_ratio: cr,
+            };
+            assert_eq!(c.is_low(), want, "{label}");
+        }
     }
 
     #[test]
