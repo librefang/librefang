@@ -154,7 +154,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -165,7 +165,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -273,7 +273,7 @@ dependencies = [
  "futures-lite",
  "parking",
  "polling",
- "rustix",
+ "rustix 1.1.4",
  "slab",
  "windows-sys 0.61.2",
 ]
@@ -304,7 +304,7 @@ dependencies = [
  "cfg-if",
  "event-listener",
  "futures-lite",
- "rustix",
+ "rustix 1.1.4",
 ]
 
 [[package]]
@@ -330,7 +330,7 @@ dependencies = [
  "cfg-if",
  "futures-core",
  "futures-io",
- "rustix",
+ "rustix 1.1.4",
  "signal-hook-registry",
  "slab",
  "windows-sys 0.61.2",
@@ -1005,7 +1005,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1435,7 +1435,7 @@ dependencies = [
  "document-features",
  "mio",
  "parking_lot",
- "rustix",
+ "rustix 1.1.4",
  "signal-hook",
  "signal-hook-mio",
  "winapi",
@@ -1791,7 +1791,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2089,7 +2089,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2625,7 +2625,7 @@ version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
 dependencies = [
- "rustix",
+ "rustix 1.1.4",
  "windows-link 0.2.1",
 ]
 
@@ -3898,8 +3898,9 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
+ "anyhow",
  "argon2",
  "async-trait",
  "axum",
@@ -3933,6 +3934,7 @@ dependencies = [
  "opentelemetry_sdk",
  "portable-pty",
  "reqwest 0.13.2",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "sha2",
@@ -3944,6 +3946,7 @@ dependencies = [
  "tokio-stream",
  "tokio-test",
  "toml 1.1.2+spec-1.1.0",
+ "toml_edit 0.25.11+spec-1.1.0",
  "tower",
  "tower-http",
  "tracing",
@@ -3958,7 +3961,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "aes",
  "async-trait",
@@ -4007,7 +4010,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "clap",
  "clap_complete",
@@ -4042,7 +4045,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "axum",
  "clap",
@@ -4072,7 +4075,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4105,7 +4108,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4124,7 +4127,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-http"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "librefang-types",
  "reqwest 0.13.2",
@@ -4136,7 +4139,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4154,6 +4157,7 @@ dependencies = [
  "librefang-hands",
  "librefang-kernel-metering",
  "librefang-kernel-router",
+ "librefang-llm-driver",
  "librefang-memory",
  "librefang-runtime",
  "librefang-skills",
@@ -4181,7 +4185,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-handle"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "async-trait",
  "librefang-types",
@@ -4194,7 +4198,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-metering"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "librefang-memory",
  "librefang-runtime",
@@ -4204,7 +4208,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-router"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "dirs 6.0.0",
  "librefang-hands",
@@ -4220,7 +4224,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-driver"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "async-trait",
  "librefang-types",
@@ -4232,7 +4236,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-drivers"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4263,7 +4267,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4284,7 +4288,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-migrate"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4303,7 +4307,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4363,7 +4367,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-mcp"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4383,7 +4387,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-oauth"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -4402,7 +4406,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-wasm"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "anyhow",
  "librefang-http",
@@ -4419,7 +4423,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4446,7 +4450,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -4455,7 +4459,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "async-trait",
  "axum",
@@ -4482,7 +4486,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4504,7 +4508,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4543,6 +4547,12 @@ checksum = "3f50e8f47623268b5407192d26876c4d7f89d686ca130fdc53bced4814cd29f8"
 dependencies = [
  "bitflags 2.11.0",
 ]
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
 name = "linux-raw-sys"
@@ -4709,7 +4719,7 @@ version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad38eb12aea514a0466ea40a80fd8cc83637065948eb4a426e4aa46261175227"
 dependencies = [
- "rustix",
+ "rustix 1.1.4",
 ]
 
 [[package]]
@@ -4991,7 +5001,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5396,7 +5406,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5924,7 +5934,7 @@ dependencies = [
  "concurrent-queue",
  "hermit-abi",
  "pin-project-lite",
- "rustix",
+ "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
 
@@ -6117,7 +6127,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6931,6 +6941,19 @@ dependencies = [
 
 [[package]]
 name = "rustix"
+version = "0.38.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
+dependencies = [
+ "bitflags 2.11.0",
+ "errno",
+ "libc",
+ "linux-raw-sys 0.4.15",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
@@ -6938,8 +6961,8 @@ dependencies = [
  "bitflags 2.11.0",
  "errno",
  "libc",
- "linux-raw-sys",
- "windows-sys 0.52.0",
+ "linux-raw-sys 0.12.1",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6953,7 +6976,7 @@ dependencies = [
  "once_cell",
  "ring",
  "rustls-pki-types",
- "rustls-webpki 0.103.10",
+ "rustls-webpki 0.103.12",
  "subtle",
  "zeroize",
 ]
@@ -6969,7 +6992,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-pki-types",
- "rustls-webpki 0.103.10",
+ "rustls-webpki 0.103.12",
 ]
 
 [[package]]
@@ -7017,11 +7040,11 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-platform-verifier-android",
- "rustls-webpki 0.103.10",
+ "rustls-webpki 0.103.12",
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7043,9 +7066,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.10"
+version = "0.103.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
+checksum = "8279bb85272c9f10811ae6a6c547ff594d6a7f3c6c6b02ee9726d1d0dcfcdd06"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -7695,7 +7718,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8441,8 +8464,8 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.2",
  "once_cell",
- "rustix",
- "windows-sys 0.52.0",
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9180,7 +9203,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9739,7 +9762,7 @@ dependencies = [
  "postcard",
  "pulley-interpreter",
  "rayon",
- "rustix",
+ "rustix 1.1.4",
  "semver",
  "serde",
  "serde_derive",
@@ -9807,7 +9830,7 @@ dependencies = [
  "directories-next",
  "log",
  "postcard",
- "rustix",
+ "rustix 1.1.4",
  "serde",
  "serde_derive",
  "sha2",
@@ -9886,7 +9909,7 @@ dependencies = [
  "cc",
  "cfg-if",
  "libc",
- "rustix",
+ "rustix 1.1.4",
  "wasmtime-environ",
  "wasmtime-internal-versioned-export-macros",
  "windows-sys 0.61.2",
@@ -9900,7 +9923,7 @@ checksum = "d950310d07391d34369f62c48336ebb14eacbd4d6f772bb5f349c24e838e0664"
 dependencies = [
  "cc",
  "object",
- "rustix",
+ "rustix 1.1.4",
  "wasmtime-internal-versioned-export-macros",
 ]
 
@@ -10216,7 +10239,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10929,7 +10952,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9993aa5be5a26815fe2c3eacfc1fde061fc1a1f094bf1ad2a18bf9c495dd7414"
 dependencies = [
  "gethostname",
- "rustix",
+ "rustix 1.1.4",
  "x11rb-protocol",
 ]
 
@@ -10946,7 +10969,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
- "rustix",
+ "rustix 1.1.4",
 ]
 
 [[package]]
@@ -10957,7 +10980,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "2026.4.13-beta19"
+version = "2026.4.15-beta22"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -11014,7 +11037,7 @@ dependencies = [
  "hex",
  "libc",
  "ordered-stream",
- "rustix",
+ "rustix 1.1.4",
  "serde",
  "serde_repr",
  "tracing",

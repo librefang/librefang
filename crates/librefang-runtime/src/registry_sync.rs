@@ -269,13 +269,23 @@ fn git_clone_fallback(
     tracing::info!("Attempting git clone fallback");
 
     if registry_cache.join(".git").exists() {
-        // Already a git repo — try pull
+        // Already a git repo — fetch and reset to origin/main so that a
+        // detached HEAD or local branch can never stall the sync.
+        let fetch_ok = Command::new("git")
+            .args(["fetch", "--depth", "1", "-q", "origin", "main"])
+            .current_dir(registry_cache)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !fetch_ok {
+            return Err("git fetch origin main failed".into());
+        }
         let status = Command::new("git")
-            .args(["pull", "--ff-only", "-q"])
+            .args(["reset", "--hard", "origin/main", "-q"])
             .current_dir(registry_cache)
             .status()?;
         if !status.success() {
-            return Err(format!("git pull exited with {status}").into());
+            return Err(format!("git reset exited with {status}").into());
         }
     } else {
         // Clean slate
@@ -346,6 +356,7 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
     };
 
     let mut synced = 0;
+    let mut updated = 0;
     let mut skipped = 0;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -359,7 +370,18 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
 
         let dest_file = dest_dir.join(&name);
         if dest_file.exists() {
-            skipped += 1;
+            // Update if content differs — keeps builtin provider metadata (e.g.
+            // supports_thinking, new model entries) in sync with the registry.
+            // User API key config lives in config.toml, not in these TOML files.
+            let src_content = std::fs::read(&path).unwrap_or_default();
+            let dst_content = std::fs::read(&dest_file).unwrap_or_default();
+            if src_content == dst_content {
+                skipped += 1;
+            } else if std::fs::create_dir_all(dest_dir).is_ok()
+                && std::fs::write(&dest_file, &src_content).is_ok()
+            {
+                updated += 1;
+            }
             continue;
         }
 
@@ -368,8 +390,27 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
         }
     }
 
-    if synced > 0 || skipped > 0 {
-        tracing::info!("{label} synced ({synced} new, {skipped} existing)");
+    // Remove local files that no longer exist in the registry source.
+    // This cleans up defunct providers/integrations after upstream pruning.
+    let mut removed = 0usize;
+    if let Ok(dest_entries) = std::fs::read_dir(dest_dir) {
+        for entry in dest_entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) if n.ends_with(".toml") => n.to_string(),
+                _ => continue,
+            };
+            if !src_dir.join(&name).exists() && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+
+    if synced > 0 || updated > 0 || removed > 0 || skipped > 0 {
+        tracing::info!("{label} synced ({synced} new, {updated} updated, {removed} removed, {skipped} unchanged)");
     }
 }
 

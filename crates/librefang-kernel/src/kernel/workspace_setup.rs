@@ -104,7 +104,7 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
     if !gitignore.exists() {
         let _ = std::fs::write(
             &gitignore,
-            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\n*.db\n*.db-shm\n*.db-wal\n",
+            "secrets.env\nvault.enc\ndaemon.json\ndaemon.log\nhand_state.json\nsessions.json\nworkflow_runs.json\nlogs/\ncache/\nregistry/\ndata/\ndashboard/\nbackups/\ninbox/\n.vscode/\n*.db\n*.db-shm\n*.db-wal\n",
         );
     }
     let _ = std::process::Command::new("git")

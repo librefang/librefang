@@ -268,6 +268,13 @@ pub struct SenderContext {
     pub channel: String,
     /// Platform-specific user ID.
     pub user_id: String,
+    /// Platform-specific conversation ID (Telegram chat_id, Discord
+    /// channel_id, WhatsApp JID, etc.). Populated by `build_sender_context`
+    /// from `ChannelMessage.sender.platform_id` so kernel session scoping
+    /// can distinguish groups, DMs, and other conversations on the same
+    /// channel+agent pair. `None` for non-channel invocations (CLI, REST).
+    #[serde(default)]
+    pub chat_id: Option<String>,
     /// Human-readable display name.
     pub display_name: String,
     /// Whether the message came from a group chat (vs DM).

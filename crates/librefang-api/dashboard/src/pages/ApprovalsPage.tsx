@@ -415,7 +415,7 @@ export function ApprovalsPage() {
                     onClick={() => handleBatchAction("approve")}
                     disabled={pendingId === "batch" || totpEnforced}
                     isLoading={pendingId === "batch"}
-                    title={totpEnforced ? "Batch approve disabled when TOTP is enforced" : undefined}
+                    title={totpEnforced ? t("approvals.batch_disabled_totp") : undefined}
                   >
                     {t("approvals.approveSelected")}
                   </Button>

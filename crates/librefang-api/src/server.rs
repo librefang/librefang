@@ -262,6 +262,57 @@ async fn dashboard_login(
                 );
             }
 
+            // TOTP second-factor check for login
+            let policy = state.kernel.approvals().policy();
+            if policy.second_factor.requires_login_totp() {
+                let totp_enrolled = state
+                    .kernel
+                    .vault_get("totp_secret")
+                    .is_some_and(|s| !s.is_empty());
+                let totp_confirmed =
+                    state.kernel.vault_get("totp_confirmed").as_deref() == Some("true");
+                if totp_enrolled && totp_confirmed {
+                    let totp_code = body.get("totp_code").and_then(|v| v.as_str()).unwrap_or("");
+                    if totp_code.is_empty() {
+                        // Password OK but TOTP required — ask frontend to prompt
+                        return axum::response::Json(serde_json::json!({
+                            "ok": false,
+                            "requires_totp": true,
+                        }))
+                        .into_response();
+                    }
+                    // Verify TOTP code
+                    let secret = state.kernel.vault_get("totp_secret").unwrap_or_default();
+                    let issuer = policy.totp_issuer.clone();
+                    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                        &secret, totp_code, &issuer,
+                    ) {
+                        Ok(true) => { /* TOTP valid, proceed to session creation */ }
+                        Ok(false) => {
+                            return (
+                                axum::http::StatusCode::UNAUTHORIZED,
+                                axum::response::Json(serde_json::json!({
+                                    "ok": false,
+                                    "error": "Invalid TOTP code",
+                                })),
+                            )
+                                .into_response();
+                        }
+                        Err(e) => {
+                            tracing::warn!("TOTP verification error during login: {e}");
+                            return (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::response::Json(serde_json::json!({
+                                    "ok": false,
+                                    "error": "TOTP verification failed",
+                                })),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+            }
+
             // Store the session token so the auth middleware can validate it.
             {
                 let mut sessions = state.active_sessions.write().await;
@@ -650,6 +701,7 @@ pub async fn build_router(
             kernel.config_ref().provider_urls.clone(),
         ),
         webhook_router,
+        config_write_lock: tokio::sync::Mutex::new(()),
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });
@@ -1167,6 +1219,27 @@ pub async fn run_daemon(
             tracing::warn!("Failed to stop observability stack: {e}");
         } else {
             info!("Observability stack stopped");
+        }
+    }
+
+    // Clean up tmux session so child shell processes don't linger after shutdown.
+    // Read config fields and drop the Guard before any `.await`.
+    let (tmux_cleanup_enabled, tmux_cleanup_path) = {
+        let cfg = kernel.config_ref();
+        (
+            cfg.terminal.tmux_enabled,
+            std::path::PathBuf::from(cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux")),
+        )
+    };
+    if tmux_cleanup_enabled {
+        let ctrl = crate::terminal_tmux::TmuxController::new(
+            tmux_cleanup_path,
+            crate::terminal_tmux::DEFAULT_TMUX_SESSION_NAME.to_string(),
+        );
+        if let Err(e) = ctrl.kill_session().await {
+            tracing::debug!("tmux session cleanup: {e}");
+        } else {
+            info!("tmux session cleaned up");
         }
     }
 

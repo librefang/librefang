@@ -18,6 +18,17 @@ update_channel = "stable"      # stable | beta | rc
 dashboard_user = "librefang"
 dashboard_pass = "librefang"
 
+# ── Terminal Access Control ──────────────────────────────────
+# [terminal]
+# allow_remote = false                   # false = local-only when no auth configured;
+                                         # with API keys/dashboard credentials, remote
+                                         # clients can still authenticate and connect
+# allow_unauthenticated_remote = false   # hard foot-gun guard: must be true to expose
+                                         # an unauthenticated shell when allow_remote=true
+# require_proxy_headers = false          # set true only if behind a reverse proxy
+                                         # that sets X-Forwarded-For / X-Real-IP
+                                         # (old name: trust_proxy_headers)
+
 # ── Performance ──────────────────────────────────────────────
 prompt_caching = true           # Reduce LLM costs (Anthropic/OpenAI)
 stable_prefix_mode = true       # Improve prompt cache hit rate

@@ -307,6 +307,31 @@ pub enum SystemEvent {
         /// How long the agent has been unresponsive.
         unresponsive_secs: u64,
     },
+    /// A task was posted to the Task Board.
+    TaskPosted {
+        /// The task ID.
+        task_id: String,
+        /// The task title.
+        title: String,
+        /// Agent the task is assigned to (if any).
+        assigned_to: Option<String>,
+        /// Agent that created the task.
+        created_by: Option<String>,
+    },
+    /// A task was claimed from the Task Board.
+    TaskClaimed {
+        /// The task ID.
+        task_id: String,
+        /// Agent that claimed the task.
+        claimed_by: String,
+    },
+    /// A task was completed on the Task Board.
+    TaskCompleted {
+        /// The task ID.
+        task_id: String,
+        /// The task result/verdict.
+        result: String,
+    },
 }
 
 /// A complete event in the LibreFang event system.

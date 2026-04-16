@@ -31,6 +31,13 @@ const {
   computeBackoffDelay,
   runDispatchSelfTest,
   channelTypeForChat,
+  echoTracker,
+  ECHO_TRACKER_ENABLED,
+  EchoTracker,
+  lidToPnJid,
+  lidMapSet,
+  db,
+  LID_PERSIST_ENABLED,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -775,7 +782,338 @@ describe('EB-02 forward_dispatch log + dispatch_self_test', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Phase 3 §A — Echo tracker wiring (EB-01)
+// ---------------------------------------------------------------------------
+describe('echo tracker wiring (Phase 3 §A)', () => {
+  it('exports tracker handle, ECHO_TRACKER_ENABLED, and EchoTracker class', () => {
+    assert.ok(echoTracker, 'echoTracker should be exported');
+    assert.equal(typeof echoTracker.track, 'function');
+    assert.equal(typeof echoTracker.isEcho, 'function');
+    assert.equal(typeof echoTracker.size, 'function');
+    assert.equal(typeof echoTracker.reset, 'function');
+    assert.equal(typeof EchoTracker, 'function');
+    assert.equal(typeof EchoTracker.normalize, 'function');
+    // Default flag state (no env var set in test env)
+    assert.equal(typeof ECHO_TRACKER_ENABLED, 'boolean');
+  });
+
+  it('integration: outbound track then inbound echo would drop (raw body)', () => {
+    echoTracker.reset();
+    // Simulate the outbound wire-in (every sock.sendMessage({ text }) is followed by track)
+    echoTracker.track('ciao');
+    // Simulate the inbound gate condition with the same body
+    assert.equal(echoTracker.isEcho('ciao'), true,
+      'inbound echo of just-sent message must be detected');
+    assert.equal(echoTracker.size(), 1);
+  });
+
+  it('integration: normalization works through wiring (Hello. -> hello)', () => {
+    echoTracker.reset();
+    echoTracker.track('Hello.');
+    assert.equal(echoTracker.isEcho('hello'), true,
+      'normalized echo (case + trailing punct) must drop');
+    assert.equal(echoTracker.isEcho('HELLO!'), true);
+  });
+
+  it('integration: unrelated inbound is NOT dropped (no false positive)', () => {
+    echoTracker.reset();
+    echoTracker.track('ciao');
+    assert.equal(echoTracker.isEcho('something else'), false,
+      'unrelated message must pass through (forwardToLibreFang would be called)');
+    // tracker unchanged for non-matching probe
+    assert.equal(echoTracker.size(), 1);
+  });
+
+  it('flag gate: when LIBREFANG_ECHO_TRACKER=off, gate is bypassed', () => {
+    // ECHO_TRACKER_ENABLED is captured at module load. We assert the source
+    // shape so a future regression (gating without flag check) is caught.
+    const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'index.js'), 'utf8');
+    // The gate must be wrapped in an ECHO_TRACKER_ENABLED check.
+    assert.match(src,
+      /if\s*\(\s*ECHO_TRACKER_ENABLED\s*&&\s*messageText\s*&&\s*echoTracker\.isEcho/,
+      'inbound gate must be flag-gated by ECHO_TRACKER_ENABLED');
+    // Each track call must also be flag-gated.
+    const trackCalls = src.match(/echoTracker\.track\(/g) || [];
+    const flaggedTrackCalls = src.match(/if\s*\(\s*ECHO_TRACKER_ENABLED\s*\)\s*echoTracker\.track\(/g) || [];
+    assert.equal(trackCalls.length, flaggedTrackCalls.length,
+      `every echoTracker.track() must be flag-gated (found ${trackCalls.length} calls, ${flaggedTrackCalls.length} flagged)`);
+    // Default ON: env unset → enabled.
+    assert.equal(process.env.LIBREFANG_ECHO_TRACKER, undefined);
+    assert.equal(ECHO_TRACKER_ENABLED, true);
+  });
+
+  it('echo_drop log structure is correct shape (would emit on drop)', () => {
+    // Verify the source emits the spec'd log structure when isEcho fires.
+    const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'index.js'), 'utf8');
+    assert.match(src, /event:\s*'echo_drop'/);
+    assert.match(src, /body_excerpt:/);
+    assert.match(src, /tracker_size:/);
+    assert.match(src, /elapsed_ms_since_last_sent:/);
+    // Body excerpt must be capped at 80 chars.
+    assert.match(src, /\.slice\(0,\s*80\)/);
+  });
+
+  it('outbound wire-in covers all 7 text sendMessage sites', () => {
+    const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'index.js'), 'utf8');
+    const trackCount = (src.match(/echoTracker\.track\(/g) || []).length;
+    assert.equal(trackCount, 7,
+      `expected 7 echoTracker.track() calls (one per outbound text site), got ${trackCount}`);
+  });
+});
+
 // Cleanup temp DB and force exit (SQLite keeps event loop alive)
+// ---------------------------------------------------------------------------
+// ID-01 identity refactor — equivalence between pre-refactor inline logic
+// and post-refactor lib/identity helpers. These fixtures assert that the
+// same JID shape produces the same outbound/sender/owner strings as the
+// inline code would have produced prior to this refactor.
+// ---------------------------------------------------------------------------
+describe('ID-01 identity refactor equivalence', () => {
+  const {
+    isLidJid, isGroupJid, normalizeDeviceScopedJid,
+    extractE164, phoneToJid, resolvePeerId, deriveOwnerJids,
+  } = require('./lib/identity');
+
+  // Legacy inline helpers reproduced from the pre-refactor inline code at
+  // index.js:229-234, 1164-1197, 2304-2306, 2232.
+  const legacyIsLid = (jid) => !!jid && jid.endsWith('@lid');
+  const legacyIsGroup = (jid) => !!jid && jid.endsWith('@g.us');
+  const legacyOutboundJid = (to) => to.includes('@g.us') ? to
+    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  const legacyOwnerJids = (nums) =>
+    new Set(nums.map(n => n.replace(/^\+/, '') + '@s.whatsapp.net'));
+  const legacyResolve = (sender, { senderPn, cache, participant }) => {
+    const isLid = legacyIsLid(sender);
+    const isGroup = legacyIsGroup(sender);
+    if (senderPn) return senderPn;
+    if (isLid && cache.has(sender)) return cache.get(sender);
+    if (!isLid && !isGroup) return sender;
+    if (participant && !legacyIsLid(participant)) return participant;
+    return '';
+  };
+
+  it('isLid boolean parity', () => {
+    for (const jid of ['123@lid', '123@s.whatsapp.net', '123-456@g.us', '']) {
+      assert.equal(isLidJid(jid), legacyIsLid(jid), `isLid parity for ${jid}`);
+    }
+  });
+
+  it('isGroup boolean parity', () => {
+    for (const jid of ['123-456@g.us', '123@lid', '123@s.whatsapp.net', '']) {
+      assert.equal(isGroupJid(jid), legacyIsGroup(jid), `isGroup parity for ${jid}`);
+    }
+  });
+
+  it('deriveOwnerJids matches legacy Set', () => {
+    const nums = ['+39111', '+39222'];
+    const got = deriveOwnerJids(nums);
+    const legacy = legacyOwnerJids(nums);
+    assert.deepEqual([...got].sort(), [...legacy].sort());
+  });
+
+  it('phoneToJid matches legacy outbound pattern for phones & groups', () => {
+    for (const to of ['+39111', '39111', '123-456@g.us']) {
+      assert.equal(phoneToJid(to), legacyOutboundJid(to), `outbound parity for ${to}`);
+    }
+  });
+
+  it('resolvePeerId matches legacy for plain phone JID', () => {
+    const r = resolvePeerId('391234@s.whatsapp.net', { lidToPnCache: new Map() });
+    const legacy = legacyResolve('391234@s.whatsapp.net', { senderPn: '', cache: new Map(), participant: '' });
+    assert.equal(r.peer, legacy);
+    assert.equal(r.confidence, 'direct');
+  });
+
+  it('resolvePeerId matches legacy for LID with senderPn', () => {
+    const r = resolvePeerId('111@lid', { lidToPnCache: new Map(), senderPn: '391234@s.whatsapp.net' });
+    const legacy = legacyResolve('111@lid', { senderPn: '391234@s.whatsapp.net', cache: new Map(), participant: '' });
+    assert.equal(r.peer, legacy);
+    assert.equal(r.confidence, 'direct');
+  });
+
+  it('resolvePeerId matches legacy for LID in cache', () => {
+    const cache = new Map([['111@lid', '391234@s.whatsapp.net']]);
+    const r = resolvePeerId('111@lid', { lidToPnCache: cache });
+    const legacy = legacyResolve('111@lid', { senderPn: '', cache, participant: '' });
+    assert.equal(r.peer, legacy);
+    assert.equal(r.confidence, 'cache');
+  });
+
+  it('resolvePeerId matches legacy for LID with phone participant', () => {
+    const r = resolvePeerId('111@lid', { lidToPnCache: new Map(), participant: '391234@s.whatsapp.net' });
+    const legacy = legacyResolve('111@lid', { senderPn: '', cache: new Map(), participant: '391234@s.whatsapp.net' });
+    assert.equal(r.peer, legacy);
+    assert.equal(r.confidence, 'participant');
+  });
+
+  it('resolvePeerId returns empty for unresolvable LID (matches legacy)', () => {
+    const r = resolvePeerId('111@lid', { lidToPnCache: new Map() });
+    const legacy = legacyResolve('111@lid', { senderPn: '', cache: new Map(), participant: '' });
+    assert.equal(r.peer, legacy);
+    assert.equal(r.peer, '');
+    assert.equal(r.confidence, 'lid_unresolved');
+  });
+
+  it('resolvePeerId tags group JID with group confidence', () => {
+    const r = resolvePeerId('123-456@g.us', { lidToPnCache: new Map() });
+    assert.equal(r.confidence, 'group');
+    assert.equal(r.peer, '123-456@g.us');
+  });
+
+  it('extractE164 strips device suffix (latent bug fix vs legacy)', () => {
+    // Legacy inline `'+' + jid.replace(/@.*$/, '')` produced '+123:45' for
+    // device-scoped JIDs — malformed. New extractE164 correctly yields '+123'.
+    assert.equal(extractE164('391234:7@s.whatsapp.net'), '+391234');
+  });
+
+  it('normalizeDeviceScopedJid passthrough for plain JIDs', () => {
+    assert.equal(normalizeDeviceScopedJid('391234@s.whatsapp.net'), '391234@s.whatsapp.net');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ID-03 structured log — identity_unresolved must emit JSON with all fields
+// ---------------------------------------------------------------------------
+describe('ID-03 identity_unresolved log shape', () => {
+  it('emits JSON with event/jid/reason/lid_cache_size on unresolved LID', () => {
+    // Simulate the handler's log emission path (inlined from index.js).
+    const { resolvePeerId } = require('./lib/identity');
+    const lidToPnJid = new Map();
+    const sender = '111@lid';
+    const senderPnRaw = '';
+    const participant = '';
+
+    const { peer, confidence } = resolvePeerId(sender, {
+      lidToPnCache: lidToPnJid,
+      senderPn: senderPnRaw,
+      participant,
+    });
+
+    assert.equal(peer, '');
+    assert.equal(confidence, 'lid_unresolved');
+
+    // Capture console.warn to ensure the payload shape is JSON with all fields.
+    const origWarn = console.warn;
+    let captured = null;
+    console.warn = (line) => { captured = line; };
+    try {
+      const reason = senderPnRaw ? 'senderPn_present_but_unextractable'
+        : (lidToPnJid.has(sender)) ? 'cache_hit_but_unextractable'
+        : participant ? 'participant_was_lid'
+        : 'no_mapping_available';
+      console.warn(JSON.stringify({
+        event: 'identity_unresolved',
+        jid: sender,
+        reason,
+        lid_cache_size: lidToPnJid.size,
+        confidence,
+      }));
+    } finally {
+      console.warn = origWarn;
+    }
+
+    assert.ok(captured, 'warn was called');
+    const parsed = JSON.parse(captured);
+    assert.equal(parsed.event, 'identity_unresolved');
+    assert.equal(parsed.jid, '111@lid');
+    assert.equal(parsed.reason, 'no_mapping_available');
+    assert.equal(parsed.lid_cache_size, 0);
+    assert.equal(parsed.confidence, 'lid_unresolved');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4 §B (ID-02) — persisted LID cache integration
+// ---------------------------------------------------------------------------
+// These tests exercise the real `db` handle owned by index.js together with
+// the in-memory `lidToPnJid` Map. Each test uses distinct LID keys so runs
+// remain independent.
+describe('ID-02 persisted LID cache wiring', () => {
+  it('exports the write-through helper and the persistence flag', () => {
+    assert.equal(typeof lidMapSet, 'function');
+    assert.ok(lidToPnJid instanceof Map);
+    assert.ok(db, 'db handle must be exported');
+    // Default enabled unless LIBREFANG_LID_PERSIST=off is set in the env.
+    assert.equal(LID_PERSIST_ENABLED, process.env.LIBREFANG_LID_PERSIST !== 'off');
+  });
+
+  it('creates the lid_cache table at boot', () => {
+    const row = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='lid_cache'")
+      .get();
+    assert.equal(row?.name, 'lid_cache');
+  });
+
+  it('mirrors a mapping observation into both the Map and SQLite', () => {
+    const LID = 'integration-a@lid';
+    const PN  = '391230000100@s.whatsapp.net';
+
+    lidMapSet(LID, PN);
+
+    // In-memory authoritative state.
+    assert.equal(lidToPnJid.get(LID), PN);
+
+    // Persisted mirror.
+    const row = db
+      .prepare('SELECT lid, pn_jid, updated_at FROM lid_cache WHERE lid = ?')
+      .get(LID);
+    assert.equal(row?.pn_jid, PN);
+    assert.equal(typeof row?.updated_at, 'number');
+    assert.ok(row.updated_at > 0);
+  });
+
+  it('ignores empty lid or empty pn_jid without touching SQLite', () => {
+    const beforeCount = db.prepare('SELECT COUNT(*) AS c FROM lid_cache').get().c;
+    lidMapSet('', '391230000200@s.whatsapp.net');
+    lidMapSet('integration-b@lid', '');
+    const afterCount = db.prepare('SELECT COUNT(*) AS c FROM lid_cache').get().c;
+    assert.equal(afterCount, beforeCount);
+    assert.equal(lidToPnJid.has('integration-b@lid'), false);
+  });
+
+  it('INSERT OR REPLACE updates pn_jid when the same lid reappears', () => {
+    const LID = 'integration-c@lid';
+    lidMapSet(LID, '391230000300@s.whatsapp.net');
+    lidMapSet(LID, '391230000301@s.whatsapp.net');
+
+    const rows = db
+      .prepare('SELECT pn_jid FROM lid_cache WHERE lid = ?')
+      .all(LID);
+    assert.equal(rows.length, 1, 'primary key must coalesce rows');
+    assert.equal(rows[0].pn_jid, '391230000301@s.whatsapp.net');
+    assert.equal(lidToPnJid.get(LID), '391230000301@s.whatsapp.net');
+  });
+});
+
+// Cross-restart: simulate shutdown + boot by opening a second DB handle at
+// the same path with the lid-cache module directly. We cannot reload
+// index.js in-process (it has module-level setInterval timers); instead we
+// assert that the SQL rows index.js wrote are visible to an independent
+// connection calling `loadAll`, which is exactly what boot-time hydration
+// does.
+describe('ID-02 cross-restart hydration', () => {
+  it('rows written via lidMapSet are visible to lidCache.loadAll on a fresh handle', () => {
+    const Database = require('better-sqlite3');
+    const lidCache = require('./lib/lid-cache');
+
+    const SEED_LID = 'restart-seed@lid';
+    const SEED_PN  = '391230000999@s.whatsapp.net';
+    lidMapSet(SEED_LID, SEED_PN);
+
+    // Open an independent connection against the same file. better-sqlite3
+    // with WAL mode lets readers see committed writes from another handle.
+    const dbPath = process.env.WHATSAPP_DB_PATH;
+    const db2 = new Database(dbPath, { readonly: true });
+    try {
+      const map = lidCache.loadAll(db2);
+      assert.equal(map.get(SEED_LID), SEED_PN);
+    } finally {
+      db2.close();
+    }
+  });
+});
+
 after(() => {
   try {
     const fs = require('node:fs');

@@ -6,6 +6,21 @@
 //!
 //! This allows the dashboard to be updated without recompiling, while still
 //! providing a working dashboard in single-binary distributions.
+//!
+//! ## Opt-out: embedded-only mode
+//!
+//! Setting `LIBREFANG_DASHBOARD_EMBEDDED_ONLY=1` pins the resolver to the
+//! compile-time-embedded assets and short-circuits [`sync_dashboard`]. This is
+//! the right setting when you want the dashboard served by the daemon to
+//! exactly match the binary you built, e.g.:
+//!
+//! - Iterating on the dashboard locally against your own `cargo build`.
+//! - Running in a packaged environment where the dashboard is intentionally
+//!   frozen to the build artifact and must not mutate at runtime.
+//!
+//! Accepted truthy values: `1`, `true`, `yes`, `on` (case-insensitive). Any
+//! other value — or the absence of the variable — leaves the default
+//! runtime-sync behavior intact.
 
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
@@ -77,8 +92,32 @@ const LOCALE_JA: &str = include_str!("../static/locales/ja.json");
 
 const DASHBOARD_SYNC_ERROR_FILE: &str = ".sync-error";
 
+/// Environment variable that, when set to a truthy value, forces the dashboard
+/// resolver to serve the compile-time-embedded assets and skips the release
+/// sync entirely. See the module-level docs for details.
+const EMBEDDED_ONLY_ENV: &str = "LIBREFANG_DASHBOARD_EMBEDDED_ONLY";
+
 fn embedded_dashboard_available() -> bool {
     REACT_DIST.get_file("index.html").is_some()
+}
+
+/// Returns `true` when the operator has opted into embedded-only dashboard
+/// mode via [`EMBEDDED_ONLY_ENV`]. Any of `1`, `true`, `yes`, `on` (case
+/// insensitive) counts as truthy.
+fn embedded_only_mode() -> bool {
+    is_embedded_only_value(std::env::var(EMBEDDED_ONLY_ENV).ok().as_deref())
+}
+
+/// Pure parser split out so tests can exercise the value grammar without
+/// touching process-global environment state.
+fn is_embedded_only_value(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => {
+            let normalized = v.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        }
+        None => false,
+    }
 }
 
 fn dashboard_sync_error_path(home_dir: &std::path::Path) -> std::path::PathBuf {
@@ -86,15 +125,34 @@ fn dashboard_sync_error_path(home_dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Resolve a dashboard file: try runtime dir first, then embedded fallback.
+///
+/// In embedded-only mode (see [`embedded_only_mode`]) the runtime directory
+/// is skipped entirely so the compile-time assets win regardless of whatever
+/// stale copy may still be sitting in `$LIBREFANG_HOME/dashboard/` from a
+/// previous sync.
 fn resolve_dashboard_file(
     home_dir: Option<&std::path::Path>,
     relative_path: &str,
 ) -> Option<Vec<u8>> {
-    // 1. Try runtime directory
-    if let Some(home) = home_dir {
-        let runtime_path = home.join("dashboard").join(relative_path);
-        if let Ok(data) = std::fs::read(&runtime_path) {
-            return Some(data);
+    resolve_dashboard_file_with_mode(home_dir, relative_path, embedded_only_mode())
+}
+
+/// Testable variant of [`resolve_dashboard_file`] that takes the
+/// embedded-only decision as a parameter instead of reading it from the
+/// environment. Keeps the public entry point ergonomic while letting unit
+/// tests exercise both branches deterministically.
+fn resolve_dashboard_file_with_mode(
+    home_dir: Option<&std::path::Path>,
+    relative_path: &str,
+    embedded_only: bool,
+) -> Option<Vec<u8>> {
+    // 1. Try runtime directory (skipped when embedded-only mode is on).
+    if !embedded_only {
+        if let Some(home) = home_dir {
+            let runtime_path = home.join("dashboard").join(relative_path);
+            if let Ok(data) = std::fs::read(&runtime_path) {
+                return Some(data);
+            }
         }
     }
 
@@ -216,7 +274,21 @@ pub async fn react_asset(
             data,
         )
             .into_response(),
-        None => (StatusCode::NOT_FOUND, "asset not found").into_response(),
+        None => {
+            // SPA fallback: if the path has no file extension, serve index.html
+            // so that browser-history routing works (e.g. /dashboard/config/general).
+            let has_ext = asset_path
+                .rsplit('/')
+                .next()
+                .is_some_and(|s| s.contains('.'));
+            if !has_ext {
+                if let Some(index) = resolve_dashboard_file(home_dir.as_deref(), "index.html") {
+                    return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], index)
+                        .into_response();
+                }
+            }
+            (StatusCode::NOT_FOUND, "asset not found").into_response()
+        }
     }
 }
 
@@ -246,7 +318,17 @@ fn content_type_for(path: &str) -> &'static str {
 ///
 /// Downloads the dashboard-dist branch tarball and extracts it.
 /// Called during daemon startup (non-blocking).
+///
+/// Short-circuits when [`EMBEDDED_ONLY_ENV`] is truthy so local builds and
+/// frozen deployments aren't silently replaced by the release artifact.
 pub async fn sync_dashboard(home_dir: &std::path::Path) {
+    if embedded_only_mode() {
+        tracing::info!(
+            "{EMBEDDED_ONLY_ENV} is set; skipping dashboard sync and serving embedded assets only"
+        );
+        return;
+    }
+
     let dashboard_dir = home_dir.join("dashboard");
     let version_file = dashboard_dir.join(".version");
     let sync_error_file = dashboard_sync_error_path(home_dir);
@@ -384,4 +466,82 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_only_unset_is_false() {
+        assert!(!is_embedded_only_value(None));
+    }
+
+    #[test]
+    fn embedded_only_truthy_values() {
+        for v in [
+            "1", "true", "TRUE", "True", "yes", "YES", "on", "ON", " 1 ", "\tTrue\n",
+        ] {
+            assert!(
+                is_embedded_only_value(Some(v)),
+                "expected {v:?} to be truthy"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_only_falsy_values() {
+        for v in [
+            "",
+            "0",
+            "false",
+            "no",
+            "off",
+            "FALSE",
+            "nope",
+            "anything-else",
+        ] {
+            assert!(
+                !is_embedded_only_value(Some(v)),
+                "expected {v:?} to be falsy"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_dashboard_prefers_runtime_dir_when_not_embedded_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dashboard = tmp.path().join("dashboard");
+        std::fs::create_dir_all(&dashboard).unwrap();
+        let marker = b"runtime-dir-wins";
+        std::fs::write(dashboard.join("test-marker.txt"), marker).unwrap();
+
+        let got = resolve_dashboard_file_with_mode(Some(tmp.path()), "test-marker.txt", false);
+        assert_eq!(got.as_deref(), Some(marker.as_slice()));
+    }
+
+    #[test]
+    fn resolve_dashboard_skips_runtime_dir_in_embedded_only_mode() {
+        // Put a file in the runtime dir that does NOT exist in the embedded
+        // bundle — in embedded-only mode the resolver must ignore it and
+        // return `None` instead of serving the stale runtime copy.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dashboard = tmp.path().join("dashboard");
+        std::fs::create_dir_all(&dashboard).unwrap();
+        std::fs::write(
+            dashboard.join("definitely-not-in-embedded-bundle.bin"),
+            b"stale-runtime",
+        )
+        .unwrap();
+
+        let got = resolve_dashboard_file_with_mode(
+            Some(tmp.path()),
+            "definitely-not-in-embedded-bundle.bin",
+            true,
+        );
+        assert!(
+            got.is_none(),
+            "embedded-only mode must not consult runtime dir"
+        );
+    }
 }

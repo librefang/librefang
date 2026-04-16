@@ -37,6 +37,40 @@ For multi-provider setups, use `[[external_auth.providers]]` with fields: `id`, 
 
 ---
 
+### `[terminal]`
+
+Configures access control for the interactive terminal WebSocket endpoint.
+
+```toml
+[terminal]
+enabled = true
+allow_remote = false
+allowed_origins = ["https://dashboard.example.com"]
+tmux_enabled = true
+max_windows = 16
+# tmux_binary_path = "/usr/local/bin/tmux"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Master switch for the terminal feature. When `false`, the terminal WebSocket endpoint is disabled entirely. |
+| `allow_remote` | bool | `false` | Allows access from remote or proxied connections. When no auth is configured, `allow_unauthenticated_remote` must also be `true` or the connection is refused. Default behavior is local-only access without auth. |
+| `allow_unauthenticated_remote` | bool | `false` | Hard foot-gun guard. Must be explicitly set to `true` to expose an unauthenticated shell over the network when `allow_remote = true` and no auth is configured. Otherwise such connections are refused even if `allow_remote = true`. |
+| `allowed_origins` | list of strings | `[]` | Additional browser `Origin` values allowed for terminal WebSocket connections beyond localhost. Use this when the dashboard is served from a custom domain. `[*]` allows any HTTP/HTTPS origin and should only be used intentionally. |
+| `require_proxy_headers` | bool | `false` | When `true`, loopback connections without proxy headers (X-Forwarded-For, X-Real-IP) are rejected. Enable only when running behind a reverse proxy that injects these headers. (Old name: `trust_proxy_headers`, still accepted as alias.) |
+| `tmux_enabled` | bool | `true` | Enable tmux-backed multi-window terminal. Only effective when the `tmux` binary is available on the system. |
+| `max_windows` | u32 | `16` | Maximum number of tmux windows that may exist simultaneously. Guards against resource exhaustion. |
+| `tmux_binary_path` | string or null | `null` | Explicit path to the `tmux` binary. If `null`, resolved via `PATH`. |
+
+Notes:
+
+- Missing `Origin` is allowed for non-browser clients.
+- `allow_remote = true` does not disable auth; if API keys or dashboard credentials are configured, remote clients still need valid auth.
+- Prefer explicit HTTPS origins over `"*"` for browser access.
+- The `ws_terminal_messages_per_minute` rate limit (default: 3600) in the `[rate_limit]` section controls per-connection WebSocket message throughput for interactive terminal sessions.
+
+---
+
 ### `[vertex_ai]`
 
 Configures Google Cloud Vertex AI as an LLM provider.
@@ -366,4 +400,3 @@ Complete table of all environment variables referenced by the configuration. Non
 | `LINKEDIN_ACCESS_TOKEN` | LinkedIn | LinkedIn OAuth2 access token. |
 
 ---
-

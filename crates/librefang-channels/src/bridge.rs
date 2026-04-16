@@ -195,6 +195,19 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
+    /// Lightweight LLM classification: should the bot reply to this group message?
+    ///
+    /// Returns `true` if the bot should reply, `false` to stay silent.
+    /// Default implementation always returns `true` (fail-open).
+    async fn classify_reply_intent(
+        &self,
+        _message_text: &str,
+        _sender_name: &str,
+        _model: Option<&str>,
+    ) -> bool {
+        true
+    }
+
     /// Record a delivery result for tracking (optional — default no-op).
     ///
     /// `thread_id` preserves Telegram forum-topic context so cron/workflow
@@ -1637,9 +1650,15 @@ fn build_sender_context(
         ),
         None => (AutoRouteStrategy::Off, 0, 0, 0, 0),
     };
+    let chat_id = if message.sender.platform_id.is_empty() {
+        None
+    } else {
+        Some(message.sender.platform_id.clone())
+    };
     SenderContext {
         channel: channel_type_str(&message.channel).to_string(),
         user_id: sender_user_id(message).to_string(),
+        chat_id,
         display_name: message.sender.display_name.clone(),
         is_group: message.is_group,
         was_mentioned: message
@@ -2010,6 +2029,22 @@ async fn dispatch_message(
         if message.is_group {
             if !should_process_group_message(ct_str, ov, message) {
                 return;
+            }
+            // Reply-intent precheck: lightweight LLM classification for group
+            // messages when group_policy is "all" and precheck is enabled.
+            // Skipped for mentions and commands (already filtered above).
+            if ov.reply_precheck && matches!(ov.group_policy, GroupPolicy::All) {
+                let text = text_content(message).unwrap_or("");
+                let sender = &message.sender.display_name;
+                let model = ov.reply_precheck_model.as_deref();
+                if !handle.classify_reply_intent(text, sender, model).await {
+                    debug!(
+                        channel = ct_str,
+                        sender = %sender,
+                        "Reply precheck: NO_REPLY — staying silent"
+                    );
+                    return;
+                }
             }
         } else {
             // DM

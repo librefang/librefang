@@ -20,6 +20,7 @@ export interface StatusResponse {
   home_dir?: string;
   log_level?: string;
   network_enabled?: boolean;
+  terminal_enabled?: boolean;
   session_count?: number;
   config_exists?: boolean;
 }
@@ -44,9 +45,13 @@ export interface ProviderItem {
   latency_ms?: number;
   api_key_env?: string;
   base_url?: string;
+  proxy_url?: string;
   key_required?: boolean;
   health?: string;
   media_capabilities?: string[];
+  is_custom?: boolean;
+  error_message?: string;
+  last_tested?: string;
 }
 
 export interface MediaProvider {
@@ -172,6 +177,7 @@ export interface DashboardSnapshot {
   agents: AgentItem[];
   skillCount: number;
   workflowCount: number;
+  webSearchAvailable: boolean;
 }
 
 export interface AgentIdentity {
@@ -191,10 +197,12 @@ export interface AgentItem {
   model_name?: string;
   model_tier?: string;
   auth_status?: string;
+  supports_thinking?: boolean;
   ready?: boolean;
   profile?: string;
   identity?: AgentIdentity;
   is_hand?: boolean;
+  web_search_augmentation?: "off" | "auto" | "always";
 }
 
 export interface PaginatedResponse<T> {
@@ -539,9 +547,13 @@ export interface HandDefinitionItem {
 export interface HandInstanceItem {
   instance_id: string;
   hand_id?: string;
+  hand_name?: string;
+  hand_icon?: string;
   status?: string;
   agent_id?: string;
   agent_name?: string;
+  agent_ids?: Record<string, string>;
+  coordinator_role?: string;
   activated_at?: string;
   updated_at?: string;
 }
@@ -582,7 +594,7 @@ export function getStoredApiKey(): string {
   return localStorage.getItem("librefang-api-key") || "";
 }
 
-function authHeader(): HeadersInit {
+export function authHeader(): HeadersInit {
   const lang = localStorage.getItem("i18nextLng") || navigator.language || "en";
   const token = getStoredApiKey();
   const headers: HeadersInit = { "Accept-Language": lang };
@@ -737,6 +749,7 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     channels: ChannelItem[];
     skillCount: number;
     workflowCount: number;
+    webSearchAvailable: boolean;
   }>("/api/dashboard/snapshot");
 
   return {
@@ -747,6 +760,7 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     channels: snap.channels ?? [],
     skillCount: snap.skillCount ?? 0,
     workflowCount: snap.workflowCount ?? 0,
+    webSearchAvailable: snap.webSearchAvailable ?? false,
   };
 }
 
@@ -769,19 +783,30 @@ export interface AgentDetail {
   mode?: string;
   thinking?: { budget_tokens?: number; stream_thinking?: boolean };
   is_hand?: boolean;
+  web_search_augmentation?: "off" | "auto" | "always";
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
-export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string; temperature?: number }): Promise<ApiActionResponse> {
+export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string; temperature?: number; web_search_augmentation?: "off" | "auto" | "always" }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 
-export async function listAgents(): Promise<AgentItem[]> {
+export async function listAgents(
+  opts: { includeHands?: boolean } = {},
+): Promise<AgentItem[]> {
+  const params = new URLSearchParams({
+    limit: "200",
+    sort: "last_active",
+    order: "desc",
+  });
+  if (opts.includeHands) {
+    params.set("include_hands", "true");
+  }
   const data = await get<PaginatedResponse<AgentItem>>(
-    "/api/agents?limit=200&sort=last_active&order=desc"
+    `/api/agents?${params.toString()}`,
   );
   return data.items ?? [];
 }
@@ -865,6 +890,8 @@ export interface ModelItem {
   supports_tools?: boolean;
   supports_vision?: boolean;
   supports_streaming?: boolean;
+  supports_thinking?: boolean;
+  aliases?: string[];
   available?: boolean;
 }
 
@@ -896,6 +923,33 @@ export async function removeCustomModel(modelId: string): Promise<ApiActionRespo
   return del<ApiActionResponse>(`/api/models/custom/${encodeURIComponent(modelId)}`);
 }
 
+// ── Per-model overrides ─────────────────────────────────────────
+
+export interface ModelOverrides {
+  model_type?: "chat" | "speech" | "embedding";
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+  frequency_penalty?: number;
+  presence_penalty?: number;
+  reasoning_effort?: string;
+  use_max_completion_tokens?: boolean;
+  no_system_role?: boolean;
+  force_max_tokens?: boolean;
+}
+
+export async function getModelOverrides(modelKey: string): Promise<ModelOverrides> {
+  return get<ModelOverrides>(`/api/models/overrides/${encodeURIComponent(modelKey)}`);
+}
+
+export async function updateModelOverrides(modelKey: string, overrides: ModelOverrides): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/models/overrides/${encodeURIComponent(modelKey)}`, overrides);
+}
+
+export async function deleteModelOverrides(modelKey: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/models/overrides/${encodeURIComponent(modelKey)}`);
+}
+
 export async function setProviderKey(providerId: string, key: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`, { key });
 }
@@ -904,12 +958,14 @@ export async function deleteProviderKey(providerId: string): Promise<ApiActionRe
   return del<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`);
 }
 
-export async function setProviderUrl(providerId: string, baseUrl: string): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, { base_url: baseUrl });
+export async function setProviderUrl(providerId: string, baseUrl: string, proxyUrl?: string): Promise<ApiActionResponse> {
+  const body: Record<string, string> = { base_url: baseUrl };
+  if (proxyUrl !== undefined) body.proxy_url = proxyUrl;
+  return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, body);
 }
 
-export async function setDefaultProvider(providerId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/default`, {});
+export async function setDefaultProvider(providerId: string, model?: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/default`, model ? { model } : {});
 }
 
 // ── Media generation API ──────────────────────────────────────────────
@@ -934,6 +990,20 @@ export interface SpeechResult {
 
 export async function synthesizeSpeech(req: { text: string; provider?: string; model?: string; voice?: string; format?: string; language?: string; speed?: number }): Promise<SpeechResult> {
   return post<SpeechResult>("/api/media/speech", req);
+}
+
+export async function transcribeAudio(audioBlob: Blob): Promise<{ text: string; provider: string; model: string }> {
+  const response = await fetch("/api/media/transcribe", {
+    method: "POST",
+    headers: buildHeaders({
+      "Content-Type": audioBlob.type || "audio/webm",
+    }),
+    body: audioBlob,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as { text: string; provider: string; model: string };
 }
 
 export async function submitVideo(req: { prompt: string; provider?: string; model?: string }): Promise<MediaVideoSubmitResult> {
@@ -1339,6 +1409,10 @@ export async function getVersionInfo(): Promise<VersionResponse> {
   return get<VersionResponse>("/api/version");
 }
 
+export async function getStatus(): Promise<StatusResponse> {
+  return get<StatusResponse>("/api/status");
+}
+
 export async function getQueueStatus(): Promise<QueueStatusResponse> {
   return get<QueueStatusResponse>("/api/queue/status");
 }
@@ -1456,6 +1530,28 @@ export async function getSecurityStatus(): Promise<SecurityStatusResponse> {
 
 export async function getFullConfig(): Promise<Record<string, unknown>> {
   return get<Record<string, unknown>>("/api/config");
+}
+
+export interface ConfigFieldSchema {
+  type?: string;
+  options?: (string | { id: string; name: string; provider: string } | { value: string; label: string })[];
+  min?: number;
+  max?: number;
+  step?: number;
+}
+
+export interface ConfigSectionSchema {
+  fields: Record<string, string | ConfigFieldSchema>;
+  root_level?: boolean;
+  hot_reloadable?: boolean;
+}
+
+export async function getConfigSchema(): Promise<{ sections: Record<string, ConfigSectionSchema> }> {
+  return get<{ sections: Record<string, ConfigSectionSchema> }>("/api/config/schema");
+}
+
+export async function setConfigValue(path: string, value: unknown): Promise<{ status: string; restart_required?: boolean }> {
+  return post<{ status: string; restart_required?: boolean }>("/api/config/set", { path, value });
 }
 
 export async function listBackups(): Promise<{ backups?: BackupItem[]; total?: number }> {
@@ -2126,12 +2222,14 @@ export async function getDashboardUsername(): Promise<string> {
   }
 }
 
-export async function dashboardLogin(username: string, password: string): Promise<{ ok: boolean; token?: string; error?: string }> {
+export async function dashboardLogin(username: string, password: string, totpCode?: string): Promise<{ ok: boolean; token?: string; error?: string; requires_totp?: boolean }> {
   try {
+    const body: Record<string, string> = { username, password };
+    if (totpCode) body.totp_code = totpCode;
     const resp = await fetch("/api/auth/dashboard-login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(body),
     });
     const data = await resp.json();
     if (data.ok && data.token) {
@@ -2417,6 +2515,46 @@ export interface McpServersResponse {
 
 export async function listMcpServers(): Promise<McpServersResponse> {
   return get<McpServersResponse>("/api/mcp/servers");
+}
+
+// ── Registry Integrations (available MCP server templates) ────────
+
+export interface IntegrationRequiredEnv {
+  name: string;
+  label: string;
+  help?: string;
+  is_secret?: boolean;
+  get_url?: string;
+}
+
+export interface IntegrationTransport {
+  type: "stdio" | "sse" | "http";
+  command?: string;
+  args?: string[];
+  url?: string;
+}
+
+export interface IntegrationTemplate {
+  id: string;
+  name: string;
+  description: string;
+  icon?: string;
+  category?: string;
+  installed: boolean;
+  tags?: string[];
+  transport?: IntegrationTransport;
+  required_env?: IntegrationRequiredEnv[];
+  has_oauth?: boolean;
+  setup_instructions?: string;
+}
+
+export interface AvailableIntegrationsResponse {
+  integrations: IntegrationTemplate[];
+  count: number;
+}
+
+export async function listAvailableIntegrations(): Promise<AvailableIntegrationsResponse> {
+  return get<AvailableIntegrationsResponse>("/api/integrations/available");
 }
 
 export async function addMcpServer(server: Omit<McpServerConfigured, "name"> & { name: string }): Promise<ApiActionResponse> {

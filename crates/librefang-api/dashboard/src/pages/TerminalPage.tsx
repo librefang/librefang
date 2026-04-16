@@ -4,14 +4,19 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { Terminal as TerminalIcon } from "lucide-react";
-import { buildAuthenticatedWebSocketUrl } from "../api";
+import { useUIStore } from "../lib/store";
+import { buildAuthenticatedWebSocketUrl, authHeader } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
+import { EmptyState } from "../components/ui/EmptyState";
+import { TerminalTabs } from "../components/TerminalTabs";
 
 interface ServerMessage {
-  type: "started" | "output" | "exit" | "error";
+  type: "started" | "output" | "exit" | "error" | "active_window";
   shell?: string;
   pid?: number;
   data?: string;
@@ -19,13 +24,33 @@ interface ServerMessage {
   code?: number;
   signal?: string;
   content?: string;
+  isRoot?: boolean;
+  window_id?: string;
+}
+
+interface TerminalHealth {
+  ok: boolean;
+  tmux: boolean;
+  max_windows: number;
+  os: string;
 }
 
 const RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
+function getTmuxInstallCommand(os: string): string {
+  switch (os) {
+    case "macos":
+      return "brew install tmux";
+    default:
+      return "sudo apt-get update && sudo apt-get install -y tmux || sudo dnf install -y tmux || sudo yum install -y tmux || sudo pacman -S --noconfirm tmux || sudo apk add tmux";
+  }
+}
+
 export function TerminalPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -38,6 +63,34 @@ export function TerminalPage() {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isRoot, setIsRoot] = useState(false);
+  const [tmuxAvailable, setTmuxAvailable] = useState(false);
+  const [maxWindows, setMaxWindows] = useState(16);
+  const [activeWindowId, setActiveWindowId] = useState<string | null>(null);
+  const [shellName, setShellName] = useState<string>("sh");
+  const [serverOs, setServerOs] = useState<string>("linux");
+  const terminalEnabled = useUIStore((s) => s.terminalEnabled);
+
+  useEffect(() => {
+    if (terminalEnabled === false) {
+      void navigate({ to: "/overview" });
+    }
+  }, [terminalEnabled, navigate]);
+
+  // Fetch terminal health for tmux feature flag.
+  useEffect(() => {
+    if (terminalEnabled !== true) return;
+    fetch("/api/terminal/health", { headers: authHeader() })
+      .then((r) => r.json())
+      .then((data: TerminalHealth) => {
+        setTmuxAvailable(data.tmux ?? false);
+        setMaxWindows(data.max_windows ?? 16);
+        if (data.os) setServerOs(data.os);
+      })
+      .catch(() => {
+        setTmuxAvailable(false);
+      });
+  }, [terminalEnabled]);
 
   const sendCloseMessage = useCallback((ws: WebSocket | null) => {
     if (ws?.readyState === WebSocket.OPEN) {
@@ -46,12 +99,17 @@ export function TerminalPage() {
   }, []);
 
   const connect = useCallback(() => {
+    if (terminalEnabled !== true) {
+      return;
+    }
+
     if (wsRef.current) {
       wsRef.current.close();
     }
 
     setError(null);
     setIsConnecting(true);
+    setIsRoot(false);
     const url = new URL(buildAuthenticatedWebSocketUrl("/api/terminal/ws"));
     if (terminalRef.current) {
       url.searchParams.set("cols", String(terminalRef.current.cols));
@@ -81,6 +139,8 @@ export function TerminalPage() {
 
       switch (msg.type) {
         case "started":
+          setIsRoot(msg.isRoot ?? false);
+          setShellName(msg.shell ? msg.shell.split("/").pop() || "sh" : "sh");
           terminalRef.current?.write(
             t("terminal.started", { shell: msg.shell, pid: msg.pid }) + "\r\n"
           );
@@ -108,6 +168,12 @@ export function TerminalPage() {
           setError(typeof msg.content === "string" && msg.content
             ? msg.content
             : t("terminal.error_unknown"));
+          break;
+        case "active_window":
+          if (msg.window_id) {
+            setActiveWindowId(msg.window_id);
+            queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
+          }
           break;
       }
     };
@@ -149,7 +215,7 @@ export function TerminalPage() {
         }
       }, delay);
     };
-  }, [t]);
+  }, [t, terminalEnabled, queryClient]);
 
   connectRef.current = connect;
 
@@ -169,7 +235,22 @@ export function TerminalPage() {
     setIsConnecting(false);
   }, [sendCloseMessage]);
 
+  const handleInstallTmux = useCallback(() => {
+    const cmd = getTmuxInstallCommand(serverOs);
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "input", data: cmd }));
+    }
+  }, [serverOs]);
+
+  const handleSwitchWindow = useCallback((id: string) => {
+    setActiveWindowId(id);
+  }, []);
+
   useEffect(() => {
+    if (terminalEnabled !== true) {
+      return;
+    }
+
     if (!containerRef.current) return;
 
     const term = new Terminal({
@@ -223,7 +304,25 @@ export function TerminalPage() {
       setIsConnecting(false);
       term.dispose();
     };
-  }, [sendCloseMessage]);
+  }, [sendCloseMessage, terminalEnabled]);
+
+  if (terminalEnabled === null) {
+    return (
+      <div className="flex flex-col h-full">
+        <PageHeader
+          badge={t("terminal.badge")}
+          title={t("nav.terminal")}
+          subtitle={t("common.loading")}
+          icon={<TerminalIcon className="h-4 w-4" />}
+        />
+        <div className="flex-1 p-4">
+          <Card className="h-full flex items-center justify-center">
+            <EmptyState title={t("common.loading")} icon={<TerminalIcon className="h-6 w-6" />} />
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -240,6 +339,11 @@ export function TerminalPage() {
         icon={<TerminalIcon className="h-4 w-4" />}
         actions={
           <>
+            {!tmuxAvailable && isConnected && (
+              <Button onClick={handleInstallTmux} variant="secondary">
+                {t("terminal.install_tmux")}
+              </Button>
+            )}
             <Button onClick={connect} disabled={isConnected || isConnecting}>
               {isConnected
                 ? t("terminal.subtitle_connected")
@@ -255,10 +359,25 @@ export function TerminalPage() {
       />
       <div className="flex-1 p-4">
         <Card className="h-full">
-          <div className="h-full min-h-[400px] flex flex-col">
+          {isRoot && (
+            <div className="bg-red-500/20 border border-red-500/50 text-red-300 px-4 py-2 rounded-lg text-sm mb-2">
+              {t("terminal.root_warning")}
+            </div>
+          )}
+          <TerminalTabs
+            ws={wsRef.current}
+            tmuxAvailable={tmuxAvailable}
+            maxWindows={maxWindows}
+            activeWindowId={activeWindowId}
+            onSwitchWindow={handleSwitchWindow}
+            terminalRef={terminalRef}
+            fitAddonRef={fitAddonRef}
+            shellName={shellName}
+          />
+          <div className="h-full flex flex-col overflow-hidden">
             <div
               ref={containerRef}
-              className="flex-1 bg-[#1a1a2e] rounded-b-lg p-2 overflow-hidden h-full lg:h-[70%]"
+              className="flex-1 bg-[#1a1a2e] rounded-b-lg p-2 overflow-hidden"
             />
           </div>
         </Card>

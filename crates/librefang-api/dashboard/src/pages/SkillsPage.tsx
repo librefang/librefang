@@ -36,16 +36,16 @@ const USE_SKILLHUB = (() => {
 
 // Categories with icons and search keywords
 const categories = [
-  { id: "coding", name: "Coding", icon: Code, keyword: "python javascript code" },
-  { id: "git", name: "Git", icon: GitBranch, keyword: "git github" },
-  { id: "web", name: "Web", icon: Globe, keyword: "web frontend html css" },
-  { id: "devops", name: "DevOps", icon: Cloud, keyword: "devops cloud aws docker kubernetes" },
-  { id: "browser", name: "Browser", icon: Monitor, keyword: "browser automation" },
-  { id: "ai", name: "AI", icon: Bot, keyword: "ai llm gpt openai" },
-  { id: "data", name: "Data", icon: Database, keyword: "data analytics python" },
-  { id: "productivity", name: "Productivity", icon: Briefcase, keyword: "productivity" },
-  { id: "security", name: "Security", icon: Shield, keyword: "security" },
-  { id: "cli", name: "CLI", icon: Terminal, keyword: "cli bash shell" },
+  { id: "coding", nameKey: "skills.cat_coding", icon: Code, keyword: "python javascript code" },
+  { id: "git", nameKey: "skills.cat_git", icon: GitBranch, keyword: "git github" },
+  { id: "web", nameKey: "skills.cat_web", icon: Globe, keyword: "web frontend html css" },
+  { id: "devops", nameKey: "skills.cat_devops", icon: Cloud, keyword: "devops cloud aws docker kubernetes" },
+  { id: "browser", nameKey: "skills.cat_browser", icon: Monitor, keyword: "browser automation" },
+  { id: "ai", nameKey: "skills.cat_ai", icon: Bot, keyword: "ai llm gpt openai" },
+  { id: "data", nameKey: "skills.cat_data", icon: Database, keyword: "data analytics python" },
+  { id: "productivity", nameKey: "skills.cat_productivity", icon: Briefcase, keyword: "productivity" },
+  { id: "security", nameKey: "skills.cat_security", icon: Shield, keyword: "security" },
+  { id: "cli", nameKey: "skills.cat_cli", icon: Terminal, keyword: "cli bash shell" },
 ];
 
 function getCategoryIcon(category: string) {
@@ -676,7 +676,7 @@ export function SkillsPage() {
               }`}
             >
               {getCategoryIcon(cat.id)}
-              {cat.name}
+              {t(cat.nameKey)}
             </button>
           ))}
         </div>
@@ -687,7 +687,7 @@ export function SkillsPage() {
         <Input
           value={search}
           onChange={(e) => { setSearch(e.target.value); setSelectedCategory(null); }}
-          placeholder={selectedCategory ? categories.find(c => c.id === selectedCategory)?.name + "..." : t("skills.search_placeholder")}
+          placeholder={selectedCategory ? t(categories.find(c => c.id === selectedCategory)?.nameKey ?? "") + "..." : t("skills.search_placeholder")}
           leftIcon={<Search className="w-4 h-4" />}
           rightIcon={search ? (
             <button onClick={() => setSearch("")} className="hover:text-text-main" aria-label={t("common.clear_search", { defaultValue: "Clear search" })}>
@@ -739,7 +739,7 @@ export function SkillsPage() {
         ) : filteredMarketplace.length === 0 ? (
           <EmptyState title={t("skills.no_results")} description={search ? t("skills.try_different_search", { defaultValue: "Try a different search term." }) : t("skills.browse_unavailable", { defaultValue: "Browse is temporarily unavailable. Try searching above." })} icon={<Search className="h-6 w-6" />} />
         ) : (
-          <div className="overflow-y-auto max-h-[600px] pr-1">
+          <div>
             <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
               {filteredMarketplace.map(s => (
                 <MarketplaceSkillCard key={s.slug} skill={s} pendingId={installingId}
@@ -762,7 +762,7 @@ export function SkillsPage() {
         ) : filteredSkillhub.length === 0 ? (
           <EmptyState title={t("skills.no_results")} icon={<Search className="h-6 w-6" />} />
         ) : (
-          <div className="overflow-y-auto max-h-[600px] pr-1">
+          <div>
             <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
               {filteredSkillhub.map(s => (
                 <MarketplaceSkillCard key={s.slug} skill={s} pendingId={installingId}
@@ -780,7 +780,7 @@ export function SkillsPage() {
         ) : filteredFanghub.length === 0 ? (
           <EmptyState title={t("skills.no_results")} icon={<Zap className="h-6 w-6" />} />
         ) : (
-          <div className="overflow-y-auto max-h-[600px] pr-1">
+          <div>
           <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
             {filteredFanghub.map((skill: FangHubSkill) => (
               <FangHubSkillCard

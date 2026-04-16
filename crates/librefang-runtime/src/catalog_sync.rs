@@ -126,6 +126,21 @@ pub async fn sync_catalog_to(
         }
     }
 
+    // Remove cached provider files that no longer exist in the upstream repo
+    if repo_providers.is_dir() {
+        if let Ok(cached_entries) = std::fs::read_dir(&providers_dir) {
+            for entry in cached_entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "toml")
+                    && !repo_providers.join(entry.file_name()).exists()
+                    && std::fs::remove_file(&path).is_ok()
+                {
+                    tracing::debug!(file = %path.display(), "removed stale catalog provider");
+                }
+            }
+        }
+    }
+
     // Copy aliases.toml if present
     let aliases_src = repo_dir.join("aliases.toml");
     if aliases_src.is_file() {
@@ -176,6 +191,7 @@ async fn sync_catalog_http(
 
     let mut downloaded = 0usize;
     let mut models_count = 0usize;
+    let mut upstream_provider_files = std::collections::HashSet::new();
 
     if let Some(items) = tree["tree"].as_array() {
         for item in items {
@@ -184,6 +200,11 @@ async fn sync_catalog_http(
                 && ((path.starts_with("providers/") && path.ends_with(".toml"))
                     || path == "aliases.toml")
             {
+                if path.starts_with("providers/") {
+                    if let Some(fname) = path.strip_prefix("providers/") {
+                        upstream_provider_files.insert(fname.to_string());
+                    }
+                }
                 let raw_url = if mirror.is_empty() {
                     format!("https://raw.githubusercontent.com/{CATALOG_REPO}/main/{path}")
                 } else {
@@ -210,6 +231,24 @@ async fn sync_catalog_http(
                     }
                     _ => {
                         tracing::warn!("Failed to download catalog file: {path}");
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove cached provider files that no longer exist upstream
+    let providers_dir = cache_dir.join("providers");
+    if !upstream_provider_files.is_empty() {
+        if let Ok(cached_entries) = std::fs::read_dir(&providers_dir) {
+            for entry in cached_entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.ends_with(".toml")
+                        && !upstream_provider_files.contains(name)
+                        && std::fs::remove_file(&path).is_ok()
+                    {
+                        tracing::debug!(file = %path.display(), "removed stale catalog provider");
                     }
                 }
             }

@@ -171,6 +171,17 @@ pub struct McpServerConfig {
     /// Optional OAuth config from config.toml (discovery fallback).
     #[serde(default)]
     pub oauth_config: Option<librefang_types::config::McpOAuthConfig>,
+    /// Enable outbound taint scanning for this MCP server (default: true).
+    ///
+    /// When `false`, the credential/PII heuristic is skipped for arguments
+    /// sent to this server. This is an escape hatch for trusted local servers
+    /// (browser automation, database adapters, …) whose tool results contain
+    /// opaque session handles that would otherwise trip the credential heuristic.
+    ///
+    /// Key-name blocking (`Authorization`, `secret`, …) remains active even
+    /// when this is `false` — only the content-based heuristic is disabled.
+    #[serde(default = "default_taint_scanning")]
+    pub taint_scanning: bool,
 }
 
 impl std::fmt::Debug for McpServerConfig {
@@ -186,6 +197,7 @@ impl std::fmt::Debug for McpServerConfig {
                 &self.oauth_provider.as_ref().map(|_| "..."),
             )
             .field("oauth_config", &self.oauth_config)
+            .field("taint_scanning", &self.taint_scanning)
             .finish()
     }
 }
@@ -200,12 +212,17 @@ impl Clone for McpServerConfig {
             headers: self.headers.clone(),
             oauth_provider: self.oauth_provider.clone(),
             oauth_config: self.oauth_config.clone(),
+            taint_scanning: self.taint_scanning,
         }
     }
 }
 
 fn default_timeout() -> u64 {
     60
+}
+
+fn default_taint_scanning() -> bool {
+    true
 }
 
 /// Transport type for MCP server connections.
@@ -502,7 +519,9 @@ impl McpConnection {
             command.to_string()
         };
 
-        let args_owned: Vec<String> = args.to_vec();
+        // Expand environment variable references ($VAR, ${VAR}) in args so
+        // templates can use e.g. "$HOME" without wrapping in `sh -c`.
+        let args_owned: Vec<String> = args.iter().map(|a| expand_env_vars(a)).collect();
         let env_owned: Vec<String> = extra_env.to_vec();
 
         let transport = TokioChildProcess::new(
@@ -982,11 +1001,13 @@ impl McpConnection {
         // `librefang_types::taint::check_outbound_text_violation` for
         // exactly which patterns trip it) — not a full information-
         // flow tracker. Copy-pasted obfuscation still bypasses it.
-        if let Some(violation) = scan_mcp_arguments_for_taint(arguments) {
-            // `violation` is already a redacted rule description from
-            // the scanner — do NOT concatenate the raw payload or the
-            // offending value into the error surface.
-            return Err(violation);
+        if self.config.taint_scanning {
+            if let Some(violation) = scan_mcp_arguments_for_taint(arguments) {
+                // `violation` is already a redacted rule description from
+                // the scanner — do NOT concatenate the raw payload or the
+                // offending value into the error surface.
+                return Err(violation);
+            }
         }
 
         // Resolve to an owned String immediately so the borrow of self.original_names
@@ -1020,11 +1041,10 @@ impl McpConnection {
                 };
 
                 let mut params = rmcp::model::CallToolRequestParams::new(raw_name.clone());
-                if let Some(obj) = arguments.as_object() {
-                    if !obj.is_empty() {
-                        params.arguments = Some(obj.clone());
-                    }
-                }
+                // Always send an object — MCP spec requires `arguments` to
+                // be an object, and some servers (e.g. filesystem) reject
+                // `undefined`/`null` even for zero-parameter tools.
+                params.arguments = Some(arguments.as_object().cloned().unwrap_or_default());
 
                 let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
                 let result: rmcp::model::CallToolResult =
@@ -1462,6 +1482,57 @@ pub fn normalize_name(name: &str) -> String {
     name.to_lowercase().replace('-', "_")
 }
 
+/// Expand `$VAR` and `${VAR}` references in a string using the process
+/// environment. Unknown variables are left as-is. This allows MCP server
+/// templates to reference `$HOME`, `$USER`, etc. without requiring a shell
+/// wrapper (`sh -c`), which the security check blocks.
+fn expand_env_vars(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            let braced = chars.peek() == Some(&'{');
+            if braced {
+                chars.next(); // consume '{'
+            }
+            let mut var_name = String::new();
+            while let Some(&c) = chars.peek() {
+                if braced {
+                    if c == '}' {
+                        chars.next();
+                        break;
+                    }
+                } else if !c.is_ascii_alphanumeric() && c != '_' {
+                    break;
+                }
+                var_name.push(c);
+                chars.next();
+            }
+            if var_name.is_empty() {
+                result.push('$');
+                if braced {
+                    result.push('{');
+                }
+            } else if let Ok(val) = std::env::var(&var_name) {
+                result.push_str(&val);
+            } else {
+                // Unknown var — keep original text
+                result.push('$');
+                if braced {
+                    result.push('{');
+                }
+                result.push_str(&var_name);
+                if braced {
+                    result.push('}');
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1577,6 +1648,33 @@ mod tests {
             "rate": 1.5,
         });
         assert!(scan_mcp_arguments_for_taint(&args).is_none());
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_allows_date_prefixed_session_handle() {
+        // Regression for issue #2652: Camofox MCP returns tabIds of the
+        // form `tab-YYYY-MM-DD-<uuid-segments>`. These must pass the
+        // taint scanner so the LLM can pass them to subsequent tool calls.
+        let args = serde_json::json!({
+            "tabId": "tab-2026-04-16-abc123-def456-ghi789",
+        });
+        assert!(
+            scan_mcp_arguments_for_taint(&args).is_none(),
+            "date-prefixed tabId must not be blocked"
+        );
+    }
+
+    #[test]
+    fn test_scan_mcp_arguments_still_blocks_real_token_in_tab_shaped_key() {
+        // A credential-shaped VALUE under a session-like KEY must still be blocked.
+        // Key-name allowlisting must NOT bypass value-content checks.
+        let args = serde_json::json!({
+            "tabId": "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890",
+        });
+        assert!(
+            scan_mcp_arguments_for_taint(&args).is_some(),
+            "real credential under session-like key must still be blocked"
+        );
     }
 
     #[test]
@@ -1729,6 +1827,7 @@ mod tests {
             headers: vec![],
             oauth_provider: None,
             oauth_config: None,
+            taint_scanning: true,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1758,6 +1857,7 @@ mod tests {
             headers: vec![],
             oauth_provider: None,
             oauth_config: None,
+            taint_scanning: true,
         };
         let json = serde_json::to_string(&sse_config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1791,6 +1891,7 @@ mod tests {
             headers: vec![],
             oauth_provider: None,
             oauth_config: None,
+            taint_scanning: true,
         };
         let json = serde_json::to_string(&http_compat_config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1819,6 +1920,7 @@ mod tests {
             headers: vec!["Authorization: Bearer test-token-456".to_string()],
             oauth_provider: None,
             oauth_config: None,
+            taint_scanning: true,
         };
         let json = serde_json::to_string(&http_config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1863,6 +1965,7 @@ mod tests {
                 headers: vec![],
                 oauth_provider: None,
                 oauth_config: None,
+                taint_scanning: true,
             },
             tools: Vec::new(),
             original_names: HashMap::new(),
@@ -2028,6 +2131,7 @@ mod tests {
             headers: vec![],
             oauth_provider: None,
             oauth_config: None,
+            taint_scanning: true,
         })
         .await
         .unwrap();

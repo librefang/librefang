@@ -67,6 +67,12 @@ pub enum TriggerPattern {
     All,
     /// Match custom events by content substring.
     ContentMatch { substring: String },
+    /// Match when a task is posted to the Task Board.
+    TaskPosted,
+    /// Match when a task is claimed from the Task Board.
+    TaskClaimed,
+    /// Match when a task is completed on the Task Board.
+    TaskCompleted,
 }
 
 /// A registered trigger definition.
@@ -524,6 +530,18 @@ fn matches_pattern(pattern: &TriggerPattern, event: &Event, description: &str) -
         TriggerPattern::ContentMatch { substring } => description
             .to_lowercase()
             .contains(&substring.to_lowercase()),
+        TriggerPattern::TaskPosted => matches!(
+            event.payload,
+            EventPayload::System(SystemEvent::TaskPosted { .. })
+        ),
+        TriggerPattern::TaskClaimed => matches!(
+            event.payload,
+            EventPayload::System(SystemEvent::TaskClaimed { .. })
+        ),
+        TriggerPattern::TaskCompleted => matches!(
+            event.payload,
+            EventPayload::System(SystemEvent::TaskCompleted { .. })
+        ),
     }
 }
 
@@ -610,6 +628,18 @@ fn describe_event(event: &Event) -> String {
                 format!(
                     "Health check failed: agent {agent_id}, unresponsive for {unresponsive_secs}s"
                 )
+            }
+            SystemEvent::TaskPosted { task_id, title, .. } => {
+                format!("Task posted: {task_id} \"{title}\"")
+            }
+            SystemEvent::TaskClaimed {
+                task_id,
+                claimed_by,
+            } => {
+                format!("Task claimed: {task_id} by {claimed_by}")
+            }
+            SystemEvent::TaskCompleted { task_id, result } => {
+                format!("Task completed: {task_id} result={result}")
             }
         },
         EventPayload::ApprovalRequested(ar) => {

@@ -17,12 +17,14 @@ librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
 librefang-migrate = { path = "../librefang-migrate" }
 librefang-telemetry = { path = "../librefang-telemetry" }
+anyhow = { workspace = true }
 dashmap = { workspace = true }
 portable-pty = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+toml_edit = "0.25"
 tracing = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
@@ -139,6 +141,9 @@ mini = [
     "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
     "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
 ]
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "0.38", features = ["process"] }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
