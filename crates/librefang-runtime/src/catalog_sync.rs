@@ -133,10 +133,9 @@ pub async fn sync_catalog_to(
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "toml")
                     && !repo_providers.join(entry.file_name()).exists()
+                    && std::fs::remove_file(&path).is_ok()
                 {
-                    if std::fs::remove_file(&path).is_ok() {
-                        tracing::debug!(file = %path.display(), "removed stale catalog provider");
-                    }
+                    tracing::debug!(file = %path.display(), "removed stale catalog provider");
                 }
             }
         }
@@ -245,10 +244,11 @@ async fn sync_catalog_http(
             for entry in cached_entries.flatten() {
                 let path = entry.path();
                 if let Some(name) = entry.file_name().to_str() {
-                    if name.ends_with(".toml") && !upstream_provider_files.contains(name) {
-                        if std::fs::remove_file(&path).is_ok() {
-                            tracing::debug!(file = %path.display(), "removed stale catalog provider");
-                        }
+                    if name.ends_with(".toml")
+                        && !upstream_provider_files.contains(name)
+                        && std::fs::remove_file(&path).is_ok()
+                    {
+                        tracing::debug!(file = %path.display(), "removed stale catalog provider");
                     }
                 }
             }

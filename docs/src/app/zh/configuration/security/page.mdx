@@ -46,6 +46,9 @@ session_ttl_secs = 86400
 enabled = true
 allow_remote = false
 allowed_origins = ["https://dashboard.example.com"]
+tmux_enabled = true
+max_windows = 16
+# tmux_binary_path = "/usr/local/bin/tmux"
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -55,12 +58,16 @@ allowed_origins = ["https://dashboard.example.com"]
 | `allow_unauthenticated_remote` | bool | `false` | 强制防呆开关。当 `allow_remote = true` 且未配置任何认证时，必须显式将本项设为 `true` 才能对外暴露未认证的 shell；否则即使 `allow_remote = true`，此类连接也会被拒绝。 |
 | `allowed_origins` | list of strings | `[]` | 除 localhost 之外，允许用于终端 WebSocket 连接的额外浏览器 `Origin` 列表。适用于 dashboard 部署在自定义域名下的情况。`["*"]` 表示允许任意 HTTP/HTTPS origin，应仅在明确知情的情况下使用。 |
 | `require_proxy_headers` | bool | `false` | 当为 `true` 时，没有代理头（X-Forwarded-For、X-Real-IP）的环回连接将被拒绝。仅在使用注入这些头的反向代理时启用。（旧名：`trust_proxy_headers`，仍作为别名兼容。） |
+| `tmux_enabled` | bool | `true` | 启用基于 tmux 的多窗口终端。仅当系统上存在 `tmux` 二进制文件时生效。 |
+| `max_windows` | u32 | `16` | 最大同时存在的 tmux 窗口数量。用于防止资源耗尽。 |
+| `tmux_binary_path` | string 或 null | `null` | `tmux` 二进制文件的显式路径。如果为 `null`，则通过 `PATH` 解析。 |
 
 说明：
 
 - 对于非浏览器客户端，缺少 `Origin` 头是允许的。
 - `allow_remote = true` 不会关闭认证；如果已配置 API Key 或 dashboard 凭据，远程客户端仍然需要提供有效认证。
 - 对浏览器访问，优先使用明确的 HTTPS origin，而不是 `"*"`。
+- `[rate_limit]` 中的 `ws_terminal_messages_per_minute`（默认值：3600）控制交互式终端会话的每连接 WebSocket 消息吞吐量。
 
 ---
 

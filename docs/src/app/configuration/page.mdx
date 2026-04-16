@@ -44,6 +44,7 @@ Complete reference for `config.toml`, covering every configurable field in the L
   - [\[proxy\]](#proxy)
   - [\[\[sidecar\_channels\]\]](#sidecar_channels)
   - [\[session\]](#session)
+  - [\[terminal\]](#terminal)
   - [\[queue\]](#queue)
   - [\[external\_auth\]](#external_auth)
   - [\[vertex\_ai\]](#vertex_ai)
@@ -421,6 +422,17 @@ rate_limit_per_minute = 30
 retention_days = 0
 max_sessions_per_agent = 0
 cleanup_interval_hours = 24
+
+# --- Terminal ---
+[terminal]
+enabled = true
+# allow_remote = false
+# allow_unauthenticated_remote = false
+# allowed_origins = []
+# require_proxy_headers = false
+# tmux_enabled = true
+# max_windows = 16
+# tmux_binary_path = ""
 
 # --- Queue ---
 [queue]
@@ -2347,6 +2359,40 @@ cleanup_interval_hours = 24
 | `retention_days` | u32 | `0` | Maximum age in days for idle sessions before automatic cleanup. `0` = unlimited. |
 | `max_sessions_per_agent` | u32 | `0` | Maximum number of sessions per agent (oldest pruned first). `0` = unlimited. |
 | `cleanup_interval_hours` | u32 | `24` | How often the background cleanup job runs in hours. |
+
+---
+
+### `[terminal]`
+
+Configures access control for the interactive terminal WebSocket endpoint.
+
+```toml
+[terminal]
+enabled = true
+allow_remote = false
+allowed_origins = ["https://dashboard.example.com"]
+tmux_enabled = true
+max_windows = 16
+# tmux_binary_path = "/usr/local/bin/tmux"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Master switch for the terminal feature. When `false`, the terminal WebSocket endpoint is disabled entirely. |
+| `allow_remote` | bool | `false` | Allows access from remote or proxied connections. When no auth is configured, `allow_unauthenticated_remote` must also be `true` or the connection is refused. Default behavior is local-only access without auth. |
+| `allow_unauthenticated_remote` | bool | `false` | Hard foot-gun guard. Must be explicitly set to `true` to expose an unauthenticated shell over the network when `allow_remote = true` and no auth is configured. Otherwise such connections are refused even if `allow_remote = true`. |
+| `allowed_origins` | list of strings | `[]` | Additional browser `Origin` values allowed for terminal WebSocket connections beyond localhost. Use this when the dashboard is served from a custom domain. `[*]` allows any HTTP/HTTPS origin and should only be used intentionally. |
+| `require_proxy_headers` | bool | `false` | When `true`, loopback connections without proxy headers (X-Forwarded-For, X-Real-IP) are rejected. Enable only when running behind a reverse proxy that injects these headers. (Old name: `trust_proxy_headers`, still accepted as alias.) |
+| `tmux_enabled` | bool | `true` | Enable tmux-backed multi-window terminal. Only effective when the `tmux` binary is available on the system. |
+| `max_windows` | u32 | `16` | Maximum number of tmux windows that may exist simultaneously. Guards against resource exhaustion. |
+| `tmux_binary_path` | string or null | `null` | Explicit path to the `tmux` binary. If `null`, resolved via `PATH`. |
+
+Notes:
+
+- Missing `Origin` is allowed for non-browser clients.
+- `allow_remote = true` does not disable auth; if API keys or dashboard credentials are configured, remote clients still need valid auth.
+- Prefer explicit HTTPS origins over `"*"` for browser access.
+- The `ws_terminal_messages_per_minute` rate limit (default: 3600) in the `[rate_limit]` section controls per-connection WebSocket message throughput for interactive terminal sessions.
 
 ---
 

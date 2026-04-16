@@ -22,7 +22,7 @@ const CATEGORY_SECTIONS: Record<string, string[]> = {
   memory: ["memory", "proactive_memory"],
   tools: ["web", "browser", "links", "media", "tts", "canvas"],
   channels: ["channels", "broadcast", "auto_reply"],
-  security: ["approval", "exec_policy", "vault", "oauth", "external_auth"],
+  security: ["approval", "exec_policy", "vault", "oauth", "external_auth", "terminal"],
   network: ["network", "a2a", "pairing"],
   infra: ["docker", "extensions", "session", "queue", "webhook_triggers", "vertex_ai"],
 };
@@ -338,9 +338,29 @@ export function ConfigPage({ category }: { category: string }) {
   const handleFieldChange = useCallback(
     (sectionKey: string, fieldKey: string, value: unknown, rootLevel?: boolean) => {
       const path = rootLevel ? fieldKey : `${sectionKey}.${fieldKey}`;
-      setPendingChanges((p) => ({ ...p, [path]: value }));
+      setPendingChanges((p) => {
+        const next = { ...p, [path]: value };
+        // Cascading: when provider changes in default_model, clear model if
+        // the current selection doesn't belong to the new provider.
+        if (sectionKey === "default_model" && fieldKey === "provider" && value) {
+          const modelPath = "default_model.model";
+          const currentModel = modelPath in p ? p[modelPath] : getNestedValue(configQuery.data ?? {}, "default_model", "model");
+          const modelOptions = (schemaQuery.data?.sections?.default_model?.fields?.model as ConfigFieldSchema)?.options;
+          if (modelOptions && currentModel) {
+            const modelBelongsToProvider = modelOptions.some((o: unknown) =>
+              typeof o === "object" && o !== null && "id" in o && "provider" in o
+              && (o as { id: string }).id === String(currentModel)
+              && (o as { provider: string }).provider === String(value)
+            );
+            if (!modelBelongsToProvider) {
+              next[modelPath] = null;
+            }
+          }
+        }
+        return next;
+      });
     },
-    []
+    [configQuery.data, schemaQuery.data]
   );
 
   const saveMutation = useMutation({
@@ -643,7 +663,7 @@ export function ConfigPage({ category }: { category: string }) {
               )}
               <div className="divide-y divide-border-subtle/30">
                 {fieldsToShow.map(([fieldKey, fieldSchema]) => {
-                  const { type: fieldType, options, min, max, step } = resolveFieldType(fieldSchema);
+                  const { type: fieldType, options: rawOptions, min, max, step } = resolveFieldType(fieldSchema);
                   const path = sec.root_level ? fieldKey : `${sKey}.${fieldKey}`;
                   const currentValue = path in pendingChanges
                     ? pendingChanges[path]
@@ -653,6 +673,24 @@ export function ConfigPage({ category }: { category: string }) {
                   const statusForField = saveStatus[path] ?? null;
                   const fieldDesc = t(`config.desc_${fieldKey}`, "");
                   const fieldLabel = t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey));
+
+                  // Cascading filter: when editing model in default_model,
+                  // only show models matching the selected provider.
+                  let options = rawOptions;
+                  if (sKey === "default_model" && fieldKey === "model" && rawOptions) {
+                    const providerPath = "default_model.provider";
+                    const selectedProvider = providerPath in pendingChanges
+                      ? String(pendingChanges[providerPath] ?? "")
+                      : String(getNestedValue(config, "default_model", "provider") ?? "");
+                    if (selectedProvider) {
+                      options = rawOptions.filter((o) => {
+                        if (typeof o === "object" && o !== null && "provider" in o) {
+                          return (o as { provider: string }).provider === selectedProvider;
+                        }
+                        return true;
+                      });
+                    }
+                  }
 
                   return (
                     <div key={fieldKey} className="flex items-start gap-4 px-5 py-3 group">

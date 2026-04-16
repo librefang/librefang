@@ -1501,6 +1501,10 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
 
   const rs = riskStyle(approval.risk_level);
 
+  const riskLabel = approval.risk_level
+    ? t(`chat.approval_risk_${approval.risk_level}`, { defaultValue: approval.risk_level })
+    : null;
+
   return (
     <div className={`mx-auto w-full max-w-lg rounded-2xl border ${rs.border} ${rs.bg} p-4 shadow-lg animate-fade-in-up`}>
       {/* Header */}
@@ -1509,21 +1513,21 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
         <span className={`text-xs font-black uppercase tracking-widest ${rs.text}`}>
           {t("chat.approval_required")}
         </span>
-        {approval.risk_level && (
+        {riskLabel && (
           <span className={`ml-auto text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${rs.bg} ${rs.text} border ${rs.border}`}>
-            {approval.risk_level}
+            {riskLabel}
           </span>
         )}
       </div>
 
       {/* Tool info */}
-      <div className="space-y-1 mb-4">
+      <div className="space-y-2 mb-4">
         <div className="flex items-center gap-2">
           <span className="text-[10px] font-bold uppercase text-text-dim tracking-wider">{t("chat.approval_tool")}</span>
           <code className="text-xs font-mono font-bold px-1.5 py-0.5 rounded bg-main">{approval.tool_name || "unknown"}</code>
         </div>
         {(approval.description || approval.action_summary || approval.action) && (
-          <p className="text-sm text-text-dim leading-relaxed">
+          <p className="text-xs text-text-dim leading-relaxed bg-main/50 rounded-lg px-3 py-2 font-mono whitespace-pre-wrap break-all">
             {approval.description || approval.action_summary || approval.action}
           </p>
         )}

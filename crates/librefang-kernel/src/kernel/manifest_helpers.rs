@@ -142,7 +142,7 @@ pub(super) fn apply_budget_defaults(
 /// default value (which is a local model name that cloud APIs wouldn't recognise).
 pub(super) fn default_embedding_model_for_provider(provider: &str) -> &'static str {
     match provider {
-        "openai" => "text-embedding-3-small",
+        "openai" | "openrouter" => "text-embedding-3-small",
         "mistral" => "mistral-embed",
         "cohere" => "embed-english-v3.0",
         // Local providers use nomic-embed-text as a good default

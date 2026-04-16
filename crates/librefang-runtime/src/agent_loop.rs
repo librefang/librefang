@@ -1762,6 +1762,15 @@ fn build_prompt_setup(ctx: PromptSetupContext<'_>) -> PromptSetup {
         None
     };
 
+    // Instruct the model to match the user's language for both thinking and
+    // response. Applied unconditionally so it covers models that generate
+    // reasoning traces without an explicit thinking config (e.g. Gemma4,
+    // Qwen3 via Ollama). Models that cannot follow this instruction are
+    // unaffected.
+    system_prompt.push_str(
+        "\n\nIMPORTANT: Always use the same language as the user's message for both your thinking process and your response.",
+    );
+
     PromptSetup {
         system_prompt,
         memory_context_msg,

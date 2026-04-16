@@ -1041,11 +1041,10 @@ impl McpConnection {
                 };
 
                 let mut params = rmcp::model::CallToolRequestParams::new(raw_name.clone());
-                if let Some(obj) = arguments.as_object() {
-                    if !obj.is_empty() {
-                        params.arguments = Some(obj.clone());
-                    }
-                }
+                // Always send an object — MCP spec requires `arguments` to
+                // be an object, and some servers (e.g. filesystem) reject
+                // `undefined`/`null` even for zero-parameter tools.
+                params.arguments = Some(arguments.as_object().cloned().unwrap_or_default());
 
                 let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
                 let result: rmcp::model::CallToolResult =
