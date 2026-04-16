@@ -1223,21 +1223,23 @@ pub async fn run_daemon(
     }
 
     // Clean up tmux session so child shell processes don't linger after shutdown.
-    {
+    // Read config fields and drop the Guard before any `.await`.
+    let (tmux_cleanup_enabled, tmux_cleanup_path) = {
         let cfg = kernel.config_ref();
-        if cfg.terminal.tmux_enabled {
-            let tmux_path = std::path::PathBuf::from(
-                cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux"),
-            );
-            let ctrl = crate::terminal_tmux::TmuxController::new(
-                tmux_path,
-                crate::terminal_tmux::DEFAULT_TMUX_SESSION_NAME.to_string(),
-            );
-            if let Err(e) = ctrl.kill_session().await {
-                tracing::debug!("tmux session cleanup: {e}");
-            } else {
-                info!("tmux session cleaned up");
-            }
+        (
+            cfg.terminal.tmux_enabled,
+            std::path::PathBuf::from(cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux")),
+        )
+    };
+    if tmux_cleanup_enabled {
+        let ctrl = crate::terminal_tmux::TmuxController::new(
+            tmux_cleanup_path,
+            crate::terminal_tmux::DEFAULT_TMUX_SESSION_NAME.to_string(),
+        );
+        if let Err(e) = ctrl.kill_session().await {
+            tracing::debug!("tmux session cleanup: {e}");
+        } else {
+            info!("tmux session cleaned up");
         }
     }
 
