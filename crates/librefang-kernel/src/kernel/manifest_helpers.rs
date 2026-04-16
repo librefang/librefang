@@ -125,11 +125,15 @@ pub(super) fn apply_budget_defaults(
     if budget.max_monthly_usd > 0.0 && resources.max_cost_per_month_usd == 0.0 {
         resources.max_cost_per_month_usd = budget.max_monthly_usd;
     }
-    // Override per-agent hourly token limit when the global default is set.
-    // This lets users raise (or lower) the token budget for all agents at once
-    // via config.toml [budget] default_max_llm_tokens_per_hour = 10000000
-    if budget.default_max_llm_tokens_per_hour > 0 {
-        resources.max_llm_tokens_per_hour = budget.default_max_llm_tokens_per_hour;
+    // Override per-agent hourly token limit when:
+    //   1. The global default is set (> 0), AND
+    //   2. The agent has NOT explicitly configured its own limit (None).
+    //
+    // When an agent explicitly sets `max_llm_tokens_per_hour = 0` in its
+    // agent.toml (Some(0)), that means "unlimited" and must not be
+    // overridden by the global default.
+    if budget.default_max_llm_tokens_per_hour > 0 && resources.max_llm_tokens_per_hour.is_none() {
+        resources.max_llm_tokens_per_hour = Some(budget.default_max_llm_tokens_per_hour);
     }
 }
 

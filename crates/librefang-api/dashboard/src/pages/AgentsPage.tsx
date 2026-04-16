@@ -94,7 +94,7 @@ export function AgentsPage() {
   });
 
   const patchAgentConfigMutation = useMutation({
-    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number; model?: string; provider?: string; temperature?: number } }) =>
+    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number; model?: string; provider?: string; temperature?: number; web_search_augmentation?: "off" | "auto" | "always" } }) =>
       patchAgentConfig(agentId, config),
     onSuccess: (_, { agentId }) => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
@@ -579,6 +579,31 @@ export function AgentsPage() {
                   </div>
                 </div>
               )}
+
+              {/* Web Search Augmentation */}
+              <div>
+                <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3">{t("agents.web_search", { defaultValue: "Web Search" })}</h4>
+                <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50">
+                  <div className="flex justify-between items-center gap-2">
+                    <div>
+                      <span className="text-xs text-text-dim">{t("agents.web_search_augmentation", { defaultValue: "Search Augmentation" })}</span>
+                      <p className="text-[10px] text-text-dim/60 mt-0.5">{t("agents.web_search_augmentation_hint", { defaultValue: "Auto-search the web and inject results into context before LLM call" })}</p>
+                    </div>
+                    <select
+                      value={detailAgent.web_search_augmentation || "off"}
+                      onChange={e => {
+                        const mode = e.target.value as "off" | "auto" | "always";
+                        patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { web_search_augmentation: mode } });
+                      }}
+                      className="w-28 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
+                    >
+                      <option value="off">{t("common.off", { defaultValue: "Off" })}</option>
+                      <option value="auto">{t("common.auto", { defaultValue: "Auto" })}</option>
+                      <option value="always">{t("common.always", { defaultValue: "Always" })}</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
 
               {/* System Prompt */}
               {detailAgent.system_prompt && (

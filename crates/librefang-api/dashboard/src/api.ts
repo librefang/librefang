@@ -45,6 +45,7 @@ export interface ProviderItem {
   latency_ms?: number;
   api_key_env?: string;
   base_url?: string;
+  proxy_url?: string;
   key_required?: boolean;
   health?: string;
   media_capabilities?: string[];
@@ -176,6 +177,7 @@ export interface DashboardSnapshot {
   agents: AgentItem[];
   skillCount: number;
   workflowCount: number;
+  webSearchAvailable: boolean;
 }
 
 export interface AgentIdentity {
@@ -200,6 +202,7 @@ export interface AgentItem {
   profile?: string;
   identity?: AgentIdentity;
   is_hand?: boolean;
+  web_search_augmentation?: "off" | "auto" | "always";
 }
 
 export interface PaginatedResponse<T> {
@@ -746,6 +749,7 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     channels: ChannelItem[];
     skillCount: number;
     workflowCount: number;
+    webSearchAvailable: boolean;
   }>("/api/dashboard/snapshot");
 
   return {
@@ -756,6 +760,7 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     channels: snap.channels ?? [],
     skillCount: snap.skillCount ?? 0,
     workflowCount: snap.workflowCount ?? 0,
+    webSearchAvailable: snap.webSearchAvailable ?? false,
   };
 }
 
@@ -778,13 +783,14 @@ export interface AgentDetail {
   mode?: string;
   thinking?: { budget_tokens?: number; stream_thinking?: boolean };
   is_hand?: boolean;
+  web_search_augmentation?: "off" | "auto" | "always";
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
-export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string; temperature?: number }): Promise<ApiActionResponse> {
+export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string; temperature?: number; web_search_augmentation?: "off" | "auto" | "always" }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 
@@ -917,6 +923,33 @@ export async function removeCustomModel(modelId: string): Promise<ApiActionRespo
   return del<ApiActionResponse>(`/api/models/custom/${encodeURIComponent(modelId)}`);
 }
 
+// ── Per-model overrides ─────────────────────────────────────────
+
+export interface ModelOverrides {
+  model_type?: "chat" | "speech" | "embedding";
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+  frequency_penalty?: number;
+  presence_penalty?: number;
+  reasoning_effort?: string;
+  use_max_completion_tokens?: boolean;
+  no_system_role?: boolean;
+  force_max_tokens?: boolean;
+}
+
+export async function getModelOverrides(modelKey: string): Promise<ModelOverrides> {
+  return get<ModelOverrides>(`/api/models/overrides/${encodeURIComponent(modelKey)}`);
+}
+
+export async function updateModelOverrides(modelKey: string, overrides: ModelOverrides): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/models/overrides/${encodeURIComponent(modelKey)}`, overrides);
+}
+
+export async function deleteModelOverrides(modelKey: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/models/overrides/${encodeURIComponent(modelKey)}`);
+}
+
 export async function setProviderKey(providerId: string, key: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`, { key });
 }
@@ -925,12 +958,14 @@ export async function deleteProviderKey(providerId: string): Promise<ApiActionRe
   return del<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`);
 }
 
-export async function setProviderUrl(providerId: string, baseUrl: string): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, { base_url: baseUrl });
+export async function setProviderUrl(providerId: string, baseUrl: string, proxyUrl?: string): Promise<ApiActionResponse> {
+  const body: Record<string, string> = { base_url: baseUrl };
+  if (proxyUrl !== undefined) body.proxy_url = proxyUrl;
+  return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, body);
 }
 
-export async function setDefaultProvider(providerId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/default`, {});
+export async function setDefaultProvider(providerId: string, model?: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/default`, model ? { model } : {});
 }
 
 // ── Media generation API ──────────────────────────────────────────────
@@ -1499,7 +1534,10 @@ export async function getFullConfig(): Promise<Record<string, unknown>> {
 
 export interface ConfigFieldSchema {
   type?: string;
-  options?: (string | { id: string; name: string; provider: string })[];
+  options?: (string | { id: string; name: string; provider: string } | { value: string; label: string })[];
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 export interface ConfigSectionSchema {

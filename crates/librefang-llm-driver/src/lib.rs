@@ -238,6 +238,10 @@ pub struct DriverConfig {
     /// Not serialized: set only by the kernel when constructing drivers.
     #[serde(skip)]
     pub mcp_bridge: Option<McpBridgeConfig>,
+    /// Per-provider proxy URL override.
+    /// When set, the driver uses this proxy instead of the global proxy config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
 }
 
 /// Configuration for bridging LibreFang tools into a CLI-based driver via MCP.
@@ -266,6 +270,7 @@ impl Default for DriverConfig {
             skip_permissions: default_skip_permissions(),
             message_timeout_secs: default_message_timeout_secs(),
             mcp_bridge: None,
+            proxy_url: None,
         }
     }
 }
@@ -301,6 +306,7 @@ impl std::fmt::Debug for DriverConfig {
             .field("skip_permissions", &self.skip_permissions)
             .field("message_timeout_secs", &self.message_timeout_secs)
             .field("mcp_bridge", &self.mcp_bridge.as_ref().map(|b| &b.base_url))
+            .field("proxy_url", &self.proxy_url.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }

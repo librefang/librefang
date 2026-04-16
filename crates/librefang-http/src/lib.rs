@@ -162,6 +162,24 @@ pub fn proxied_client() -> reqwest::Client {
         .expect("HTTP client with proxy/TLS config should always build")
 }
 
+/// Build a [`reqwest::Client`] that routes all traffic through the given proxy URL,
+/// ignoring the global proxy config. Used for per-provider proxy overrides.
+pub fn proxied_client_with_override(proxy_url: &str) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .use_preconfigured_tls(tls_config())
+        .user_agent(USER_AGENT);
+    if let Ok(proxy) = Proxy::all(proxy_url) {
+        builder = builder.proxy(proxy);
+    } else {
+        tracing::warn!(
+            url = proxy_url,
+            "Invalid per-provider proxy URL, falling back to global proxy"
+        );
+        return proxied_client();
+    }
+    builder.build().unwrap_or_else(|_| proxied_client())
+}
+
 /// Backward-compatible alias for [`proxied_client_builder`].
 pub fn client_builder() -> reqwest::ClientBuilder {
     proxied_client_builder()
