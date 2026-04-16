@@ -4384,6 +4384,7 @@ mod tests {
             env: vec![],
             headers: vec!["xc-mcp-token: secret".to_string()],
             oauth: None,
+            taint_scanning: true,
         };
 
         upsert_mcp_server_config(&config_path, &entry).expect("upsert should succeed");
@@ -4436,6 +4437,7 @@ mod tests {
             env: vec![],
             headers: vec![],
             oauth: None,
+            taint_scanning: true,
         };
         upsert_mcp_server_config(&config_path, &v1).unwrap();
 
@@ -4448,6 +4450,7 @@ mod tests {
             env: vec![],
             headers: vec![],
             oauth: None,
+            taint_scanning: true,
         };
         upsert_mcp_server_config(&config_path, &v2).unwrap();
 
