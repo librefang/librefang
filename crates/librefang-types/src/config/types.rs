@@ -3301,6 +3301,18 @@ pub struct McpServerConfigEntry {
     // fails to deserialize back into `Option<McpOAuthConfig>` on reload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<McpOAuthConfig>,
+    /// Enable outbound taint scanning for this MCP server (default: true).
+    ///
+    /// Set to `false` to disable the credential/PII content heuristic for
+    /// trusted local servers (e.g. browser automation, database adapters)
+    /// whose tool results contain opaque session handles that would otherwise
+    /// trip the scanner. Key-name blocking remains active regardless.
+    #[serde(default = "default_taint_scanning")]
+    pub taint_scanning: bool,
+}
+
+fn default_taint_scanning() -> bool {
+    true
 }
 
 fn default_mcp_timeout() -> u64 {
