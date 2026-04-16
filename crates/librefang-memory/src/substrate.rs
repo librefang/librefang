@@ -326,9 +326,11 @@ impl MemorySubstrate {
     pub fn canonical_context(
         &self,
         agent_id: AgentId,
+        session_id: Option<SessionId>,
         window_size: Option<usize>,
     ) -> LibreFangResult<(Option<String>, Vec<librefang_types::message::Message>)> {
-        self.sessions.canonical_context(agent_id, window_size)
+        self.sessions
+            .canonical_context(agent_id, session_id, window_size)
     }
 
     /// Store an LLM-generated summary, replacing older messages with the kept subset.
@@ -363,9 +365,10 @@ impl MemorySubstrate {
         agent_id: AgentId,
         messages: &[librefang_types::message::Message],
         compaction_threshold: Option<usize>,
+        session_id: Option<SessionId>,
     ) -> LibreFangResult<()> {
         self.sessions
-            .append_canonical(agent_id, messages, compaction_threshold)?;
+            .append_canonical(agent_id, messages, compaction_threshold, session_id)?;
         Ok(())
     }
 

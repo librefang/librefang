@@ -43,11 +43,38 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use librefang_channels::types::SenderContext;
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
+
+/// Build the MCP bridge config that lets CLI-based drivers (Claude Code)
+/// reach back into the daemon's own `/mcp` endpoint. Uses loopback when the
+/// API listens on a wildcard address.
+fn build_mcp_bridge_cfg(cfg: &KernelConfig) -> librefang_llm_driver::McpBridgeConfig {
+    let listen = cfg.api_listen.trim();
+    let base = if listen.is_empty() {
+        "http://127.0.0.1:4545".to_string()
+    } else if listen.starts_with("0.0.0.0")
+        || listen.starts_with("[::]")
+        || listen.starts_with("::")
+    {
+        let port = listen.rsplit(':').next().unwrap_or("4545");
+        format!("http://127.0.0.1:{port}")
+    } else {
+        format!("http://{listen}")
+    };
+    let api_key = if cfg.api_key.is_empty() {
+        None
+    } else {
+        Some(cfg.api_key.clone())
+    };
+    librefang_llm_driver::McpBridgeConfig {
+        base_url: base,
+        api_key,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Prompt metadata cache — avoids redundant filesystem I/O and skill registry
@@ -558,437 +585,8 @@ impl DeliveryTracker {
     }
 }
 
-/// Ensure workspaces directory structure exists.
-fn ensure_workspaces_layout(home_dir: &Path) -> KernelResult<()> {
-    let workspaces_dir = home_dir.join("workspaces");
-    let agents_dir = workspaces_dir.join("agents");
-    let hands_dir = workspaces_dir.join("hands");
-    for dir in [&workspaces_dir, &agents_dir, &hands_dir] {
-        std::fs::create_dir_all(dir).map_err(|e| {
-            KernelError::LibreFang(LibreFangError::Internal(format!(
-                "Failed to create {}: {e}",
-                dir.display()
-            )))
-        })?;
-    }
-    Ok(())
-}
-
-/// One-shot migration from the legacy `<home>/agents/<name>/` layout to the
-/// canonical `<home>/workspaces/agents/<name>/` layout.
-///
-/// Prior releases (and the `migrate` subcommand's output) placed per-agent
-/// manifests under `<home>/agents/<name>/agent.toml`, while the runtime
-/// reads from `<home>/workspaces/agents/<name>/`. This function moves any
-/// stray directories on boot so existing installations keep working after
-/// unification. Destinations that already exist are left alone — the
-/// workspaces copy wins.
-fn migrate_legacy_agent_dirs(home_dir: &Path, workspaces_agents_dir: &Path) {
-    let legacy = home_dir.join("agents");
-    if !legacy.is_dir() {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(&legacy) else {
-        return;
-    };
-    let mut moved = 0usize;
-    for entry in entries.flatten() {
-        let src = entry.path();
-        if !src.is_dir() || !src.join("agent.toml").exists() {
-            continue;
-        }
-        let Some(name) = src.file_name() else {
-            continue;
-        };
-        let dest = workspaces_agents_dir.join(name);
-        if dest.exists() {
-            tracing::warn!(
-                src = %src.display(),
-                dest = %dest.display(),
-                "Legacy agent dir skipped — destination already exists"
-            );
-            continue;
-        }
-        if let Some(parent) = dest.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match std::fs::rename(&src, &dest) {
-            Ok(()) => {
-                moved += 1;
-                tracing::info!(
-                    src = %src.display(),
-                    dest = %dest.display(),
-                    "Migrated legacy agent dir"
-                );
-            }
-            Err(e) => tracing::warn!(
-                src = %src.display(),
-                dest = %dest.display(),
-                "Failed to migrate legacy agent dir: {e}"
-            ),
-        }
-    }
-    if moved > 0 {
-        // Remove the legacy parent if it is now empty.
-        let _ = std::fs::remove_dir(&legacy);
-    }
-}
-
-/// Initialize a git repo in the home directory for config version control.
-fn init_git_if_missing(home_dir: &Path) {
-    if home_dir.join(".git").exists() {
-        return;
-    }
-    let ok = std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(home_dir)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !ok {
-        return;
-    }
-    let gitignore = home_dir.join(".gitignore");
-    if !gitignore.exists() {
-        let _ = std::fs::write(
-            &gitignore,
-            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\n*.db\n*.db-shm\n*.db-wal\n",
-        );
-    }
-    let _ = std::process::Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(home_dir)
-        .status();
-    let _ = std::process::Command::new("git")
-        .args([
-            "-c",
-            "user.name=LibreFang",
-            "-c",
-            "user.email=noreply@librefang.ai",
-            "commit",
-            "-q",
-            "-m",
-            "chore: initial librefang config",
-        ])
-        .current_dir(home_dir)
-        .status();
-    info!("Initialized git repo in {}", home_dir.display());
-}
-
-/// Create workspace directory structure for an agent.
-fn ensure_workspace(workspace: &Path) -> KernelResult<()> {
-    for subdir in &["data", "output", "sessions", "skills", "logs", "memory"] {
-        std::fs::create_dir_all(workspace.join(subdir)).map_err(|e| {
-            KernelError::LibreFang(LibreFangError::Internal(format!(
-                "Failed to create workspace dir {}/{subdir}: {e}",
-                workspace.display()
-            )))
-        })?;
-    }
-    // Write agent metadata file (best-effort)
-    let meta = serde_json::json!({
-        "created_at": chrono::Utc::now().to_rfc3339(),
-        "workspace": workspace.display().to_string(),
-    });
-    let _ = std::fs::write(
-        workspace.join("AGENT.json"),
-        serde_json::to_string_pretty(&meta).unwrap_or_default(),
-    );
-    Ok(())
-}
-
-fn safe_path_component(input: &str, fallback: &str) -> String {
-    let sanitized: String = input
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    if sanitized.is_empty() {
-        fallback.to_string()
-    } else {
-        sanitized
-    }
-}
-
-fn has_unsafe_relative_components(path: &Path) -> bool {
-    path.components()
-        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
-}
-
-fn resolve_workspace_dir(
-    workspaces_root: &Path,
-    requested: Option<PathBuf>,
-    agent_name: &str,
-    agent_id: AgentId,
-) -> KernelResult<PathBuf> {
-    std::fs::create_dir_all(workspaces_root).map_err(|e| {
-        KernelError::LibreFang(LibreFangError::Internal(format!(
-            "Failed to create workspaces root {}: {e}",
-            workspaces_root.display()
-        )))
-    })?;
-    let root = workspaces_root.to_path_buf();
-
-    if let Some(path) = requested {
-        if path.is_absolute() || has_unsafe_relative_components(&path) {
-            return Err(KernelError::LibreFang(LibreFangError::Internal(
-                "Invalid workspace path".to_string(),
-            )));
-        }
-        return Ok(root.join(path));
-    }
-
-    let fallback = agent_id.to_string();
-    let component = safe_path_component(agent_name, &fallback);
-    Ok(root.join(component))
-}
-
-/// Resolve the correct workspace directory for lazy backfill, respecting
-/// hand agents whose workspace lives under `workspaces/hands/<hand>/<role>/`
-/// rather than `workspaces/agents/<name>/`.
-fn backfill_workspace_dir(
-    cfg: &librefang_types::config::KernelConfig,
-    tags: &[String],
-    agent_name: &str,
-    agent_id: AgentId,
-) -> KernelResult<PathBuf> {
-    // Check if this is a hand agent by looking for "hand:<id>" and "hand_role:<role>" tags.
-    let hand_id = tags.iter().find_map(|t| t.strip_prefix("hand:"));
-    let hand_role = tags.iter().find_map(|t| t.strip_prefix("hand_role:"));
-
-    if let (Some(hid), Some(role)) = (hand_id, hand_role) {
-        let safe_hand = safe_path_component(hid, "hand");
-        let safe_role = safe_path_component(role, "agent");
-        let dir = cfg
-            .effective_hands_workspaces_dir()
-            .join(&safe_hand)
-            .join(&safe_role);
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            KernelError::LibreFang(LibreFangError::Internal(format!(
-                "Failed to create hand workspace {}: {e}",
-                dir.display()
-            )))
-        })?;
-        Ok(dir)
-    } else {
-        resolve_workspace_dir(
-            &cfg.effective_agent_workspaces_dir(),
-            None,
-            agent_name,
-            agent_id,
-        )
-    }
-}
-
-/// Generate workspace identity files for an agent (SOUL.md, USER.md, TOOLS.md, MEMORY.md).
-/// Uses `create_new` to never overwrite existing files (preserves user edits).
-fn generate_identity_files(workspace: &Path, manifest: &AgentManifest) {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-
-    let soul_content = format!(
-        "# Soul\n\
-         You are {}. {}\n\
-         Be genuinely helpful. Have opinions. Be resourceful before asking.\n\
-         Treat user data with respect \u{2014} you are a guest in their life.\n",
-        manifest.name,
-        if manifest.description.is_empty() {
-            "You are a helpful AI agent."
-        } else {
-            &manifest.description
-        }
-    );
-
-    let user_content = "# User\n\
-         <!-- Updated by the agent as it learns about the user -->\n\
-         - Name:\n\
-         - Timezone:\n\
-         - Preferences:\n";
-
-    let tools_content = "# Tools & Environment\n\
-         <!-- Agent-specific environment notes (not synced) -->\n";
-
-    let memory_content = "# Long-Term Memory\n\
-         <!-- Curated knowledge the agent preserves across sessions -->\n";
-
-    let agents_content = "# Agent Behavioral Guidelines\n\n\
-         ## Core Principles\n\
-         - Act first, narrate second. Use tools to accomplish tasks rather than describing what you'd do.\n\
-         - Batch tool calls when possible \u{2014} don't output reasoning between each call.\n\
-         - When a task is ambiguous, ask ONE clarifying question, not five.\n\
-         - Store important context in memory (memory_store) proactively.\n\
-         - Search memory (memory_recall) before asking the user for context they may have given before.\n\n\
-         ## Tool Usage Protocols\n\
-         - file_read BEFORE file_write \u{2014} always understand what exists.\n\
-         - web_search for current info, web_fetch for specific URLs.\n\
-         - browser_* for interactive sites that need clicks/forms.\n\
-         - shell_exec: explain destructive commands before running.\n\n\
-         ## Response Style\n\
-         - Lead with the answer or result, not process narration.\n\
-         - Keep responses concise unless the user asks for detail.\n\
-         - Use formatting (headers, lists, code blocks) for readability.\n\
-         - If a task fails, explain what went wrong and suggest alternatives.\n";
-
-    let bootstrap_content = format!(
-        "# First-Run Bootstrap\n\n\
-         On your FIRST conversation with a new user, follow this protocol:\n\n\
-         1. **Greet** \u{2014} Introduce yourself as {name} with a one-line summary of your specialty.\n\
-         2. **Discover** \u{2014} Ask the user's name and one key preference relevant to your domain.\n\
-         3. **Store** \u{2014} Use memory_store to save: user_name, their preference, and today's date as first_interaction.\n\
-         4. **Orient** \u{2014} Briefly explain what you can help with (2-3 bullet points, not a wall of text).\n\
-         5. **Serve** \u{2014} If the user included a request in their first message, handle it immediately after steps 1-3.\n\n\
-         After bootstrap, this protocol is complete. Focus entirely on the user's needs.\n",
-        name = manifest.name
-    );
-
-    let identity_content = format!(
-        "---\n\
-         name: {name}\n\
-         archetype: assistant\n\
-         vibe: helpful\n\
-         emoji:\n\
-         avatar_url:\n\
-         greeting_style: warm\n\
-         color:\n\
-         ---\n\
-         # Identity\n\
-         <!-- Visual identity and personality at a glance. Edit these fields freely. -->\n",
-        name = manifest.name
-    );
-
-    let files: &[(&str, &str)] = &[
-        ("SOUL.md", &soul_content),
-        ("USER.md", user_content),
-        ("TOOLS.md", tools_content),
-        ("MEMORY.md", memory_content),
-        ("AGENTS.md", agents_content),
-        ("BOOTSTRAP.md", &bootstrap_content),
-        ("IDENTITY.md", &identity_content),
-    ];
-
-    // Conditionally generate HEARTBEAT.md for autonomous agents
-    let heartbeat_content = if manifest.autonomous.is_some() {
-        Some(
-            "# Heartbeat Checklist\n\
-             <!-- Proactive reminders to check during heartbeat cycles -->\n\n\
-             ## Every Heartbeat\n\
-             - [ ] Check for pending tasks or messages\n\
-             - [ ] Review memory for stale items\n\n\
-             ## Daily\n\
-             - [ ] Summarize today's activity for the user\n\n\
-             ## Weekly\n\
-             - [ ] Archive old sessions and clean up memory\n"
-                .to_string(),
-        )
-    } else {
-        None
-    };
-
-    for (filename, content) in files {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(workspace.join(filename))
-        {
-            Ok(mut f) => {
-                let _ = f.write_all(content.as_bytes());
-            }
-            Err(_) => {
-                // File already exists — preserve user edits
-            }
-        }
-    }
-
-    // Write HEARTBEAT.md for autonomous agents
-    if let Some(ref hb) = heartbeat_content {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(workspace.join("HEARTBEAT.md"))
-        {
-            Ok(mut f) => {
-                let _ = f.write_all(hb.as_bytes());
-            }
-            Err(_) => {
-                // File already exists — preserve user edits
-            }
-        }
-    }
-}
-
-/// Append an assistant response summary to the daily memory log (best-effort, append-only).
-/// Caps daily log at 1MB to prevent unbounded growth.
-fn append_daily_memory_log(workspace: &Path, response: &str) {
-    use std::io::Write;
-    let trimmed = response.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let log_path = workspace.join("memory").join(format!("{today}.md"));
-    // Security: cap total daily log to 1MB
-    if let Ok(metadata) = std::fs::metadata(&log_path) {
-        if metadata.len() > 1_048_576 {
-            return;
-        }
-    }
-    // Truncate long responses for the log (UTF-8 safe)
-    let summary = librefang_types::truncate_str(trimmed, 500);
-    let timestamp = chrono::Utc::now().format("%H:%M:%S").to_string();
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
-        let _ = writeln!(f, "\n## {timestamp}\n{summary}\n");
-    }
-}
-
-/// Read a workspace identity file with a size cap to prevent prompt stuffing.
-/// Returns None if the file doesn't exist or is empty.
-fn read_identity_file(workspace: &Path, filename: &str) -> Option<String> {
-    const MAX_IDENTITY_FILE_BYTES: usize = 32_768; // 32KB cap
-    let path = workspace.join(filename);
-    // Security: ensure path stays inside workspace
-    match path.canonicalize() {
-        Ok(canonical) => {
-            if let Ok(ws_canonical) = workspace.canonicalize() {
-                if !canonical.starts_with(&ws_canonical) {
-                    return None; // path traversal attempt
-                }
-            }
-        }
-        Err(_) => return None, // file doesn't exist
-    }
-    let content = std::fs::read_to_string(&path).ok()?;
-    if content.trim().is_empty() {
-        return None;
-    }
-    if content.len() > MAX_IDENTITY_FILE_BYTES {
-        Some(librefang_types::truncate_str(&content, MAX_IDENTITY_FILE_BYTES).to_string())
-    } else {
-        Some(content)
-    }
-}
-
-/// Get the system hostname as a String.
-fn gethostname() -> Option<String> {
-    #[cfg(unix)]
-    {
-        std::process::Command::new("hostname")
-            .output()
-            .ok()
-            .and_then(|out| String::from_utf8(out.stdout).ok())
-            .map(|s| s.trim().to_string())
-    }
-    #[cfg(windows)]
-    {
-        std::env::var("COMPUTERNAME").ok()
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        None
-    }
-}
-
+mod workspace_setup;
+use workspace_setup::*;
 // ── Public Facade Getters ────────────────────────────────────────────
 // These provide a stable API surface for external crates (librefang-api,
 // librefang-desktop) to access kernel internals. When all external call
@@ -1119,10 +717,20 @@ impl LibreFangKernel {
                 .map(|(id, base_url, key_env)| {
                     let kernel = Arc::clone(&self);
                     tokio::spawn(async move {
-                        let key = match std::env::var(&key_env) {
-                            Ok(k) if !k.trim().is_empty() => k,
-                            _ => return,
-                        };
+                        // Resolve the actual key via primary env var, alt env var,
+                        // and credential files. This is needed for AutoDetected
+                        // providers whose key lives in a fallback env var (e.g.
+                        // GOOGLE_API_KEY for gemini, not GEMINI_API_KEY).
+                        let key = librefang_runtime::drivers::resolve_provider_api_key(&id)
+                            .or_else(|| {
+                                std::env::var(&key_env)
+                                    .ok()
+                                    .filter(|k| !k.trim().is_empty())
+                            })
+                            .unwrap_or_default();
+                        if key.is_empty() {
+                            return;
+                        }
                         let result =
                             librefang_runtime::model_catalog::probe_api_key(&id, &base_url, &key)
                                 .await;
@@ -1742,7 +1350,7 @@ impl LibreFangKernel {
             .unwrap_or_else(|| config.data_dir.join("librefang.db"));
         let mut substrate = MemorySubstrate::open_with_chunking(
             &db_path,
-            config.memory.decay_rate,
+            config.memory.decay_rate as f32,
             config.memory.chunking.clone(),
         )
         .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?;
@@ -1771,6 +1379,15 @@ impl LibreFangKernel {
 
         let memory = Arc::new(substrate);
 
+        // Check if Ollama is reachable on localhost:11434 (TCP probe, 500ms timeout).
+        fn is_ollama_reachable() -> bool {
+            std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], 11434)),
+                std::time::Duration::from_millis(500),
+            )
+            .is_ok()
+        }
+
         // Resolve "auto" provider: scan environment for the first available API key.
         if config.default_model.provider == "auto" || config.default_model.provider.is_empty() {
             if let Some((provider, model_hint, env_var)) = drivers::detect_available_provider() {
@@ -1792,10 +1409,20 @@ impl LibreFangKernel {
                 config.default_model.provider = provider.to_string();
                 config.default_model.model = model;
                 config.default_model.api_key_env = env_var.to_string();
-            } else {
-                warn!("No API keys detected in environment — defaulting to ollama (local)");
+            } else if is_ollama_reachable() {
+                // Ollama is running locally — use the catalog's default model, not a hardcoded one.
+                let model = librefang_runtime::model_catalog::ModelCatalog::default()
+                    .default_model_for_provider("ollama")
+                    .unwrap_or_else(|| {
+                        warn!("Model catalog has no default for ollama — falling back to gemma4");
+                        "gemma4".to_string()
+                    });
+                info!(
+                    model = %model,
+                    "No API keys detected — Ollama is running locally, using as default"
+                );
                 config.default_model.provider = "ollama".to_string();
-                config.default_model.model = "llama3.2".to_string();
+                config.default_model.model = model;
                 config.default_model.api_key_env = String::new();
                 if !config.provider_urls.contains_key("ollama") {
                     config.provider_urls.insert(
@@ -1803,6 +1430,11 @@ impl LibreFangKernel {
                         "http://localhost:11434/v1".to_string(),
                     );
                 }
+            } else {
+                warn!(
+                    "No API keys detected and Ollama is not running. \
+                     Set an API key or start Ollama to enable LLM features."
+                );
             }
         }
 
@@ -1823,6 +1455,11 @@ impl LibreFangKernel {
                 .get(&config.default_model.provider)
                 .cloned()
         });
+        let mcp_bridge_cfg = build_mcp_bridge_cfg(&config);
+        let default_proxy_url = config
+            .provider_proxy_urls
+            .get(&config.default_model.provider)
+            .cloned();
         let driver_config = DriverConfig {
             provider: config.default_model.provider.clone(),
             api_key: default_api_key.clone(),
@@ -1831,6 +1468,8 @@ impl LibreFangKernel {
             azure_openai: config.azure_openai.clone(),
             skip_permissions: true,
             message_timeout_secs: config.default_model.message_timeout_secs,
+            mcp_bridge: Some(mcp_bridge_cfg.clone()),
+            proxy_url: default_proxy_url.clone(),
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
         // even if the LLM provider is misconfigured. Users can fix config via dashboard.
@@ -1865,6 +1504,8 @@ impl LibreFangKernel {
                     azure_openai: config.azure_openai.clone(),
                     skip_permissions: true,
                     message_timeout_secs: config.default_model.message_timeout_secs,
+                    mcp_bridge: Some(mcp_bridge_cfg.clone()),
+                    proxy_url: default_proxy_url.clone(),
                 };
                 match drivers::create_driver(&profile_config) {
                     Ok(profile_driver) => {
@@ -1920,7 +1561,8 @@ impl LibreFangKernel {
                     true, // skip_permissions — daemon mode
                     config.default_model.message_timeout_secs,
                 )
-                .with_config_dir(dir);
+                .with_config_dir(dir)
+                .with_mcp_bridge(mcp_bridge_cfg.clone());
                 let name = format!("profile-{}", i + 1);
                 profile_drivers.push((Arc::new(d), name));
             }
@@ -1967,6 +1609,8 @@ impl LibreFangKernel {
                             azure_openai: config.azure_openai.clone(),
                             skip_permissions: true,
                             message_timeout_secs: config.default_model.message_timeout_secs,
+                            mcp_bridge: Some(mcp_bridge_cfg.clone()),
+                            proxy_url: config.provider_proxy_urls.get(provider).cloned(),
                         };
                         match drivers::create_driver(&auto_config) {
                             Ok(d) => {
@@ -2016,6 +1660,8 @@ impl LibreFangKernel {
                 azure_openai: config.azure_openai.clone(),
                 skip_permissions: true,
                 message_timeout_secs: config.default_model.message_timeout_secs,
+                mcp_bridge: Some(mcp_bridge_cfg.clone()),
+                proxy_url: config.provider_proxy_urls.get(&fb.provider).cloned(),
             };
             match drivers::create_driver(&fb_config) {
                 Ok(d) => {
@@ -2090,6 +1736,8 @@ impl LibreFangKernel {
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
+        model_catalog.load_suppressed(&config.home_dir.join("suppressed_providers.json"));
+        model_catalog.load_overrides(&config.home_dir.join("model_overrides.json"));
         model_catalog.detect_auth();
         // Apply region selections first (lower priority than explicit provider_urls)
         if !config.provider_regions.is_empty() {
@@ -2115,6 +1763,13 @@ impl LibreFangKernel {
             info!(
                 "applied {} provider URL override(s)",
                 config.provider_urls.len()
+            );
+        }
+        if !config.provider_proxy_urls.is_empty() {
+            model_catalog.apply_proxy_url_overrides(&config.provider_proxy_urls);
+            info!(
+                "applied {} provider proxy URL override(s)",
+                config.provider_proxy_urls.len()
             );
         }
         // Load user's custom models from ~/.librefang/custom_models.json (highest priority)
@@ -2288,6 +1943,7 @@ impl LibreFangKernel {
                     // Determine the API key env var for the detected provider.
                     let key_env = match detected {
                         "openai" => "OPENAI_API_KEY",
+                        "openrouter" => "OPENROUTER_API_KEY",
                         "groq" => "GROQ_API_KEY",
                         "mistral" => "MISTRAL_API_KEY",
                         "together" => "TOGETHER_API_KEY",
@@ -2314,8 +1970,9 @@ impl LibreFangKernel {
                 } else {
                     warn!(
                         "No embedding provider available. Set one of: OPENAI_API_KEY, \
-                         GROQ_API_KEY, MISTRAL_API_KEY, TOGETHER_API_KEY, FIREWORKS_API_KEY, \
-                         COHERE_API_KEY, or configure Ollama."
+                         OPENROUTER_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, \
+                         TOGETHER_API_KEY, FIREWORKS_API_KEY, COHERE_API_KEY, \
+                         or configure Ollama."
                     );
                     None
                 }
@@ -3000,9 +2657,27 @@ system_prompt = "You are a helpful assistant."
         source_toml_path: Option<PathBuf>,
         predetermined_id: Option<AgentId>,
     ) -> KernelResult<AgentId> {
-        let agent_id = predetermined_id.unwrap_or_default();
-        let session_id = SessionId::new();
         let name = manifest.name.clone();
+        // Use a deterministic agent ID derived from the agent name so the
+        // same agent gets the same UUID across daemon restarts. This preserves
+        // session history associations in SQLite. Child agents spawned at
+        // runtime still use random IDs (via predetermined_id = None + parent).
+        let agent_id = predetermined_id.unwrap_or_else(|| {
+            if parent.is_none() {
+                AgentId::from_name(&name)
+            } else {
+                AgentId::new()
+            }
+        });
+
+        // Restore the most recent session for this agent if one exists in the
+        // database, so conversation history survives daemon restarts.
+        let session_id = self
+            .memory
+            .get_agent_session_ids(agent_id)
+            .ok()
+            .and_then(|ids| ids.into_iter().next())
+            .unwrap_or_default();
 
         // SECURITY: If this spawn is linked to a running parent agent,
         // enforce that the child's capabilities are a subset of the
@@ -3568,6 +3243,17 @@ system_prompt = "You are a helpful assistant."
                 .map(|m| m.context_window as usize)
         });
 
+        // Inject model_supports_tools for auto web search augmentation
+        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&manifest.model.model)
+                .map(|m| m.supports_tools)
+        }) {
+            manifest.metadata.insert(
+                "model_supports_tools".to_string(),
+                serde_json::Value::Bool(supports),
+            );
+        }
+
         // Create a temporary in-memory session (empty — no history loaded)
         let ephemeral_session_id = SessionId::new();
         let mut ephemeral_session = librefang_memory::session::Session {
@@ -3634,6 +3320,7 @@ system_prompt = "You are a helpful assistant."
         );
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
+            provider: manifest.model.provider.clone(),
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
@@ -4030,10 +3717,18 @@ system_prompt = "You are a helpful assistant."
         }
 
         // LLM agent: true streaming via agent loop
-        // Derive session ID: channel-specific sessions are always deterministic
-        // per-channel. For non-channel invocations, respect the agent's session_mode.
+        // Derive session ID: channel-specific sessions are deterministic per
+        // (channel, chat_id). Including chat_id prevents context bleed between
+        // a group and a DM that share the same (agent, channel). For non-channel
+        // invocations, respect the agent's session_mode.
         let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
+            Some(ctx) if !ctx.channel.is_empty() => {
+                let scope = match &ctx.chat_id {
+                    Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
+                    _ => ctx.channel.clone(),
+                };
+                SessionId::for_channel(agent_id, &scope)
+            }
             _ => match entry.manifest.session_mode {
                 librefang_types::agent::SessionMode::Persistent => entry.session_id,
                 librefang_types::agent::SessionMode::New => SessionId::new(),
@@ -4089,6 +3784,17 @@ system_prompt = "You are a helpful assistant."
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
         let mut manifest = entry.manifest.clone();
+
+        // Inject model_supports_tools for auto web search augmentation
+        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&manifest.model.model)
+                .map(|m| m.supports_tools)
+        }) {
+            manifest.metadata.insert(
+                "model_supports_tools".to_string(),
+                serde_json::Value::Bool(supports),
+            );
+        }
 
         // Backfill thinking config from global config if per-agent is not set
         if manifest.thinking.is_none() {
@@ -4179,7 +3885,7 @@ system_prompt = "You are a helpful assistant."
                     None
                 } else {
                     self.memory
-                        .canonical_context(agent_id, None)
+                        .canonical_context(agent_id, Some(effective_session_id), None)
                         .ok()
                         .and_then(|(s, _)| s)
                 },
@@ -4386,7 +4092,12 @@ system_prompt = "You are a helpful assistant."
                     let start = result.new_messages_start.min(session.messages.len());
                     if start < session.messages.len() {
                         let new_messages = session.messages[start..].to_vec();
-                        if let Err(e) = memory.append_canonical(agent_id, &new_messages, None) {
+                        if let Err(e) = memory.append_canonical(
+                            agent_id,
+                            &new_messages,
+                            None,
+                            Some(effective_session_id),
+                        ) {
                             warn!(agent_id = %agent_id, "Failed to update canonical session (streaming): {e}");
                         }
                     }
@@ -4427,6 +4138,7 @@ system_prompt = "You are a helpful assistant."
                     );
                     let usage_record = librefang_memory::usage::UsageRecord {
                         agent_id,
+                        provider: manifest.model.provider.clone(),
                         model: model.clone(),
                         input_tokens: result.total_usage.input_tokens,
                         output_tokens: result.total_usage.output_tokens,
@@ -5138,12 +4850,19 @@ system_prompt = "You are a helpful assistant."
             .check_quota(agent_id, &entry.manifest.resources)
             .map_err(KernelError::LibreFang)?;
 
-        // Derive session ID: channel-specific sessions are always deterministic
-        // per-channel and are not affected by session_mode. For non-channel
+        // Derive session ID: channel-specific sessions are deterministic per
+        // (channel, chat_id). Including chat_id prevents context bleed between
+        // a group and a DM that share the same (agent, channel). For non-channel
         // invocations (background ticks, triggers, agent_send), resolve the
         // effective session mode: per-trigger override > agent manifest default.
         let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() => SessionId::for_channel(agent_id, &ctx.channel),
+            Some(ctx) if !ctx.channel.is_empty() => {
+                let scope = match &ctx.chat_id {
+                    Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
+                    _ => ctx.channel.clone(),
+                };
+                SessionId::for_channel(agent_id, &scope)
+            }
             _ => {
                 let mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
                 match mode {
@@ -5305,7 +5024,7 @@ system_prompt = "You are a helpful assistant."
                     None
                 } else {
                     self.memory
-                        .canonical_context(agent_id, None)
+                        .canonical_context(agent_id, Some(effective_session_id), None)
                         .ok()
                         .and_then(|(s, _)| s)
                 },
@@ -5435,6 +5154,45 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Apply per-model inference parameter overrides from the catalog.
+        // Placed AFTER model routing so overrides match the final model, not
+        // the pre-routing one (e.g. routing may switch sonnet → haiku).
+        // Priority: model overrides > agent manifest > system defaults.
+        {
+            let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
+            let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(mo) = catalog.get_overrides(&override_key) {
+                if let Some(t) = mo.temperature {
+                    manifest.model.temperature = t;
+                }
+                if let Some(mt) = mo.max_tokens {
+                    manifest.model.max_tokens = mt;
+                }
+                let ep = &mut manifest.model.extra_params;
+                if let Some(tp) = mo.top_p {
+                    ep.insert("top_p".to_string(), serde_json::json!(tp));
+                }
+                if let Some(fp) = mo.frequency_penalty {
+                    ep.insert("frequency_penalty".to_string(), serde_json::json!(fp));
+                }
+                if let Some(pp) = mo.presence_penalty {
+                    ep.insert("presence_penalty".to_string(), serde_json::json!(pp));
+                }
+                if let Some(ref re) = mo.reasoning_effort {
+                    ep.insert("reasoning_effort".to_string(), serde_json::json!(re));
+                }
+                if mo.use_max_completion_tokens == Some(true) {
+                    ep.insert(
+                        "use_max_completion_tokens".to_string(),
+                        serde_json::json!(true),
+                    );
+                }
+                if mo.force_max_tokens == Some(true) {
+                    ep.insert("force_max_tokens".to_string(), serde_json::json!(true));
+                }
+            }
+        }
+
         let driver = self.resolve_driver(&manifest)?;
 
         // Look up model's actual context window from the catalog
@@ -5442,6 +5200,17 @@ system_prompt = "You are a helpful assistant."
             cat.find_model(&manifest.model.model)
                 .map(|m| m.context_window as usize)
         });
+
+        // Inject model_supports_tools for auto web search augmentation
+        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&manifest.model.model)
+                .map(|m| m.supports_tools)
+        }) {
+            manifest.metadata.insert(
+                "model_supports_tools".to_string(),
+                serde_json::Value::Bool(supports),
+            );
+        }
 
         // Snapshot skill registry before async call (RwLockReadGuard is !Send)
         let mut skill_snapshot = self
@@ -5554,7 +5323,12 @@ system_prompt = "You are a helpful assistant."
         let start = result.new_messages_start.min(session.messages.len());
         if start < session.messages.len() {
             let new_messages = session.messages[start..].to_vec();
-            if let Err(e) = self.memory.append_canonical(agent_id, &new_messages, None) {
+            if let Err(e) = self.memory.append_canonical(
+                agent_id,
+                &new_messages,
+                None,
+                Some(effective_session_id),
+            ) {
                 warn!("Failed to update canonical session: {e}");
             }
         }
@@ -5585,6 +5359,7 @@ system_prompt = "You are a helpful assistant."
         );
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
+            provider: manifest.model.provider.clone(),
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
@@ -7491,6 +7266,9 @@ system_prompt = "You are a helpful assistant."
                     if !new_config.provider_urls.is_empty() {
                         catalog.apply_url_overrides(&new_config.provider_urls);
                     }
+                    if !new_config.provider_proxy_urls.is_empty() {
+                        catalog.apply_proxy_url_overrides(&new_config.provider_proxy_urls);
+                    }
                     // Also update media driver cache with new provider URLs
                     self.media_drivers
                         .update_provider_urls(new_config.provider_urls.clone());
@@ -7673,6 +7451,42 @@ system_prompt = "You are a helpful assistant."
         // agents are picked up on the next routing call.
         router::invalidate_manifest_cache();
         router::invalidate_hand_route_cache();
+    }
+
+    /// Lightweight one-shot LLM call for classification tasks (e.g., reply precheck).
+    ///
+    /// Uses the default driver with low max_tokens and 0 temperature.
+    /// Returns `Err` on LLM error or timeout (caller should fail-open).
+    pub async fn one_shot_llm_call(&self, model: &str, prompt: &str) -> Result<String, String> {
+        use librefang_runtime::llm_driver::CompletionRequest;
+        use librefang_types::message::Message;
+
+        let request = CompletionRequest {
+            model: model.to_string(),
+            messages: vec![Message::user(prompt.to_string())],
+            tools: vec![],
+            max_tokens: 10,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+        };
+
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.default_driver.complete(request),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => return Err(format!("LLM call failed: {e}")),
+            Err(_) => return Err("LLM call timed out (5s)".to_string()),
+        };
+
+        Ok(result.text())
     }
 
     /// Publish an event to the bus and evaluate triggers.
@@ -8006,29 +7820,30 @@ system_prompt = "You are a helpful assistant."
                 }
             }
         } else if !state_path.exists() {
-            // First boot: activate all registry hands then pause them (pre-install).
-            // This creates full workspace structure (AGENT.json, SOUL.md, memory/, etc.)
-            // without leaving agents running.
+            // First boot: scaffold workspace directories and identity files for all
+            // registry hands without activating them. Activation (DB entries, session
+            // spawning, agent registration) only happens when the user explicitly
+            // enables a hand — not unconditionally on every fresh install.
             let defs = self.hand_registry.list_definitions();
             if !defs.is_empty() {
                 info!(
-                    "First boot — pre-installing {} hand(s) (activate + pause)",
+                    "First boot — scaffolding {} hand workspace(s) (files only, no activation)",
                     defs.len()
                 );
+                let hands_ws_dir = cfg.effective_hands_workspaces_dir();
                 for def in &defs {
-                    match self.activate_hand(&def.id, std::collections::HashMap::new()) {
-                        Ok(inst) => {
-                            if let Err(e) = self.pause_hand(inst.instance_id) {
-                                warn!(hand = %def.id, error = %e, "Failed to pause pre-installed hand");
-                            } else {
-                                info!(hand = %def.id, "Pre-installed hand (paused)");
-                            }
+                    for (role, agent) in &def.agents {
+                        let safe_hand = safe_path_component(&def.id, "hand");
+                        let safe_role = safe_path_component(role, "agent");
+                        let workspace = hands_ws_dir.join(&safe_hand).join(&safe_role);
+                        if let Err(e) = ensure_workspace(&workspace) {
+                            warn!(hand = %def.id, role = %role, error = %e, "Failed to scaffold hand workspace");
+                            continue;
                         }
-                        Err(e) => {
-                            warn!(hand = %def.id, error = %e, "Failed to pre-install hand");
-                        }
+                        generate_identity_files(&workspace, &agent.manifest);
                     }
                 }
+                // Write an empty state file so subsequent boots skip this block.
                 self.persist_hand_state();
             }
         }
@@ -8210,11 +8025,14 @@ system_prompt = "You are a helpful assistant."
                             error = result.error.as_deref().unwrap_or("unknown"),
                             "Local provider offline"
                         );
-                        // Mark unreachable local providers so dashboard doesn't show "configured"
+                        // Mark unreachable local providers as LocalOffline (not Missing).
+                        // Using Missing would cause detect_auth() to reset the status back
+                        // to NotRequired on the next unrelated auth check, making offline
+                        // providers reappear in the model switcher.
                         if let Ok(mut catalog) = kernel.model_catalog.write() {
                             catalog.set_provider_auth_status(
                                 provider_id,
-                                librefang_types::model_catalog::AuthStatus::Missing,
+                                librefang_types::model_catalog::AuthStatus::LocalOffline,
                             );
                         }
                     }
@@ -9075,6 +8893,8 @@ system_prompt = "You are a helpful assistant."
                 azure_openai: cfg.azure_openai.clone(),
                 skip_permissions: true,
                 message_timeout_secs: cfg.default_model.message_timeout_secs,
+                mcp_bridge: Some(build_mcp_bridge_cfg(&cfg)),
+                proxy_url: cfg.provider_proxy_urls.get(agent_provider).cloned(),
             };
 
             match self.driver_cache.get_or_create(&driver_config) {
@@ -9156,8 +8976,10 @@ system_prompt = "You are a helpful assistant."
                         .or_else(|| self.lookup_provider_url(&fb_provider)),
                     vertex_ai: cfg.vertex_ai.clone(),
                     azure_openai: cfg.azure_openai.clone(),
+                    mcp_bridge: Some(build_mcp_bridge_cfg(&cfg)),
                     skip_permissions: true,
                     message_timeout_secs: cfg.default_model.message_timeout_secs,
+                    proxy_url: cfg.provider_proxy_urls.get(&fb_provider).cloned(),
                 };
                 match self.driver_cache.get_or_create(&config) {
                     Ok(d) => chain.push((d, strip_provider_prefix(&fb.model, &fb_provider))),
@@ -9177,7 +8999,10 @@ system_prompt = "You are a helpful assistant."
     }
 
     /// Connect to all configured MCP servers and cache their tool definitions.
-    async fn connect_mcp_servers(self: &Arc<Self>) {
+    ///
+    /// Idempotent: servers that already have a live connection are skipped.
+    /// Called at boot and after hot-reload adds/updates MCP server config.
+    pub async fn connect_mcp_servers(self: &Arc<Self>) {
         use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
         use librefang_types::config::McpTransportEntry;
 
@@ -9188,6 +9013,14 @@ system_prompt = "You are a helpful assistant."
             .unwrap_or_default();
 
         for server_config in &servers {
+            // Skip servers that already have a live connection (idempotent).
+            {
+                let conns = self.mcp_connections.lock().await;
+                if conns.iter().any(|c| c.name() == server_config.name) {
+                    continue;
+                }
+            }
+
             let transport_entry = match &server_config.transport {
                 Some(t) => t,
                 None => {
@@ -9221,6 +9054,7 @@ system_prompt = "You are a helpful assistant."
                 headers: server_config.headers.clone(),
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
+                taint_scanning: server_config.taint_scanning,
             };
 
             match McpConnection::connect(mcp_config).await {
@@ -9278,6 +9112,29 @@ system_prompt = "You are a helpful assistant."
                 self.mcp_connections.lock().await.len()
             );
         }
+    }
+
+    /// Disconnect an MCP server by name, removing it from the live connection list.
+    ///
+    /// The dropped `McpConnection` will shut down the underlying transport.
+    /// Returns `true` if a connection was found and removed.
+    pub async fn disconnect_mcp_server(&self, name: &str) -> bool {
+        let mut conns = self.mcp_connections.lock().await;
+        let before = conns.len();
+        conns.retain(|c| c.name() != name);
+        let removed = conns.len() < before;
+        if removed {
+            // Remove cached tools from this server and bump generation.
+            // MCP tools are prefixed: mcp_{normalized_server_name}_{tool_name}
+            let prefix = format!("mcp_{}_", librefang_runtime::mcp::normalize_name(name));
+            if let Ok(mut tools) = self.mcp_tools.lock() {
+                tools.retain(|t| !t.name.starts_with(&prefix));
+            }
+            self.mcp_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            info!(server = %name, "MCP server disconnected");
+        }
+        removed
     }
 
     /// Watch for OAuth completion by polling the vault for a stored access token.
@@ -9346,6 +9203,7 @@ system_prompt = "You are a helpful assistant."
             headers: server_config.headers.clone(),
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
+            taint_scanning: server_config.taint_scanning,
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -9480,6 +9338,7 @@ system_prompt = "You are a helpful assistant."
                 headers: server_config.headers.clone(),
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
+                taint_scanning: server_config.taint_scanning,
             };
 
             self.extension_health.register(&server_config.name);
@@ -9626,6 +9485,7 @@ system_prompt = "You are a helpful assistant."
             headers: server_config.headers.clone(),
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
+            taint_scanning: server_config.taint_scanning,
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -9847,8 +9707,17 @@ system_prompt = "You are a helpful assistant."
                     .collect()
             };
             for t in mcp_candidates {
-                // If agent declares specific tools, only include matching MCP tools
-                if !tools_unrestricted && !declared_tools.iter().any(|d| glob_matches(d, &t.name)) {
+                // When the agent explicitly lists MCP servers (non-empty mcp_servers),
+                // all tools from those servers are always available — mcp_servers is a
+                // separate permission grant independent of capabilities.tools (which
+                // governs builtin tools). Listing a server implies permission to use
+                // all of its tools.
+                // When mcp_servers is empty (use all servers), still apply the
+                // declared_tools filter so capabilities.tools can narrow them down.
+                if !tools_unrestricted
+                    && mcp_allowlist.is_empty()
+                    && !declared_tools.iter().any(|d| glob_matches(d, &t.name))
+                {
                     continue;
                 }
                 all_tools.push(t);
@@ -10308,287 +10177,8 @@ system_prompt = "You are a helpful assistant."
     }
 }
 
-/// Convert a manifest's capability declarations into Capability enums.
-///
-/// If a `profile` is set and the manifest has no explicit tools, the profile's
-/// implied capabilities are used as a base — preserving any non-tool overrides
-/// from the manifest.
-fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capability> {
-    let mut caps = Vec::new();
-
-    // Profile expansion: use profile's implied capabilities when no explicit tools
-    let effective_caps = if let Some(ref profile) = manifest.profile {
-        if manifest.capabilities.tools.is_empty() {
-            let mut merged = profile.implied_capabilities();
-            if !manifest.capabilities.network.is_empty() {
-                merged.network = manifest.capabilities.network.clone();
-            }
-            if !manifest.capabilities.shell.is_empty() {
-                merged.shell = manifest.capabilities.shell.clone();
-            }
-            if !manifest.capabilities.agent_message.is_empty() {
-                merged.agent_message = manifest.capabilities.agent_message.clone();
-            }
-            if manifest.capabilities.agent_spawn {
-                merged.agent_spawn = true;
-            }
-            if !manifest.capabilities.memory_read.is_empty() {
-                merged.memory_read = manifest.capabilities.memory_read.clone();
-            }
-            if !manifest.capabilities.memory_write.is_empty() {
-                merged.memory_write = manifest.capabilities.memory_write.clone();
-            }
-            if manifest.capabilities.ofp_discover {
-                merged.ofp_discover = true;
-            }
-            if !manifest.capabilities.ofp_connect.is_empty() {
-                merged.ofp_connect = manifest.capabilities.ofp_connect.clone();
-            }
-            merged
-        } else {
-            manifest.capabilities.clone()
-        }
-    } else {
-        manifest.capabilities.clone()
-    };
-
-    for host in &effective_caps.network {
-        caps.push(Capability::NetConnect(host.clone()));
-    }
-    for tool in &effective_caps.tools {
-        caps.push(Capability::ToolInvoke(tool.clone()));
-    }
-    for scope in &effective_caps.memory_read {
-        caps.push(Capability::MemoryRead(scope.clone()));
-    }
-    for scope in &effective_caps.memory_write {
-        caps.push(Capability::MemoryWrite(scope.clone()));
-    }
-    if effective_caps.agent_spawn {
-        caps.push(Capability::AgentSpawn);
-    }
-    for pattern in &effective_caps.agent_message {
-        caps.push(Capability::AgentMessage(pattern.clone()));
-    }
-    for cmd in &effective_caps.shell {
-        caps.push(Capability::ShellExec(cmd.clone()));
-    }
-    if effective_caps.ofp_discover {
-        caps.push(Capability::OfpDiscover);
-    }
-    for peer in &effective_caps.ofp_connect {
-        caps.push(Capability::OfpConnect(peer.clone()));
-    }
-
-    caps
-}
-
-/// Apply global budget defaults to an agent's resource quota.
-///
-/// When the global budget config specifies limits and the agent still has
-/// the built-in defaults, override them so agents respect the user's config.
-/// Apply a per-call deep-thinking override to a manifest clone.
-///
-/// - `Some(true)` — ensure the manifest has a `ThinkingConfig` (inserting the
-///   default one if previously empty) so the driver enables reasoning.
-/// - `Some(false)` — clear `manifest.thinking` so the driver does not request
-///   thinking regardless of the manifest/global default.
-/// - `None` — leave the manifest untouched.
-fn apply_thinking_override(
-    manifest: &mut librefang_types::agent::AgentManifest,
-    thinking_override: Option<bool>,
-) {
-    match thinking_override {
-        Some(true) => {
-            if manifest.thinking.is_none() {
-                manifest.thinking = Some(librefang_types::config::ThinkingConfig::default());
-            }
-        }
-        Some(false) => {
-            manifest.thinking = None;
-        }
-        None => {}
-    }
-}
-
-fn apply_budget_defaults(
-    budget: &librefang_types::config::BudgetConfig,
-    resources: &mut ResourceQuota,
-) {
-    // Only override hourly if agent has unlimited (0.0) and global is set
-    if budget.max_hourly_usd > 0.0 && resources.max_cost_per_hour_usd == 0.0 {
-        resources.max_cost_per_hour_usd = budget.max_hourly_usd;
-    }
-    // Only override daily/monthly if agent has unlimited (0.0) and global is set
-    if budget.max_daily_usd > 0.0 && resources.max_cost_per_day_usd == 0.0 {
-        resources.max_cost_per_day_usd = budget.max_daily_usd;
-    }
-    if budget.max_monthly_usd > 0.0 && resources.max_cost_per_month_usd == 0.0 {
-        resources.max_cost_per_month_usd = budget.max_monthly_usd;
-    }
-    // Override per-agent hourly token limit when the global default is set.
-    // This lets users raise (or lower) the token budget for all agents at once
-    // via config.toml [budget] default_max_llm_tokens_per_hour = 10000000
-    if budget.default_max_llm_tokens_per_hour > 0 {
-        resources.max_llm_tokens_per_hour = budget.default_max_llm_tokens_per_hour;
-    }
-}
-
-/// Pick a sensible default embedding model for a given provider when the user
-/// configured an explicit `embedding_provider` but left `embedding_model` at the
-/// default value (which is a local model name that cloud APIs wouldn't recognise).
-fn default_embedding_model_for_provider(provider: &str) -> &'static str {
-    match provider {
-        "openai" => "text-embedding-3-small",
-        "mistral" => "mistral-embed",
-        "cohere" => "embed-english-v3.0",
-        // Local providers use nomic-embed-text as a good default
-        "ollama" | "vllm" | "lmstudio" => "nomic-embed-text",
-        // Other OpenAI-compatible APIs typically support the OpenAI model names
-        _ => "text-embedding-3-small",
-    }
-}
-
-/// Infer provider from a model name when catalog lookup fails.
-///
-/// Uses well-known model name prefixes to map to the correct provider.
-/// This is a defense-in-depth fallback — models should ideally be in the catalog.
-fn infer_provider_from_model(model: &str) -> Option<String> {
-    let lower = model.to_lowercase();
-    // Check for explicit provider prefix with / or : delimiter
-    // (e.g., "minimax/MiniMax-M2.5" or "qwen:qwen-plus")
-    let (prefix, has_delim) = if let Some(idx) = lower.find('/') {
-        (&lower[..idx], true)
-    } else if let Some(idx) = lower.find(':') {
-        (&lower[..idx], true)
-    } else {
-        (lower.as_str(), false)
-    };
-    if has_delim {
-        match prefix {
-            "minimax" | "gemini" | "anthropic" | "openai" | "groq" | "deepseek" | "mistral"
-            | "cohere" | "xai" | "ollama" | "together" | "fireworks" | "perplexity"
-            | "cerebras" | "sambanova" | "replicate" | "huggingface" | "ai21" | "codex"
-            | "claude-code" | "copilot" | "github-copilot" | "qwen" | "zhipu" | "zai"
-            | "moonshot" | "openrouter" | "volcengine" | "doubao" | "dashscope" => {
-                return Some(prefix.to_string());
-            }
-            // "z.ai" is a domain alias for the zai provider
-            "z.ai" => {
-                return Some("zai".to_string());
-            }
-            // "kimi" / "kimi2" are brand aliases for moonshot
-            "kimi" | "kimi2" => {
-                return Some("moonshot".to_string());
-            }
-            _ => {}
-        }
-    }
-    // Infer from well-known model name patterns
-    if lower.starts_with("minimax") {
-        Some("minimax".to_string())
-    } else if lower.starts_with("gemini") {
-        Some("gemini".to_string())
-    } else if lower.starts_with("claude") {
-        Some("anthropic".to_string())
-    } else if lower.starts_with("gpt")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
-    {
-        Some("openai".to_string())
-    } else if lower.starts_with("llama")
-        || lower.starts_with("mixtral")
-        || lower.starts_with("qwen")
-    {
-        // These could be on multiple providers; don't infer
-        None
-    } else if lower.starts_with("grok") {
-        Some("xai".to_string())
-    } else if lower.starts_with("deepseek") {
-        Some("deepseek".to_string())
-    } else if lower.starts_with("mistral")
-        || lower.starts_with("codestral")
-        || lower.starts_with("pixtral")
-    {
-        Some("mistral".to_string())
-    } else if lower.starts_with("command") || lower.starts_with("embed-") {
-        Some("cohere".to_string())
-    } else if lower.starts_with("jamba") {
-        Some("ai21".to_string())
-    } else if lower.starts_with("sonar") {
-        Some("perplexity".to_string())
-    } else if lower.starts_with("glm") {
-        Some("zhipu".to_string())
-    } else if lower.starts_with("ernie") {
-        Some("qianfan".to_string())
-    } else if lower.starts_with("abab") {
-        Some("minimax".to_string())
-    } else if lower.starts_with("moonshot") || lower.starts_with("kimi") {
-        Some("moonshot".to_string())
-    } else {
-        None
-    }
-}
-
-/// A well-known agent ID used for shared memory operations across agents.
-/// This is a fixed UUID so all agents read/write to the same namespace.
-/// Parse an agent.toml string and return true if `enabled` is explicitly set
-/// Try to extract an `AgentManifest` from a `hand.toml` file (HandDefinition format).
-///
-/// When `source_toml_path` points to a hand.toml rather than an agent.toml, the file
-/// contains a `HandDefinition` with multiple agent manifests keyed by role name.
-/// This function parses the file as a `HandDefinition` and returns the manifest whose
-/// `name` field (or role key) matches `agent_name`.
-fn extract_manifest_from_hand_toml(
-    toml_str: &str,
-    agent_name: &str,
-) -> Option<librefang_types::agent::AgentManifest> {
-    let def: librefang_hands::HandDefinition = toml::from_str(toml_str).ok()?;
-    for (role, hand_agent) in &def.agents {
-        if hand_agent.manifest.name == agent_name || role == agent_name {
-            return Some(hand_agent.manifest.clone());
-        }
-    }
-    // Also try matching by the "{hand_id}-{role}" convention used for spawned agents.
-    for (role, hand_agent) in &def.agents {
-        let qualified = format!("{}-{}", def.id, role);
-        if qualified == agent_name {
-            return Some(hand_agent.manifest.clone());
-        }
-    }
-    None
-}
-
-/// to `false`. Uses proper TOML parsing to handle all valid whitespace variants
-/// and avoid false positives from commented-out lines.
-fn toml_enabled_false(content: &str) -> bool {
-    #[derive(serde::Deserialize)]
-    struct Probe {
-        enabled: Option<bool>,
-    }
-    toml::from_str::<Probe>(content)
-        .ok()
-        .and_then(|p| p.enabled)
-        == Some(false)
-}
-
-pub fn shared_memory_agent_id() -> AgentId {
-    AgentId(uuid::Uuid::from_bytes([
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01,
-    ]))
-}
-
-/// Namespace a memory key by peer ID for per-user isolation.
-/// When `peer_id` is `Some`, returns `"peer:{peer_id}:{key}"`.
-/// When `None`, returns the key unchanged (global scope).
-fn peer_scoped_key(key: &str, peer_id: Option<&str>) -> String {
-    match peer_id {
-        Some(pid) => format!("peer:{pid}:{key}"),
-        None => key.to_string(),
-    }
-}
+mod manifest_helpers;
+use manifest_helpers::*;
 
 /// Deliver a cron job's agent response to the configured delivery target.
 async fn cron_deliver_response(
@@ -10985,9 +10575,40 @@ impl KernelHandle for LibreFangKernel {
     ) -> Result<(), String> {
         let agent_id = shared_memory_agent_id();
         let scoped = peer_scoped_key(key, peer_id);
+        // Check whether key already exists to determine Created vs Updated
+        let had_old = self
+            .memory
+            .structured_get(agent_id, &scoped)
+            .ok()
+            .flatten()
+            .is_some();
         self.memory
             .structured_set(agent_id, &scoped, value)
-            .map_err(|e| format!("Memory store failed: {e}"))
+            .map_err(|e| format!("Memory store failed: {e}"))?;
+
+        // Publish MemoryUpdate event so triggers can react
+        let operation = if had_old {
+            MemoryOperation::Updated
+        } else {
+            MemoryOperation::Created
+        };
+        let event = Event::new(
+            agent_id,
+            EventTarget::Broadcast,
+            EventPayload::MemoryUpdate(MemoryDelta {
+                operation,
+                key: scoped.clone(),
+                agent_id,
+            }),
+        );
+        if let Some(weak) = self.self_handle.get() {
+            if let Some(kernel) = weak.upgrade() {
+                tokio::spawn(async move {
+                    kernel.publish_event(event).await;
+                });
+            }
+        }
+        Ok(())
     }
 
     fn memory_recall(
@@ -11063,10 +10684,27 @@ impl KernelHandle for LibreFangKernel {
         assigned_to: Option<&str>,
         created_by: Option<&str>,
     ) -> Result<String, String> {
-        self.memory
+        let task_id = self
+            .memory
             .task_post(title, description, assigned_to, created_by)
             .await
-            .map_err(|e| format!("Task post failed: {e}"))
+            .map_err(|e| format!("Task post failed: {e}"))?;
+
+        let event = librefang_types::event::Event::new(
+            AgentId::new(), // system-originated
+            librefang_types::event::EventTarget::Broadcast,
+            librefang_types::event::EventPayload::System(
+                librefang_types::event::SystemEvent::TaskPosted {
+                    task_id: task_id.clone(),
+                    title: title.to_string(),
+                    assigned_to: assigned_to.map(String::from),
+                    created_by: created_by.map(String::from),
+                },
+            ),
+        );
+        self.publish_event(event).await;
+
+        Ok(task_id)
     }
 
     async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String> {
@@ -11085,17 +10723,49 @@ impl KernelHandle for LibreFangKernel {
                 }
             },
         };
-        self.memory
+        let result = self
+            .memory
             .task_claim(&resolved)
             .await
-            .map_err(|e| format!("Task claim failed: {e}"))
+            .map_err(|e| format!("Task claim failed: {e}"))?;
+
+        if let Some(ref task) = result {
+            let task_id = task["id"].as_str().unwrap_or("").to_string();
+            let event = librefang_types::event::Event::new(
+                AgentId::new(), // system-originated
+                librefang_types::event::EventTarget::Broadcast,
+                librefang_types::event::EventPayload::System(
+                    librefang_types::event::SystemEvent::TaskClaimed {
+                        task_id,
+                        claimed_by: resolved.clone(),
+                    },
+                ),
+            );
+            self.publish_event(event).await;
+        }
+
+        Ok(result)
     }
 
     async fn task_complete(&self, task_id: &str, result: &str) -> Result<(), String> {
         self.memory
             .task_complete(task_id, result)
             .await
-            .map_err(|e| format!("Task complete failed: {e}"))
+            .map_err(|e| format!("Task complete failed: {e}"))?;
+
+        let event = librefang_types::event::Event::new(
+            AgentId::new(), // system-originated
+            librefang_types::event::EventTarget::Broadcast,
+            librefang_types::event::EventPayload::System(
+                librefang_types::event::SystemEvent::TaskCompleted {
+                    task_id: task_id.to_string(),
+                    result: result.to_string(),
+                },
+            ),
+        );
+        self.publish_event(event).await;
+
+        Ok(())
     }
 
     async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
@@ -12474,6 +12144,9 @@ impl LibreFangKernel {
             allowed_tools: deferred.allowed_tools.as_deref(),
             caller_agent_id: Some(deferred.agent_id.as_str()),
             skill_registry: Some(skill_snapshot),
+            // Deferred tools have already passed the approval gate; skill
+            // allowlist is not available here so we skip the check (None).
+            allowed_skills: None,
             mcp_connections: Some(&self.mcp_connections),
             web_ctx: Some(&self.web_ctx),
             browser_ctx: Some(&self.browser_ctx),
@@ -12812,1319 +12485,4 @@ impl librefang_wire::peer::PeerHandle for LibreFangKernel {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::stream;
-    use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};
-    use librefang_types::approval::{
-        AgentNotificationRule, ApprovalRequest, NotificationConfig, NotificationTarget, RiskLevel,
-    };
-    use librefang_types::config::DefaultModelConfig;
-    use std::collections::HashMap;
-    use std::pin::Pin;
-
-    struct RecordingChannelAdapter {
-        name: String,
-        channel_type: ChannelType,
-        sent: Arc<std::sync::Mutex<Vec<String>>>,
-    }
-
-    impl RecordingChannelAdapter {
-        fn new(channel_type: &str) -> Self {
-            Self {
-                name: channel_type.to_string(),
-                channel_type: ChannelType::Custom(channel_type.to_string()),
-                sent: Arc::new(std::sync::Mutex::new(Vec::new())),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ChannelAdapter for RecordingChannelAdapter {
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        fn channel_type(&self) -> ChannelType {
-            self.channel_type.clone()
-        }
-
-        async fn start(
-            &self,
-        ) -> Result<
-            Pin<Box<dyn futures::Stream<Item = librefang_channels::types::ChannelMessage> + Send>>,
-            Box<dyn std::error::Error + Send + Sync>,
-        > {
-            Ok(Box::pin(stream::empty()))
-        }
-
-        async fn send(
-            &self,
-            user: &ChannelUser,
-            content: ChannelContent,
-        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            if let ChannelContent::Text(text) = content {
-                self.sent
-                    .lock()
-                    .unwrap()
-                    .push(format!("{}:{text}", user.platform_id));
-            }
-            Ok(())
-        }
-
-        async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            Ok(())
-        }
-    }
-
-    struct EnvVarGuard {
-        key: &'static str,
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            std::env::remove_var(self.key);
-        }
-    }
-
-    fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
-        std::env::set_var(key, value);
-        EnvVarGuard { key }
-    }
-
-    #[test]
-    fn test_collect_rotation_key_specs_dedupes_primary_profile_key() {
-        let _primary = set_test_env("LIBREFANG_TEST_ROTATION_PRIMARY_KEY_A", "key-1");
-        let _secondary = set_test_env("LIBREFANG_TEST_ROTATION_SECONDARY_KEY_A", "key-2");
-        let profiles = [
-            AuthProfile {
-                name: "secondary".to_string(),
-                api_key_env: "LIBREFANG_TEST_ROTATION_SECONDARY_KEY_A".to_string(),
-                priority: 10,
-            },
-            AuthProfile {
-                name: "profile-a".to_string(),
-                api_key_env: "LIBREFANG_TEST_ROTATION_PRIMARY_KEY_A".to_string(),
-                priority: 0,
-            },
-        ];
-
-        let specs = collect_rotation_key_specs(Some(&profiles), Some("key-1"));
-
-        assert_eq!(
-            specs,
-            vec![
-                RotationKeySpec {
-                    name: "profile-a".to_string(),
-                    api_key: "key-1".to_string(),
-                    use_primary_driver: true,
-                },
-                RotationKeySpec {
-                    name: "secondary".to_string(),
-                    api_key: "key-2".to_string(),
-                    use_primary_driver: false,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn test_collect_rotation_key_specs_prepends_distinct_primary_and_skips_missing_profiles() {
-        let _secondary = set_test_env("LIBREFANG_TEST_ROTATION_SECONDARY_KEY_B", "key-2");
-        let profiles = [
-            AuthProfile {
-                name: "missing".to_string(),
-                api_key_env: "LIBREFANG_TEST_ROTATION_MISSING_KEY_B".to_string(),
-                priority: 0,
-            },
-            AuthProfile {
-                name: "secondary".to_string(),
-                api_key_env: "LIBREFANG_TEST_ROTATION_SECONDARY_KEY_B".to_string(),
-                priority: 1,
-            },
-        ];
-
-        let specs = collect_rotation_key_specs(Some(&profiles), Some("key-0"));
-
-        assert_eq!(
-            specs,
-            vec![
-                RotationKeySpec {
-                    name: "primary".to_string(),
-                    api_key: "key-0".to_string(),
-                    use_primary_driver: true,
-                },
-                RotationKeySpec {
-                    name: "secondary".to_string(),
-                    api_key: "key-2".to_string(),
-                    use_primary_driver: false,
-                },
-            ]
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_notify_escalated_approval_prefers_request_route_to() {
-        let dir = tempfile::tempdir().unwrap();
-        let home_dir = dir.path().to_path_buf();
-        std::fs::create_dir_all(home_dir.join("data")).unwrap();
-
-        let explicit_target = NotificationTarget {
-            channel_type: "test".to_string(),
-            recipient: "explicit-recipient".to_string(),
-            thread_id: None,
-        };
-
-        let mut config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-        config.approval.routing = vec![librefang_types::approval::ApprovalRoutingRule {
-            tool_pattern: "shell_*".to_string(),
-            route_to: vec![NotificationTarget {
-                channel_type: "test".to_string(),
-                recipient: "policy-recipient".to_string(),
-                thread_id: None,
-            }],
-        }];
-        config.notification = NotificationConfig {
-            approval_channels: vec![NotificationTarget {
-                channel_type: "test".to_string(),
-                recipient: "global-recipient".to_string(),
-                thread_id: None,
-            }],
-            alert_channels: Vec::new(),
-            agent_rules: vec![AgentNotificationRule {
-                agent_pattern: "*".to_string(),
-                channels: vec![NotificationTarget {
-                    channel_type: "test".to_string(),
-                    recipient: "agent-rule-recipient".to_string(),
-                    thread_id: None,
-                }],
-                events: vec!["approval_requested".to_string()],
-            }],
-        };
-
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-        let adapter = Arc::new(RecordingChannelAdapter::new("test"));
-        let sent = adapter.sent.clone();
-        kernel.channel_adapters.insert("test".to_string(), adapter);
-
-        let req = ApprovalRequest {
-            id: uuid::Uuid::new_v4(),
-            agent_id: "agent-123".to_string(),
-            tool_name: "shell_exec".to_string(),
-            description: "run shell command".to_string(),
-            action_summary: "run shell command".to_string(),
-            risk_level: RiskLevel::High,
-            requested_at: chrono::Utc::now(),
-            timeout_secs: 60,
-            sender_id: None,
-            channel: None,
-            route_to: vec![explicit_target],
-            escalation_count: 1,
-        };
-
-        kernel.notify_escalated_approval(&req, req.id).await;
-
-        let sent = sent.lock().unwrap().clone();
-        assert_eq!(
-            sent.len(),
-            1,
-            "only the explicit request target should be used"
-        );
-        assert!(
-            sent[0].starts_with("explicit-recipient:"),
-            "escalation should use the per-request route_to target"
-        );
-        assert!(
-            !sent[0].contains("policy-recipient")
-                && !sent[0].contains("agent-rule-recipient")
-                && !sent[0].contains("global-recipient")
-        );
-
-        kernel.shutdown();
-    }
-
-    #[test]
-    fn test_manifest_to_capabilities() {
-        let mut manifest = AgentManifest {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            author: "test".to_string(),
-            module: "test".to_string(),
-            ..Default::default()
-        };
-        manifest.capabilities.tools = vec!["file_read".to_string(), "web_fetch".to_string()];
-        manifest.capabilities.agent_spawn = true;
-
-        let caps = manifest_to_capabilities(&manifest);
-        assert!(caps.contains(&Capability::ToolInvoke("file_read".to_string())));
-        assert!(caps.contains(&Capability::AgentSpawn));
-        assert_eq!(caps.len(), 3); // 2 tools + agent_spawn
-    }
-
-    fn test_manifest(name: &str, description: &str, tags: Vec<String>) -> AgentManifest {
-        AgentManifest {
-            name: name.to_string(),
-            description: description.to_string(),
-            author: "test".to_string(),
-            module: "builtin:chat".to_string(),
-            tags,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_send_to_agent_by_name_resolution() {
-        // Test that name resolution works in the registry
-        let registry = AgentRegistry::new();
-        let manifest = test_manifest("coder", "A coder agent", vec!["coding".to_string()]);
-        let agent_id = AgentId::new();
-        let entry = AgentEntry {
-            id: agent_id,
-            name: "coder".to_string(),
-            manifest,
-            state: AgentState::Running,
-            mode: AgentMode::default(),
-            created_at: chrono::Utc::now(),
-            last_active: chrono::Utc::now(),
-            parent: None,
-            children: vec![],
-            session_id: SessionId::new(),
-            tags: vec!["coding".to_string()],
-            identity: Default::default(),
-            onboarding_completed: false,
-            onboarding_completed_at: None,
-            source_toml_path: None,
-            is_hand: false,
-        };
-        registry.register(entry).unwrap();
-
-        // find_by_name should return the agent
-        let found = registry.find_by_name("coder");
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().id, agent_id);
-
-        // UUID lookup should also work
-        let found_by_id = registry.get(agent_id);
-        assert!(found_by_id.is_some());
-    }
-
-    #[test]
-    fn test_find_agents_by_tag() {
-        let registry = AgentRegistry::new();
-
-        let m1 = test_manifest(
-            "coder",
-            "Expert coder",
-            vec!["coding".to_string(), "rust".to_string()],
-        );
-        let e1 = AgentEntry {
-            id: AgentId::new(),
-            name: "coder".to_string(),
-            manifest: m1,
-            state: AgentState::Running,
-            mode: AgentMode::default(),
-            created_at: chrono::Utc::now(),
-            last_active: chrono::Utc::now(),
-            parent: None,
-            children: vec![],
-            session_id: SessionId::new(),
-            tags: vec!["coding".to_string(), "rust".to_string()],
-            identity: Default::default(),
-            onboarding_completed: false,
-            onboarding_completed_at: None,
-            source_toml_path: None,
-            is_hand: false,
-        };
-        registry.register(e1).unwrap();
-
-        let m2 = test_manifest(
-            "auditor",
-            "Security auditor",
-            vec!["security".to_string(), "audit".to_string()],
-        );
-        let e2 = AgentEntry {
-            id: AgentId::new(),
-            name: "auditor".to_string(),
-            manifest: m2,
-            state: AgentState::Running,
-            mode: AgentMode::default(),
-            created_at: chrono::Utc::now(),
-            last_active: chrono::Utc::now(),
-            parent: None,
-            children: vec![],
-            session_id: SessionId::new(),
-            tags: vec!["security".to_string(), "audit".to_string()],
-            identity: Default::default(),
-            onboarding_completed: false,
-            onboarding_completed_at: None,
-            source_toml_path: None,
-            is_hand: false,
-        };
-        registry.register(e2).unwrap();
-
-        // Search by tag — should find only the matching agent
-        let agents = registry.list();
-        let security_agents: Vec<_> = agents
-            .iter()
-            .filter(|a| a.tags.iter().any(|t| t.to_lowercase().contains("security")))
-            .collect();
-        assert_eq!(security_agents.len(), 1);
-        assert_eq!(security_agents[0].name, "auditor");
-
-        // Search by name substring — should find coder
-        let code_agents: Vec<_> = agents
-            .iter()
-            .filter(|a| a.name.to_lowercase().contains("coder"))
-            .collect();
-        assert_eq!(code_agents.len(), 1);
-        assert_eq!(code_agents[0].name, "coder");
-    }
-
-    #[test]
-    fn test_manifest_to_capabilities_with_profile() {
-        use librefang_types::agent::ToolProfile;
-        let manifest = AgentManifest {
-            profile: Some(ToolProfile::Coding),
-            ..Default::default()
-        };
-        let caps = manifest_to_capabilities(&manifest);
-        // Coding profile gives: file_read, file_write, file_list, shell_exec, web_fetch
-        assert!(caps
-            .iter()
-            .any(|c| matches!(c, Capability::ToolInvoke(name) if name == "file_read")));
-        assert!(caps
-            .iter()
-            .any(|c| matches!(c, Capability::ToolInvoke(name) if name == "shell_exec")));
-        assert!(caps.iter().any(|c| matches!(c, Capability::ShellExec(_))));
-        assert!(caps.iter().any(|c| matches!(c, Capability::NetConnect(_))));
-    }
-
-    #[test]
-    fn test_manifest_to_capabilities_profile_overridden_by_explicit_tools() {
-        use librefang_types::agent::ToolProfile;
-        let mut manifest = AgentManifest {
-            profile: Some(ToolProfile::Coding),
-            ..Default::default()
-        };
-        // Set explicit tools — profile should NOT be expanded
-        manifest.capabilities.tools = vec!["file_read".to_string()];
-        let caps = manifest_to_capabilities(&manifest);
-        assert!(caps
-            .iter()
-            .any(|c| matches!(c, Capability::ToolInvoke(name) if name == "file_read")));
-        // Should NOT have shell_exec since explicit tools override profile
-        assert!(!caps
-            .iter()
-            .any(|c| matches!(c, Capability::ToolInvoke(name) if name == "shell_exec")));
-    }
-
-    #[test]
-    fn test_spawn_agent_applies_local_default_model_override() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-local-model-test");
-        std::fs::create_dir_all(&home_dir).unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-        *kernel
-            .default_model_override
-            .write()
-            .expect("default model override lock") = Some(DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "Qwen3.5-4B-MLX-4bit".to_string(),
-            api_key_env: String::new(),
-            base_url: Some("http://127.0.0.1:11434/v1".to_string()),
-            ..Default::default()
-        });
-
-        let agent_id = kernel
-            .spawn_agent_inner(
-                AgentManifest {
-                    name: "local-model-agent".to_string(),
-                    description: "uses local model override".to_string(),
-                    author: "test".to_string(),
-                    module: "builtin:chat".to_string(),
-                    model: ModelConfig {
-                        provider: "default".to_string(),
-                        model: "default".to_string(),
-                        max_tokens: 4096,
-                        temperature: 0.7,
-                        system_prompt: String::new(),
-                        api_key_env: None,
-                        base_url: None,
-                        extra_params: std::collections::HashMap::new(),
-                    },
-                    ..Default::default()
-                },
-                None,
-                None,
-                None,
-            )
-            .expect("agent should spawn with local model override");
-
-        let entry = kernel.registry.get(agent_id).expect("agent registry entry");
-        // Spawn now stores "default"/"default" so provider changes propagate at
-        // execute time without re-spawning. Concrete resolution happens in
-        // execute_llm_agent, not at spawn.
-        assert_eq!(entry.manifest.model.provider, "default");
-        assert_eq!(entry.manifest.model.model, "default");
-        assert!(entry.manifest.model.base_url.is_none());
-        assert!(entry.manifest.model.api_key_env.is_none());
-
-        kernel.shutdown();
-    }
-
-    /// Regression: `spawn_agent_inner` must refuse to spawn a child whose
-    /// declared capabilities exceed its parent's. Before this check was
-    /// pushed down, only `spawn_agent_checked` (tool-runner / WASM host
-    /// path) enforced it, and any future caller routing through
-    /// `spawn_agent_with_parent` directly (channel handlers, workflow
-    /// engines, LLM routing, bulk spawn) would silently bypass the
-    /// subset rule and let a restricted parent promote its own
-    /// offspring to full privileges.
-    #[test]
-    fn test_spawn_child_exceeding_parent_is_rejected() {
-        use librefang_types::agent::ManifestCapabilities;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-lineage-reject-test");
-        std::fs::create_dir_all(&home_dir).unwrap();
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-        // Restricted parent: only allowed to invoke `file_read`, no network, no shell.
-        let parent = kernel
-            .spawn_agent_inner(
-                AgentManifest {
-                    name: "restricted-parent".to_string(),
-                    description: "can only read".to_string(),
-                    author: "test".to_string(),
-                    module: "builtin:chat".to_string(),
-                    capabilities: ManifestCapabilities {
-                        tools: vec!["file_read".to_string()],
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                None,
-                None,
-                None,
-            )
-            .expect("parent should spawn as a top-level agent");
-
-        // Malicious child manifest: asks for the wildcard tool +
-        // shell + network — a superset of the parent's single read
-        // capability.
-        let escalation = kernel.spawn_agent_inner(
-            AgentManifest {
-                name: "escalated-child".to_string(),
-                description: "requests full privileges".to_string(),
-                author: "test".to_string(),
-                module: "builtin:chat".to_string(),
-                capabilities: ManifestCapabilities {
-                    tools: vec!["*".to_string()],
-                    shell: vec!["*".to_string()],
-                    network: vec!["*".to_string()],
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            Some(parent),
-            None,
-            None,
-        );
-        let err = escalation.expect_err("child must be rejected");
-        assert!(
-            format!("{err}").contains("Privilege escalation denied"),
-            "error should mention privilege escalation; got {err}"
-        );
-
-        // Nothing called "escalated-child" should be registered —
-        // the check ran before `register()`.
-        assert!(kernel
-            .registry
-            .list()
-            .iter()
-            .all(|e| e.name != "escalated-child"));
-
-        kernel.shutdown();
-    }
-
-    /// A child whose capabilities are a strict subset of its parent
-    /// still spawns successfully — the check must not refuse legitimate
-    /// inheritance. This is the positive counterpart of
-    /// `test_spawn_child_exceeding_parent_is_rejected`.
-    #[test]
-    fn test_spawn_child_with_subset_capabilities_is_allowed() {
-        use librefang_types::agent::ManifestCapabilities;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-lineage-allow-test");
-        std::fs::create_dir_all(&home_dir).unwrap();
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-        let parent = kernel
-            .spawn_agent_inner(
-                AgentManifest {
-                    name: "parent-with-file-tools".to_string(),
-                    description: "file-reading parent".to_string(),
-                    author: "test".to_string(),
-                    module: "builtin:chat".to_string(),
-                    capabilities: ManifestCapabilities {
-                        tools: vec!["file_read".to_string(), "file_write".to_string()],
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                None,
-                None,
-                None,
-            )
-            .expect("parent should spawn");
-
-        let child_id = kernel
-            .spawn_agent_inner(
-                AgentManifest {
-                    name: "subset-child".to_string(),
-                    description: "narrower read-only child".to_string(),
-                    author: "test".to_string(),
-                    module: "builtin:chat".to_string(),
-                    capabilities: ManifestCapabilities {
-                        tools: vec!["file_read".to_string()],
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                Some(parent),
-                None,
-                None,
-            )
-            .expect("subset child should be allowed");
-
-        let entry = kernel.registry.get(child_id).expect("child registered");
-        assert_eq!(entry.parent, Some(parent));
-
-        kernel.shutdown();
-    }
-
-    /// A child whose `parent` argument points at a registry entry that
-    /// doesn't exist must fail closed. This protects against a stale
-    /// `AgentId` slipping through (e.g. after a parent is killed mid-
-    /// spawn) and silently landing on the non-parent code path.
-    #[test]
-    fn test_spawn_with_unknown_parent_fails_closed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-lineage-unknown-test");
-        std::fs::create_dir_all(&home_dir).unwrap();
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-        let ghost_parent = AgentId::new();
-        let result = kernel.spawn_agent_inner(
-            AgentManifest {
-                name: "orphan".to_string(),
-                description: "parent does not exist".to_string(),
-                author: "test".to_string(),
-                module: "builtin:chat".to_string(),
-                ..Default::default()
-            },
-            Some(ghost_parent),
-            None,
-            None,
-        );
-        let err = result.expect_err("unknown parent must fail closed");
-        assert!(
-            format!("{err}").contains("not registered"),
-            "error should indicate parent is not registered; got {err}"
-        );
-
-        kernel.shutdown();
-    }
-
-    /// Regression: switching an agent's provider via `set_agent_model` must
-    /// clear any stale per-agent `api_key_env` / `base_url` overrides. Before
-    /// the fix, `update_model_and_provider` only touched `model.provider` and
-    /// `model.model`, so an agent that had been booted under a custom default
-    /// provider (which seeded those fields onto the manifest) would carry the
-    /// old credentials and URL into the new provider, sending requests to the
-    /// previous endpoint with the wrong key — surfacing as the upstream's
-    /// "Missing Authentication header" 401 (issue #2380).
-    #[test]
-    fn test_set_agent_model_clears_overrides_when_provider_changes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-provider-switch-test");
-        std::fs::create_dir_all(&home_dir).unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-        // Spawn an agent that already carries the previous provider's
-        // connection overrides — this mirrors the boot-time state of an
-        // agent loaded from disk with provider="default" against a custom
-        // default provider like "cloudverse".
-        let agent_id = kernel
-            .spawn_agent_inner(
-                AgentManifest {
-                    name: "switch-provider-agent".to_string(),
-                    description: "carries stale overrides from prior provider".to_string(),
-                    author: "test".to_string(),
-                    module: "builtin:chat".to_string(),
-                    model: ModelConfig {
-                        provider: "cloudverse".to_string(),
-                        model: "anthropic-claude-4-5-sonnet".to_string(),
-                        max_tokens: 4096,
-                        temperature: 0.7,
-                        system_prompt: String::new(),
-                        api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
-                        base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
-                        extra_params: std::collections::HashMap::new(),
-                    },
-                    ..Default::default()
-                },
-                None,
-                None,
-                None,
-            )
-            .expect("agent should spawn");
-
-        // Sanity: stale overrides are present.
-        let pre = kernel.registry.get(agent_id).expect("agent registry entry");
-        assert_eq!(pre.manifest.model.provider, "cloudverse");
-        assert_eq!(
-            pre.manifest.model.api_key_env.as_deref(),
-            Some("CLOUDVERSE_API_KEY")
-        );
-        assert_eq!(
-            pre.manifest.model.base_url.as_deref(),
-            Some("https://cloudverse.freshworkscorp.com/api/v1")
-        );
-
-        // Switch to an entirely different provider via the same path the
-        // dashboard's model picker uses.
-        kernel
-            .set_agent_model(agent_id, "anthropic/claude-3.5-sonnet", Some("openrouter"))
-            .expect("provider switch should succeed");
-
-        let post = kernel
-            .registry
-            .get(agent_id)
-            .expect("agent registry entry after switch");
-        assert_eq!(post.manifest.model.provider, "openrouter");
-        assert_eq!(
-            post.manifest.model.model, "anthropic/claude-3.5-sonnet",
-            "model name should be updated (and prefix-stripped)"
-        );
-        assert!(
-            post.manifest.model.api_key_env.is_none(),
-            "stale CLOUDVERSE_API_KEY override must be cleared so resolve_driver \
-             falls back to the new provider's key from [provider_api_keys] / convention"
-        );
-        assert!(
-            post.manifest.model.base_url.is_none(),
-            "stale cloudverse base_url override must be cleared so resolve_driver \
-             routes to openrouter's URL from [provider_urls] instead of cloudverse"
-        );
-
-        // Re-applying the same provider (model-only swap) must NOT clear the
-        // override fields — they may be legitimate per-agent overrides on a
-        // single provider.
-        kernel
-            .set_agent_model(agent_id, "anthropic/claude-3.7-sonnet", Some("openrouter"))
-            .expect("same-provider model swap should succeed");
-
-        // Seed an override on the now-openrouter agent so we can confirm the
-        // same-provider branch leaves it alone.
-        kernel
-            .registry
-            .update_model_provider_config(
-                agent_id,
-                "anthropic/claude-3.7-sonnet".to_string(),
-                "openrouter".to_string(),
-                Some("CUSTOM_OPENROUTER_KEY".to_string()),
-                Some("https://my-proxy.example/v1".to_string()),
-            )
-            .expect("seed override");
-
-        kernel
-            .set_agent_model(
-                agent_id,
-                "anthropic/claude-3.7-sonnet-v2",
-                Some("openrouter"),
-            )
-            .expect("same-provider swap should succeed");
-
-        let same_provider = kernel
-            .registry
-            .get(agent_id)
-            .expect("agent after same-provider swap");
-        assert_eq!(
-            same_provider.manifest.model.api_key_env.as_deref(),
-            Some("CUSTOM_OPENROUTER_KEY"),
-            "same-provider swap must preserve per-agent api_key_env override"
-        );
-        assert_eq!(
-            same_provider.manifest.model.base_url.as_deref(),
-            Some("https://my-proxy.example/v1"),
-            "same-provider swap must preserve per-agent base_url override"
-        );
-
-        kernel.shutdown();
-    }
-
-    #[test]
-    fn test_hand_activation_does_not_seed_runtime_tool_filters() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-hand-test");
-        std::fs::create_dir_all(&home_dir).unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-        let instance = match kernel.activate_hand("apitester", HashMap::new()) {
-            Ok(inst) => inst,
-            Err(e) if e.to_string().contains("unsatisfied requirements") => {
-                eprintln!("Skipping test: {e}");
-                kernel.shutdown();
-                return;
-            }
-            Err(e) => panic!("apitester hand should activate: {e}"),
-        };
-        let agent_id = instance.agent_id().expect("apitester hand agent id");
-        let entry = kernel
-            .registry
-            .get(agent_id)
-            .expect("apitester hand agent entry");
-
-        assert!(
-            entry.manifest.tool_allowlist.is_empty(),
-            "hand activation should leave the runtime tool allowlist empty so skill/MCP tools remain visible"
-        );
-        assert!(
-            entry.manifest.tool_blocklist.is_empty(),
-            "hand activation should not set a runtime blocklist by default"
-        );
-
-        kernel.shutdown();
-    }
-
-    #[test]
-    fn test_hand_reactivation_rebuilds_same_runtime_profile() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-reactivation-test");
-        std::fs::create_dir_all(&home_dir).unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-        let first_instance = match kernel.activate_hand("apitester", HashMap::new()) {
-            Ok(inst) => inst,
-            Err(e) if e.to_string().contains("unsatisfied requirements") => {
-                eprintln!("Skipping test: {e}");
-                kernel.shutdown();
-                return;
-            }
-            Err(e) => panic!("apitester hand should activate the first time: {e}"),
-        };
-        let first_agent_id = first_instance.agent_id().expect("first apitester agent id");
-        let first_entry = kernel
-            .registry
-            .get(first_agent_id)
-            .expect("first apitester hand agent entry");
-        let first_manifest = first_entry.manifest.clone();
-
-        kernel
-            .deactivate_hand(first_instance.instance_id)
-            .expect("apitester hand should deactivate cleanly");
-
-        let second_instance = match kernel.activate_hand("apitester", HashMap::new()) {
-            Ok(inst) => inst,
-            Err(e) if e.to_string().contains("unsatisfied requirements") => {
-                eprintln!("Skipping test (second activation): {e}");
-                kernel.shutdown();
-                return;
-            }
-            Err(e) => panic!("apitester hand should activate the second time: {e}"),
-        };
-        let second_agent_id = second_instance
-            .agent_id()
-            .expect("second apitester agent id");
-        let second_entry = kernel
-            .registry
-            .get(second_agent_id)
-            .expect("second apitester hand agent entry");
-        let second_manifest = second_entry.manifest.clone();
-
-        assert_eq!(
-            second_manifest.capabilities.tools, first_manifest.capabilities.tools,
-            "reactivation should rebuild the same explicit tool set"
-        );
-        assert_eq!(
-            second_manifest.profile, first_manifest.profile,
-            "reactivation should preserve the same runtime profile"
-        );
-        assert_eq!(
-            second_manifest.tool_allowlist, first_manifest.tool_allowlist,
-            "reactivation should preserve the runtime tool allowlist"
-        );
-        assert_eq!(
-            second_manifest.tool_blocklist, first_manifest.tool_blocklist,
-            "reactivation should preserve the runtime tool blocklist"
-        );
-        assert_eq!(
-            second_manifest.mcp_servers, first_manifest.mcp_servers,
-            "reactivation should preserve MCP server assignments"
-        );
-
-        kernel.shutdown();
-    }
-
-    #[test]
-    fn test_available_tools_returns_empty_when_tools_disabled() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-tools-disabled-test");
-        std::fs::create_dir_all(&home_dir).unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-        let manifest = AgentManifest {
-            name: "no-tools".to_string(),
-            description: "agent with tools disabled".to_string(),
-            author: "test".to_string(),
-            module: "builtin:chat".to_string(),
-            profile: Some(librefang_types::agent::ToolProfile::Full),
-            capabilities: ManifestCapabilities {
-                tools: vec!["file_read".to_string(), "web_fetch".to_string()],
-                ..Default::default()
-            },
-            tools_disabled: true,
-            ..Default::default()
-        };
-
-        let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
-        let tools = kernel.available_tools(agent_id);
-        assert!(
-            tools.is_empty(),
-            "disabled tools should suppress all builtin, skill, and MCP tools"
-        );
-
-        kernel.shutdown();
-    }
-
-    #[test]
-    fn test_available_tools_glob_pattern_matches_mcp_tools() {
-        // Regression: declared tools used exact == match, so "mcp_filesystem_*"
-        // never matched "mcp_filesystem_list_directory" etc. and MCP tools were
-        // silently dropped from available_tools().
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-glob-mcp-test");
-        std::fs::create_dir_all(&home_dir).unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-        // Agent with a glob pattern in declared tools — should match builtins
-        let manifest = AgentManifest {
-            name: "glob-tools".to_string(),
-            description: "agent using glob in tools".to_string(),
-            author: "test".to_string(),
-            module: "builtin:chat".to_string(),
-            capabilities: ManifestCapabilities {
-                tools: vec!["file_*".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
-        let tools = kernel.available_tools(agent_id);
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-
-        assert!(
-            names.contains(&"file_read"),
-            "file_* should match file_read, got: {names:?}"
-        );
-        assert!(
-            names.contains(&"file_write"),
-            "file_* should match file_write, got: {names:?}"
-        );
-        assert!(
-            names.contains(&"file_list"),
-            "file_* should match file_list, got: {names:?}"
-        );
-        assert!(
-            !names.contains(&"web_fetch"),
-            "file_* should NOT match web_fetch, got: {names:?}"
-        );
-        assert!(
-            !names.contains(&"shell_exec"),
-            "file_* should NOT match shell_exec, got: {names:?}"
-        );
-
-        kernel.shutdown();
-    }
-
-    #[test]
-    fn test_shell_exec_available_when_declared_in_tools_without_explicit_exec_policy() {
-        // Regression: agents without an explicit exec_policy inherited the global
-        // ExecPolicy whose default mode is Deny, causing shell_exec to be stripped
-        // from available_tools() even when explicitly listed in capabilities.tools.
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-shell-exec-policy-test");
-        std::fs::create_dir_all(&home_dir).unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            // Global exec_policy stays at default (Deny) — this is the scenario
-            // that triggered the bug.
-            ..KernelConfig::default()
-        };
-
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-        let manifest = AgentManifest {
-            name: "shell-agent".to_string(),
-            description: "agent with shell_exec in tools, no exec_policy".to_string(),
-            author: "test".to_string(),
-            module: "builtin:chat".to_string(),
-            capabilities: ManifestCapabilities {
-                tools: vec!["shell_exec".to_string(), "file_read".to_string()],
-                shell: vec!["*".to_string()],
-                ..Default::default()
-            },
-            exec_policy: None, // no explicit policy — must auto-promote
-            ..Default::default()
-        };
-
-        let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
-
-        // Verify exec_policy was promoted to Full
-        let entry = kernel
-            .registry
-            .get(agent_id)
-            .expect("agent must be registered");
-        assert_eq!(
-            entry.manifest.exec_policy.as_ref().map(|p| p.mode),
-            Some(librefang_types::config::ExecSecurityMode::Full),
-            "exec_policy should be auto-promoted to Full when shell_exec is declared"
-        );
-
-        // Verify shell_exec appears in available_tools
-        let tools = kernel.available_tools(agent_id);
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(
-            names.contains(&"shell_exec"),
-            "shell_exec must be in available_tools when declared in capabilities.tools, got: {names:?}"
-        );
-
-        kernel.shutdown();
-    }
-
-    #[test]
-    fn test_should_reuse_cached_route_for_brief_follow_up() {
-        assert!(LibreFangKernel::should_reuse_cached_route("fix that"));
-        assert!(LibreFangKernel::should_reuse_cached_route("继续"));
-        assert!(!LibreFangKernel::should_reuse_cached_route("thanks"));
-        assert!(!LibreFangKernel::should_reuse_cached_route(
-            "please write the API design for this service"
-        ));
-    }
-
-    #[test]
-    fn test_assistant_route_key_scopes_sender_and_thread() {
-        let agent_id = AgentId::new();
-        let sender = SenderContext {
-            channel: "telegram".to_string(),
-            user_id: "user-123".to_string(),
-            display_name: "Alice".to_string(),
-            is_group: true,
-            was_mentioned: false,
-            thread_id: Some("thread-9".to_string()),
-            account_id: None,
-            ..Default::default()
-        };
-
-        let with_sender = LibreFangKernel::assistant_route_key(agent_id, Some(&sender));
-        let without_sender = LibreFangKernel::assistant_route_key(agent_id, None);
-
-        assert!(with_sender.contains("telegram"));
-        assert!(with_sender.contains("user-123"));
-        assert!(with_sender.contains("thread-9"));
-        assert_ne!(with_sender, without_sender);
-    }
-
-    #[test]
-    fn test_boot_spawns_assistant_as_default_agent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-default-assistant-test");
-        std::fs::create_dir_all(&home_dir).unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-        let agents = kernel.registry.list();
-
-        assert!(
-            agents.iter().any(|entry| entry.name == "assistant"),
-            "fresh kernel boot should auto-spawn an assistant agent"
-        );
-
-        kernel.shutdown();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_message_ephemeral_unknown_agent_returns_not_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let home_dir = dir.path().to_path_buf();
-        std::fs::create_dir_all(home_dir.join("data")).unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-        // Use a random AgentId that doesn't exist
-        let bogus_id = AgentId::new();
-        let result = kernel.send_message_ephemeral(bogus_id, "hello?").await;
-        assert!(
-            result.is_err(),
-            "ephemeral message to unknown agent should error"
-        );
-
-        kernel.shutdown();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_message_ephemeral_does_not_modify_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let home_dir = dir.path().to_path_buf();
-        std::fs::create_dir_all(home_dir.join("data")).unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-
-        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-
-        // Find the auto-spawned assistant agent
-        let agents = kernel.registry.list();
-        let assistant = agents
-            .iter()
-            .find(|a| a.name == "assistant")
-            .expect("assistant should exist");
-        let agent_id = assistant.id;
-        let session_id = assistant.session_id;
-
-        // Get session messages before ephemeral call
-        let session_before = kernel.memory.get_session(session_id).unwrap();
-        let msg_count_before = session_before.map(|s| s.messages.len()).unwrap_or(0);
-
-        // Send ephemeral message (will fail because no LLM provider, but that's OK —
-        // the point is the session should remain untouched)
-        let _ = kernel
-            .send_message_ephemeral(agent_id, "what is 2+2?")
-            .await;
-
-        // Check session is unchanged
-        let session_after = kernel.memory.get_session(session_id).unwrap();
-        let msg_count_after = session_after.map(|s| s.messages.len()).unwrap_or(0);
-        assert_eq!(
-            msg_count_before, msg_count_after,
-            "ephemeral /btw message should not modify the real session"
-        );
-
-        kernel.shutdown();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_spawn_approval_sweep_task_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let home_dir = dir.path().to_path_buf();
-        std::fs::create_dir_all(home_dir.join("data")).unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-
-        let kernel =
-            Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
-
-        Arc::clone(&kernel).spawn_approval_sweep_task();
-        assert!(kernel.approval_sweep_started.load(Ordering::Acquire));
-
-        Arc::clone(&kernel).spawn_approval_sweep_task();
-        assert!(kernel.approval_sweep_started.load(Ordering::Acquire));
-
-        kernel.shutdown();
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-
-        assert!(!kernel.approval_sweep_started.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn test_evaluate_condition_none() {
-        let tags = vec!["chat".to_string(), "dev".to_string()];
-        assert!(LibreFangKernel::evaluate_condition(&None, &tags));
-    }
-
-    #[test]
-    fn test_evaluate_condition_empty() {
-        let tags = vec!["chat".to_string()];
-        assert!(LibreFangKernel::evaluate_condition(
-            &Some(String::new()),
-            &tags
-        ));
-    }
-
-    #[test]
-    fn test_evaluate_condition_tag_match() {
-        let tags = vec!["chat".to_string(), "dev".to_string()];
-        assert!(LibreFangKernel::evaluate_condition(
-            &Some("agent.tags contains 'chat'".to_string()),
-            &tags,
-        ));
-    }
-
-    #[test]
-    fn test_evaluate_condition_tag_no_match() {
-        let tags = vec!["dev".to_string()];
-        assert!(!LibreFangKernel::evaluate_condition(
-            &Some("agent.tags contains 'chat'".to_string()),
-            &tags,
-        ));
-    }
-
-    #[test]
-    fn test_evaluate_condition_unknown_format() {
-        let tags = vec!["chat".to_string()];
-        // Unknown condition format defaults to false (strict — prevents accidental injection).
-        assert!(!LibreFangKernel::evaluate_condition(
-            &Some("some.unknown.expression".to_string()),
-            &tags,
-        ));
-    }
-
-    #[test]
-    fn test_peer_scoped_key() {
-        // With peer_id: key is namespaced
-        assert_eq!(
-            peer_scoped_key("car", Some("user-123")),
-            "peer:user-123:car"
-        );
-        assert_eq!(
-            peer_scoped_key("prefs.color", Some("u:456")),
-            "peer:u:456:prefs.color"
-        );
-
-        // Without peer_id: key is unchanged
-        assert_eq!(peer_scoped_key("car", None), "car");
-        assert_eq!(peer_scoped_key("global_setting", None), "global_setting");
-    }
-
-    #[test]
-    fn test_apply_thinking_override_none_leaves_manifest_untouched() {
-        let mut manifest = librefang_types::agent::AgentManifest {
-            thinking: Some(librefang_types::config::ThinkingConfig {
-                budget_tokens: 4242,
-                stream_thinking: true,
-            }),
-            ..Default::default()
-        };
-        apply_thinking_override(&mut manifest, None);
-        let cfg = manifest.thinking.as_ref().expect("thinking preserved");
-        assert_eq!(cfg.budget_tokens, 4242);
-        assert!(cfg.stream_thinking);
-    }
-
-    #[test]
-    fn test_apply_thinking_override_force_off_clears_thinking() {
-        let mut manifest = librefang_types::agent::AgentManifest {
-            thinking: Some(librefang_types::config::ThinkingConfig::default()),
-            ..Default::default()
-        };
-        apply_thinking_override(&mut manifest, Some(false));
-        assert!(manifest.thinking.is_none());
-    }
-
-    #[test]
-    fn test_apply_thinking_override_force_on_inserts_default() {
-        let mut manifest = librefang_types::agent::AgentManifest::default();
-        assert!(manifest.thinking.is_none());
-        apply_thinking_override(&mut manifest, Some(true));
-        let cfg = manifest.thinking.as_ref().expect("thinking inserted");
-        assert_eq!(
-            cfg.budget_tokens,
-            librefang_types::config::ThinkingConfig::default().budget_tokens
-        );
-    }
-
-    #[test]
-    fn test_apply_thinking_override_force_on_keeps_existing_budget() {
-        let mut manifest = librefang_types::agent::AgentManifest {
-            thinking: Some(librefang_types::config::ThinkingConfig {
-                budget_tokens: 1234,
-                stream_thinking: false,
-            }),
-            ..Default::default()
-        };
-        apply_thinking_override(&mut manifest, Some(true));
-        let cfg = manifest.thinking.as_ref().expect("thinking preserved");
-        assert_eq!(cfg.budget_tokens, 1234);
-    }
-}
+mod tests;

@@ -365,9 +365,9 @@ export function WorkflowsPage() {
                     {t("canvas.run_now")}
                   </Button>
                   <Button variant="secondary" disabled={runMutation.isPending || dryRunMutation.isPending} onClick={handleDryRun}
-                    title="Dry Run — validate without calling LLMs">
+                    title={t("workflows.dry_run_hint")}>
                     {dryRunMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <FlaskConical className="w-4 h-4" />}
-                    <span className="hidden sm:inline ml-1.5">Dry Run</span>
+                    <span className="hidden sm:inline ml-1.5">{t("workflows.dry_run")}</span>
                   </Button>
                 </div>
 
@@ -379,7 +379,7 @@ export function WorkflowsPage() {
                         ? <CheckCircle2 className="w-3.5 h-3.5 text-success" />
                         : <AlertCircle className="w-3.5 h-3.5 text-warning" />}
                       <p className={`text-[10px] font-bold ${dryRunResult.valid ? "text-success" : "text-warning"}`}>
-                        {dryRunResult.valid ? "Valid — all agents resolved" : "Warning — some agents not found"}
+                        {dryRunResult.valid ? t("workflows.dry_run_valid") : t("workflows.dry_run_warning")}
                       </p>
                     </div>
                     <div className="space-y-2">

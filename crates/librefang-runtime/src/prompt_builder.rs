@@ -24,7 +24,7 @@
 // silently breaks the prompt-injection containment the boundary exists for.
 
 /// Maximum characters in a single skill's `prompt_context` block.
-pub const SKILL_PROMPT_CONTEXT_PER_SKILL_CAP: usize = 4000;
+pub const SKILL_PROMPT_CONTEXT_PER_SKILL_CAP: usize = 16000;
 
 /// Maximum characters allowed in the sanitized skill name displayed in
 /// the `--- Skill: NAME ---` header. Both the kernel call site
@@ -34,7 +34,7 @@ pub const SKILL_PROMPT_CONTEXT_PER_SKILL_CAP: usize = 4000;
 pub const SKILL_NAME_DISPLAY_CAP: usize = 80;
 
 /// Number of full-cap skills the total budget is sized to fit.
-const MAX_SKILLS_IN_PROMPT_CONTEXT: usize = 3;
+const MAX_SKILLS_IN_PROMPT_CONTEXT: usize = 5;
 
 /// Per-skill trust-boundary boilerplate in characters, computed exactly:
 ///
@@ -1416,7 +1416,7 @@ mod tests {
         let name = "x".repeat(SKILL_NAME_DISPLAY_CAP) + "..."; // worst case: 80 chars + cap_str ellipsis
         assert_eq!(name.chars().count(), SKILL_NAME_DISPLAY_CAP + 3);
 
-        let body = "y".repeat(SKILL_PROMPT_CONTEXT_PER_SKILL_CAP) + "..."; // 4000 chars + ellipsis
+        let body = "y".repeat(SKILL_PROMPT_CONTEXT_PER_SKILL_CAP) + "..."; // per-skill cap chars + ellipsis
         let block = format!(
             concat!(
                 "--- Skill: {} ---\n",

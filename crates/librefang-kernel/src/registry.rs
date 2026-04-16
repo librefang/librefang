@@ -268,6 +268,21 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's web search augmentation mode.
+    pub fn update_web_search_augmentation(
+        &self,
+        id: AgentId,
+        mode: librefang_types::agent::WebSearchAugmentationMode,
+    ) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.manifest.web_search_augmentation = mode;
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
+
     /// Update an agent's fallback model chain.
     pub fn update_fallback_models(
         &self,
@@ -398,7 +413,7 @@ impl AgentRegistry {
             entry.manifest.resources.max_cost_per_month_usd = v;
         }
         if let Some(v) = tokens_per_hour {
-            entry.manifest.resources.max_llm_tokens_per_hour = v;
+            entry.manifest.resources.max_llm_tokens_per_hour = Some(v);
         }
         entry.last_active = chrono::Utc::now();
         Ok(())

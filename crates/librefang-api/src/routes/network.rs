@@ -935,9 +935,10 @@ pub async fn mcp_http(
             tool_name,
             &arguments,
             Some(&kernel_handle),
-            None,
-            None,
+            None, // allowed_tools
+            None, // caller_agent_id
             Some(&skill_snapshot),
+            None, // allowed_skills
             Some(state.kernel.mcp_connections_ref()),
             Some(state.kernel.web_tools()),
             Some(state.kernel.browser()),

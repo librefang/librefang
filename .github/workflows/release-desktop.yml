@@ -86,11 +86,15 @@ jobs:
         with:
           key: desktop-${{ matrix.platform.rust_target }}-${{ github.ref_name }}
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
         run: |
-          npm ci
-          npm run build
+          pnpm install --frozen-lockfile
+          pnpm run build
 
       - name: Import macOS signing certificate
         if: runner.os == 'macOS'

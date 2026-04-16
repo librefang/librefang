@@ -334,70 +334,40 @@ fn is_process_group_leader(pid: u32) -> bool {
 
 #[cfg(unix)]
 async fn kill_tree_unix(pid: u32, grace_ms: u64) -> Result<bool, String> {
-    use tokio::process::Command;
-
     let pid_i32 = pid as i32;
-    let is_group_leader = is_process_group_leader(pid);
+    let is_leader = is_process_group_leader(pid);
 
-    // Send SIGTERM. When `pid` is its own pgid we can safely use the
-    // negative-PID syntax to cover the whole group (the process plus
-    // any children that inherited the pgid). When it isn't, we MUST
-    // NOT use that syntax: `kill -TERM -<pid>` would target whichever
-    // unrelated process group happens to have `pid` as its PGID, which
-    // on long-lived runners (GitHub Actions' ubuntu-latest in
-    // particular) can easily coincide with the actions-runner session
-    // leader and bring the whole job down with a SIGTERM originating
-    // from inside a test. See librefang/librefang#2464 for the
-    // investigation that turned this up.
-    if is_group_leader {
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{pid_i32}")])
-            .output()
-            .await;
+    // Use direct libc::kill instead of Command::new("kill").
+    // Spawning a `kill` subprocess forks a child that briefly exists
+    // in the caller's process group before exec — on GitHub Actions
+    // Ubuntu runners this fork races with PID recycling and can land
+    // a signal on the runner's session leader (SIGTERM exit 143).
+    // Direct syscall has no fork, no race.
+    //
+    // SAFETY: libc::kill only sends a signal and returns -1 on error.
+    if is_leader {
+        unsafe { libc::kill(-pid_i32, libc::SIGTERM) };
     } else {
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .output()
-            .await;
+        unsafe { libc::kill(pid_i32, libc::SIGTERM) };
     }
 
-    // Wait for grace period.
     tokio::time::sleep(std::time::Duration::from_millis(grace_ms)).await;
 
-    // Check if still alive.
-    let check = Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .output()
-        .await;
+    let alive = unsafe { libc::kill(pid_i32, 0) } == 0;
 
-    match check {
-        Ok(output) if output.status.success() => {
-            // Still alive — force kill. Same pgid rule applies: never
-            // SIGKILL by pgid unless we've confirmed the target is the
-            // group leader.
-            tracing::warn!(
-                pid,
-                is_group_leader,
-                "Process still alive after grace period, sending SIGKILL"
-            );
-
-            if is_group_leader {
-                let _ = Command::new("kill")
-                    .args(["-9", &format!("-{pid_i32}")])
-                    .output()
-                    .await;
-            }
-            let _ = Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .output()
-                .await;
-
-            Ok(true)
+    if alive {
+        tracing::warn!(
+            pid,
+            is_leader,
+            "Process still alive after grace period, sending SIGKILL"
+        );
+        if is_leader {
+            unsafe { libc::kill(-pid_i32, libc::SIGKILL) };
         }
-        _ => {
-            // Process is already dead (kill -0 failed = no such process).
-            Ok(true)
-        }
+        unsafe { libc::kill(pid_i32, libc::SIGKILL) };
+        Ok(true)
+    } else {
+        Ok(true)
     }
 }
 

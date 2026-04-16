@@ -1,0 +1,99 @@
+{
+  "title": "Ollama",
+  "uid": "ollama-local",
+  "tags": ["ollama"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Service Status",
+      "type": "stat",
+      "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {"calcs": ["lastNotNull"]}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "green", "value": 1}]}
+        }
+      },
+      "targets": [{"datasource": {"type": "prometheus", "uid": "librefang-prometheus"}, "expr": "ollama_up", "legendFormat": "Ollama"}]
+    },
+    {
+      "id": 2,
+      "title": "Installed Models",
+      "type": "stat",
+      "gridPos": {"x": 4, "y": 0, "w": 4, "h": 4},
+      "options": {"colorMode": "value", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": 0}]}}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "librefang-prometheus"}, "expr": "ollama_models_total", "legendFormat": "Models"}]
+    },
+    {
+      "id": 3,
+      "title": "Loaded in VRAM",
+      "type": "stat",
+      "gridPos": {"x": 8, "y": 0, "w": 4, "h": 4},
+      "options": {"colorMode": "value", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "orange", "value": 2}]}}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "librefang-prometheus"}, "expr": "ollama_loaded_models_total", "legendFormat": "Loaded"}]
+    },
+    {
+      "id": 4,
+      "title": "VRAM Usage by Model",
+      "type": "bargauge",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "options": {
+        "orientation": "horizontal",
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "displayMode": "gradient"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "orange", "value": 8000000000}, {"color": "red", "value": 14000000000}]},
+          "max": 17179869184
+        }
+      },
+      "targets": [{"datasource": {"type": "prometheus", "uid": "librefang-prometheus"}, "expr": "ollama_model_vram_bytes > 0", "legendFormat": "{{model}}"}]
+    },
+    {
+      "id": 5,
+      "title": "Model Sizes",
+      "type": "bargauge",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 12},
+      "options": {
+        "orientation": "horizontal",
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "displayMode": "basic"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": 0}]}
+        }
+      },
+      "targets": [{"datasource": {"type": "prometheus", "uid": "librefang-prometheus"}, "expr": "ollama_model_size_bytes", "legendFormat": "{{model}}"}]
+    },
+    {
+      "id": 6,
+      "title": "VRAM Used (Total)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 12, "w": 24, "h": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {"fillOpacity": 20, "lineWidth": 2}
+        }
+      },
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "librefang-prometheus"}, "expr": "sum(ollama_model_vram_bytes)", "legendFormat": "Total VRAM Used"},
+        {"datasource": {"type": "prometheus", "uid": "librefang-prometheus"}, "expr": "ollama_model_vram_bytes > 0", "legendFormat": "{{model}}"}
+      ]
+    }
+  ],
+  "time": {"from": "now-1h", "to": "now"}
+}

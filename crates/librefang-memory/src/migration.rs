@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 18;
+const SCHEMA_VERSION: u32 = 19;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -81,6 +81,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 18 {
         migrate_v18(conn)?;
+    }
+
+    if current_version < 19 {
+        migrate_v19(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -618,6 +622,26 @@ fn migrate_v18(conn: &Connection) -> Result<(), rusqlite::Error> {
             locked_at  INTEGER             -- Unix timestamp (seconds) when lockout started, NULL if below threshold
         );",
     )
+}
+
+/// Version 19: Add `provider` column to usage_events so the metering engine
+/// can enforce per-provider budget caps (issue #2316).
+fn migrate_v19(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "usage_events", "provider") {
+        conn.execute(
+            "ALTER TABLE usage_events ADD COLUMN provider TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_provider_time ON usage_events(provider, timestamp)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (19, datetime('now'), 'Add provider column for per-provider budgets')",
+        [],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

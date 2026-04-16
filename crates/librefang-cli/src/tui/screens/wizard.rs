@@ -11,6 +11,21 @@ use std::path::PathBuf;
 use crate::tui::theme;
 use crate::tui::widgets;
 
+/// Return the first model ID for `provider` from the local catalog, falling
+/// back to `fallback` when the catalog is empty or unavailable.
+fn catalog_default_model(provider: &str, fallback: &str) -> String {
+    let home = std::env::var("LIBREFANG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .map(|h| h.join(".librefang"))
+                .unwrap_or_default()
+        });
+    librefang_runtime::model_catalog::ModelCatalog::new(&home)
+        .default_model_for_provider(provider)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 /// Provider metadata for the setup wizard.
 struct ProviderInfo {
     name: &'static str,
@@ -155,7 +170,7 @@ const PROVIDERS: &[ProviderInfo] = &[
     ProviderInfo {
         name: "alibaba-coding-plan",
         env_var: "ALIBABA_CODING_PLAN_API_KEY",
-        default_model: "alibaba-coding-plan/qwen3.5-plus",
+        default_model: "alibaba-coding-plan/qwen3.6-plus",
         needs_key: true,
     },
 ];
@@ -300,12 +315,12 @@ impl WizardState {
                     if !p.needs_key {
                         // No key needed, skip to model
                         self.api_key_from_env = false;
-                        self.model_input = p.default_model.to_string();
+                        self.model_input = catalog_default_model(p.name, p.default_model);
                         self.step = WizardStep::Model;
                     } else if std::env::var(p.env_var).is_ok() {
                         // Key already in env
                         self.api_key_from_env = true;
-                        self.model_input = p.default_model.to_string();
+                        self.model_input = catalog_default_model(p.name, p.default_model);
                         self.step = WizardStep::Model;
                     } else {
                         self.api_key_from_env = false;
@@ -327,7 +342,7 @@ impl WizardState {
             KeyCode::Enter => {
                 if !self.api_key_input.is_empty() {
                     if let Some(p) = self.selected_provider_info() {
-                        self.model_input = p.default_model.to_string();
+                        self.model_input = catalog_default_model(p.name, p.default_model);
                     }
                     self.step = WizardStep::Model;
                 }

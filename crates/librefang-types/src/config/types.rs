@@ -90,6 +90,14 @@ pub struct ChannelOverrides {
     /// `group_policy` is `mention_only`.
     #[serde(default)]
     pub group_trigger_patterns: Vec<String>,
+    /// Enable LLM-based reply-intent precheck for group messages.
+    /// When true and group_policy is "all", a lightweight classifier decides
+    /// whether to reply before running the full agent loop.
+    #[serde(default)]
+    pub reply_precheck: bool,
+    /// Model override for the reply precheck classifier (default: agent's model).
+    #[serde(default)]
+    pub reply_precheck_model: Option<String>,
     /// Global rate limit for this channel (messages per minute, 0 = unlimited).
     #[serde(default)]
     pub rate_limit_per_minute: u32,
@@ -170,6 +178,8 @@ impl Default for ChannelOverrides {
             dm_policy: DmPolicy::default(),
             group_policy: GroupPolicy::default(),
             group_trigger_patterns: Vec::new(),
+            reply_precheck: false,
+            reply_precheck_model: None,
             rate_limit_per_minute: 0,
             rate_limit_per_user: 0,
             threading: false,
@@ -1975,6 +1985,11 @@ pub struct KernelConfig {
     /// e.g. `ollama = "http://192.168.1.100:11434/v1"`
     #[serde(default)]
     pub provider_urls: HashMap<String, String>,
+    /// Per-provider proxy URL overrides (provider ID → proxy URL).
+    /// Allows routing specific providers through a proxy while others connect directly.
+    /// e.g. `openai = "http://proxy.corp:8080"`, `ollama = ""` (direct)
+    #[serde(default)]
+    pub provider_proxy_urls: HashMap<String, String>,
     /// Provider region selection (provider ID → region name).
     /// Selects a regional endpoint from the provider's `[provider.regions]` map.
     /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
@@ -2104,6 +2119,9 @@ pub struct KernelConfig {
     /// Individual endpoints may enforce tighter limits.
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// Terminal / CLI access control configuration.
+    #[serde(default)]
+    pub terminal: TerminalConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2950,6 +2968,26 @@ pub struct OAuthConfig {
     pub slack_client_id: Option<String>,
 }
 
+/// Per-provider spending limits.
+///
+/// Lets you cap spend on paid providers (e.g. Moonshot, OpenAI) without
+/// throttling free local providers (e.g. litellm, ollama). All limits
+/// default to 0 which means "unlimited" — only non-zero limits are enforced.
+/// Keyed by the provider id in `BudgetConfig.providers`, which must match
+/// the `model.provider` field of the agent's `ModelConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProviderBudget {
+    /// Maximum cost in USD per hour for this provider (0.0 = unlimited).
+    pub max_cost_per_hour_usd: f64,
+    /// Maximum cost in USD per day for this provider (0.0 = unlimited).
+    pub max_cost_per_day_usd: f64,
+    /// Maximum cost in USD per month for this provider (0.0 = unlimited).
+    pub max_cost_per_month_usd: f64,
+    /// Maximum total tokens per hour for this provider (0 = unlimited).
+    pub max_tokens_per_hour: u64,
+}
+
 /// Global spending budget configuration.
 ///
 /// Set limits to 0.0 for unlimited. All limits apply across all agents.
@@ -2968,6 +3006,10 @@ pub struct BudgetConfig {
     /// will be overridden to this value. Set to 0 to keep each agent's own limit.
     /// Use this to globally raise or lower the token budget for all agents.
     pub default_max_llm_tokens_per_hour: u64,
+    /// Per-provider spending caps, keyed by provider id (e.g. `"moonshot"`,
+    /// `"openai"`, `"litellm"`). Missing providers are unlimited.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub providers: std::collections::HashMap<String, ProviderBudget>,
 }
 
 impl Default for BudgetConfig {
@@ -2978,6 +3020,7 @@ impl Default for BudgetConfig {
             max_monthly_usd: 0.0,
             alert_threshold: 0.8,
             default_max_llm_tokens_per_hour: 0,
+            providers: std::collections::HashMap::new(),
         }
     }
 }
@@ -3240,6 +3283,18 @@ pub struct McpServerConfigEntry {
     // fails to deserialize back into `Option<McpOAuthConfig>` on reload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<McpOAuthConfig>,
+    /// Enable outbound taint scanning for this MCP server (default: true).
+    ///
+    /// Set to `false` to disable the credential/PII content heuristic for
+    /// trusted local servers (e.g. browser automation, database adapters)
+    /// whose tool results contain opaque session handles that would otherwise
+    /// trip the scanner. Key-name blocking remains active regardless.
+    #[serde(default = "default_taint_scanning")]
+    pub taint_scanning: bool,
+}
+
+fn default_taint_scanning() -> bool {
+    true
 }
 
 fn default_mcp_timeout() -> u64 {
@@ -3495,6 +3550,7 @@ impl Default for KernelConfig {
             thinking: None,
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
+            provider_proxy_urls: HashMap::new(),
             provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
             vertex_ai: VertexAiConfig::default(),
@@ -3531,6 +3587,7 @@ impl Default for KernelConfig {
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
+            terminal: TerminalConfig::default(),
         }
     }
 }
@@ -3551,6 +3608,18 @@ impl KernelConfig {
     /// Resolved directory for hand workspaces.
     pub fn effective_hands_workspaces_dir(&self) -> PathBuf {
         self.effective_workspaces_dir().join("hands")
+    }
+
+    /// Parse the TCP port number from `api_listen`.
+    ///
+    /// Returns `None` when the address string is malformed. Callers that rely
+    /// on the port for security-relevant decisions (e.g. Origin validation)
+    /// MUST fail closed in the `None` case rather than assume a default.
+    pub fn listen_port(&self) -> Option<u16> {
+        self.api_listen
+            .rsplit(':')
+            .next()
+            .and_then(|s| s.parse::<u16>().ok())
     }
 
     /// Resolve the API key env var name for a provider.
@@ -3745,7 +3814,7 @@ pub struct MemoryConfig {
     /// Maximum memories before consolidation is triggered.
     pub consolidation_threshold: u64,
     /// Memory decay rate (0.0 = no decay, 1.0 = aggressive decay).
-    pub decay_rate: f32,
+    pub decay_rate: f64,
     /// Embedding provider. Valid values: `"openai"`, `"groq"`, `"mistral"`,
     /// `"together"`, `"fireworks"`, `"cohere"`, `"ollama"`, `"bedrock"`,
     /// `"vllm"`, `"lmstudio"`, or `"auto"`.
@@ -5765,6 +5834,87 @@ impl Default for LinkedInConfig {
     }
 }
 
+/// Terminal / CLI access control configuration.
+///
+/// Controls which clients may connect to the interactive terminal (WebSocket)
+/// and how locality is determined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Master switch — set to false to disable the terminal entirely.
+    #[serde(default = "default_terminal_enabled")]
+    pub enabled: bool,
+
+    /// Additional allowed WebSocket origins beyond auto-detected localhost.
+    /// Use when the dashboard is served from a custom domain (e.g. "https://my.domain.com").
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+
+    /// Allow terminal access from remote/proxied connections when no auth is configured.
+    /// Default: false (local-only when unauthenticated).
+    #[serde(default)]
+    pub allow_remote: bool,
+
+    /// When true, bare-loopback connections (127.0.0.1 / ::1 with no proxy
+    /// headers) are rejected at auth time — only connections that arrived via
+    /// a reverse proxy (carrying X-Forwarded-For / X-Real-IP) are considered
+    /// "local". Enable only when running behind a reverse proxy that strips
+    /// direct loopback access. Default: false.
+    ///
+    /// (Historically named `trust_proxy_headers`; the old name is still
+    /// accepted for backward compatibility via `serde(alias)`.)
+    #[serde(default, alias = "trust_proxy_headers")]
+    pub require_proxy_headers: bool,
+
+    /// Hard-override for the "remote + no authentication" combination.
+    /// When `allow_remote` is true and no auth is configured, the terminal
+    /// will still refuse every connection unless this flag is explicitly
+    /// set to `true`. Intended as a foot-gun guard: enabling `allow_remote`
+    /// alone is not enough to expose an unauthenticated shell to the network.
+    /// Default: false.
+    #[serde(default)]
+    pub allow_unauthenticated_remote: bool,
+
+    /// Enable tmux-backed multi-window terminal. Only effective when `tmux` binary is available.
+    #[serde(default = "default_tmux_enabled")]
+    pub tmux_enabled: bool,
+
+    /// Maximum number of tmux windows that may exist simultaneously. Guards against DoS.
+    #[serde(default = "default_max_windows")]
+    pub max_windows: u32,
+
+    /// Optional explicit path to the `tmux` binary. If None, resolve via PATH.
+    #[serde(default)]
+    pub tmux_binary_path: Option<String>,
+}
+
+fn default_terminal_enabled() -> bool {
+    true
+}
+
+fn default_tmux_enabled() -> bool {
+    true
+}
+
+fn default_max_windows() -> u32 {
+    16
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowed_origins: Vec::new(),
+            allow_remote: false,
+            require_proxy_headers: false,
+            allow_unauthenticated_remote: false,
+            tmux_enabled: true,
+            max_windows: 16,
+            tmux_binary_path: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5963,5 +6113,88 @@ type = "number"
             toml_str, toml_str2,
             "KernelConfig default roundtrip mismatch — a field may be missing from Default impl"
         );
+    }
+
+    /// Per-provider budget TOML roundtrip (issue #2316).
+    #[test]
+    fn test_budget_config_per_provider_roundtrip() {
+        let toml_str = r#"
+max_hourly_usd = 0.0
+max_daily_usd = 10.0
+max_monthly_usd = 0.0
+alert_threshold = 0.8
+default_max_llm_tokens_per_hour = 0
+
+[providers.moonshot]
+max_cost_per_day_usd = 2.0
+max_tokens_per_hour = 500000
+
+[providers.litellm]
+# all zeros -> unlimited
+"#;
+        let cfg: BudgetConfig = toml::from_str(toml_str).expect("parse budget TOML");
+        assert_eq!(cfg.providers.len(), 2);
+
+        let moonshot = cfg.providers.get("moonshot").expect("moonshot entry");
+        assert!((moonshot.max_cost_per_day_usd - 2.0).abs() < f64::EPSILON);
+        assert_eq!(moonshot.max_tokens_per_hour, 500_000);
+        // Unset fields default to 0 (unlimited).
+        assert_eq!(moonshot.max_cost_per_hour_usd, 0.0);
+        assert_eq!(moonshot.max_cost_per_month_usd, 0.0);
+
+        let litellm = cfg.providers.get("litellm").expect("litellm entry");
+        assert_eq!(*litellm, ProviderBudget::default());
+
+        // Round-trip: serialize then re-parse, structs should match.
+        let reserialized = toml::to_string(&cfg).expect("serialize budget");
+        let cfg2: BudgetConfig = toml::from_str(&reserialized).expect("reparse budget");
+        assert_eq!(cfg2.providers, cfg.providers);
+    }
+
+    #[test]
+    fn test_budget_config_default_has_empty_providers() {
+        let b = BudgetConfig::default();
+        assert!(b.providers.is_empty());
+        // An empty providers map must not appear in serialized output so that
+        // users who never configured per-provider caps see a clean config.
+        let s = toml::to_string(&b).expect("serialize");
+        assert!(
+            !s.contains("providers"),
+            "empty providers map should be skipped: {s}"
+        );
+    }
+
+    // ---- TerminalConfig tmux fields tests ----
+
+    #[test]
+    fn test_terminal_config_tmux_defaults() {
+        let tc = TerminalConfig::default();
+        assert!(tc.tmux_enabled, "tmux_enabled should default to true");
+        assert_eq!(tc.max_windows, 16, "max_windows should default to 16");
+        assert!(
+            tc.tmux_binary_path.is_none(),
+            "tmux_binary_path should default to None"
+        );
+    }
+
+    #[test]
+    fn test_terminal_config_empty_toml_uses_defaults() {
+        let tc: TerminalConfig = toml::from_str("").unwrap();
+        assert!(tc.tmux_enabled);
+        assert_eq!(tc.max_windows, 16);
+        assert!(tc.tmux_binary_path.is_none());
+    }
+
+    #[test]
+    fn test_terminal_config_toml_roundtrip() {
+        let toml_str = r#"
+            tmux_enabled = false
+            max_windows = 4
+            tmux_binary_path = "/usr/bin/tmux"
+        "#;
+        let tc: TerminalConfig = toml::from_str(toml_str).unwrap();
+        assert!(!tc.tmux_enabled);
+        assert_eq!(tc.max_windows, 4);
+        assert_eq!(tc.tmux_binary_path.as_deref(), Some("/usr/bin/tmux"));
     }
 }

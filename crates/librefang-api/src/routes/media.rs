@@ -24,6 +24,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         )
         .route("/media/music", axum::routing::post(generate_music))
         .route("/media/providers", axum::routing::get(list_media_providers))
+        .route("/media/transcribe", axum::routing::post(transcribe_audio))
 }
 
 // ── Known media providers (mirrors MEDIA_PROVIDER_ORDER in runtime) ─────
@@ -357,6 +358,85 @@ pub async fn generate_music(
         }))
         .into_response(),
         Err(e) => ApiErrorResponse::internal(format!("Failed to save audio: {e}")).into_response(),
+    }
+}
+
+// ── POST /media/transcribe ──────────────────────────────────────────────
+
+/// Transcribe audio to text (STT).
+///
+/// Accepts raw audio bytes with `Content-Type` set to the audio MIME type
+/// (e.g. `audio/webm`, `audio/wav`). Returns the transcribed text.
+pub async fn transcribe_audio(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    // Strip parameters (e.g. "audio/webm;codecs=opus" -> "audio/webm")
+    // so MediaEngine's mime_to_ext can match the base type.
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("audio/webm")
+        .split(';')
+        .next()
+        .unwrap_or("audio/webm")
+        .trim()
+        .to_string();
+
+    if !content_type.starts_with("audio/") {
+        return ApiErrorResponse::bad_request("Content-Type must be an audio type").into_response();
+    }
+
+    if body.is_empty() {
+        return ApiErrorResponse::bad_request("Empty audio body").into_response();
+    }
+
+    // 10 MB limit
+    if body.len() > 10 * 1024 * 1024 {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "Audio too large (max 10MB)"})),
+        )
+            .into_response();
+    }
+
+    // Save to temp file so MediaEngine can read it
+    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+    if let Err(e) = std::fs::create_dir_all(&upload_dir) {
+        return ApiErrorResponse::internal(format!("Failed to create upload dir: {e}"))
+            .into_response();
+    }
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let file_path = upload_dir.join(&file_id);
+    if let Err(e) = std::fs::write(&file_path, &body) {
+        return ApiErrorResponse::internal(format!("Failed to write audio: {e}")).into_response();
+    }
+
+    let attachment = librefang_types::media::MediaAttachment {
+        media_type: librefang_types::media::MediaType::Audio,
+        mime_type: content_type,
+        source: librefang_types::media::MediaSource::FilePath {
+            path: file_path.to_string_lossy().to_string(),
+        },
+        size_bytes: body.len() as u64,
+    };
+
+    match state.kernel.media().transcribe_audio(&attachment).await {
+        Ok(result) => {
+            // Clean up temp file
+            let _ = std::fs::remove_file(&file_path);
+            Json(serde_json::json!({
+                "text": result.description,
+                "provider": result.provider,
+                "model": result.model,
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&file_path);
+            ApiErrorResponse::internal(format!("Transcription failed: {e}")).into_response()
+        }
     }
 }
 

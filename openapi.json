@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "2026.4.11-beta18"
+    "version": "2026.4.15-beta22"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -7364,6 +7364,16 @@
             "type": "boolean",
             "description": "If true, this is an ephemeral \"side question\" (`/btw`).\nThe message is answered using the agent's system prompt but WITHOUT\nloading or saving session history — the real conversation is untouched."
           },
+          "group_participants": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ParticipantRefSchema"
+            },
+            "description": "Optional group participant roster (Phase 2 §C addressee guard).\n\nForwarded by the WhatsApp gateway for group messages so the kernel's\naddressee guard (`is_addressed_to_other_participant`) can detect when\na turn is addressed to a named participant other than the agent.\n\n`#[serde(default)]` ensures backward compatibility for callers (Telegram,\ndirect API) that don't populate this field."
+          },
           "is_group": {
             "type": "boolean",
             "description": "Whether this message originated from a group chat (vs DM)."
@@ -7384,6 +7394,20 @@
               "null"
             ],
             "description": "Optional sender display name."
+          },
+          "show_thinking": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the response should include the model's thinking/reasoning trace.\n\n`None` defaults to `true` when thinking content is available."
+          },
+          "thinking": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Per-call deep-thinking override.\n\n- `Some(true)`: force thinking on (even if the manifest has it off)\n- `Some(false)`: force thinking off (even if the manifest has it on)\n- `None`: use the manifest/global default"
           },
           "was_mentioned": {
             "type": "boolean",
@@ -7449,6 +7473,13 @@
           },
           "response": {
             "type": "string"
+          },
+          "thinking": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Combined thinking/reasoning trace from the model, when the caller\nrequested `show_thinking = true`."
           }
         }
       },
@@ -7484,6 +7515,24 @@
         "properties": {
           "path": {
             "type": "string"
+          }
+        }
+      },
+      "ParticipantRefSchema": {
+        "type": "object",
+        "description": "OpenAPI schema stand-in for `librefang_channels::types::ParticipantRef`.\n\nThe real type lives in `librefang-channels`, which does not depend on\nutoipa. This mirror struct exists only so `#[schema(value_type = ...)]`\non `MessageRequest.group_participants` can expose the shape to the\ngenerated OpenAPI document.",
+        "required": [
+          "jid",
+          "display_name"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "description": "Human-readable name (push-name, contact name, or first part of JID)."
+          },
+          "jid": {
+            "type": "string",
+            "description": "Platform JID (e.g. `1234567890@s.whatsapp.net`)."
           }
         }
       },

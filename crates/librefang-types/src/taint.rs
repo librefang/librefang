@@ -271,7 +271,29 @@ pub fn check_outbound_text_violation(payload: &str, sink: &TaintSink) -> Option<
         // dashes (32-hex), and bare decimal runs — all common in
         // legitimate tool arguments.
         let mixed_enough = has_letter && has_digit && !is_hex_only;
-        let looks_opaque = trimmed.len() >= 32 && charset_ok && mixed_enough;
+        // Strings containing a calendar date component (YYYY-MM-DD) are
+        // structured resource identifiers, not opaque credentials. Real
+        // API tokens never embed dates. This prevents false positives on
+        // MCP session handles of the form `tab-2026-04-16-<uuid-parts>`.
+        let has_date_component = date_component_regex().is_match(trimmed);
+        // File paths (absolute or relative with directory separators)
+        // are structured identifiers, not credentials. Exclude strings
+        // that look like paths: start with `/` or `C:\`, or contain
+        // multiple `/` segments with a file extension at the end.
+        let looks_like_path = trimmed.starts_with('/')
+            || (trimmed.len() >= 3
+                && trimmed.as_bytes()[1] == b':'
+                && trimmed.as_bytes()[2] == b'\\')
+            || trimmed.starts_with("\\\\")
+            || (trimmed.contains('/')
+                && trimmed
+                    .rfind('.')
+                    .is_some_and(|dot| dot > trimmed.rfind('/').unwrap_or(0)));
+        let looks_opaque = trimmed.len() >= 32
+            && charset_ok
+            && mixed_enough
+            && !has_date_component
+            && !looks_like_path;
         let well_known = trimmed.starts_with("sk-")
             || trimmed.starts_with("ghp_")
             || trimmed.starts_with("github_pat_")
@@ -323,6 +345,18 @@ fn payload_contains_pii(payload: &str) -> bool {
         || phone_regex().is_match(payload)
         || credit_card_regex().is_match(payload)
         || ssn_regex().is_match(payload)
+}
+
+/// Matches a calendar date in ISO 8601 / RFC 3339 form (`YYYY-MM-DD`).
+/// Used to exclude structured resource identifiers from the opaque-token
+/// heuristic: real API credentials never contain dates, but many MCP
+/// session handle formats do (e.g. `tab-2026-04-16-abc123-def456`).
+fn date_component_regex() -> &'static Regex {
+    static DATE: OnceLock<Regex> = OnceLock::new();
+    DATE.get_or_init(|| {
+        Regex::new(r"\b\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b")
+            .expect("built-in date component regex must compile")
+    })
 }
 
 fn email_regex() -> &'static Regex {
@@ -595,5 +629,37 @@ mod tests {
         // After declassification -- should pass
         assert!(tainted.check_sink(&TaintSink::shell_exec()).is_ok());
         assert!(!tainted.is_tainted());
+    }
+
+    // ── Regression: MCP session handle false positives (issue #2652) ─────
+
+    #[test]
+    fn test_check_outbound_text_allows_date_prefixed_session_id() {
+        // Camofox-style tabId: word prefix + ISO date + UUID segments.
+        // Must NOT trip despite being ≥32 chars and mixed alnum.
+        let sink = TaintSink::mcp_tool_call();
+        for id in [
+            "tab-2026-04-16-abc123-def456-ghi789",
+            "sess-2026-01-01-aabbcc-ddeeff-001122",
+            "page-2025-12-31-xyz789-abc123-000000",
+            "ctx-2024-06-15-handle42-abcdef-012345",
+        ] {
+            assert!(
+                check_outbound_text_violation(id, &sink).is_none(),
+                "date-prefixed session ID must not be blocked: {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_outbound_text_still_blocks_token_without_date() {
+        // A long mixed-alnum token with no date component must still trip.
+        let sink = TaintSink::mcp_tool_call();
+        let tok = "xAbCdEfGhIjKlMnOpQrStUvWxYz1234567890AB";
+        assert!(tok.len() >= 32);
+        assert!(
+            check_outbound_text_violation(tok, &sink).is_some(),
+            "opaque token without date must still be blocked"
+        );
     }
 }

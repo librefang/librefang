@@ -6,7 +6,7 @@ import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
 import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
-import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, getDashboardUsername, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
+import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, getDashboardUsername, getStatus, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 import { NotificationCenter } from "./components/NotificationCenter";
 
 function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
@@ -17,12 +17,16 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   const [authMethod, setAuthMethod] = useState<"credentials" | "api_key">(
     mode === "api_key" ? "api_key" : "credentials",
   );
-  const [errorKey, setErrorKey] = useState<"invalid_api_key" | "invalid_credentials" | null>(null);
+  const [errorKey, setErrorKey] = useState<"invalid_api_key" | "invalid_credentials" | "invalid_totp" | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [totpRequired, setTotpRequired] = useState(false);
+  const [totpCode, setTotpCode] = useState("");
 
   useEffect(() => {
     setAuthMethod(mode === "api_key" ? "api_key" : "credentials");
     setErrorKey(null);
+    setTotpRequired(false);
+    setTotpCode("");
   }, [mode]);
 
   async function handleApiKeySubmit(e: React.FormEvent) {
@@ -55,20 +59,36 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
     setErrorKey(null);
 
     try {
+      if (totpRequired) {
+        if (!totpCode || totpCode.length !== 6) {
+          setErrorKey("invalid_totp");
+          return;
+        }
+        const result = await dashboardLogin(username.trim(), password, totpCode);
+        if (!result.ok) {
+          setErrorKey("invalid_totp");
+          return;
+        }
+        onAuthenticated();
+        return;
+      }
+
       if (!username.trim() || !password) {
         setErrorKey("invalid_credentials");
         return;
       }
 
       const result = await dashboardLogin(username.trim(), password);
+      if (result.requires_totp) {
+        setTotpRequired(true);
+        setTotpCode("");
+        return;
+      }
       if (!result.ok) {
         setErrorKey("invalid_credentials");
         return;
       }
 
-      // The login response already proves the credential path succeeded.
-      // Avoid immediately probing session-backed auth before the new session
-      // is fully visible server-side.
       onAuthenticated();
     } finally {
       setSubmitting(false);
@@ -93,7 +113,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-main p-1">
               <button
                 type="button"
-                onClick={() => { setAuthMethod("credentials"); setErrorKey(null); setKey(""); }}
+                onClick={() => { setAuthMethod("credentials"); setErrorKey(null); setKey(""); setTotpRequired(false); setTotpCode(""); }}
                 className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
                   isCredentials ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-brand"
                 }`}
@@ -102,7 +122,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
               </button>
               <button
                 type="button"
-                onClick={() => { setAuthMethod("api_key"); setErrorKey(null); setUsername(""); setPassword(""); }}
+                onClick={() => { setAuthMethod("api_key"); setErrorKey(null); setUsername(""); setPassword(""); setTotpRequired(false); setTotpCode(""); }}
                 className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
                   !isCredentials ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-brand"
                 }`}
@@ -112,7 +132,26 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             </div>
           )}
           <form onSubmit={isCredentials ? handleCredentialsSubmit : handleApiKeySubmit} className="space-y-4">
-            {isCredentials ? (
+            {isCredentials && totpRequired ? (
+              <>
+                <p className="text-sm text-text-dim text-center">{t("auth.totp_prompt")}</p>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={totpCode}
+                  onChange={(e) => { setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6)); setErrorKey(null); }}
+                  placeholder="000000"
+                  autoFocus
+                  className={`w-full rounded-xl border px-4 py-3 text-center text-2xl font-mono tracking-[0.5em] focus:ring-2 outline-none transition-colors ${
+                    errorKey === "invalid_totp"
+                      ? "border-error focus:border-error focus:ring-error/10"
+                      : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+                  }`}
+                />
+              </>
+            ) : isCredentials ? (
               <>
                 <input
                   type="text"
@@ -157,10 +196,10 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             )}
             <button
               type="submit"
-              disabled={submitting || (isCredentials ? !username.trim() || !password : !key.trim())}
+              disabled={submitting || (isCredentials ? (totpRequired ? totpCode.length !== 6 : !username.trim() || !password) : !key.trim())}
               className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-colors shadow-lg shadow-brand/20"
             >
-              {t("auth.submit")}
+              {totpRequired ? t("auth.verify_totp") : t("auth.submit")}
             </button>
           </form>
         </div>
@@ -357,6 +396,8 @@ export function App() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const terminalEnabled = useUIStore((s) => s.terminalEnabled);
+  const setTerminalEnabled = useUIStore((s) => s.setTerminalEnabled);
 
   useKeyboardShortcuts({ onShowHelp: () => setShowShortcuts(true) });
 
@@ -403,6 +444,14 @@ export function App() {
       setHostname(v.hostname ?? "");
     }).catch(() => {});
 
+    getStatus().then((s) => {
+      setTerminalEnabled(s.terminal_enabled !== false);
+    }).catch(() => {
+      // If status fetch fails, assume terminal is available (fail-open).
+      // The WebSocket connection itself will enforce actual policy.
+      setTerminalEnabled(true);
+    });
+
     return () => {
       cancelled = true;
       setOnUnauthorized(null);
@@ -423,7 +472,15 @@ export function App() {
   }`;
   const navActive = "border-brand/20 bg-brand/10 text-brand font-semibold shadow-sm shadow-brand/5";
 
-  const navGroups = useMemo(() => [
+  const navGroups = useMemo(() => {
+    const advancedItems = [
+      { to: "/comms", label: t("nav.comms"), icon: Activity },
+      ...(terminalEnabled ? [{ to: "/terminal" as const, label: t("nav.terminal"), icon: Terminal }] : []),
+      { to: "/network", label: t("nav.network"), icon: Share2 },
+      { to: "/a2a", label: t("nav.a2a"), icon: Globe },
+      { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
+    ];
+    return [
     {
       key: "core",
       label: t("nav.core"),
@@ -449,6 +506,20 @@ export function App() {
       ],
     },
     {
+      key: "config",
+      label: t("nav.config"),
+      items: [
+        { to: "/config/general", label: t("config.cat_general"), icon: Settings },
+        { to: "/config/memory", label: t("config.cat_memory"), icon: Database },
+        { to: "/config/tools", label: t("config.cat_tools"), icon: Sparkles },
+        { to: "/config/channels", label: t("config.cat_channels"), icon: Network },
+        { to: "/config/security", label: t("config.cat_security"), icon: Shield },
+        { to: "/config/network", label: t("config.cat_network"), icon: Share2 },
+        { to: "/config/infra", label: t("config.cat_infra"), icon: Server },
+        { to: "/settings", label: t("nav.settings"), icon: Settings },
+      ],
+    },
+    {
       key: "automate",
       label: t("nav.automate"),
       items: [
@@ -470,15 +541,9 @@ export function App() {
     {
       key: "advanced",
       label: t("nav.advanced"),
-      items: [
-        { to: "/comms", label: t("nav.comms"), icon: Activity },
-        { to: "/terminal", label: t("nav.terminal"), icon: Terminal },
-        { to: "/network", label: t("nav.network"), icon: Share2 },
-        { to: "/a2a", label: t("nav.a2a"), icon: Globe },
-        { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
-      ],
+      items: advancedItems,
     },
-  ], [t]);
+  ]; }, [t, terminalEnabled]);
 
   return (
     <div className="flex h-screen flex-col bg-main text-slate-900 dark:text-slate-100 lg:flex-row transition-colors duration-300 overflow-hidden">

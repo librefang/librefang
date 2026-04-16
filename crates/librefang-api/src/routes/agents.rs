@@ -156,6 +156,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 use crate::middleware::RequestLanguage;
+use crate::stream_dedup::StreamDedup;
 use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -723,20 +724,21 @@ pub(crate) fn enrich_agent_json(
         e.manifest.model.model.as_str()
     };
 
-    let (tier, auth_status) = catalog
+    let (tier, auth_status, supports_thinking) = catalog
         .as_ref()
         .map(|cat| {
-            let tier = cat
-                .find_model(model)
+            let model_entry = cat.find_model(model);
+            let tier = model_entry
                 .map(|m| format!("{:?}", m.tier).to_lowercase())
                 .unwrap_or_else(|| "unknown".to_string());
+            let thinking = model_entry.map(|m| m.supports_thinking).unwrap_or(false);
             let auth = cat
                 .get_provider(provider)
                 .map(|p| p.auth_status.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            (tier, auth)
+            (tier, auth, thinking)
         })
-        .unwrap_or(("unknown".to_string(), "unknown".to_string()));
+        .unwrap_or(("unknown".to_string(), "unknown".to_string(), false));
 
     let ready =
         matches!(e.state, librefang_types::agent::AgentState::Running) && auth_status != "missing";
@@ -753,6 +755,7 @@ pub(crate) fn enrich_agent_json(
         "model_name": model,
         "model_tier": tier,
         "auth_status": auth_status,
+        "supports_thinking": supports_thinking,
         "ready": ready,
         "profile": e.manifest.profile,
         "identity": {
@@ -760,6 +763,7 @@ pub(crate) fn enrich_agent_json(
             "avatar_url": e.identity.avatar_url,
             "color": e.identity.color,
         },
+        "web_search_augmentation": e.manifest.web_search_augmentation,
     })
 }
 
@@ -1299,6 +1303,11 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
         was_mentioned: req.was_mentioned,
         thread_id: None,
         account_id: None,
+        // Phase 2 §C — forward the optional group participant roster from the
+        // gateway POST body so the addressee guard can fire downstream. Empty
+        // when the caller (Telegram, direct API) doesn't populate it; the
+        // guard then becomes a no-op and cannot produce false positives.
+        group_participants: req.group_participants.clone().unwrap_or_default(),
         ..Default::default()
     })
 }
@@ -1774,6 +1783,7 @@ pub async fn get_agent(
             "mcp_servers": entry.manifest.mcp_servers,
             "mcp_servers_mode": if entry.manifest.mcp_servers.is_empty() { "all" } else { "allowlist" },
             "fallback_models": entry.manifest.fallback_models,
+            "web_search_augmentation": entry.manifest.web_search_augmentation,
         })),
     )
 }
@@ -1863,44 +1873,57 @@ pub async fn send_message_stream(
         }
     };
 
-    let sse_stream = stream::unfold(rx, |mut rx| async move {
-        match rx.recv().await {
-            Some(event) => {
-                let sse_event: Result<Event, std::convert::Infallible> = Ok(match event {
-                    StreamEvent::TextDelta { text } => Event::default()
+    // Defense against the agent loop emitting the same text span twice in a
+    // single streaming turn (observed when multi-iteration loops re-assert a
+    // final sentence after a tool step). The dedup window is per-request, so
+    // legitimate repetitions across turns stay unaffected.
+    let sse_stream = stream::unfold((rx, StreamDedup::new()), |(mut rx, mut dedup)| async move {
+        loop {
+            let event = rx.recv().await?;
+            let sse_event: Result<Event, std::convert::Infallible> = Ok(match event {
+                StreamEvent::TextDelta { text } => {
+                    if dedup.is_duplicate(&text) {
+                        tracing::debug!(
+                            len = text.len(),
+                            preview = %text.chars().take(40).collect::<String>(),
+                            "stream dedup: dropping duplicate TextDelta",
+                        );
+                        continue;
+                    }
+                    dedup.record_sent(&text);
+                    Event::default()
                         .event("chunk")
                         .json_data(serde_json::json!({"content": text, "done": false}))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::ToolUseStart { name, .. } => Event::default()
-                        .event("tool_use")
-                        .json_data(serde_json::json!({"tool": name}))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::ToolUseEnd { name, input, .. } => Event::default()
-                        .event("tool_result")
-                        .json_data(serde_json::json!({"tool": name, "input": input}))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::ContentComplete { usage, .. } => Event::default()
-                        .event("done")
-                        .json_data(serde_json::json!({
-                            "done": true,
-                            "usage": {
-                                "input_tokens": usage.input_tokens,
-                                "output_tokens": usage.output_tokens,
-                            }
-                        }))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::PhaseChange { phase, detail } => Event::default()
-                        .event("phase")
-                        .json_data(serde_json::json!({
-                            "phase": phase,
-                            "detail": detail,
-                        }))
-                        .unwrap_or_else(|_| Event::default().data("error")),
-                    _ => Event::default().comment("skip"),
-                });
-                Some((sse_event, rx))
-            }
-            None => None,
+                        .unwrap_or_else(|_| Event::default().data("error"))
+                }
+                StreamEvent::ToolUseStart { name, .. } => Event::default()
+                    .event("tool_use")
+                    .json_data(serde_json::json!({"tool": name}))
+                    .unwrap_or_else(|_| Event::default().data("error")),
+                StreamEvent::ToolUseEnd { name, input, .. } => Event::default()
+                    .event("tool_result")
+                    .json_data(serde_json::json!({"tool": name, "input": input}))
+                    .unwrap_or_else(|_| Event::default().data("error")),
+                StreamEvent::ContentComplete { usage, .. } => Event::default()
+                    .event("done")
+                    .json_data(serde_json::json!({
+                        "done": true,
+                        "usage": {
+                            "input_tokens": usage.input_tokens,
+                            "output_tokens": usage.output_tokens,
+                        }
+                    }))
+                    .unwrap_or_else(|_| Event::default().data("error")),
+                StreamEvent::PhaseChange { phase, detail } => Event::default()
+                    .event("phase")
+                    .json_data(serde_json::json!({
+                        "phase": phase,
+                        "detail": detail,
+                    }))
+                    .unwrap_or_else(|_| Event::default().data("error")),
+                _ => Event::default().comment("skip"),
+            });
+            return Some((sse_event, (rx, dedup)));
         }
     });
 
@@ -3177,6 +3200,9 @@ pub struct PatchAgentConfigRequest {
     pub temperature: Option<f32>,
     #[schema(value_type = Option<Vec<serde_json::Value>>)]
     pub fallback_models: Option<Vec<librefang_types::agent::FallbackModel>>,
+    /// Web search augmentation mode: "off", "auto", or "always".
+    #[schema(value_type = Option<String>)]
+    pub web_search_augmentation: Option<librefang_types::agent::WebSearchAugmentationMode>,
 }
 
 /// PATCH /api/agents/{id}/config — Hot-update agent name, description, system prompt, and identity.
@@ -3425,6 +3451,21 @@ pub async fn patch_agent_config(
             .kernel
             .agent_registry()
             .update_fallback_models(agent_id, fallbacks)
+            .is_err()
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    }
+
+    // Update web search augmentation mode
+    if let Some(mode) = req.web_search_augmentation {
+        if state
+            .kernel
+            .agent_registry()
+            .update_web_search_augmentation(agent_id, mode)
             .is_err()
         {
             return (
@@ -4558,6 +4599,7 @@ pub async fn push_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librefang_channels::types::ParticipantRef;
 
     /// The pre-fix prefix-match (`"image/"`) let SVG, BMP, TIFF, HEIC and
     /// friends through. Post-fix the allowlist is exact-match over the
@@ -4722,6 +4764,7 @@ mod tests {
             ephemeral: false,
             thinking: None,
             show_thinking: None,
+            group_participants: None,
         };
         assert!(request_sender_context(&req).is_none());
     }
@@ -4739,11 +4782,13 @@ mod tests {
             ephemeral: false,
             thinking: None,
             show_thinking: None,
+            group_participants: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.user_id, "u-123");
         assert_eq!(sender.display_name, "u-123");
         assert_eq!(sender.channel, "api");
+        assert!(sender.group_participants.is_empty());
     }
 
     #[test]
@@ -4759,10 +4804,77 @@ mod tests {
             ephemeral: false,
             thinking: None,
             show_thinking: None,
+            group_participants: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert!(sender.is_group);
         assert!(sender.was_mentioned);
+    }
+
+    #[test]
+    fn test_request_sender_context_threads_group_participants() {
+        let roster = vec![
+            ParticipantRef {
+                jid: "111@s.whatsapp.net".to_string(),
+                display_name: "Alice".to_string(),
+            },
+            ParticipantRef {
+                jid: "222@s.whatsapp.net".to_string(),
+                display_name: "Bob".to_string(),
+            },
+        ];
+        let req = MessageRequest {
+            message: "Bob, ciao".to_string(),
+            attachments: Vec::new(),
+            sender_id: Some("111@s.whatsapp.net".to_string()),
+            sender_name: Some("Alice".to_string()),
+            channel_type: Some("whatsapp".to_string()),
+            is_group: true,
+            was_mentioned: false,
+            ephemeral: false,
+            thinking: None,
+            show_thinking: None,
+            group_participants: Some(roster.clone()),
+        };
+        let sender = request_sender_context(&req).expect("sender context");
+        assert_eq!(sender.group_participants, roster);
+    }
+
+    #[test]
+    fn test_message_request_group_participants_default_when_missing() {
+        // Backward compat: callers (Telegram, direct API) that omit
+        // `group_participants` must still deserialize cleanly.
+        let json = serde_json::json!({
+            "message": "hi",
+            "sender_id": "u-1",
+            "channel_type": "telegram",
+            "is_group": false,
+        });
+        let req: MessageRequest =
+            serde_json::from_value(json).expect("deserialize without group_participants");
+        assert!(req.group_participants.is_none());
+        let sender = request_sender_context(&req).expect("sender context");
+        assert!(sender.group_participants.is_empty());
+    }
+
+    #[test]
+    fn test_message_request_group_participants_deserializes_from_json() {
+        let json = serde_json::json!({
+            "message": "hey Bob",
+            "sender_id": "111@s.whatsapp.net",
+            "sender_name": "Alice",
+            "channel_type": "whatsapp:group-jid@g.us",
+            "is_group": true,
+            "group_participants": [
+                {"jid": "111@s.whatsapp.net", "display_name": "Alice"},
+                {"jid": "222@s.whatsapp.net", "display_name": "Bob"}
+            ]
+        });
+        let req: MessageRequest =
+            serde_json::from_value(json).expect("deserialize with group_participants");
+        let sender = request_sender_context(&req).expect("sender context");
+        assert_eq!(sender.group_participants.len(), 2);
+        assert_eq!(sender.group_participants[1].display_name, "Bob");
     }
 
     #[test]
@@ -5095,6 +5207,7 @@ mod monitoring_tests {
             media_drivers: librefang_runtime::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            config_write_lock: tokio::sync::Mutex::new(()),
         });
         (state, tmp)
     }

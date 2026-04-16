@@ -67,6 +67,12 @@ pub enum TriggerPattern {
     All,
     /// Match custom events by content substring.
     ContentMatch { substring: String },
+    /// Match when a task is posted to the Task Board.
+    TaskPosted,
+    /// Match when a task is claimed from the Task Board.
+    TaskClaimed,
+    /// Match when a task is completed on the Task Board.
+    TaskCompleted,
 }
 
 /// A registered trigger definition.
@@ -524,6 +530,18 @@ fn matches_pattern(pattern: &TriggerPattern, event: &Event, description: &str) -
         TriggerPattern::ContentMatch { substring } => description
             .to_lowercase()
             .contains(&substring.to_lowercase()),
+        TriggerPattern::TaskPosted => matches!(
+            event.payload,
+            EventPayload::System(SystemEvent::TaskPosted { .. })
+        ),
+        TriggerPattern::TaskClaimed => matches!(
+            event.payload,
+            EventPayload::System(SystemEvent::TaskClaimed { .. })
+        ),
+        TriggerPattern::TaskCompleted => matches!(
+            event.payload,
+            EventPayload::System(SystemEvent::TaskCompleted { .. })
+        ),
     }
 }
 
@@ -611,6 +629,18 @@ fn describe_event(event: &Event) -> String {
                     "Health check failed: agent {agent_id}, unresponsive for {unresponsive_secs}s"
                 )
             }
+            SystemEvent::TaskPosted { task_id, title, .. } => {
+                format!("Task posted: {task_id} \"{title}\"")
+            }
+            SystemEvent::TaskClaimed {
+                task_id,
+                claimed_by,
+            } => {
+                format!("Task claimed: {task_id} by {claimed_by}")
+            }
+            SystemEvent::TaskCompleted { task_id, result } => {
+                format!("Task completed: {task_id} result={result}")
+            }
         },
         EventPayload::ApprovalRequested(ar) => {
             format!(
@@ -625,7 +655,23 @@ fn describe_event(event: &Event) -> String {
             )
         }
         EventPayload::Custom(data) => {
-            format!("Custom event ({} bytes)", data.len())
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
+                let event_type = val
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("unknown");
+                let summary = {
+                    let s = val.to_string();
+                    if s.len() > 300 {
+                        format!("{}...", &s[..300])
+                    } else {
+                        s
+                    }
+                };
+                format!("Custom event: type={}, payload={}", event_type, summary)
+            } else {
+                format!("Custom event ({} bytes)", data.len())
+            }
         }
     }
 }
@@ -1158,5 +1204,155 @@ mod tests {
             Some(30),
             "cooldown_secs should survive take/restore"
         );
+    }
+
+    // -- describe_event: Custom payload decoding (#2438) -----------------------
+
+    #[test]
+    fn test_describe_event_custom_json() {
+        let payload =
+            serde_json::to_vec(&serde_json::json!({"type": "deploy", "data": {"env": "prod"}}))
+                .unwrap();
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::Custom(payload),
+        );
+        let desc = describe_event(&event);
+        assert!(
+            desc.contains("type=deploy"),
+            "Should include the event type, got: {desc}"
+        );
+        assert!(
+            desc.contains("prod"),
+            "Should include payload data, got: {desc}"
+        );
+    }
+
+    #[test]
+    fn test_describe_event_custom_non_json_fallback() {
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::Custom(vec![0xFF, 0xFE, 0x00]),
+        );
+        let desc = describe_event(&event);
+        assert!(
+            desc.contains("3 bytes"),
+            "Non-JSON should fall back to byte-length description, got: {desc}"
+        );
+    }
+
+    #[test]
+    fn test_describe_event_custom_json_no_type_field() {
+        let payload = serde_json::to_vec(&serde_json::json!({"action": "restart"})).unwrap();
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::Custom(payload),
+        );
+        let desc = describe_event(&event);
+        assert!(
+            desc.contains("type=unknown"),
+            "Missing 'type' field should show 'unknown', got: {desc}"
+        );
+    }
+
+    #[test]
+    fn test_content_match_on_custom_json_event() {
+        let engine = TriggerEngine::new();
+        let agent_id = AgentId::new();
+        engine.register(
+            agent_id,
+            TriggerPattern::ContentMatch {
+                substring: "deploy".to_string(),
+            },
+            "Deploy alert: {{event}}".to_string(),
+            0,
+        );
+
+        let payload =
+            serde_json::to_vec(&serde_json::json!({"type": "deploy", "data": {"env": "prod"}}))
+                .unwrap();
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::Custom(payload),
+        );
+        let matches = engine.evaluate(&event);
+        assert_eq!(
+            matches.len(),
+            1,
+            "ContentMatch should match decoded Custom JSON payload"
+        );
+    }
+
+    // -- MemoryUpdate trigger matching (#2438) ---------------------------------
+
+    #[test]
+    fn test_memory_update_trigger_fires() {
+        let engine = TriggerEngine::new();
+        let watcher = AgentId::new();
+        engine.register(
+            watcher,
+            TriggerPattern::MemoryUpdate,
+            "Memory changed: {{event}}".to_string(),
+            0,
+        );
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::MemoryUpdate(MemoryDelta {
+                operation: MemoryOperation::Created,
+                key: "user.prefs".to_string(),
+                agent_id: AgentId::new(),
+            }),
+        );
+        let matches = engine.evaluate(&event);
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].message.contains("user.prefs"));
+    }
+
+    #[test]
+    fn test_memory_key_pattern_trigger_fires() {
+        let engine = TriggerEngine::new();
+        let watcher = AgentId::new();
+        engine.register(
+            watcher,
+            TriggerPattern::MemoryKeyPattern {
+                key_pattern: "user.".to_string(),
+            },
+            "User memory changed: {{event}}".to_string(),
+            0,
+        );
+
+        // Should match
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::MemoryUpdate(MemoryDelta {
+                operation: MemoryOperation::Updated,
+                key: "user.settings".to_string(),
+                agent_id: AgentId::new(),
+            }),
+        );
+        assert_eq!(engine.evaluate(&event).len(), 1);
+
+        // Should NOT match (different key)
+        let event2 = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::MemoryUpdate(MemoryDelta {
+                operation: MemoryOperation::Deleted,
+                key: "system.config".to_string(),
+                agent_id: AgentId::new(),
+            }),
+        );
+        // Disable cooldown for second evaluation
+        for mut entry in engine.triggers.iter_mut() {
+            entry.cooldown_secs = Some(0);
+        }
+        assert_eq!(engine.evaluate(&event2).len(), 0);
     }
 }
