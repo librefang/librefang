@@ -228,6 +228,9 @@ impl LlmDriver for CodexCliDriver {
 
 /// Check if the Codex CLI is available.
 pub fn codex_cli_available() -> bool {
+    if super::is_proxied_via_env(&["OPENAI_BASE_URL", "OPENAI_API_BASE"], &["api.openai.com"]) {
+        return false;
+    }
     CodexCliDriver::detect().is_some() || codex_cli_credentials_exist()
 }
 

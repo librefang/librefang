@@ -211,6 +211,15 @@ impl LlmDriver for GeminiCliDriver {
 
 /// Check if the Gemini CLI is available.
 pub fn gemini_cli_available() -> bool {
+    if super::is_proxied_via_env(
+        &["GEMINI_API_BASE", "GOOGLE_AI_BASE_URL"],
+        &[
+            "generativelanguage.googleapis.com",
+            "aiplatform.googleapis.com",
+        ],
+    ) {
+        return false;
+    }
     GeminiCliDriver::detect().is_some() || gemini_cli_credentials_exist()
 }
 
