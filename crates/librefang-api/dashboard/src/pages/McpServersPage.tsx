@@ -1029,7 +1029,7 @@ export function McpServersPage() {
             <div key={e.name} className="flex flex-col gap-1.5">
               <div className="flex items-center gap-1.5">
                 <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                  {e.name}
+                  {e.label || e.name}
                 </label>
                 {e.get_url && (
                   <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline">
@@ -1037,11 +1037,12 @@ export function McpServersPage() {
                   </a>
                 )}
               </div>
+              {e.help && <span className="text-[9px] text-text-dim/50">{e.help}</span>}
               <input
-                type="text"
+                type={e.is_secret ? "password" : "text"}
                 value={envInputs[e.name] ?? ""}
                 onChange={(ev) => setEnvInputs(prev => ({ ...prev, [e.name]: ev.target.value }))}
-                placeholder={e.name}
+                placeholder={e.label || e.name}
                 className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
               />
             </div>
