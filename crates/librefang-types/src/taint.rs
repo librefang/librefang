@@ -276,7 +276,24 @@ pub fn check_outbound_text_violation(payload: &str, sink: &TaintSink) -> Option<
         // API tokens never embed dates. This prevents false positives on
         // MCP session handles of the form `tab-2026-04-16-<uuid-parts>`.
         let has_date_component = date_component_regex().is_match(trimmed);
-        let looks_opaque = trimmed.len() >= 32 && charset_ok && mixed_enough && !has_date_component;
+        // File paths (absolute or relative with directory separators)
+        // are structured identifiers, not credentials. Exclude strings
+        // that look like paths: start with `/` or `C:\`, or contain
+        // multiple `/` segments with a file extension at the end.
+        let looks_like_path = trimmed.starts_with('/')
+            || (trimmed.len() >= 3
+                && trimmed.as_bytes()[1] == b':'
+                && trimmed.as_bytes()[2] == b'\\')
+            || trimmed.starts_with("\\\\")
+            || (trimmed.contains('/')
+                && trimmed
+                    .rfind('.')
+                    .is_some_and(|dot| dot > trimmed.rfind('/').unwrap_or(0)));
+        let looks_opaque = trimmed.len() >= 32
+            && charset_ok
+            && mixed_enough
+            && !has_date_component
+            && !looks_like_path;
         let well_known = trimmed.starts_with("sk-")
             || trimmed.starts_with("ghp_")
             || trimmed.starts_with("github_pat_")

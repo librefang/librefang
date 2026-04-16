@@ -22,6 +22,7 @@ use tracing::{info, warn};
 
 use super::AppState;
 use crate::terminal::PtySession;
+use crate::terminal_tmux::{validate_window_name, TmuxController, DEFAULT_TMUX_SESSION_NAME};
 use crate::ws::{
     detect_connection_locality, send_json, try_acquire_ws_slot, validate_ws_origin, ws_auth_token,
     ws_query_param, WsConnectionGuard,
@@ -35,6 +36,14 @@ const MAX_ROWS: u16 = 500;
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/terminal/health", axum::routing::get(terminal_health))
+        .route(
+            "/terminal/windows",
+            axum::routing::get(list_windows).post(create_window),
+        )
+        .route(
+            "/terminal/windows/{window_id}",
+            axum::routing::delete(delete_window),
+        )
         .route("/terminal/ws", axum::routing::get(terminal_ws))
 }
 
@@ -45,6 +54,8 @@ pub enum ClientMessage {
     Input { data: String },
     #[serde(rename = "resize")]
     Resize { cols: u16, rows: u16 },
+    #[serde(rename = "switch_window")]
+    SwitchWindow { window: String },
     #[serde(rename = "close")]
     Close,
 }
@@ -65,6 +76,8 @@ pub enum ServerMessage {
     Exit { code: u32, signal: Option<String> },
     #[serde(rename = "error")]
     Error { content: String },
+    #[serde(rename = "active_window")]
+    ActiveWindow { window_id: String },
 }
 
 impl ClientMessage {
@@ -86,6 +99,12 @@ impl ClientMessage {
                         "Input too large: {} bytes (max {MAX_INPUT_SIZE})",
                         data.len()
                     ));
+                }
+                Ok(())
+            }
+            ClientMessage::SwitchWindow { window } => {
+                if !crate::terminal_tmux::validate_window_id(window) {
+                    return Err(format!("Invalid window id: {window:?}"));
                 }
                 Ok(())
             }
@@ -127,12 +146,39 @@ impl fmt::Display for ServerMessage {
             ServerMessage::Error { content } => {
                 write!(f, "error(content=\"{}\")", content.replace('"', "\\\""))
             }
+            ServerMessage::ActiveWindow { window_id } => {
+                write!(f, "active_window(window_id={window_id})")
+            }
         }
     }
 }
 
-pub async fn terminal_health(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(serde_json::json!({ "ok": true }))
+pub async fn terminal_health(
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(resp) = authorize_terminal_request(&headers, &uri, addr, &state).await {
+        return resp;
+    }
+
+    let (tmux_enabled, max_windows, tmux_path) = {
+        let cfg = state.kernel.config_ref();
+        (
+            cfg.terminal.tmux_enabled,
+            cfg.terminal.max_windows,
+            std::path::PathBuf::from(cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux")),
+        )
+    };
+    let tmux_available = tmux_enabled && TmuxController::is_available(&tmux_path).await;
+    Json(serde_json::json!({
+        "ok": true,
+        "tmux": tmux_available,
+        "max_windows": max_windows,
+        "os": std::env::consts::OS,
+    }))
+    .into_response()
 }
 
 /// Authentication method recorded for a successful terminal WS connection.
@@ -250,15 +296,23 @@ pub fn decide_auth(
     }
 }
 
-pub async fn terminal_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: axum::http::HeaderMap,
-    uri: axum::http::Uri,
-) -> impl IntoResponse {
+/// Authorizes a terminal request by checking the enabled flag, origin, proxy
+/// headers, and the auth-policy decision matrix. Does **not** enforce the
+/// per-IP WebSocket rate limit — that remains in the WebSocket handler itself
+/// because it is WS-specific.
+///
+/// Returns `Ok(AuthMethod)` on success, or `Err(ready-made Response)` on any
+/// rejection so callers can return it immediately.
+pub(super) async fn authorize_terminal_request(
+    headers: &axum::http::HeaderMap,
+    uri: &axum::http::Uri,
+    addr: SocketAddr,
+    state: &AppState,
+) -> Result<AuthMethod, axum::response::Response> {
+    use axum::response::IntoResponse as _;
+
     let cfg = state.kernel.config_ref();
-    let locality = detect_connection_locality(&addr, &headers);
+    let locality = detect_connection_locality(&addr, headers);
 
     if !cfg.terminal.enabled {
         warn!(
@@ -267,7 +321,7 @@ pub async fn terminal_ws(
             reason = "disabled",
             "Terminal WebSocket rejected — terminal is disabled"
         );
-        return axum::http::StatusCode::FORBIDDEN.into_response();
+        return Err(axum::http::StatusCode::FORBIDDEN.into_response());
     }
 
     // Warn if terminal is enabled without any authentication configured.
@@ -295,35 +349,14 @@ pub async fn terminal_ws(
 
     let require_proxy_headers = cfg.terminal.require_proxy_headers;
     let listen_port = cfg.listen_port();
-    if let Err(reason) = validate_ws_origin(
-        &headers,
-        listen_port,
-        &cfg.terminal.allowed_origins,
-        cfg.terminal.allow_remote,
-    ) {
-        if !cfg.terminal.allow_remote {
-            warn!(
-                ip = %locality.source_ip,
-                proxied = locality.is_proxied,
-                reason = "origin_mismatch",
-                origin = %reason,
-                "Terminal WebSocket rejected — origin validation failed"
-            );
-            return axum::http::StatusCode::FORBIDDEN.into_response();
-        }
-        warn!(
-            ip = %locality.source_ip,
-            proxied = locality.is_proxied,
-            reason = "origin_mismatch",
-            origin = %reason,
-            "Terminal WebSocket origin mismatch — continuing to auth token check"
-        );
-    }
 
-    let provided_token = ws_auth_token(&headers, &uri);
+    let provided_token = ws_auth_token(headers, uri);
 
-    // Validate the token (if any) before consulting the policy matrix so the
-    // decision table can treat token-ok / token-bad / no-token uniformly.
+    // Validate the token (if any) before origin checks so that authenticated
+    // requests are never rejected on origin alone. Origin validation is a CSRF
+    // defense — it only matters when the browser silently attaches credentials
+    // (cookies). Explicit Bearer tokens cannot be forged cross-origin, so
+    // authenticated requests bypass origin checks entirely.
     let token_status = if let Some(token_str) = provided_token.as_deref() {
         let api_auth = {
             use subtle::ConstantTimeEq;
@@ -359,6 +392,37 @@ pub async fn terminal_ws(
         TokenStatus::NoToken
     };
 
+    // Only enforce origin validation for unauthenticated requests.
+    // Authenticated requests (valid token) are already protected against CSRF
+    // because the token must be explicitly provided — browsers cannot inject it
+    // cross-origin.
+    if !matches!(token_status, TokenStatus::Valid(_)) {
+        if let Err(reason) = validate_ws_origin(
+            headers,
+            listen_port,
+            &cfg.terminal.allowed_origins,
+            cfg.terminal.allow_remote,
+        ) {
+            if !cfg.terminal.allow_remote {
+                warn!(
+                    ip = %locality.source_ip,
+                    proxied = locality.is_proxied,
+                    reason = "origin_mismatch",
+                    origin = %reason,
+                    "Terminal rejected — origin validation failed"
+                );
+                return Err(axum::http::StatusCode::FORBIDDEN.into_response());
+            }
+            warn!(
+                ip = %locality.source_ip,
+                proxied = locality.is_proxied,
+                reason = "origin_mismatch",
+                origin = %reason,
+                "Terminal origin mismatch — continuing to auth decision"
+            );
+        }
+    }
+
     let decision = decide_auth(
         token_status,
         auth_configured,
@@ -382,9 +446,193 @@ pub async fn terminal_ws(
                 reason = reason,
                 "Terminal WebSocket rejected"
             );
-            return status.into_response();
+            return Err(status.into_response());
         }
     };
+
+    Ok(auth_method)
+}
+
+// ── REST: tmux window management ─────────────────────────────────────────────
+
+async fn tmux_controller(state: &AppState) -> Result<TmuxController, axum::response::Response> {
+    use axum::response::IntoResponse as _;
+    let cfg = state.kernel.config_ref();
+    if !cfg.terminal.tmux_enabled {
+        return Err(axum::http::StatusCode::FORBIDDEN.into_response());
+    }
+    let tmux_path =
+        std::path::PathBuf::from(cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux"));
+    Ok(TmuxController::new(
+        tmux_path,
+        DEFAULT_TMUX_SESSION_NAME.to_string(),
+    ))
+}
+
+async fn list_windows(
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+
+    if let Err(resp) = authorize_terminal_request(&headers, &uri, addr, &state).await {
+        return resp;
+    }
+
+    // Rate limiting is handled by the global GCRA middleware in server.rs.
+
+    let ctrl = match tmux_controller(&state).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
+    if let Err(e) = ctrl.ensure_session().await {
+        warn!(error = %e, "tmux ensure_session failed in list_windows");
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
+    match ctrl.list_windows().await {
+        Ok(windows) => Json(serde_json::json!(windows)).into_response(),
+        Err(e) => {
+            warn!(error = %e, "tmux list_windows failed");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CreateWindowRequest {
+    name: Option<String>,
+}
+
+async fn create_window(
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateWindowRequest>,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+
+    if let Err(resp) = authorize_terminal_request(&headers, &uri, addr, &state).await {
+        return resp;
+    }
+
+    // Rate limiting is handled by the global GCRA middleware in server.rs.
+
+    // Validate name before any tmux calls.
+    if let Some(ref name) = body.name {
+        if !validate_window_name(name) {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_window_name"})),
+            )
+                .into_response();
+        }
+    }
+
+    let ctrl = match tmux_controller(&state).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
+    if let Err(e) = ctrl.ensure_session().await {
+        warn!(error = %e, "tmux ensure_session failed in create_window");
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
+    // Enforce window limit.
+    // NOTE: The list_windows() check and new_window() call are two separate tmux
+    // subprocess invocations, so a concurrent caller could slip in between. This
+    // is accepted as a soft limit — the global GCRA rate limiter makes this race
+    // benign in practice.
+    let max_windows = state.kernel.config_ref().terminal.max_windows;
+    match ctrl.list_windows().await {
+        Ok(existing) => {
+            if existing.len() >= max_windows as usize {
+                return (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({"error": "window_limit_reached", "max": max_windows})),
+                )
+                    .into_response();
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "tmux list_windows failed in create_window");
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    match ctrl.new_window(body.name.as_deref()).await {
+        Ok(window) => Json(serde_json::json!(window)).into_response(),
+        Err(e) => {
+            warn!(error = %e, "tmux new_window failed");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn delete_window(
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(window_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+
+    if !crate::terminal_tmux::validate_window_id(&window_id) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid_window_id"})),
+        )
+            .into_response();
+    }
+
+    if let Err(resp) = authorize_terminal_request(&headers, &uri, addr, &state).await {
+        return resp;
+    }
+
+    let ctrl = match tmux_controller(&state).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
+    if let Err(e) = ctrl.ensure_session().await {
+        warn!(error = %e, "tmux ensure_session failed in delete_window");
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
+    match ctrl.kill_window(&window_id).await {
+        Ok(()) => axum::http::StatusCode::OK.into_response(),
+        Err(e) => {
+            warn!(error = %e, %window_id, "tmux kill_window failed");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "kill_window_failed"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ── WebSocket handler ────────────────────────────────────────────────────────
+
+pub async fn terminal_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
+    let auth_method = match authorize_terminal_request(&headers, &uri, addr, &state).await {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+
+    let locality = detect_connection_locality(&addr, &headers);
 
     match auth_method {
         AuthMethod::LocalBypass => {
@@ -435,7 +683,7 @@ pub async fn terminal_ws(
 
     ws.on_upgrade(move |socket| {
         let guard = _terminal_guard;
-        handle_terminal_ws(socket, state, ip, guard, initial_cols, initial_rows)
+        handle_terminal_ws(socket, state, ip, guard, initial_cols, initial_rows, uri)
     })
     .into_response()
 }
@@ -453,24 +701,110 @@ async fn handle_terminal_ws(
     _guard: WsConnectionGuard,
     initial_cols: Option<u16>,
     initial_rows: Option<u16>,
+    uri: axum::http::Uri,
 ) {
     let (sender, mut receiver) = socket.split();
     let sender = Arc::new(Mutex::new(sender));
 
-    let (mut pty, mut pty_rx) = match PtySession::spawn(initial_cols, initial_rows) {
-        Ok((pty, rx)) => (pty, rx),
-        Err(e) => {
+    // Decide whether to attach to tmux or spawn a plain shell.
+    let cfg = state.kernel.config_ref();
+    let tmux_path_val = cfg
+        .terminal
+        .tmux_binary_path
+        .as_deref()
+        .unwrap_or("tmux")
+        .to_string();
+    let tmux_enabled = cfg.terminal.tmux_enabled;
+    drop(cfg);
+
+    let tmux_path_buf = std::path::PathBuf::from(&tmux_path_val);
+    let tmux_avail =
+        tmux_enabled && crate::terminal_tmux::TmuxController::is_available(&tmux_path_buf).await;
+
+    // Validate optional ?window= query param.
+    let requested_window = ws_query_param(&uri, "window");
+    let valid_window = match &requested_window {
+        Some(w) if crate::terminal_tmux::validate_window_id(w) => Some(w.clone()),
+        Some(w) => {
+            warn!(requested = %w, "Invalid ?window= query param — connecting without window");
+            None
+        }
+        None => None,
+    };
+
+    let (mut pty, mut pty_rx) = if tmux_avail {
+        // Ensure tmux session exists and optionally select a window.
+        let ctrl = crate::terminal_tmux::TmuxController::new(
+            tmux_path_buf,
+            DEFAULT_TMUX_SESSION_NAME.to_string(),
+        );
+        if let Err(e) = ctrl.ensure_session().await {
+            warn!(error = %e, "tmux session init failed");
             let _ = send_json(
                 &sender,
                 &serde_json::json!({
                     "type": "error",
-                    "content": format!("Failed to spawn terminal: {}", e)
+                    "content": "tmux session init failed"
                 }),
             )
             .await;
             return;
         }
+        if let Some(wid) = &valid_window {
+            if let Err(e) = ctrl.select_window(wid).await {
+                warn!(error = %e, window = %wid, "tmux select window failed");
+                let _ = send_json(
+                    &sender,
+                    &serde_json::json!({
+                        "type": "error",
+                        "content": "tmux select window failed"
+                    }),
+                )
+                .await;
+                // Continue anyway — still attach to session.
+            }
+        }
+        match PtySession::spawn_tmux_attached(
+            &tmux_path_val,
+            DEFAULT_TMUX_SESSION_NAME,
+            initial_cols,
+            initial_rows,
+        ) {
+            Ok((pty, rx)) => (pty, rx),
+            Err(e) => {
+                warn!(error = %e, "Failed to spawn tmux terminal");
+                let _ = send_json(
+                    &sender,
+                    &serde_json::json!({
+                        "type": "error",
+                        "content": "Failed to spawn tmux terminal"
+                    }),
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        match PtySession::spawn(initial_cols, initial_rows) {
+            Ok((pty, rx)) => (pty, rx),
+            Err(e) => {
+                warn!(error = %e, "Failed to spawn terminal");
+                let _ = send_json(
+                    &sender,
+                    &serde_json::json!({
+                        "type": "error",
+                        "content": "Failed to spawn terminal"
+                    }),
+                )
+                .await;
+                return;
+            }
+        }
     };
+
+    // Track current PTY dimensions for re-resize after window switch.
+    let mut current_cols = initial_cols.unwrap_or(120);
+    let mut current_rows = initial_rows.unwrap_or(40);
 
     // Send only the shell basename (e.g. "zsh") instead of the full path
     // (e.g. "/bin/zsh") to avoid leaking server filesystem layout.
@@ -606,23 +940,88 @@ async fn handle_terminal_ws(
                                         input_times.push(now);
 
                                         if let Err(e) = pty.write(data.as_bytes()) {
+                                            warn!(error = %e, "PTY write failed");
                                             let _ = send_json(
                                                 &sender,
                                                 &serde_json::json!({
                                                     "type": "error",
-                                                    "content": format!("Write error: {}", e)
+                                                    "content": "PTY write failed"
                                                 }),
                                             )
                                             .await;
                                         }
                                     }
                                     ClientMessage::Resize { cols, rows } => {
+                                        current_cols = *cols;
+                                        current_rows = *rows;
                                         if let Err(e) = pty.resize(*cols, *rows) {
+                                            warn!(error = %e, "PTY resize failed");
                                             let _ = send_json(
                                                 &sender,
                                                 &serde_json::json!({
                                                     "type": "error",
-                                                    "content": format!("Resize error: {}", e)
+                                                    "content": "PTY resize failed"
+                                                }),
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    ClientMessage::SwitchWindow { window } => {
+                                        let window_id = window.clone();
+                                        let (tmux_enabled, tmux_path) = {
+                                            let cfg = state.kernel.config_ref();
+                                            (
+                                                cfg.terminal.tmux_enabled,
+                                                std::path::PathBuf::from(
+                                                    cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux"),
+                                                ),
+                                            )
+                                        };
+                                        if tmux_enabled {
+                                            let ctrl = crate::terminal_tmux::TmuxController::new(
+                                                tmux_path,
+                                                DEFAULT_TMUX_SESSION_NAME.to_string(),
+                                            );
+                                            match ctrl.select_window(&window_id).await {
+                                                Ok(()) => {
+                                                    // Re-resize PTY after tmux window switch.
+                                                    if let Err(e) = pty.resize(current_cols, current_rows) {
+                                                        warn!(
+                                                            error = %e,
+                                                            cols = current_cols,
+                                                            rows = current_rows,
+                                                            "failed to resize PTY after window switch"
+                                                        );
+                                                    }
+                                                    let _ = send_json(
+                                                        &sender,
+                                                        &serde_json::to_value(
+                                                            ServerMessage::ActiveWindow {
+                                                                window_id,
+                                                            },
+                                                        )
+                                                        .unwrap(),
+                                                    )
+                                                    .await;
+                                                }
+                                                Err(e) => {
+                                                    warn!(error = %e, "tmux switch window failed");
+                                                    let _ = send_json(
+                                                        &sender,
+                                                        &serde_json::json!({
+                                                            "type": "error",
+                                                            "content": "Switch failed"
+                                                        }),
+                                                    )
+                                                    .await;
+                                                }
+                                            }
+                                        } else {
+                                            let _ = send_json(
+                                                &sender,
+                                                &serde_json::json!({
+                                                    "type": "error",
+                                                    "content": "tmux not available"
                                                 }),
                                             )
                                             .await;
@@ -829,6 +1228,181 @@ mod tests {
     #[test]
     fn test_terminal_router_creation() {
         let _app = router();
+    }
+
+    // ── Security: SwitchWindow validation ────────────────────────────────────
+
+    #[test]
+    fn switch_window_rejects_missing_at() {
+        let msg = ClientMessage::SwitchWindow {
+            window: "1".to_string(),
+        };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn switch_window_rejects_shell_injection() {
+        let msg = ClientMessage::SwitchWindow {
+            window: "@1;ls".to_string(),
+        };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn switch_window_rejects_command_substitution() {
+        let msg = ClientMessage::SwitchWindow {
+            window: "@$(whoami)".to_string(),
+        };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn switch_window_rejects_path_traversal() {
+        let msg = ClientMessage::SwitchWindow {
+            window: "@../".to_string(),
+        };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn switch_window_rejects_spaces() {
+        let msg = ClientMessage::SwitchWindow {
+            window: "@1 2".to_string(),
+        };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn switch_window_rejects_ten_digits() {
+        let msg = ClientMessage::SwitchWindow {
+            window: "@1234567890".to_string(),
+        };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn switch_window_accepts_valid_id() {
+        let msg = ClientMessage::SwitchWindow {
+            window: "@42".to_string(),
+        };
+        assert!(msg.validate().is_ok());
+    }
+
+    #[test]
+    fn switch_window_accepts_max_9_digits() {
+        let msg = ClientMessage::SwitchWindow {
+            window: "@123456789".to_string(),
+        };
+        assert!(msg.validate().is_ok());
+    }
+
+    #[test]
+    fn switch_window_rejects_empty() {
+        let msg = ClientMessage::SwitchWindow {
+            window: String::new(),
+        };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn active_window_serializes() {
+        let msg = ServerMessage::ActiveWindow {
+            window_id: "@3".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"active_window""#));
+        assert!(json.contains(r#""window_id":"@3""#));
+    }
+
+    #[test]
+    fn window_name_rejects_shell_injection_in_create() {
+        assert!(!crate::terminal_tmux::validate_window_name("a;rm -rf /"));
+        assert!(!crate::terminal_tmux::validate_window_name("$(evil)"));
+        assert!(!crate::terminal_tmux::validate_window_name("`cmd`"));
+    }
+
+    #[test]
+    fn window_name_rejects_too_long() {
+        let long = "a".repeat(65);
+        assert!(!crate::terminal_tmux::validate_window_name(&long));
+    }
+
+    #[test]
+    fn window_name_accepts_valid() {
+        assert!(crate::terminal_tmux::validate_window_name("editor"));
+        assert!(crate::terminal_tmux::validate_window_name("my-app_01"));
+    }
+
+    #[test]
+    fn window_name_rejects_all_special_chars() {
+        for bad in &[
+            "a;b", "a&b", "a|b", "a`b", "a$b", "a(b)", "a{b}", "a<b>", "a>b", "a/b", "a\\b",
+            "a\"b", "a'b", "a#b", "a!b", "a@b", "a=b", "a+b", "a~b",
+        ] {
+            assert!(
+                !crate::terminal_tmux::validate_window_name(bad),
+                "should reject: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn window_name_rejects_control_chars() {
+        for bad in &["foo\0bar", "foo\x01bar", "foo\x1fbar", "foo\x7fbar"] {
+            assert!(
+                !crate::terminal_tmux::validate_window_name(bad),
+                "should reject control char"
+            );
+        }
+    }
+
+    #[test]
+    fn window_id_rejects_negative() {
+        assert!(!crate::terminal_tmux::validate_window_id("@-1"));
+    }
+
+    #[test]
+    fn window_id_rejects_unicode() {
+        assert!(!crate::terminal_tmux::validate_window_id("@①"));
+        assert!(!crate::terminal_tmux::validate_window_id("@１"));
+    }
+
+    #[test]
+    fn resize_accepts_min_valid() {
+        let msg = ClientMessage::Resize { cols: 1, rows: 1 };
+        assert!(msg.validate().is_ok());
+    }
+
+    #[test]
+    fn resize_accepts_max_valid() {
+        let msg = ClientMessage::Resize {
+            cols: MAX_COLS,
+            rows: MAX_ROWS,
+        };
+        assert!(msg.validate().is_ok());
+    }
+
+    #[test]
+    fn input_one_byte_over_limit_rejected() {
+        let data = "x".repeat(64 * 1024 + 1);
+        let msg = ClientMessage::Input { data };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn max_ws_msg_size_is_64kb() {
+        assert_eq!(crate::routes::terminal::MAX_WS_MSG_SIZE, 64 * 1024);
+    }
+
+    #[test]
+    fn binary_output_serializes_data_and_flag() {
+        let msg = ServerMessage::Output {
+            data: "SGVsbG8=".to_string(),
+            binary: Some(true),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""binary":true"#));
+        assert!(json.contains(r#""data":"SGVsbG8=""#));
     }
 }
 
@@ -1163,5 +1737,34 @@ mod auth_policy_matrix_tests {
         c.is_local = true;
         let d = decide_auth(TokenStatus::NoToken, false, c);
         assert_eq!(d, AuthDecision::LocalBypass);
+    }
+
+    // ── valid token variants always authenticate ──────────────────────────
+    #[test]
+    fn valid_token_session_authenticates() {
+        let d = decide_auth(TokenStatus::Valid(AuthMethod::Session), true, ctx_remote());
+        assert_eq!(d, AuthDecision::Authenticated(AuthMethod::Session));
+    }
+
+    #[test]
+    fn valid_token_user_key_authenticates() {
+        let d = decide_auth(TokenStatus::Valid(AuthMethod::UserKey), true, ctx_remote());
+        assert_eq!(d, AuthDecision::Authenticated(AuthMethod::UserKey));
+    }
+
+    // ── auth_configured + remote + invalid token → 401 ────────────────────
+    #[test]
+    fn auth_configured_remote_invalid_token_still_401() {
+        let mut c = ctx_remote();
+        c.allow_remote = true;
+        c.allow_unauthenticated_remote = true;
+        let d = decide_auth(TokenStatus::InvalidToken, true, c);
+        assert!(matches!(
+            d,
+            AuthDecision::Reject {
+                status: StatusCode::UNAUTHORIZED,
+                reason: "invalid_token"
+            }
+        ));
     }
 }

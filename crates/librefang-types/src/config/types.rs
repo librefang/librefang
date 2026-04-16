@@ -5874,10 +5874,30 @@ pub struct TerminalConfig {
     /// Default: false.
     #[serde(default)]
     pub allow_unauthenticated_remote: bool,
+
+    /// Enable tmux-backed multi-window terminal. Only effective when `tmux` binary is available.
+    #[serde(default = "default_tmux_enabled")]
+    pub tmux_enabled: bool,
+
+    /// Maximum number of tmux windows that may exist simultaneously. Guards against DoS.
+    #[serde(default = "default_max_windows")]
+    pub max_windows: u32,
+
+    /// Optional explicit path to the `tmux` binary. If None, resolve via PATH.
+    #[serde(default)]
+    pub tmux_binary_path: Option<String>,
 }
 
 fn default_terminal_enabled() -> bool {
     true
+}
+
+fn default_tmux_enabled() -> bool {
+    true
+}
+
+fn default_max_windows() -> u32 {
+    16
 }
 
 impl Default for TerminalConfig {
@@ -5888,6 +5908,9 @@ impl Default for TerminalConfig {
             allow_remote: false,
             require_proxy_headers: false,
             allow_unauthenticated_remote: false,
+            tmux_enabled: true,
+            max_windows: 16,
+            tmux_binary_path: None,
         }
     }
 }
@@ -6139,5 +6162,39 @@ max_tokens_per_hour = 500000
             !s.contains("providers"),
             "empty providers map should be skipped: {s}"
         );
+    }
+
+    // ---- TerminalConfig tmux fields tests ----
+
+    #[test]
+    fn test_terminal_config_tmux_defaults() {
+        let tc = TerminalConfig::default();
+        assert!(tc.tmux_enabled, "tmux_enabled should default to true");
+        assert_eq!(tc.max_windows, 16, "max_windows should default to 16");
+        assert!(
+            tc.tmux_binary_path.is_none(),
+            "tmux_binary_path should default to None"
+        );
+    }
+
+    #[test]
+    fn test_terminal_config_empty_toml_uses_defaults() {
+        let tc: TerminalConfig = toml::from_str("").unwrap();
+        assert!(tc.tmux_enabled);
+        assert_eq!(tc.max_windows, 16);
+        assert!(tc.tmux_binary_path.is_none());
+    }
+
+    #[test]
+    fn test_terminal_config_toml_roundtrip() {
+        let toml_str = r#"
+            tmux_enabled = false
+            max_windows = 4
+            tmux_binary_path = "/usr/bin/tmux"
+        "#;
+        let tc: TerminalConfig = toml::from_str(toml_str).unwrap();
+        assert!(!tc.tmux_enabled);
+        assert_eq!(tc.max_windows, 4);
+        assert_eq!(tc.tmux_binary_path.as_deref(), Some("/usr/bin/tmux"));
     }
 }

@@ -5,16 +5,18 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { Terminal as TerminalIcon } from "lucide-react";
 import { useUIStore } from "../lib/store";
-import { buildAuthenticatedWebSocketUrl } from "../api";
+import { buildAuthenticatedWebSocketUrl, authHeader } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
+import { TerminalTabs } from "../components/TerminalTabs";
 
 interface ServerMessage {
-  type: "started" | "output" | "exit" | "error";
+  type: "started" | "output" | "exit" | "error" | "active_window";
   shell?: string;
   pid?: number;
   data?: string;
@@ -23,14 +25,32 @@ interface ServerMessage {
   signal?: string;
   content?: string;
   isRoot?: boolean;
+  window_id?: string;
+}
+
+interface TerminalHealth {
+  ok: boolean;
+  tmux: boolean;
+  max_windows: number;
+  os: string;
 }
 
 const RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
+function getTmuxInstallCommand(os: string): string {
+  switch (os) {
+    case "macos":
+      return "brew install tmux";
+    default:
+      return "sudo apt-get update && sudo apt-get install -y tmux || sudo dnf install -y tmux || sudo yum install -y tmux || sudo pacman -S --noconfirm tmux || sudo apk add tmux";
+  }
+}
+
 export function TerminalPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -44,6 +64,11 @@ export function TerminalPage() {
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isRoot, setIsRoot] = useState(false);
+  const [tmuxAvailable, setTmuxAvailable] = useState(false);
+  const [maxWindows, setMaxWindows] = useState(16);
+  const [activeWindowId, setActiveWindowId] = useState<string | null>(null);
+  const [shellName, setShellName] = useState<string>("sh");
+  const [serverOs, setServerOs] = useState<string>("linux");
   const terminalEnabled = useUIStore((s) => s.terminalEnabled);
 
   useEffect(() => {
@@ -51,6 +76,21 @@ export function TerminalPage() {
       void navigate({ to: "/overview" });
     }
   }, [terminalEnabled, navigate]);
+
+  // Fetch terminal health for tmux feature flag.
+  useEffect(() => {
+    if (terminalEnabled !== true) return;
+    fetch("/api/terminal/health", { headers: authHeader() })
+      .then((r) => r.json())
+      .then((data: TerminalHealth) => {
+        setTmuxAvailable(data.tmux ?? false);
+        setMaxWindows(data.max_windows ?? 16);
+        if (data.os) setServerOs(data.os);
+      })
+      .catch(() => {
+        setTmuxAvailable(false);
+      });
+  }, [terminalEnabled]);
 
   const sendCloseMessage = useCallback((ws: WebSocket | null) => {
     if (ws?.readyState === WebSocket.OPEN) {
@@ -100,6 +140,7 @@ export function TerminalPage() {
       switch (msg.type) {
         case "started":
           setIsRoot(msg.isRoot ?? false);
+          setShellName(msg.shell ? msg.shell.split("/").pop() || "sh" : "sh");
           terminalRef.current?.write(
             t("terminal.started", { shell: msg.shell, pid: msg.pid }) + "\r\n"
           );
@@ -127,6 +168,12 @@ export function TerminalPage() {
           setError(typeof msg.content === "string" && msg.content
             ? msg.content
             : t("terminal.error_unknown"));
+          break;
+        case "active_window":
+          if (msg.window_id) {
+            setActiveWindowId(msg.window_id);
+            queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
+          }
           break;
       }
     };
@@ -168,7 +215,7 @@ export function TerminalPage() {
         }
       }, delay);
     };
-  }, [t, terminalEnabled]);
+  }, [t, terminalEnabled, queryClient]);
 
   connectRef.current = connect;
 
@@ -187,6 +234,17 @@ export function TerminalPage() {
     setIsConnected(false);
     setIsConnecting(false);
   }, [sendCloseMessage]);
+
+  const handleInstallTmux = useCallback(() => {
+    const cmd = getTmuxInstallCommand(serverOs);
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "input", data: cmd }));
+    }
+  }, [serverOs]);
+
+  const handleSwitchWindow = useCallback((id: string) => {
+    setActiveWindowId(id);
+  }, []);
 
   useEffect(() => {
     if (terminalEnabled !== true) {
@@ -281,6 +339,11 @@ export function TerminalPage() {
         icon={<TerminalIcon className="h-4 w-4" />}
         actions={
           <>
+            {!tmuxAvailable && isConnected && (
+              <Button onClick={handleInstallTmux} variant="secondary">
+                {t("terminal.install_tmux")}
+              </Button>
+            )}
             <Button onClick={connect} disabled={isConnected || isConnecting}>
               {isConnected
                 ? t("terminal.subtitle_connected")
@@ -301,10 +364,20 @@ export function TerminalPage() {
               {t("terminal.root_warning")}
             </div>
           )}
-          <div className="h-full min-h-[400px] flex flex-col">
+          <TerminalTabs
+            ws={wsRef.current}
+            tmuxAvailable={tmuxAvailable}
+            maxWindows={maxWindows}
+            activeWindowId={activeWindowId}
+            onSwitchWindow={handleSwitchWindow}
+            terminalRef={terminalRef}
+            fitAddonRef={fitAddonRef}
+            shellName={shellName}
+          />
+          <div className="h-full flex flex-col overflow-hidden">
             <div
               ref={containerRef}
-              className="flex-1 bg-[#1a1a2e] rounded-b-lg p-2 overflow-hidden h-full lg:h-[70%]"
+              className="flex-1 bg-[#1a1a2e] rounded-b-lg p-2 overflow-hidden"
             />
           </div>
         </Card>

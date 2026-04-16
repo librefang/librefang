@@ -1492,6 +1492,12 @@
     "ws_streaming": "流式",
     "auth_missing": "供应商 \"{{provider}}\" 的 API Key 未配置，请在 设置 > 供应商 中设置后再对话。",
     "provider_offline": "本地供应商 \"{{provider}}\" 未运行，请先启动服务。",
+    "approval_required": "需要审批",
+    "approval_tool": "工具",
+    "approval_agent": "Agent {{agent}} 请求执行",
+    "approval_risk_high": "高风险",
+    "approval_risk_medium": "中风险",
+    "approval_risk_low": "低风险",
     "switch_model": "切换模型",
     "search_models": "搜索模型...",
     "loading_models": "加载中…",
@@ -1925,7 +1931,17 @@
     "websocket_error": "WebSocket 连接错误",
     "connection_closed_non_recoverable": "由于不可恢复的错误，连接已关闭",
     "max_reconnect_exceeded": "已达到最大重连次数，请手动连接。",
-    "root_warning": "警告：守护进程以 root 身份运行。终端命令将以完整权限执行。"
+    "root_warning": "警告：守护进程以 root 身份运行。终端命令将以完整权限执行。",
+    "tabs": {
+      "new": "新标签页",
+      "unnamed": "未命名",
+      "limit_reached": "已达窗口上限",
+      "switch_failed": "切换窗口失败",
+      "create_failed": "创建窗口失败",
+      "delete_failed": "关闭窗口失败",
+      "tmux_unavailable": "此主机不支持 tmux"
+    },
+    "install_tmux": "安装 tmux"
   },
   "mcp": {
     "title": "MCP 服务器",
