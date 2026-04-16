@@ -174,10 +174,23 @@ impl LlmDriver for GeminiCliDriver {
             let detail = if !stderr.is_empty() { &stderr } else { &stdout };
             let code = output.status.code().unwrap_or(1);
 
-            let message = if detail.contains("not authenticated")
-                || detail.contains("auth")
-                || detail.contains("login")
-                || detail.contains("credentials")
+            // Check quota/rate-limit BEFORE auth — Gemini CLI's error output
+            // for quota exhaustion contains "credentials" (from "Loaded cached
+            // credentials") which would false-positive the auth check.
+            let lower = detail.to_lowercase();
+            if lower.contains("exhausted your capacity")
+                || lower.contains("quota")
+                || lower.contains("rate limit")
+                || lower.contains("too many requests")
+                || lower.contains("429")
+            {
+                return Err(LlmError::RateLimited {
+                    retry_after_ms: 60_000,
+                    message: Some(format!("Gemini quota exhausted: {detail}")),
+                });
+            }
+
+            let message = if lower.contains("not authenticated") || lower.contains("login required")
             {
                 format!("Gemini CLI is not authenticated. Run: gemini auth\nDetail: {detail}")
             } else {
