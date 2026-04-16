@@ -176,6 +176,7 @@ pub async fn terminal_health(
         "ok": true,
         "tmux": tmux_available,
         "max_windows": max_windows,
+        "os": std::env::consts::OS,
     }))
     .into_response()
 }

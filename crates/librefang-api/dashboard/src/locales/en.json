@@ -1926,7 +1926,8 @@
       "create_failed": "Failed to create window",
       "delete_failed": "Failed to close window",
       "tmux_unavailable": "tmux is not available on this host"
-    }
+    },
+    "install_tmux": "Install tmux"
   },
   "mcp": {
     "title": "MCP Servers",

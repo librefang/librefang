@@ -1933,7 +1933,8 @@
       "create_failed": "创建窗口失败",
       "delete_failed": "关闭窗口失败",
       "tmux_unavailable": "此主机不支持 tmux"
-    }
+    },
+    "install_tmux": "安装 tmux"
   },
   "mcp": {
     "title": "MCP 服务器",

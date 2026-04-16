@@ -32,10 +32,20 @@ interface TerminalHealth {
   ok: boolean;
   tmux: boolean;
   max_windows: number;
+  os: string;
 }
 
 const RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECT_ATTEMPTS = 10;
+
+function getTmuxInstallCommand(os: string): string {
+  switch (os) {
+    case "macos":
+      return "brew install tmux";
+    default:
+      return "sudo apt-get update && sudo apt-get install -y tmux || sudo dnf install -y tmux || sudo yum install -y tmux || sudo pacman -S --noconfirm tmux || sudo apk add tmux";
+  }
+}
 
 export function TerminalPage() {
   const { t } = useTranslation();
@@ -58,6 +68,7 @@ export function TerminalPage() {
   const [maxWindows, setMaxWindows] = useState(16);
   const [activeWindowId, setActiveWindowId] = useState<string | null>(null);
   const [shellName, setShellName] = useState<string>("sh");
+  const [serverOs, setServerOs] = useState<string>("linux");
   const terminalEnabled = useUIStore((s) => s.terminalEnabled);
 
   useEffect(() => {
@@ -74,6 +85,7 @@ export function TerminalPage() {
       .then((data: TerminalHealth) => {
         setTmuxAvailable(data.tmux ?? false);
         setMaxWindows(data.max_windows ?? 16);
+        if (data.os) setServerOs(data.os);
       })
       .catch(() => {
         setTmuxAvailable(false);
@@ -223,6 +235,13 @@ export function TerminalPage() {
     setIsConnecting(false);
   }, [sendCloseMessage]);
 
+  const handleInstallTmux = useCallback(() => {
+    const cmd = getTmuxInstallCommand(serverOs);
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "input", data: cmd }));
+    }
+  }, [serverOs]);
+
   useEffect(() => {
     if (terminalEnabled !== true) {
       return;
@@ -316,6 +335,11 @@ export function TerminalPage() {
         icon={<TerminalIcon className="h-4 w-4" />}
         actions={
           <>
+            {!tmuxAvailable && isConnected && (
+              <Button onClick={handleInstallTmux} variant="secondary">
+                {t("terminal.install_tmux")}
+              </Button>
+            )}
             <Button onClick={connect} disabled={isConnected || isConnecting}>
               {isConnected
                 ? t("terminal.subtitle_connected")
