@@ -52,6 +52,7 @@ impl KernelConfig {
             "thinking",
             "budget",
             "provider_urls",
+            "provider_proxy_urls",
             "provider_regions",
             "provider_api_keys",
             "vertex_ai",

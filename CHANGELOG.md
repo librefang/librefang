@@ -9,30 +9,31 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Added
 
-- Add terminal websocket access controls and documentation (Terminal Phase 2) (#2332) (@leszek3737)
-- Show hand agents in chat picker, grouped by hand (#2458) (@neo-wanderer)
-- Group models by provider when showing all providers (#2509) (@houko)
-- Conditionally show thinking toggles based on model capability (#2511) (@houko)
-- Add Registry tab to MCP Servers page (#2515) (@houko)
-- Add TOTP second-factor verification to dashboard login (#2517) (@houko)
+- Add LIBREFANG_DASHBOARD_EMBEDDED_ONLY env var to pin dashboard to embedded assets (#2520) (@neo-wanderer)
+- Add TOTP scope selector in Settings (#2526) (@houko)
+- Add section tab switcher to config category pages (#2532) (@houko)
+- Add voice input button to ChatPage (#2533) (@houko)
+- Swap tab bar and page header positions in config pages (#2534) (@houko)
+- Polish config page layout and UX (#2535) (@houko)
+- Step-by-step provider creation wizard (#2544) (@houko)
 
 ### Fixed
 
-- Atomic tool-use turn commit — closes #2381 (follow-up to #2065) (#2387) (@DaBlitzStein)
-- Spawn pnpm via sh to resolve mise shim PATH (#2504) (@houko)
-- Retry mergeability check on synchronize to clear stale conflict label (#2505) (@houko)
-- Always strip ready-for-review when conflicts exist (#2506) (@houko)
-- Scaffold hand workspaces on first boot instead of activate+pause (#2507) (@houko)
-- Probe ollama before fallback, default to gemma4 (#2508) (@houko)
-- Collapsible provider groups in models page (#2510) (@houko)
-- Read SKILL.md for FangHub registry listing (#2512) (@houko)
-- Clear ci-failed label on new push and fallback PR lookup (#2513) (@houko)
-- Complete i18n for config page + switch to browser history routing (#2514) (@houko)
-- I18n remaining hardcoded strings across all pages (#2516) (@houko)
-
-### Changed
-
-- Centralize JID normalization in lib/identity.js (#2503) (@f-liva)
+- Scope telegram sessions per chat_id to prevent context leakage (#2349) (#2522) (@DaBlitzStein)
+- Honour silent flag in KernelBridgeAdapter sender methods (#2521) (#2523) (@DaBlitzStein)
+- Use is_some_and instead of map_or in webchat asset_path check (#2525) (@houko)
+- Move TOTP scope to ConfigPage via schema (#2527) (@houko)
+- Restore ready-for-review when blockers are cleared (#2528) (@houko)
+- Fall back to npm when pnpm is unavailable in dev command (#2529) (@houko)
+- Check review state before clearing needs-changes on push (#2530) (@houko)
+- Remove needless borrow in serde_json::to_value call (#2531) (@houko)
+- Show disabled mic button when STT not configured (#2536) (@houko)
+- Fix stale state bugs in provider config modal (#2537) (@houko)
+- Move field description to label column (#2538) (@houko)
+- Show field description below input/toggle (#2539) (@houko)
+- Save API key on provider creation and show remove button for all providers (#2540) (@houko)
+- Improve provider auto-detection accuracy and UX (#2542) (@houko)
+- Remove orphaned doc comment causing clippy failure on main (#2543) (@houko)
 
 
 ## [2026.4.14] - 2026-04-14

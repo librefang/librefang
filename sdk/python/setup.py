@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="librefang",
-    version="2026.4.15b21",
+    version="2026.4.15b22",
     description="Official Python client for the LibreFang Agent OS REST API",
     py_modules=["librefang_sdk", "librefang_client"],
     python_requires=">=3.8",

@@ -93,10 +93,11 @@ impl DriverCache {
         let key_hash = hasher.finish();
 
         format!(
-            "{}|{}|{}",
+            "{}|{}|{}|{}",
             config.provider,
             key_hash,
-            config.base_url.as_deref().unwrap_or("")
+            config.base_url.as_deref().unwrap_or(""),
+            config.proxy_url.as_deref().unwrap_or("")
         )
     }
 }
@@ -682,10 +683,18 @@ fn create_driver_from_entry(
         )));
     }
 
+    let proxy_url = config.proxy_url.as_deref();
+
     match entry.api_format {
-        ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::new(api_key, base_url))),
-        ApiFormat::Anthropic => Ok(Arc::new(anthropic::AnthropicDriver::new(api_key, base_url))),
-        ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::new(api_key, base_url))),
+        ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::with_proxy(
+            api_key, base_url, proxy_url,
+        ))),
+        ApiFormat::Anthropic => Ok(Arc::new(anthropic::AnthropicDriver::with_proxy(
+            api_key, base_url, proxy_url,
+        ))),
+        ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::with_proxy(
+            api_key, base_url, proxy_url,
+        ))),
         ApiFormat::ClaudeCode => {
             let mut d = claude_code::ClaudeCodeDriver::with_timeout(
                 config.base_url.clone(),
@@ -713,7 +722,9 @@ fn create_driver_from_entry(
             config.base_url.clone(),
             config.skip_permissions,
         ))),
-        ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::new(api_key, base_url))),
+        ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::with_proxy(
+            api_key, base_url, proxy_url,
+        ))),
         ApiFormat::Copilot => Ok(Arc::new(copilot::CopilotDriver::new(api_key, base_url))),
         ApiFormat::VertexAI => Ok(Arc::new(vertex_ai::VertexAiDriver::new(config)?)),
         ApiFormat::AzureOpenAI => {
@@ -739,11 +750,12 @@ fn create_driver_from_entry(
                 .clone()
                 .or_else(|| std::env::var("AZURE_OPENAI_API_VERSION").ok())
                 .unwrap_or_else(|| "2024-02-01".to_string());
-            Ok(Arc::new(openai::OpenAIDriver::new_azure(
+            Ok(Arc::new(openai::OpenAIDriver::new_azure_with_proxy(
                 api_key,
                 endpoint,
                 deployment,
                 api_version,
+                proxy_url,
             )))
         }
     }
@@ -794,9 +806,10 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             let env_var = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
             std::env::var(&env_var).unwrap_or_default()
         });
-        return Ok(Arc::new(openai::OpenAIDriver::new(
+        return Ok(Arc::new(openai::OpenAIDriver::with_proxy(
             api_key,
             base_url.clone(),
+            config.proxy_url.as_deref(),
         )));
     }
 
@@ -928,6 +941,32 @@ pub fn is_cli_provider(name: &str) -> bool {
     )
 }
 
+/// Resolve the API key for a provider by checking all known sources:
+/// primary env var → alt env var → Codex credential file (for openai).
+///
+/// Returns `None` if no key is found through any source.
+pub fn resolve_provider_api_key(provider: &str) -> Option<String> {
+    let entry = find_provider(provider)?;
+    let non_empty = |v: String| if v.trim().is_empty() { None } else { Some(v) };
+
+    std::env::var(entry.api_key_env)
+        .ok()
+        .and_then(non_empty)
+        .or_else(|| {
+            entry
+                .alt_api_key_env
+                .and_then(|v| std::env::var(v).ok())
+                .and_then(non_empty)
+        })
+        .or_else(|| {
+            if entry.name == "openai" {
+                read_codex_credential()
+            } else {
+                None
+            }
+        })
+}
+
 /// Read an OpenAI API key from the Codex CLI credential file.
 ///
 /// Checks `$CODEX_HOME/auth.json` or `~/.codex/auth.json`.
@@ -1015,6 +1054,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1031,6 +1071,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1153,6 +1194,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1176,6 +1218,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1199,6 +1242,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let result = create_driver(&config);
         assert!(result.is_err());
@@ -1231,6 +1275,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1257,6 +1302,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
 
         let driver = create_driver(&config);
@@ -1295,6 +1341,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1314,6 +1361,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         // Clear any env var that might interfere
         std::env::remove_var("AZURE_OPENAI_ENDPOINT");
@@ -1342,6 +1390,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let d1 = cache.get_or_create(&config).unwrap();
         let d2 = cache.get_or_create(&config).unwrap();
@@ -1361,6 +1410,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let config_b = DriverConfig {
             provider: "ollama".to_string(),
@@ -1371,6 +1421,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         let d_a = cache.get_or_create(&config_a).unwrap();
         let d_b = cache.get_or_create(&config_b).unwrap();
@@ -1393,6 +1444,7 @@ mod tests {
             skip_permissions: true,
             message_timeout_secs: 300,
             mcp_bridge: None,
+            proxy_url: None,
         };
         cache.get_or_create(&config).unwrap();
         assert_eq!(cache.len(), 1);

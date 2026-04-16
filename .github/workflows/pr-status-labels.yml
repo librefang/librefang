@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
   pull-requests: write
 
 jobs:
@@ -96,7 +97,20 @@ jobs:
                 await rmLabel('ready-for-review');
               } else if (mergeable !== false && hasLabel) {
                 await rmLabel(LABEL);
-                core.info(`#${pr.number}: -${LABEL}`);
+                // Restore ready-for-review if no other blockers remain
+                const hasCiFailed = labels.includes('ci-failed');
+                const needsChanges = labels.includes('needs-changes');
+                if (!hasCiFailed && !needsChanges && !labels.includes('ready-for-review')) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    labels: ['ready-for-review'],
+                  });
+                  core.info(`#${pr.number}: -${LABEL} +ready-for-review`);
+                } else {
+                  core.info(`#${pr.number}: -${LABEL}`);
+                }
               }
             }
 
@@ -203,9 +217,25 @@ jobs:
                 });
                 await rmLabel('ready-for-review');
                 core.info(`#${prNumber}: +${LABEL} -ready-for-review`);
-              } else if (!hasFailure && hasLabel) {
-                await rmLabel(LABEL);
-                core.info(`#${prNumber}: -${LABEL}`);
+              } else if (!hasFailure) {
+                // CI passed — remove ci-failed if present, and ensure
+                // ready-for-review is set when no blockers remain.
+                if (hasLabel) {
+                  await rmLabel(LABEL);
+                }
+                const hasConflicts = labels.includes('has-conflicts');
+                const needsChanges = labels.includes('needs-changes');
+                if (!hasConflicts && !needsChanges && !labels.includes('ready-for-review')) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: prNumber,
+                    labels: ['ready-for-review'],
+                  });
+                  core.info(`#${prNumber}: ${hasLabel ? `-${LABEL} ` : ''}+ready-for-review (CI passed, no blockers)`);
+                } else if (hasLabel) {
+                  core.info(`#${prNumber}: -${LABEL}`);
+                }
               }
             }
 
@@ -373,14 +403,39 @@ jobs:
                 }
               }
             } else if (context.eventName === 'pull_request_target' && context.payload.action === 'synchronize') {
-              // New push after changes_requested → remove needs-changes, add ready-for-review (if no blockers)
+              // New push — check whether any changes_requested reviews are still
+              // pending (not superseded by a later approved/dismissed review from
+              // the same reviewer). Only clear needs-changes when all such reviews
+              // have been resolved.
               if (labels.includes(NEEDS)) {
-                await removeLabel(NEEDS);
-                if (!hasBlocker) {
-                  await addLabel(READY);
-                  core.info(`#${prNumber}: new push → -${NEEDS} +${READY}`);
+                const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  per_page: 100,
+                });
+
+                // Build per-reviewer latest state (last review wins)
+                const latestByReviewer = new Map();
+                for (const r of reviews) {
+                  if (!r.user || r.state === 'COMMENTED' || r.state === 'PENDING') continue;
+                  latestByReviewer.set(r.user.login, r.state);
+                }
+
+                const hasPendingChangesRequested = [...latestByReviewer.values()].some(
+                  s => s === 'CHANGES_REQUESTED'
+                );
+
+                if (hasPendingChangesRequested) {
+                  core.info(`#${prNumber}: new push but changes_requested still pending, keeping ${NEEDS}`);
                 } else {
-                  core.info(`#${prNumber}: new push → -${NEEDS}, skipping ${READY} (blockers)`);
+                  await removeLabel(NEEDS);
+                  if (!hasBlocker) {
+                    await addLabel(READY);
+                    core.info(`#${prNumber}: new push, all reviews resolved → -${NEEDS} +${READY}`);
+                  } else {
+                    core.info(`#${prNumber}: new push → -${NEEDS}, skipping ${READY} (blockers)`);
+                  }
                 }
               }
             }

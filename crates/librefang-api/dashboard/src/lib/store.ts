@@ -28,8 +28,10 @@ interface UIState {
   skillOutputs: SkillOutput[];
   hiddenModelKeys: string[];
   terminalEnabled: boolean | null;
+  modelsAvailableOnly: boolean;
   deepThinking: boolean;
   showThinkingProcess: boolean;
+  setModelsAvailableOnly: (value: boolean) => void;
   setDeepThinking: (value: boolean) => void;
   setShowThinkingProcess: (value: boolean) => void;
   toggleTheme: () => void;
@@ -62,8 +64,10 @@ export const useUIStore = create<UIState>()(
       skillOutputs: [],
       hiddenModelKeys: [],
       terminalEnabled: null,
+      modelsAvailableOnly: true,
       deepThinking: false,
       showThinkingProcess: true,
+      setModelsAvailableOnly: (value) => set({ modelsAvailableOnly: value }),
       setDeepThinking: (value) => set({ deepThinking: value }),
       setShowThinkingProcess: (value) => set({ showThinkingProcess: value }),
       toggleTheme: () =>
@@ -119,6 +123,7 @@ export const useUIStore = create<UIState>()(
         language: state.language,
         navLayout: state.navLayout,
         hiddenModelKeys: state.hiddenModelKeys,
+        modelsAvailableOnly: state.modelsAvailableOnly,
         deepThinking: state.deepThinking,
         showThinkingProcess: state.showThinkingProcess,
       }),

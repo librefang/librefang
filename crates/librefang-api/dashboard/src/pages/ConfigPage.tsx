@@ -2,13 +2,15 @@ import { useTranslation } from "react-i18next";
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
-import { PageHeader } from "../components/ui/PageHeader";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
-import { RefreshCw, Save, Zap, Settings, Search, RotateCcw, AlertTriangle } from "lucide-react";
+import {
+  RefreshCw, Save, Zap, Settings, Search, RotateCcw,
+  AlertTriangle, X, Copy, Check,
+} from "lucide-react";
 import {
   getConfigSchema, getFullConfig, setConfigValue, reloadConfig,
-  type ConfigSectionSchema, type ConfigFieldSchema,
+  type ConfigFieldSchema,
 } from "../api";
 
 /* ------------------------------------------------------------------ */
@@ -41,15 +43,84 @@ function fieldLabelFallback(key: string): string {
 
 function resolveFieldType(
   schema: string | ConfigFieldSchema
-): { type: string; options?: (string | { id: string; name: string; provider: string })[] } {
+): { type: string; options?: ConfigFieldSchema["options"]; min?: number; max?: number; step?: number } {
   if (typeof schema === "string") return { type: schema };
-  return { type: schema.type || "string", options: schema.options };
+  return { type: schema.type || "string", options: schema.options, min: schema.min, max: schema.max, step: schema.step };
 }
 
 function getNestedValue(obj: Record<string, unknown>, section: string, field: string, rootLevel?: boolean): unknown {
   if (rootLevel) return obj[field];
   const sec = obj[section] as Record<string, unknown> | undefined;
   return sec?.[field];
+}
+
+/* ------------------------------------------------------------------ */
+/*  Highlight matching text in search results                          */
+/* ------------------------------------------------------------------ */
+
+function Highlight({ text, query }: { text: string; query: string }) {
+  if (!query) return <>{text}</>;
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="bg-brand/20 text-brand rounded-sm not-italic">{text.slice(idx, idx + query.length)}</mark>
+      {text.slice(idx + query.length)}
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Field type badge                                                   */
+/* ------------------------------------------------------------------ */
+
+const TYPE_COLORS: Record<string, string> = {
+  boolean: "text-blue-500 bg-blue-500/10",
+  number:  "text-purple-500 bg-purple-500/10",
+  select:  "text-amber-500 bg-amber-500/10",
+  array:   "text-teal-500 bg-teal-500/10",
+  "string[]": "text-teal-500 bg-teal-500/10",
+  object:  "text-orange-500 bg-orange-500/10",
+  string:  "text-text-dim bg-border-subtle/50",
+};
+
+function FieldTypeBadge({ type }: { type: string }) {
+  const cls = TYPE_COLORS[type] ?? TYPE_COLORS.string;
+  return (
+    <span className={`inline-block text-[9px] font-mono px-1 rounded leading-4 ${cls}`}>
+      {type}
+    </span>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Copy path button                                                   */
+/* ------------------------------------------------------------------ */
+
+function CopyPathButton({ path }: { path: string }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(path).then(() => {
+      setCopied(true);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setCopied(false), 1500);
+    });
+  }, [path]);
+
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+
+  return (
+    <button
+      onClick={handleCopy}
+      className="p-1 rounded-md text-text-dim/50 hover:text-text-dim hover:bg-surface-hover transition-colors"
+      title={`Copy path: ${path}`}
+    >
+      {copied ? <Check className="w-2.5 h-2.5 text-success" /> : <Copy className="w-2.5 h-2.5" />}
+    </button>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -104,36 +175,58 @@ function JsonEditor({ value, onChange }: { value: unknown; onChange: (v: unknown
 const SENSITIVE_PATTERNS = /api_key|secret|password|token_env|client_secret|credentials/i;
 
 function ConfigFieldInput({
-  fieldKey, fieldType, options, value, onChange,
+  fieldKey, fieldType, options, min, max, step, value, onChange,
 }: {
   fieldKey: string;
   fieldType: string;
-  options?: (string | { id: string; name: string; provider: string })[];
+  options?: ConfigFieldSchema["options"];
+  min?: number;
+  max?: number;
+  step?: number;
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
+  const { t } = useTranslation();
   const inputClass =
     "w-full px-3 py-1.5 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand transition-colors";
 
   if (fieldType === "boolean") {
+    // Wrap in a fixed-height container so it aligns with other input rows
     return (
-      <button
-        onClick={() => onChange(!value)}
-        className={`relative w-10 h-5 rounded-full transition-colors ${value ? "bg-brand" : "bg-border-subtle"}`}
-      >
-        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value ? "left-5" : "left-0.5"}`} />
-      </button>
+      <div className="flex items-center h-[30px]">
+        <button
+          onClick={() => onChange(!value)}
+          className={`relative w-10 h-5 rounded-full transition-colors ${value ? "bg-brand" : "bg-border-subtle"}`}
+        >
+          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value ? "left-5" : "left-0.5"}`} />
+        </button>
+      </div>
     );
   }
 
-  if (fieldType === "select" && options) {
-    const strOptions = options.map((o) => (typeof o === "string" ? o : o.id));
+  if ((fieldType === "select" || fieldType === "number_select") && options) {
+    const normalizedOptions = options.map((o) => {
+      if (typeof o === "string") {
+        return { value: o, label: t(`config.${fieldKey}_${o}`, o) };
+      }
+      if ("value" in o && "label" in o) return { value: String((o as { value: unknown }).value), label: String((o as { label: unknown }).label) };
+      if ("id" in o) return { value: (o as { id: string; name?: string }).id, label: (o as { name?: string; id: string }).name ?? (o as { id: string }).id };
+      return { value: String(o), label: String(o) };
+    });
     const rawValue = String(value ?? "");
-    const matched = strOptions.find((o) => o.toLowerCase() === rawValue.toLowerCase()) ?? rawValue;
+    const matched = normalizedOptions.find((o) => o.value.toLowerCase() === rawValue.toLowerCase())?.value ?? rawValue;
+    const handleChange = (v: string) => {
+      if (fieldType === "number_select") {
+        const n = Number(v);
+        onChange(Number.isNaN(n) ? v : n);
+      } else {
+        onChange(v);
+      }
+    };
     return (
-      <select value={matched} onChange={(e) => onChange(e.target.value)} className={inputClass}>
-        {matched && !strOptions.includes(matched) && <option value={matched}>{matched}</option>}
-        {strOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+      <select value={matched} onChange={(e) => handleChange(e.target.value)} className={inputClass}>
+        {matched && !normalizedOptions.some((o) => o.value === matched) && <option value={matched}>{matched}</option>}
+        {normalizedOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
     );
   }
@@ -147,6 +240,7 @@ function ConfigFieldInput({
           const n = Number(v);
           if (!Number.isNaN(n)) onChange(n);
         }}
+        min={min} max={max} step={step}
         className={inputClass} />
     );
   }
@@ -194,16 +288,33 @@ export function ConfigPage({ category }: { category: string }) {
     staleTime: 30_000,
   });
 
-  // ── Shared pending state (lifted from SectionCard) ─────────────────
   const [pendingChanges, setPendingChanges] = useState<Record<string, unknown>>({});
   const [saveStatus, setSaveStatus] = useState<Record<string, { ok: boolean; msg: string }>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [reloadStatus, setReloadStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [activeSection, setActiveSection] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   const hasPendingChanges = Object.keys(pendingChanges).length > 0;
 
-  // ── Unsaved changes warning ────────────────────────────────────────
+  // ── Global keyboard shortcuts: / to focus search, Esc to clear ────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const inInput = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT";
+      if (e.key === "/" && !inInput) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+      if (e.key === "Escape" && inInput && target === searchRef.current) {
+        setSearchQuery("");
+        searchRef.current?.blur();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
   useEffect(() => {
     if (!hasPendingChanges) return;
     const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); };
@@ -211,7 +322,6 @@ export function ConfigPage({ category }: { category: string }) {
     return () => window.removeEventListener("beforeunload", handler);
   }, [hasPendingChanges]);
 
-  // Block route navigation with pending changes
   useEffect(() => {
     if (!hasPendingChanges) return;
     const unsub = router.subscribe("onBeforeNavigate", () => {
@@ -233,15 +343,15 @@ export function ConfigPage({ category }: { category: string }) {
     []
   );
 
-  // ── Single field save ──────────────────────────────────────────────
   const saveMutation = useMutation({
     mutationFn: ({ path, value }: { path: string; value: unknown }) => setConfigValue(path, value),
     onSuccess: (data, variables) => {
-      const reloadFailed = data.status !== "ok" && data.status !== "saved";
+      const reloadFailed = data.status === "saved_reload_failed";
+      const restartRequired = data.status === "applied_partial" || data.restart_required;
       if (reloadFailed) {
         setSaveStatus((s) => ({ ...s, [variables.path]: { ok: false, msg: t("config.saved_reload_failed", "Saved but reload failed") } }));
       } else {
-        const msg = data.restart_required ? t("config.saved_restart", "Saved (restart required)") : t("common.saved", "Saved");
+        const msg = restartRequired ? t("config.saved_restart", "Saved (restart required)") : t("common.saved", "Saved");
         setSaveStatus((s) => ({ ...s, [variables.path]: { ok: true, msg } }));
       }
       setPendingChanges((p) => {
@@ -259,7 +369,6 @@ export function ConfigPage({ category }: { category: string }) {
     },
   });
 
-  // ── Batch save all pending ─────────────────────────────────────────
   const [batchSaving, setBatchSaving] = useState(false);
   const handleBatchSave = useCallback(async () => {
     const entries = Object.entries(pendingChanges);
@@ -269,10 +378,11 @@ export function ConfigPage({ category }: { category: string }) {
     for (const [path, value] of entries) {
       try {
         const data = await setConfigValue(path, value);
-        const reloadFailed = data.status !== "ok" && data.status !== "saved";
+        const reloadFailed = data.status === "saved_reload_failed";
+        const restartRequired = data.status === "applied_partial" || data.restart_required;
         const msg = reloadFailed
           ? t("config.saved_reload_failed", "Saved but reload failed")
-          : data.restart_required
+          : restartRequired
             ? t("config.saved_restart", "Saved (restart required)")
             : t("common.saved", "Saved");
         setSaveStatus((s) => ({ ...s, [path]: { ok: !reloadFailed, msg } }));
@@ -287,17 +397,28 @@ export function ConfigPage({ category }: { category: string }) {
     setTimeout(() => setSaveStatus({}), errors > 0 ? 5000 : 3000);
   }, [pendingChanges, queryClient, t]);
 
-  // ── Reset field to default ─────────────────────────────────────────
   const handleResetField = useCallback(
     (sectionKey: string, fieldKey: string, rootLevel?: boolean) => {
       const path = rootLevel ? fieldKey : `${sectionKey}.${fieldKey}`;
-      // Setting null removes the key → KernelConfig uses Default impl value
       setPendingChanges((p) => ({ ...p, [path]: null }));
     },
     []
   );
 
-  // ── Reload config ──────────────────────────────────────────────────
+  const handleResetSection = useCallback(
+    (sectionKey: string, fieldKeys: string[], rootLevel?: boolean) => {
+      setPendingChanges((p) => {
+        const next = { ...p };
+        for (const fKey of fieldKeys) {
+          const path = rootLevel ? fKey : `${sectionKey}.${fKey}`;
+          next[path] = null;
+        }
+        return next;
+      });
+    },
+    []
+  );
+
   const reloadMutation = useMutation({
     mutationFn: reloadConfig,
     onSuccess: () => {
@@ -322,11 +443,25 @@ export function ConfigPage({ category }: { category: string }) {
   const sectionKeys = (CATEGORY_SECTIONS[category] ?? []).filter((s) => s in allSections);
   const categoryTitle = t(`config.cat_${category}`, sectionLabelFallback(category));
   const q = searchQuery.toLowerCase();
+  const isSearching = q.length > 0;
 
-  // Filter sections & fields by search
+  const effectiveTab = isSearching
+    ? null
+    : (activeSection && sectionKeys.includes(activeSection) ? activeSection : sectionKeys[0] ?? null);
+
+  // Which sections have pending changes (for tab dot indicators)
+  const sectionHasPending = useCallback((sKey: string): boolean => {
+    const sec = allSections[sKey];
+    if (!sec) return false;
+    return Object.keys(pendingChanges).some((path) =>
+      sec.root_level ? path in sec.fields : path.startsWith(sKey + ".")
+    );
+  }, [allSections, pendingChanges]);
+
   const filteredSections = useMemo(() => {
-    if (!q) return sectionKeys.map((sKey) => ({ sKey, fields: Object.keys(allSections[sKey]?.fields ?? {}) }));
-    return sectionKeys
+    const keysToShow = effectiveTab ? [effectiveTab] : sectionKeys;
+    if (!q) return keysToShow.map((sKey) => ({ sKey, fields: Object.keys(allSections[sKey]?.fields ?? {}) }));
+    return keysToShow
       .map((sKey) => {
         const sec = allSections[sKey];
         if (!sec) return null;
@@ -337,13 +472,16 @@ export function ConfigPage({ category }: { category: string }) {
         return matchedFields.length > 0 ? { sKey, fields: matchedFields } : null;
       })
       .filter((x): x is { sKey: string; fields: string[] } => x !== null);
-  }, [sectionKeys, allSections, q]);
+  }, [sectionKeys, allSections, q, effectiveTab]);
 
   // ── Loading / error states ─────────────────────────────────────────
   if (schemaQuery.isLoading || configQuery.isLoading) {
     return (
-      <div className="flex flex-col gap-6 p-6">
-        <PageHeader badge={t("nav.config")} title={categoryTitle} subtitle={t("config.desc", "System configuration editor")} icon={<Settings className="h-4 w-4" />} />
+      <div className="flex flex-col gap-4 p-6 max-w-5xl">
+        <div className="flex items-center gap-2.5">
+          <Settings className="h-4 w-4 text-text-dim" />
+          <span className="text-sm font-semibold">{categoryTitle}</span>
+        </div>
         <div className="rounded-2xl border border-border-subtle bg-surface p-8 text-center text-text-dim text-sm">
           {t("common.loading", "Loading...")}
         </div>
@@ -353,8 +491,11 @@ export function ConfigPage({ category }: { category: string }) {
 
   if (schemaQuery.isError || configQuery.isError) {
     return (
-      <div className="flex flex-col gap-6 p-6">
-        <PageHeader badge={t("nav.config")} title={categoryTitle} subtitle={t("config.desc", "System configuration editor")} icon={<Settings className="h-4 w-4" />} />
+      <div className="flex flex-col gap-4 p-6 max-w-5xl">
+        <div className="flex items-center gap-2.5">
+          <Settings className="h-4 w-4 text-text-dim" />
+          <span className="text-sm font-semibold">{categoryTitle}</span>
+        </div>
         <div className="rounded-2xl border border-danger/30 bg-surface p-8 text-center text-danger text-sm">
           {t("config.load_error", "Failed to load configuration")}
         </div>
@@ -364,10 +505,18 @@ export function ConfigPage({ category }: { category: string }) {
 
   // ── Render ─────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col gap-6 p-6">
-      <div className="flex items-center justify-between">
-        <PageHeader badge={t("nav.config")} title={categoryTitle} subtitle={t("config.desc", "System configuration editor")} icon={<Settings className="h-4 w-4" />} />
-        <div className="flex items-center gap-2">
+    <div className="flex flex-col p-6 max-w-5xl gap-4 pb-24">
+
+      {/* Row 1: title + reload */}
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-2.5">
+          <Settings className="h-4 w-4 text-text-dim shrink-0" />
+          <div>
+            <h1 className="text-sm font-bold leading-tight">{categoryTitle}</h1>
+            <p className="text-[11px] text-text-dim leading-tight mt-0.5">{t("config.desc", "System configuration editor")}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
           {reloadStatus && (
             <span className={`text-xs font-semibold ${reloadStatus.ok ? "text-success" : "text-danger"}`}>
               {reloadStatus.msg}
@@ -380,38 +529,64 @@ export function ConfigPage({ category }: { category: string }) {
         </div>
       </div>
 
-      {/* Search + batch save bar */}
-      <div className="flex items-center gap-3">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-dim" />
-          <input
-            ref={searchRef}
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={t("config.search_placeholder", "Search fields...")}
-            className="w-full pl-9 pr-3 py-2 rounded-xl border border-border-subtle bg-surface text-xs outline-none focus:border-brand transition-colors"
-          />
+      {/* Row 2: tabs — always visible when >1 section; grayed/disabled during search */}
+      {sectionKeys.length > 1 && (
+        <div className="flex items-center border-b border-border-subtle -mx-6 px-6">
+          {sectionKeys.map((sKey) => {
+            const isActive = !isSearching && effectiveTab === sKey;
+            const hasDot = sectionHasPending(sKey);
+            return (
+              <button
+                key={sKey}
+                onClick={() => { setActiveSection(sKey); setSearchQuery(""); }}
+                disabled={isSearching}
+                className={`relative px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                  isActive
+                    ? "border-brand text-brand"
+                    : isSearching
+                      ? "border-transparent text-text-dim/40 cursor-not-allowed"
+                      : "border-transparent text-text-dim hover:text-text hover:border-border-subtle"
+                }`}
+              >
+                {t(`config.sec_${sKey}`, sectionLabelFallback(sKey))}
+                {hasDot && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-warning shrink-0" />
+                )}
+              </button>
+            );
+          })}
+          {isSearching && (
+            <span className="ml-auto text-[10px] text-text-dim pb-2 pr-1">
+              {t("config.searching_all", "searching all sections")}
+            </span>
+          )}
         </div>
-        {hasPendingChanges && (
-          <div className="flex items-center gap-2">
-            <Badge variant="warning">
-              <AlertTriangle className="w-2.5 h-2.5 mr-1" />
-              {Object.keys(pendingChanges).length} {t("config.unsaved", "unsaved")}
-            </Badge>
-            <Button variant="ghost" size="sm" onClick={() => setPendingChanges({})}>
-              {t("config.discard", "Discard")}
-            </Button>
-            <Button variant="primary" size="sm" onClick={handleBatchSave} isLoading={batchSaving} disabled={batchSaving}>
-              <Save className="w-3 h-3 mr-1" />
-              {t("config.save_all", "Save All")}
-            </Button>
-          </div>
+      )}
+
+      {/* Row 3: search */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-dim pointer-events-none" />
+        <input
+          ref={searchRef}
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder={t("config.search_placeholder", "Search fields…  (/)")}
+          className="w-full pl-9 pr-8 py-2 rounded-xl border border-border-subtle bg-surface text-xs outline-none focus:border-brand transition-colors"
+        />
+        {isSearching && (
+          <button
+            onClick={() => setSearchQuery("")}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-text-dim hover:text-text transition-colors"
+            aria-label="Clear search"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         )}
       </div>
 
       {/* Sections */}
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-3">
         {filteredSections.length === 0 && (
           <div className="rounded-2xl border border-border-subtle bg-surface p-8 text-center text-text-dim text-sm">
             {t("config.no_results", "No fields match your search")}
@@ -424,23 +599,51 @@ export function ConfigPage({ category }: { category: string }) {
             ? allFields.filter(([fKey]) => visibleFields.includes(fKey))
             : allFields;
 
+          const hasBadges = sec.hot_reloadable || sec.root_level;
+          const showSectionHeader = isSearching || hasBadges;
+
+
           return (
             <div key={sKey} className="rounded-2xl border border-border-subtle bg-surface overflow-hidden">
-              <div className="flex items-center gap-3 px-5 py-4 border-b border-border-subtle/50">
-                <h3 className="text-sm font-bold">{t(`config.sec_${sKey}`, sectionLabelFallback(sKey))}</h3>
-                {sec.hot_reloadable && (
-                  <Badge variant="success"><Zap className="w-2.5 h-2.5 mr-0.5" />{t("config.hot_reload", "Hot Reload")}</Badge>
-                )}
-                {sec.root_level && (
-                  <Badge variant="info">{t("config.root_level", "Root Level")}</Badge>
-                )}
-                <span className="text-[10px] text-text-dim ml-auto">
-                  {fieldsToShow.length}{q ? `/${allFields.length}` : ""} {t("config.fields_unit")}
-                </span>
-              </div>
-              <div className="px-5 py-2">
+              {showSectionHeader && (
+                <div className="flex items-center gap-2 px-5 py-2.5 border-b border-border-subtle/50">
+                  {isSearching && (
+                    <span className="text-xs font-semibold text-text-dim">
+                      {t(`config.sec_${sKey}`, sectionLabelFallback(sKey))}
+                    </span>
+                  )}
+                  {sec.hot_reloadable && (
+                    <Badge variant="success"><Zap className="w-2.5 h-2.5 mr-0.5" />{t("config.hot_reload", "Hot Reload")}</Badge>
+                  )}
+                  {sec.root_level && (
+                    <Badge variant="info">{t("config.root_level", "Root Level")}</Badge>
+                  )}
+                  <div className="ml-auto flex items-center gap-2">
+                    {isSearching && (
+                      <span className="text-[10px] text-text-dim">
+                        {fieldsToShow.length}/{allFields.length} {t("config.fields_unit")}
+                      </span>
+                    )}
+                    {/* Section-level reset: only show when any field in this section has a pending change */}
+                    {fieldsToShow.some(([fKey]) => {
+                      const p = sec.root_level ? fKey : `${sKey}.${fKey}`;
+                      return p in pendingChanges;
+                    }) && (
+                      <button
+                        onClick={() => handleResetSection(sKey, fieldsToShow.map(([fKey]) => fKey), sec.root_level)}
+                        className="text-[10px] text-text-dim hover:text-warning transition-colors flex items-center gap-1"
+                        title={t("config.reset_section", "Reset section to defaults")}
+                      >
+                        <RotateCcw className="w-2.5 h-2.5" />
+                        {t("config.reset_all", "Reset all")}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+              <div className="divide-y divide-border-subtle/30">
                 {fieldsToShow.map(([fieldKey, fieldSchema]) => {
-                  const { type: fieldType, options } = resolveFieldType(fieldSchema);
+                  const { type: fieldType, options, min, max, step } = resolveFieldType(fieldSchema);
                   const path = sec.root_level ? fieldKey : `${sKey}.${fieldKey}`;
                   const currentValue = path in pendingChanges
                     ? pendingChanges[path]
@@ -448,22 +651,52 @@ export function ConfigPage({ category }: { category: string }) {
                   const hasPending = path in pendingChanges;
                   const isSaving = saveMutation.isPending && saveMutation.variables?.path === path;
                   const statusForField = saveStatus[path] ?? null;
+                  const fieldDesc = t(`config.desc_${fieldKey}`, "");
+                  const fieldLabel = t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey));
 
                   return (
-                    <div key={fieldKey} className="flex items-start gap-4 py-3 border-b border-border-subtle/30 last:border-0">
-                      <div className="w-48 shrink-0 pt-1">
-                        <p className="text-xs font-semibold">{t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey))}</p>
-                        <p className="text-[10px] text-text-dim font-mono">{fieldKey}</p>
-                        {t(`config.desc_${fieldKey}`, "") && (
-                          <p className="text-[10px] text-text-dim mt-0.5">{t(`config.desc_${fieldKey}`)}</p>
+                    <div key={fieldKey} className="flex items-start gap-4 px-5 py-3 group">
+                      {/* Label + key + type badge */}
+                      <div className="w-44 shrink-0 pt-1">
+                        <p className="text-xs font-semibold leading-tight">
+                          <Highlight text={fieldLabel} query={q} />
+                        </p>
+                        <div className="flex items-center gap-1 mt-0.5">
+                          <p className="text-[10px] text-text-dim font-mono leading-tight">
+                            <Highlight text={fieldKey} query={q} />
+                          </p>
+                          <CopyPathButton path={path} />
+                        </div>
+                        <div className="mt-0.5">
+                          <FieldTypeBadge type={fieldType} />
+                        </div>
+                      </div>
+                      {/* Input + description below */}
+                      <div className="flex-1 min-w-0 flex flex-col gap-1 pt-1">
+                        <ConfigFieldInput
+                          fieldKey={fieldKey}
+                          fieldType={fieldType}
+                          options={options}
+                          min={min}
+                          max={max}
+                          step={step}
+                          value={currentValue}
+                          onChange={(v) => handleFieldChange(sKey, fieldKey, v, sec.root_level)}
+                        />
+                        {fieldDesc && (
+                          <p className="text-[10px] text-text-dim leading-relaxed">{fieldDesc}</p>
                         )}
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <ConfigFieldInput fieldKey={fieldKey} fieldType={fieldType} options={options} value={currentValue}
-                          onChange={(v) => handleFieldChange(sKey, fieldKey, v, sec.root_level)} />
-                      </div>
-                      <div className="w-24 shrink-0 flex items-center justify-end gap-1 pt-1">
-                        {hasPending && (
+                      {/* Actions */}
+                      <div className="w-24 shrink-0 flex items-center justify-end gap-1">
+                        {statusForField ? (
+                          <span
+                            className={`text-[10px] font-semibold truncate ${statusForField.ok ? "text-success" : "text-danger"}`}
+                            title={statusForField.msg}
+                          >
+                            {statusForField.msg}
+                          </span>
+                        ) : hasPending ? (
                           <>
                             <button
                               onClick={() => handleResetField(sKey, fieldKey, sec.root_level)}
@@ -472,18 +705,19 @@ export function ConfigPage({ category }: { category: string }) {
                             >
                               <RotateCcw className="w-3 h-3" />
                             </button>
-                            <Button variant="primary" size="sm" onClick={() => {
-                              if (path in pendingChanges) saveMutation.mutate({ path, value: pendingChanges[path] });
-                            }} isLoading={isSaving} disabled={isSaving}>
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              onClick={() => {
+                                if (path in pendingChanges) saveMutation.mutate({ path, value: pendingChanges[path] });
+                              }}
+                              isLoading={isSaving}
+                              disabled={isSaving}
+                            >
                               <Save className="w-3 h-3" />
                             </Button>
                           </>
-                        )}
-                        {statusForField && (
-                          <span className={`text-[10px] font-semibold ${statusForField.ok ? "text-success" : "text-danger"}`}>
-                            {statusForField.msg}
-                          </span>
-                        )}
+                        ) : null}
                       </div>
                     </div>
                   );
@@ -493,6 +727,26 @@ export function ConfigPage({ category }: { category: string }) {
           );
         })}
       </div>
+
+      {/* Sticky unsaved changes bar */}
+      {hasPendingChanges && (
+        <div className="fixed bottom-0 left-0 right-0 z-40 flex justify-center pointer-events-none">
+          <div className="mb-5 flex items-center gap-3 px-4 py-2.5 rounded-2xl border border-warning/30 bg-surface shadow-lg pointer-events-auto">
+            <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0" />
+            <span className="text-xs font-semibold text-warning">
+              {Object.keys(pendingChanges).length} {t("config.unsaved", "unsaved")} {t("config.changes", "changes")}
+            </span>
+            <div className="w-px h-4 bg-border-subtle" />
+            <Button variant="ghost" size="sm" onClick={() => setPendingChanges({})}>
+              {t("config.discard", "Discard")}
+            </Button>
+            <Button variant="primary" size="sm" onClick={handleBatchSave} isLoading={batchSaving} disabled={batchSaving}>
+              <Save className="w-3 h-3 mr-1" />
+              {t("config.save_all", "Save All")}
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

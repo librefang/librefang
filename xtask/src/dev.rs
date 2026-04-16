@@ -73,15 +73,27 @@ pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
     let dashboard_dir = root.join("crates/librefang-api/dashboard");
     let mut _dashboard_child = None;
     if !args.no_dashboard && dashboard_dir.join("package.json").exists() {
-        println!("Installing dashboard dependencies...");
+        // Detect available package manager: prefer pnpm, fall back to npm.
+        let pm = if Command::new("pnpm")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            "pnpm"
+        } else {
+            "npm"
+        };
+
+        println!("Installing dashboard dependencies (using {pm})...");
         let _ = Command::new("sh")
-            .args(["-c", "pnpm install"])
+            .args(["-c", &format!("{pm} install")])
             .current_dir(&dashboard_dir)
             .status();
 
-        println!("Starting dashboard dev server...");
+        println!("Starting dashboard dev server (using {pm})...");
         let child = Command::new("sh")
-            .args(["-c", "pnpm dev"])
+            .args(["-c", &format!("{pm} run dev")])
             .current_dir(&dashboard_dir)
             .spawn();
         match child {

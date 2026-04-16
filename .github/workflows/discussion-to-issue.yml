@@ -1,7 +1,9 @@
 name: Discussion to Issue
 
-# Automatically create issues from new Discussions in Ideas/General/Q&A.
-# Also supports manual "/to-issue" command and daily backfill.
+# Automatically create issues from new Discussions when content analysis
+# detects a real problem (bug report, error, regression).
+# FAQ, guides, and community threads are skipped regardless of category.
+# Manual "/to-issue" command bypasses all content filters.
 
 on:
   discussion:
@@ -64,6 +66,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          MANUAL: 'true'
         run: |
           bash .github/scripts/discussion-to-issue.sh \
             "${{ github.event.discussion.number }}" \

@@ -175,6 +175,14 @@ pub struct ChatGptDriver {
 
 impl ChatGptDriver {
     pub fn new(session_token: String, base_url: String) -> Self {
+        Self::with_proxy(session_token, base_url, None)
+    }
+
+    pub fn with_proxy(session_token: String, base_url: String, proxy_url: Option<&str>) -> Self {
+        let client = match proxy_url {
+            Some(url) => librefang_http::proxied_client_with_override(url),
+            None => librefang_http::proxied_client(),
+        };
         Self {
             session_token: Zeroizing::new(session_token),
             base_url: if base_url.is_empty() {
@@ -183,7 +191,7 @@ impl ChatGptDriver {
                 base_url
             },
             token_cache: ChatGptTokenCache::new(),
-            client: librefang_http::proxied_client(),
+            client,
         }
     }
 
