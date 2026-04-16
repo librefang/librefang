@@ -269,13 +269,23 @@ fn git_clone_fallback(
     tracing::info!("Attempting git clone fallback");
 
     if registry_cache.join(".git").exists() {
-        // Already a git repo — try pull
+        // Already a git repo — fetch and reset to origin/main so that a
+        // detached HEAD or local branch can never stall the sync.
+        let fetch_ok = Command::new("git")
+            .args(["fetch", "--depth", "1", "-q", "origin", "main"])
+            .current_dir(registry_cache)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !fetch_ok {
+            return Err("git fetch origin main failed".into());
+        }
         let status = Command::new("git")
-            .args(["pull", "--ff-only", "-q"])
+            .args(["reset", "--hard", "origin/main", "-q"])
             .current_dir(registry_cache)
             .status()?;
         if !status.success() {
-            return Err(format!("git pull exited with {status}").into());
+            return Err(format!("git reset exited with {status}").into());
         }
     } else {
         // Clean slate
