@@ -1637,7 +1637,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "sqlite_path": "string", "embedding_model": "string",
         "consolidation_threshold": { "type": "number", "min": 1, "max": 1000000, "step": 1 },
         "decay_rate": { "type": "number", "min": 0, "max": 1, "step": 0.01 },
-        "embedding_provider": { "type": "select", "options": ["auto", "openai", "groq", "mistral", "together", "fireworks", "cohere", "ollama", "bedrock", "vllm", "lmstudio"] },
+        "embedding_provider": { "type": "select", "options": ["auto", "openai", "openrouter", "groq", "mistral", "together", "fireworks", "cohere", "ollama", "bedrock", "vllm", "lmstudio"] },
         "embedding_api_key_env": "string",
         "consolidation_interval_hours": { "type": "number_select", "options": ["0", "1", "6", "12", "24", "48", "168"] }
     }});
@@ -1790,6 +1790,16 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "scopes": "string[]", "allowed_domains": "string[]",
         "audience": "string",
         "session_ttl_secs": { "type": "number", "min": 60, "max": 2592000, "step": 60 }
+    }});
+    sec!("terminal", { "fields": {
+        "enabled": "boolean",
+        "allow_remote": "boolean",
+        "require_proxy_headers": "boolean",
+        "allow_unauthenticated_remote": "boolean",
+        "allowed_origins": "string[]",
+        "tmux_enabled": "boolean",
+        "max_windows": { "type": "number", "min": 1, "max": 64, "step": 1 },
+        "tmux_binary_path": "string"
     }});
 
     Json(serde_json::json!({ "sections": serde_json::Value::Object(sections) }))

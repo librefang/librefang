@@ -1943,6 +1943,7 @@ impl LibreFangKernel {
                     // Determine the API key env var for the detected provider.
                     let key_env = match detected {
                         "openai" => "OPENAI_API_KEY",
+                        "openrouter" => "OPENROUTER_API_KEY",
                         "groq" => "GROQ_API_KEY",
                         "mistral" => "MISTRAL_API_KEY",
                         "together" => "TOGETHER_API_KEY",
@@ -1969,8 +1970,9 @@ impl LibreFangKernel {
                 } else {
                     warn!(
                         "No embedding provider available. Set one of: OPENAI_API_KEY, \
-                         GROQ_API_KEY, MISTRAL_API_KEY, TOGETHER_API_KEY, FIREWORKS_API_KEY, \
-                         COHERE_API_KEY, or configure Ollama."
+                         OPENROUTER_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, \
+                         TOGETHER_API_KEY, FIREWORKS_API_KEY, COHERE_API_KEY, \
+                         or configure Ollama."
                     );
                     None
                 }
@@ -9705,8 +9707,17 @@ system_prompt = "You are a helpful assistant."
                     .collect()
             };
             for t in mcp_candidates {
-                // If agent declares specific tools, only include matching MCP tools
-                if !tools_unrestricted && !declared_tools.iter().any(|d| glob_matches(d, &t.name)) {
+                // When the agent explicitly lists MCP servers (non-empty mcp_servers),
+                // all tools from those servers are always available — mcp_servers is a
+                // separate permission grant independent of capabilities.tools (which
+                // governs builtin tools). Listing a server implies permission to use
+                // all of its tools.
+                // When mcp_servers is empty (use all servers), still apply the
+                // declared_tools filter so capabilities.tools can narrow them down.
+                if !tools_unrestricted
+                    && mcp_allowlist.is_empty()
+                    && !declared_tools.iter().any(|d| glob_matches(d, &t.name))
+                {
                     continue;
                 }
                 all_tools.push(t);
