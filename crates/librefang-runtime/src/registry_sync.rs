@@ -390,8 +390,29 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
         }
     }
 
-    if synced > 0 || updated > 0 || skipped > 0 {
-        tracing::info!("{label} synced ({synced} new, {updated} updated, {skipped} unchanged)");
+    // Remove local files that no longer exist in the registry source.
+    // This cleans up defunct providers/integrations after upstream pruning.
+    let mut removed = 0usize;
+    if let Ok(dest_entries) = std::fs::read_dir(dest_dir) {
+        for entry in dest_entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) if n.ends_with(".toml") => n.to_string(),
+                _ => continue,
+            };
+            if !src_dir.join(&name).exists() {
+                if std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+
+    if synced > 0 || updated > 0 || removed > 0 || skipped > 0 {
+        tracing::info!("{label} synced ({synced} new, {updated} updated, {removed} removed, {skipped} unchanged)");
     }
 }
 
