@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Command } from "cmdk";
-import { Check, ChevronDown, X } from "lucide-react";
+import { ChevronDown, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 interface MultiSelectCmdkProps {
@@ -142,7 +142,7 @@ export function MultiSelectCmdk({
             onValueChange={setSearch}
             onFocus={handleInputFocus}
             onKeyDown={handleKeyDown}
-            placeholder={value.length === 0 ? placeholder : "Add more…"}
+            placeholder={value.length === 0 ? placeholder : t("common.add_more", { defaultValue: "Add more…" })}
             disabled={disabled}
             className="flex-1 min-w-[120px] bg-transparent text-xs text-text outline-none placeholder:text-text-dim/40"
           />
@@ -163,9 +163,6 @@ export function MultiSelectCmdk({
                   onSelect={select}
                   className="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs text-text-dim transition-colors hover:bg-brand/5 data-[selected=true]:bg-brand/10 data-[selected=true]:text-brand"
                 >
-                  {value.includes(option) && (
-                    <Check className="h-3 w-3 shrink-0 text-brand" />
-                  )}
                   <span className="truncate">{option}</span>
                 </Command.Item>
               ))}

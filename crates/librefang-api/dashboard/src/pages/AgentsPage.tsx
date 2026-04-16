@@ -139,8 +139,7 @@ export function AgentsPage() {
   function closeDetailModal() {
     setDetailAgent(null);
     setEditingModel(false);
-    setShowToolsEditor(false);
-    setToolsEditorAgentId(null);
+    closeToolsEditor();
   }
 
   function closeToolsEditor() {
@@ -901,6 +900,7 @@ export function AgentsPage() {
                     value={toolAllowlistDraft}
                     onChange={setToolAllowlistDraft}
                     placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
+                    disabled={toolsDisabledState}
                   />
                 </div>
 
@@ -918,6 +918,7 @@ export function AgentsPage() {
                     value={toolBlocklistDraft}
                     onChange={setToolBlocklistDraft}
                     placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
+                    disabled={toolsDisabledState}
                   />
                 </div>
 
