@@ -5893,7 +5893,7 @@ fn default_terminal_enabled() -> bool {
 }
 
 fn default_tmux_enabled() -> bool {
-    true
+    false
 }
 
 fn default_max_windows() -> u32 {
@@ -5908,7 +5908,7 @@ impl Default for TerminalConfig {
             allow_remote: false,
             require_proxy_headers: false,
             allow_unauthenticated_remote: false,
-            tmux_enabled: true,
+            tmux_enabled: false,
             max_windows: 16,
             tmux_binary_path: None,
         }
@@ -6169,7 +6169,7 @@ max_tokens_per_hour = 500000
     #[test]
     fn test_terminal_config_tmux_defaults() {
         let tc = TerminalConfig::default();
-        assert!(tc.tmux_enabled, "tmux_enabled should default to true");
+        assert!(!tc.tmux_enabled, "tmux_enabled should default to false");
         assert_eq!(tc.max_windows, 16, "max_windows should default to 16");
         assert!(
             tc.tmux_binary_path.is_none(),
@@ -6180,7 +6180,7 @@ max_tokens_per_hour = 500000
     #[test]
     fn test_terminal_config_empty_toml_uses_defaults() {
         let tc: TerminalConfig = toml::from_str("").unwrap();
-        assert!(tc.tmux_enabled);
+        assert!(!tc.tmux_enabled);
         assert_eq!(tc.max_windows, 16);
         assert!(tc.tmux_binary_path.is_none());
     }

@@ -35,7 +35,7 @@ function useTmuxWindows(tmuxAvailable: boolean) {
       if (!res.ok) throw new Error("Failed to fetch windows");
       return res.json();
     },
-    refetchInterval: 2000,
+    refetchInterval: 10000,
     enabled: tmuxAvailable,
   });
 }
@@ -59,6 +59,11 @@ export function TerminalTabs({
   const [createError, setCreateError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const settleTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const windowsRef = useRef<WindowInfo[]>([]);
+
+  useEffect(() => {
+    windowsRef.current = windows;
+  }, [windows]);
 
   const handleTabClick = useCallback(
     (windowId: string) => {
@@ -133,7 +138,8 @@ export function TerminalTabs({
   const handleCloseTab = useCallback(
     async (windowId: string, e: React.MouseEvent) => {
       e.stopPropagation();
-      if (windows.length <= 1) return;
+      const currentWindows = windowsRef.current;
+      if (currentWindows.length <= 1) return;
       try {
         const res = await fetch(
           `/api/terminal/windows/${encodeURIComponent(windowId)}`,
@@ -142,7 +148,7 @@ export function TerminalTabs({
         if (res.ok) {
           const isActive = activeWindowId === windowId;
           if (isActive) {
-            const remaining = windows.filter((w) => w.id !== windowId);
+            const remaining = currentWindows.filter((w) => w.id !== windowId);
             if (remaining.length > 0) {
               const next = remaining[0];
               if (ws && ws.readyState === WebSocket.OPEN) {
@@ -163,7 +169,7 @@ export function TerminalTabs({
         addToast(t("terminal.tabs.delete_failed"), "error");
       }
     },
-    [queryClient, windows, activeWindowId, ws, onSwitchWindow, addToast, t]
+    [queryClient, activeWindowId, ws, onSwitchWindow, addToast, t]
   );
 
   if (!tmuxAvailable) return null;

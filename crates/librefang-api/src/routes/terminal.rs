@@ -22,7 +22,7 @@ use tracing::{info, warn};
 
 use super::AppState;
 use crate::terminal::PtySession;
-use crate::terminal_tmux::{validate_window_name, TmuxController};
+use crate::terminal_tmux::{validate_window_name, TmuxController, DEFAULT_TMUX_SESSION_NAME};
 use crate::ws::{
     detect_connection_locality, send_json, try_acquire_ws_slot, validate_ws_origin, ws_auth_token,
     ws_query_param, WsConnectionGuard,
@@ -453,10 +453,10 @@ async fn tmux_controller(state: &AppState) -> Result<TmuxController, axum::respo
     }
     let tmux_path =
         std::path::PathBuf::from(cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux"));
-    if !TmuxController::is_available(&tmux_path).await {
-        return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response());
-    }
-    Ok(TmuxController::new(tmux_path, "main".to_string()))
+    Ok(TmuxController::new(
+        tmux_path,
+        DEFAULT_TMUX_SESSION_NAME.to_string(),
+    ))
 }
 
 async fn list_windows(
@@ -724,7 +724,10 @@ async fn handle_terminal_ws(
 
     let (mut pty, mut pty_rx) = if tmux_avail {
         // Ensure tmux session exists and optionally select a window.
-        let ctrl = crate::terminal_tmux::TmuxController::new(tmux_path_buf, "main".to_string());
+        let ctrl = crate::terminal_tmux::TmuxController::new(
+            tmux_path_buf,
+            DEFAULT_TMUX_SESSION_NAME.to_string(),
+        );
         if let Err(e) = ctrl.ensure_session().await {
             warn!(error = %e, "tmux session init failed");
             let _ = send_json(
@@ -751,7 +754,12 @@ async fn handle_terminal_ws(
                 // Continue anyway — still attach to session.
             }
         }
-        match PtySession::spawn_tmux_attached(&tmux_path_val, "main", initial_cols, initial_rows) {
+        match PtySession::spawn_tmux_attached(
+            &tmux_path_val,
+            DEFAULT_TMUX_SESSION_NAME,
+            initial_cols,
+            initial_rows,
+        ) {
             Ok((pty, rx)) => (pty, rx),
             Err(e) => {
                 warn!(error = %e, "Failed to spawn tmux terminal");
@@ -959,12 +967,10 @@ async fn handle_terminal_ws(
                                                 ),
                                             )
                                         };
-                                        if tmux_enabled
-                                            && crate::terminal_tmux::TmuxController::is_available(&tmux_path).await
-                                        {
+                                        if tmux_enabled {
                                             let ctrl = crate::terminal_tmux::TmuxController::new(
                                                 tmux_path,
-                                                "main".to_string(),
+                                                DEFAULT_TMUX_SESSION_NAME.to_string(),
                                             );
                                             match ctrl.select_window(&window_id).await {
                                                 Ok(()) => {

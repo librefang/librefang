@@ -242,6 +242,10 @@ export function TerminalPage() {
     }
   }, [serverOs]);
 
+  const handleSwitchWindow = useCallback((id: string) => {
+    setActiveWindowId(id);
+  }, []);
+
   useEffect(() => {
     if (terminalEnabled !== true) {
       return;
@@ -365,7 +369,7 @@ export function TerminalPage() {
             tmuxAvailable={tmuxAvailable}
             maxWindows={maxWindows}
             activeWindowId={activeWindowId}
-            onSwitchWindow={useCallback((id: string) => setActiveWindowId(id), [])}
+            onSwitchWindow={handleSwitchWindow}
             terminalRef={terminalRef}
             fitAddonRef={fitAddonRef}
             shellName={shellName}

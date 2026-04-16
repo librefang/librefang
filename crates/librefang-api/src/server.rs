@@ -1229,7 +1229,10 @@ pub async fn run_daemon(
             let tmux_path = std::path::PathBuf::from(
                 cfg.terminal.tmux_binary_path.as_deref().unwrap_or("tmux"),
             );
-            let ctrl = crate::terminal_tmux::TmuxController::new(tmux_path, "main".to_string());
+            let ctrl = crate::terminal_tmux::TmuxController::new(
+                tmux_path,
+                crate::terminal_tmux::DEFAULT_TMUX_SESSION_NAME.to_string(),
+            );
             if let Err(e) = ctrl.kill_session().await {
                 tracing::debug!("tmux session cleanup: {e}");
             } else {

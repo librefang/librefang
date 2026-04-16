@@ -28,6 +28,9 @@ const TMUX_TIMEOUT: Duration = Duration::from_secs(5);
 /// Availability probe timeout (shorter — just `-V`).
 const TMUX_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Default tmux session managed by the API terminal.
+pub const DEFAULT_TMUX_SESSION_NAME: &str = "main";
+
 // ── public types ─────────────────────────────────────────────────────────────
 
 /// Information about a single tmux window.
@@ -547,9 +550,12 @@ mod tests {
 
     #[test]
     fn controller_fields_set_correctly() {
-        let ctrl = TmuxController::new(PathBuf::from("/usr/bin/tmux"), "main".to_string());
+        let ctrl = TmuxController::new(
+            PathBuf::from("/usr/bin/tmux"),
+            DEFAULT_TMUX_SESSION_NAME.to_string(),
+        );
         assert_eq!(ctrl.socket_name, "librefang");
-        assert_eq!(ctrl.session_name, "main");
+        assert_eq!(ctrl.session_name, DEFAULT_TMUX_SESSION_NAME);
         assert_eq!(ctrl.tmux_path, PathBuf::from("/usr/bin/tmux"));
     }
 }
