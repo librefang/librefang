@@ -433,7 +433,7 @@ async fn test_build_router_serves_dashboard_locales() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_build_router_providers_marks_lemonade_as_local() {
+async fn test_build_router_providers_marks_local_providers() {
     let harness = start_full_router("").await;
 
     let response = harness
@@ -455,12 +455,13 @@ async fn test_build_router_providers_marks_lemonade_as_local() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let providers = json["providers"].as_array().unwrap();
-    let lemonade = providers
+    // Ollama is always in the registry and must be marked as a local provider.
+    let ollama = providers
         .iter()
-        .find(|provider| provider["id"] == "lemonade")
-        .expect("lemonade provider should be present");
+        .find(|provider| provider["id"] == "ollama")
+        .expect("ollama provider should be present");
 
-    assert_eq!(lemonade["is_local"], serde_json::json!(true));
+    assert_eq!(ollama["is_local"], serde_json::json!(true));
 }
 
 #[tokio::test(flavor = "multi_thread")]
