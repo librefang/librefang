@@ -1516,6 +1516,7 @@
     "ws_connected": "WS",
     "ws_streaming": "Streaming",
     "auth_missing": "API key for provider \"{{provider}}\" is not configured. Please set it in Settings > Providers before chatting.",
+    "provider_offline": "Local provider \"{{provider}}\" is not running. Please start the service first.",
     "switch_model": "Switch Model",
     "search_models": "Search models...",
     "loading_models": "Loading…",
