@@ -449,14 +449,30 @@ pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) ->
 fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
     let mut out = String::from("## Skills\n");
     if !skill_summary.is_empty() {
-        out.push_str(
-            "You have installed skills. If a request matches a skill, use its tools directly.\n",
-        );
+        // Mandatory skill loading language — ensures agents proactively use skills
+        out.push_str(concat!(
+            "Before replying, scan the skills below. If a skill matches or is even ",
+            "partially relevant to your task, you MUST load it with `skill_read_file` ",
+            "and follow its instructions.\n",
+            "Err on the side of loading — it is always better to have context you don't ",
+            "need than to miss critical steps, pitfalls, or established workflows.\n",
+            "Skills contain specialized knowledge — API endpoints, tool-specific commands, ",
+            "and proven workflows that outperform general-purpose approaches. Load the skill ",
+            "even if you think you could handle the task with basic tools.\n",
+            "Skills also encode the user's preferred approach, conventions, and quality ",
+            "standards — load them even for tasks you already know how to do, because ",
+            "the skill defines how it should be done here.\n\n",
+        ));
+        out.push_str("<available_skills>\n");
         out.push_str(skill_summary.trim());
+        out.push_str("\n</available_skills>\n\n");
+        out.push_str(
+            "Only proceed without loading a skill if genuinely none are relevant to the task.\n",
+        );
     }
     // Skill evolution guidance — teach agents to self-improve their skill library
     out.push_str(concat!(
-        "\n\n### Skill Evolution\n",
+        "\n### Skill Evolution\n",
         "You can create and improve skills based on your experience:\n",
         "- After completing a complex task (5+ tool calls) that involved trial-and-error ",
         "or a non-trivial workflow, save the approach as a skill with `skill_evolve_create` ",
@@ -465,6 +481,8 @@ fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
         "patch it immediately with `skill_evolve_patch` — don't wait to be asked. ",
         "Skills that aren't maintained become liabilities.\n",
         "- Use `skill_evolve_rollback` if a recent update made things worse.\n",
+        "- Use `skill_evolve_write_file` to add supporting files (references, templates, ",
+        "scripts, assets) that enrich a skill's context.\n",
     ));
     if !prompt_context.is_empty() {
         out.push('\n');

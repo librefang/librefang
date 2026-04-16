@@ -10015,28 +10015,50 @@ system_prompt = "You are a helpful assistant."
         if skills.is_empty() {
             return String::new();
         }
-        let mut summary = format!("\n\n--- Available Skills ({}) ---\n", skills.len());
+
+        // Group skills by category (derived from parent directory name or tags)
+        let mut categories: std::collections::BTreeMap<String, Vec<&librefang_skills::InstalledSkill>> =
+            std::collections::BTreeMap::new();
         for skill in &skills {
-            // Sanitize third-party-authored fields before interpolation —
-            // a malicious skill author could otherwise smuggle newlines or
-            // `[...]` markers through the name/description/tool name slots
-            // and forge fake trust-boundary headers in the system prompt.
-            let name = sanitize_for_prompt(&skill.manifest.skill.name, SKILL_NAME_DISPLAY_CAP);
-            let desc = sanitize_for_prompt(&skill.manifest.skill.description, 200);
-            let tools: Vec<String> = skill
+            // Derive category: use first tag if available, else "general"
+            let category = skill
                 .manifest
-                .tools
-                .provided
-                .iter()
-                .map(|t| sanitize_for_prompt(&t.name, 64))
-                .collect();
-            if tools.is_empty() {
-                summary.push_str(&format!("- {name}: {desc}\n"));
-            } else {
-                summary.push_str(&format!("- {name}: {desc} [tools: {}]\n", tools.join(", ")));
+                .skill
+                .tags
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "general".to_string());
+            categories.entry(category).or_default().push(skill);
+        }
+
+        let mut summary = String::new();
+        for (category, cat_skills) in &categories {
+            summary.push_str(&format!("{category}:\n"));
+            for skill in cat_skills {
+                // Sanitize third-party-authored fields before interpolation —
+                // a malicious skill author could otherwise smuggle newlines or
+                // `[...]` markers through the name/description/tool name slots
+                // and forge fake trust-boundary headers in the system prompt.
+                let name =
+                    sanitize_for_prompt(&skill.manifest.skill.name, SKILL_NAME_DISPLAY_CAP);
+                let desc = sanitize_for_prompt(&skill.manifest.skill.description, 200);
+                let tools: Vec<String> = skill
+                    .manifest
+                    .tools
+                    .provided
+                    .iter()
+                    .map(|t| sanitize_for_prompt(&t.name, 64))
+                    .collect();
+                if tools.is_empty() {
+                    summary.push_str(&format!("  - {name}: {desc}\n"));
+                } else {
+                    summary.push_str(&format!(
+                        "  - {name}: {desc} [tools: {}]\n",
+                        tools.join(", ")
+                    ));
+                }
             }
         }
-        summary.push_str("Use these skill tools when they match the user's request.");
         summary
     }
 

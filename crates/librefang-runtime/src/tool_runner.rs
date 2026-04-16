@@ -580,6 +580,8 @@ pub async fn execute_tool_raw(
         "skill_evolve_patch" => tool_skill_evolve_patch(input, *skill_registry).await,
         "skill_evolve_delete" => tool_skill_evolve_delete(input, *skill_registry).await,
         "skill_evolve_rollback" => tool_skill_evolve_rollback(input, *skill_registry).await,
+        "skill_evolve_write_file" => tool_skill_evolve_write_file(input, *skill_registry).await,
+        "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry).await,
 
         // Cron scheduling tools
         "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id).await,
@@ -1905,6 +1907,31 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "name": { "type": "string", "description": "Name of the skill to roll back" }
                 },
                 "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_evolve_write_file".to_string(),
+            description: "Add a supporting file to a skill (references, templates, scripts, or assets). Use to enrich a skill with additional context like API docs, code templates, or example configurations.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the skill to add the file to" },
+                    "path": { "type": "string", "description": "Relative path under the skill directory (e.g., 'references/api.md', 'templates/config.yaml'). Must be under references/, templates/, scripts/, or assets/" },
+                    "content": { "type": "string", "description": "File content to write" }
+                },
+                "required": ["name", "path", "content"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_evolve_remove_file".to_string(),
+            description: "Remove a supporting file from a skill.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the skill" },
+                    "path": { "type": "string", "description": "Relative path of file to remove (e.g., 'references/old-api.md')" }
+                },
+                "required": ["name", "path"]
             }),
         },
     ]
@@ -4884,6 +4911,43 @@ async fn tool_skill_evolve_rollback(
     match librefang_skills::evolution::rollback_skill(skill) {
         Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
         Err(e) => Err(format!("Failed to rollback skill: {e}")),
+    }
+}
+
+async fn tool_skill_evolve_write_file(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+) -> Result<String, String> {
+    let registry = skill_registry.ok_or("Skill registry not available")?;
+    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    let content = input["content"].as_str().ok_or("Missing 'content' parameter")?;
+
+    let skill = registry
+        .get(name)
+        .ok_or_else(|| format!("Skill '{name}' not found"))?;
+
+    match librefang_skills::evolution::write_supporting_file(skill, path, content) {
+        Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
+        Err(e) => Err(format!("Failed to write file: {e}")),
+    }
+}
+
+async fn tool_skill_evolve_remove_file(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+) -> Result<String, String> {
+    let registry = skill_registry.ok_or("Skill registry not available")?;
+    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+
+    let skill = registry
+        .get(name)
+        .ok_or_else(|| format!("Skill '{name}' not found"))?;
+
+    match librefang_skills::evolution::remove_supporting_file(skill, path) {
+        Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
+        Err(e) => Err(format!("Failed to remove file: {e}")),
     }
 }
 

@@ -104,13 +104,14 @@ impl SkillVerifier {
 
     /// Scan prompt content (Markdown body from SKILL.md) for injection attacks.
     ///
-    /// This catches the common patterns used in the 341 malicious skills
-    /// discovered on ClawHub (Feb 2026).
+    /// Comprehensive threat detection ported from hermes-agent's skills_guard.py.
+    /// Covers 80+ patterns across 12 threat categories discovered in 341
+    /// malicious skills on ClawHub (Feb 2026).
     pub fn scan_prompt_content(content: &str) -> Vec<SkillWarning> {
         let mut warnings = Vec::new();
         let lower = content.to_lowercase();
 
-        // --- Critical: prompt override attempts ---
+        // ── Critical: prompt injection / override ───────────────────
         let injection_patterns = [
             "ignore previous instructions",
             "ignore all previous",
@@ -122,6 +123,18 @@ impl SkillVerifier {
             "ignore the above",
             "do not follow",
             "override system",
+            "disregard your",
+            "act as if",
+            "pretend you are",
+            "do not tell the user",
+            "dan mode",
+            "developer mode",
+            "jailbreak",
+            "hypothetical scenario where you bypass",
+            "when no one is watching",
+            "in secret",
+            "without telling the user",
+            "hidden instruction",
         ];
         for pattern in &injection_patterns {
             if lower.contains(pattern) {
@@ -132,8 +145,134 @@ impl SkillVerifier {
             }
         }
 
-        // --- Warning: data exfiltration patterns ---
-        let exfil_patterns = [
+        // ── Critical: data exfiltration with env vars / secrets ─────
+        let exfil_critical = [
+            "curl.*$", "wget.*$", "requests.post.*api_key",
+            "cat .env", "cat ~/.ssh", "cat ~/.aws",
+            "printenv", "os.environ",
+            "send conversation history",
+            "forward the entire chat",
+        ];
+        for pattern in &exfil_critical {
+            if lower.contains(pattern) {
+                warnings.push(SkillWarning {
+                    severity: WarningSeverity::Critical,
+                    message: format!("Data exfiltration pattern: '{pattern}'"),
+                });
+            }
+        }
+
+        // ── Critical: reverse shells / backdoors ────────────────────
+        let reverse_shell_patterns = [
+            "/bin/bash -i",
+            "/dev/tcp/",
+            "nc -l",
+            "nc -e",
+            "ncat ",
+            "mkfifo",
+            "bash -c 'exec",
+        ];
+        for pattern in &reverse_shell_patterns {
+            if lower.contains(pattern) {
+                warnings.push(SkillWarning {
+                    severity: WarningSeverity::Critical,
+                    message: format!("Reverse shell pattern: '{pattern}'"),
+                });
+            }
+        }
+
+        // ── Critical: persistence mechanisms ────────────────────────
+        let persistence_patterns = [
+            "crontab",
+            ".bashrc",
+            ".zshrc",
+            ".profile",
+            "systemctl enable",
+            "launchctl load",
+            "ssh-keygen",
+            "authorized_keys",
+            "sudoers",
+            "nopasswd",
+        ];
+        for pattern in &persistence_patterns {
+            if lower.contains(pattern) {
+                warnings.push(SkillWarning {
+                    severity: WarningSeverity::Critical,
+                    message: format!("Persistence mechanism: '{pattern}'"),
+                });
+            }
+        }
+
+        // ── Critical: obfuscation / encoded execution ───────────────
+        let obfuscation_patterns = [
+            "base64 -d",
+            "base64 --decode",
+            "eval(",
+            "exec(",
+            "echo | bash",
+            "echo | sh",
+            "python -c",
+            "python3 -c",
+            "compile(",
+        ];
+        for pattern in &obfuscation_patterns {
+            if lower.contains(pattern) {
+                warnings.push(SkillWarning {
+                    severity: WarningSeverity::Critical,
+                    message: format!("Obfuscated execution pattern: '{pattern}'"),
+                });
+            }
+        }
+
+        // ── Critical: supply chain attacks ──────────────────────────
+        let supply_chain_patterns = [
+            "curl | sh",
+            "curl | bash",
+            "wget | sh",
+            "wget | bash",
+            "pip install --",
+            "npm install --",
+            "uv run ",
+        ];
+        for pattern in &supply_chain_patterns {
+            if lower.contains(pattern) {
+                warnings.push(SkillWarning {
+                    severity: WarningSeverity::Critical,
+                    message: format!("Supply chain attack pattern: '{pattern}'"),
+                });
+            }
+        }
+
+        // ── Critical: agent config tampering ────────────────────────
+        let config_tampering = [
+            "agents.md",
+            "claude.md",
+            ".cursorrules",
+            "soul.md",
+            "config.yaml",
+            "config.toml",
+        ];
+        for pattern in &config_tampering {
+            // Only flag if it looks like a write/modify operation, not just a reference
+            let write_contexts = [
+                &format!("write {pattern}") as &str,
+                &format!("modify {pattern}"),
+                &format!("overwrite {pattern}"),
+                &format!("append to {pattern}"),
+                &format!("edit {pattern}"),
+            ];
+            for ctx in &write_contexts {
+                if lower.contains(ctx) {
+                    warnings.push(SkillWarning {
+                        severity: WarningSeverity::Critical,
+                        message: format!("Agent config tampering: '{ctx}'"),
+                    });
+                }
+            }
+        }
+
+        // ── Warning: data exfiltration (general) ────────────────────
+        let exfil_warning = [
             "send to http",
             "send to https",
             "post to http",
@@ -143,28 +282,105 @@ impl SkillVerifier {
             "send all data",
             "base64 encode and send",
             "upload to",
+            "webhook.site",
+            "requestbin",
+            "pastebin",
+            "ngrok",
+            "localtunnel",
+            "cloudflared",
         ];
-        for pattern in &exfil_patterns {
+        for pattern in &exfil_warning {
             if lower.contains(pattern) {
                 warnings.push(SkillWarning {
                     severity: WarningSeverity::Warning,
-                    message: format!("Potential data exfiltration pattern: '{pattern}'"),
+                    message: format!("Potential data exfiltration: '{pattern}'"),
                 });
             }
         }
 
-        // --- Warning: shell command references in prompt text ---
-        let shell_patterns = ["rm -rf", "chmod ", "sudo "];
-        for pattern in &shell_patterns {
+        // ── Warning: destructive operations ─────────────────────────
+        let destructive_patterns = [
+            "rm -rf /",
+            "rm -rf ~",
+            "rm -rf .",
+            "mkfs",
+            "dd if=",
+            "chmod 777",
+            "chmod -r 777",
+            "> /etc/",
+            "truncate -s 0",
+            "shred ",
+        ];
+        for pattern in &destructive_patterns {
             if lower.contains(pattern) {
                 warnings.push(SkillWarning {
                     severity: WarningSeverity::Warning,
-                    message: format!("Shell command reference in prompt: '{pattern}'"),
+                    message: format!("Destructive operation: '{pattern}'"),
                 });
             }
         }
 
-        // --- Info: excessive length ---
+        // ── Warning: privilege escalation ───────────────────────────
+        let privesc_patterns = [
+            "sudo ", "setuid", "setgid", "chmod u+s", "chmod g+s",
+        ];
+        for pattern in &privesc_patterns {
+            if lower.contains(pattern) {
+                warnings.push(SkillWarning {
+                    severity: WarningSeverity::Warning,
+                    message: format!("Privilege escalation: '{pattern}'"),
+                });
+            }
+        }
+
+        // ── Warning: hardcoded secrets ──────────────────────────────
+        let secret_patterns = [
+            "sk-", "api_key", "apikey", "secret_key", "private_key",
+            "-----begin rsa", "-----begin openssh", "-----begin private",
+            "ghp_", "gho_", "github_pat_",
+            "xoxb-", "xoxp-",
+            "akia",
+        ];
+        for pattern in &secret_patterns {
+            if lower.contains(pattern) {
+                warnings.push(SkillWarning {
+                    severity: WarningSeverity::Warning,
+                    message: format!("Possible hardcoded secret: '{pattern}'"),
+                });
+            }
+        }
+
+        // ── Warning: invisible unicode characters ───────────────────
+        let invisible_chars: &[(char, &str)] = &[
+            ('\u{200B}', "zero-width space"),
+            ('\u{200C}', "zero-width non-joiner"),
+            ('\u{200D}', "zero-width joiner"),
+            ('\u{2060}', "word joiner"),
+            ('\u{FEFF}', "zero-width no-break space"),
+            ('\u{200E}', "left-to-right mark"),
+            ('\u{200F}', "right-to-left mark"),
+            ('\u{202A}', "left-to-right embedding"),
+            ('\u{202B}', "right-to-left embedding"),
+            ('\u{202C}', "pop directional formatting"),
+            ('\u{202D}', "left-to-right override"),
+            ('\u{202E}', "right-to-left override"),
+            ('\u{2066}', "left-to-right isolate"),
+            ('\u{2067}', "right-to-left isolate"),
+            ('\u{2069}', "pop directional isolate"),
+        ];
+        for &(ch, name) in invisible_chars {
+            if content.contains(ch) {
+                warnings.push(SkillWarning {
+                    severity: WarningSeverity::Warning,
+                    message: format!(
+                        "Invisible unicode character detected: {name} (U+{:04X})",
+                        ch as u32
+                    ),
+                });
+            }
+        }
+
+        // ── Info: excessive length ──────────────────────────────────
         if content.len() > 50_000 {
             warnings.push(SkillWarning {
                 severity: WarningSeverity::Info,
