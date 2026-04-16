@@ -8422,23 +8422,28 @@ mod tests {
 
     #[test]
     fn test_should_augment_web_search_off() {
-        let mut manifest = AgentManifest::default();
-        manifest.web_search_augmentation = librefang_types::agent::WebSearchAugmentationMode::Off;
+        let manifest = AgentManifest {
+            web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::Off,
+            ..Default::default()
+        };
         assert!(!should_augment_web_search(&manifest));
     }
 
     #[test]
     fn test_should_augment_web_search_always() {
-        let mut manifest = AgentManifest::default();
-        manifest.web_search_augmentation =
-            librefang_types::agent::WebSearchAugmentationMode::Always;
+        let manifest = AgentManifest {
+            web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::Always,
+            ..Default::default()
+        };
         assert!(should_augment_web_search(&manifest));
     }
 
     #[test]
     fn test_should_augment_web_search_auto_with_tools() {
-        let mut manifest = AgentManifest::default();
-        manifest.web_search_augmentation = librefang_types::agent::WebSearchAugmentationMode::Auto;
+        let mut manifest = AgentManifest {
+            web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::Auto,
+            ..Default::default()
+        };
         // model_supports_tools = true → don't augment
         manifest.metadata.insert(
             "model_supports_tools".to_string(),
@@ -8449,8 +8454,10 @@ mod tests {
 
     #[test]
     fn test_should_augment_web_search_auto_without_tools() {
-        let mut manifest = AgentManifest::default();
-        manifest.web_search_augmentation = librefang_types::agent::WebSearchAugmentationMode::Auto;
+        let mut manifest = AgentManifest {
+            web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::Auto,
+            ..Default::default()
+        };
         // model_supports_tools = false → augment
         manifest.metadata.insert(
             "model_supports_tools".to_string(),
@@ -8461,8 +8468,10 @@ mod tests {
 
     #[test]
     fn test_should_augment_web_search_auto_no_metadata() {
-        let mut manifest = AgentManifest::default();
-        manifest.web_search_augmentation = librefang_types::agent::WebSearchAugmentationMode::Auto;
+        let manifest = AgentManifest {
+            web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::Auto,
+            ..Default::default()
+        };
         // No metadata → assume tools supported → don't augment (conservative)
         assert!(!should_augment_web_search(&manifest));
     }
