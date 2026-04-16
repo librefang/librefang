@@ -121,7 +121,6 @@ taskkill //PID <pid> //F
 | `/api/approvals/totp` | DELETE | Revoke TOTP enrollment |
 
 ## Architecture Notes
-- **Don't touch `librefang-cli`** — user is actively building the interactive CLI
 - `KernelHandle` trait avoids circular deps between runtime and kernel
 - `AppState` in `server.rs` bridges kernel to API routes
 - New routes must be registered in `server.rs` router AND implemented in `routes.rs`

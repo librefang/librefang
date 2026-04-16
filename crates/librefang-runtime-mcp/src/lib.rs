@@ -519,7 +519,9 @@ impl McpConnection {
             command.to_string()
         };
 
-        let args_owned: Vec<String> = args.to_vec();
+        // Expand environment variable references ($VAR, ${VAR}) in args so
+        // templates can use e.g. "$HOME" without wrapping in `sh -c`.
+        let args_owned: Vec<String> = args.iter().map(|a| expand_env_vars(a)).collect();
         let env_owned: Vec<String> = extra_env.to_vec();
 
         let transport = TokioChildProcess::new(
@@ -1479,6 +1481,57 @@ pub fn resolve_mcp_server_from_known<'a>(
 /// Normalize a name for use in tool namespacing (lowercase, replace hyphens).
 pub fn normalize_name(name: &str) -> String {
     name.to_lowercase().replace('-', "_")
+}
+
+/// Expand `$VAR` and `${VAR}` references in a string using the process
+/// environment. Unknown variables are left as-is. This allows MCP server
+/// templates to reference `$HOME`, `$USER`, etc. without requiring a shell
+/// wrapper (`sh -c`), which the security check blocks.
+fn expand_env_vars(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            let braced = chars.peek() == Some(&'{');
+            if braced {
+                chars.next(); // consume '{'
+            }
+            let mut var_name = String::new();
+            while let Some(&c) = chars.peek() {
+                if braced {
+                    if c == '}' {
+                        chars.next();
+                        break;
+                    }
+                } else if !c.is_ascii_alphanumeric() && c != '_' {
+                    break;
+                }
+                var_name.push(c);
+                chars.next();
+            }
+            if var_name.is_empty() {
+                result.push('$');
+                if braced {
+                    result.push('{');
+                }
+            } else if let Ok(val) = std::env::var(&var_name) {
+                result.push_str(&val);
+            } else {
+                // Unknown var — keep original text
+                result.push('$');
+                if braced {
+                    result.push('{');
+                }
+                result.push_str(&var_name);
+                if braced {
+                    result.push('}');
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 #[cfg(test)]

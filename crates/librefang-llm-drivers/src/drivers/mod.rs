@@ -933,6 +933,30 @@ pub fn cli_provider_available(name: &str) -> bool {
     }
 }
 
+/// Check whether any of the given env vars redirect traffic away from official
+/// API hosts. Returns `true` when a proxy/non-official endpoint is detected.
+///
+/// CLI providers inherit environment variables (e.g. `ANTHROPIC_BASE_URL`)
+/// that can silently redirect all requests to a third-party proxy. When that
+/// happens the provider should not appear as "configured".
+///
+/// `env_vars` — env var names to check (first non-empty wins).
+/// `official_hosts` — substrings that identify the official API (e.g.
+/// `"api.anthropic.com"`). If the env var value contains none of them, the
+/// provider is considered proxied.
+pub fn is_proxied_via_env(env_vars: &[&str], official_hosts: &[&str]) -> bool {
+    for var in env_vars {
+        if let Ok(val) = std::env::var(var) {
+            let val = val.trim().trim_end_matches('/').to_lowercase();
+            if val.is_empty() {
+                continue;
+            }
+            return !official_hosts.iter().any(|host| val.contains(host));
+        }
+    }
+    false
+}
+
 /// Check if a provider name refers to a CLI-subprocess-based provider.
 pub fn is_cli_provider(name: &str) -> bool {
     matches!(
