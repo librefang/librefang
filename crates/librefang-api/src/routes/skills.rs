@@ -198,16 +198,32 @@ use std::time::Instant;
         (status = 200, description = "List installed skills", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_skills(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
     let skills_dir = state.kernel.home_dir().join("skills");
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
     if let Err(e) = registry.load_all() {
         tracing::warn!("Failed to reload skill registry: {e}");
     }
 
+    let category_filter = params.get("category").map(|s| s.as_str());
+
+    let mut categories = std::collections::BTreeSet::new();
     let skills: Vec<serde_json::Value> = registry
         .list()
         .iter()
+        .filter(|s| {
+            // Collect all categories while iterating
+            let cat = s.manifest.skill.tags.first().map(|t| t.as_str()).unwrap_or("general");
+            categories.insert(cat.to_string());
+            // Apply category filter if specified
+            match category_filter {
+                Some(filter) => cat == filter,
+                None => true,
+            }
+        })
         .map(|s| {
             let source = match &s.manifest.source {
                 Some(librefang_skills::SkillSource::ClawHub { slug, version }) => {
@@ -240,7 +256,12 @@ pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoRespons
         })
         .collect();
 
-    Json(serde_json::json!({ "skills": skills, "total": skills.len() }))
+    let categories_vec: Vec<String> = categories.into_iter().collect();
+    Json(serde_json::json!({
+        "skills": skills,
+        "total": skills.len(),
+        "categories": categories_vec,
+    }))
 }
 
 /// POST /api/skills/install — Install a skill from FangHub (GitHub).

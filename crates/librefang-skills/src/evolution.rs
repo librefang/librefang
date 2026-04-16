@@ -1043,6 +1043,60 @@ pub fn record_skill_usage(skill_dir: &Path) -> Result<(), SkillError> {
     save_evolution_meta(skill_dir, &meta)
 }
 
+// ── Skill config variable discovery ─────────────────────────────────
+
+/// A config variable declared by a skill.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillConfigVar {
+    /// Dot-separated config key (e.g., "wiki.path").
+    pub key: String,
+    /// Human-readable description.
+    pub description: String,
+    /// Default value if not set in config.
+    pub default: Option<String>,
+    /// Skill that declares this variable.
+    pub skill_name: String,
+}
+
+/// Extract config variable declarations from a skill's [config] table.
+///
+/// Skills can declare config keys in their `[config]` section:
+/// ```toml
+/// [config]
+/// wiki_path = "~/wiki"
+/// api_endpoint = "https://api.example.com"
+/// ```
+///
+/// Returns a list of config vars with their keys and defaults.
+pub fn extract_skill_config_vars(skill: &InstalledSkill) -> Vec<SkillConfigVar> {
+    let mut vars = Vec::new();
+    for (key, value) in &skill.manifest.config {
+        vars.push(SkillConfigVar {
+            key: key.clone(),
+            description: format!("Config for skill '{}'", skill.manifest.skill.name),
+            default: value.as_str().map(String::from),
+            skill_name: skill.manifest.skill.name.clone(),
+        });
+    }
+    vars
+}
+
+/// Discover all config variables across all installed skills.
+pub fn discover_all_config_vars(
+    skills: &[&InstalledSkill],
+) -> Vec<SkillConfigVar> {
+    let mut all_vars = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
+    for skill in skills {
+        for var in extract_skill_config_vars(skill) {
+            if seen_keys.insert(var.key.clone()) {
+                all_vars.push(var);
+            }
+        }
+    }
+    all_vars
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
