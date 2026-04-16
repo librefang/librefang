@@ -226,6 +226,7 @@ impl IntegrationRegistry {
                     env,
                     headers: Vec::new(),
                     oauth: None,
+                    taint_scanning: true,
                 })
             })
             .collect()
