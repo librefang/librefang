@@ -403,10 +403,8 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
                 Some(n) if n.ends_with(".toml") => n.to_string(),
                 _ => continue,
             };
-            if !src_dir.join(&name).exists() {
-                if std::fs::remove_file(&path).is_ok() {
-                    removed += 1;
-                }
+            if !src_dir.join(&name).exists() && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
             }
         }
     }
