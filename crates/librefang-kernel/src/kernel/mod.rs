@@ -1943,6 +1943,7 @@ impl LibreFangKernel {
                     // Determine the API key env var for the detected provider.
                     let key_env = match detected {
                         "openai" => "OPENAI_API_KEY",
+                        "openrouter" => "OPENROUTER_API_KEY",
                         "groq" => "GROQ_API_KEY",
                         "mistral" => "MISTRAL_API_KEY",
                         "together" => "TOGETHER_API_KEY",
@@ -1969,8 +1970,9 @@ impl LibreFangKernel {
                 } else {
                     warn!(
                         "No embedding provider available. Set one of: OPENAI_API_KEY, \
-                         GROQ_API_KEY, MISTRAL_API_KEY, TOGETHER_API_KEY, FIREWORKS_API_KEY, \
-                         COHERE_API_KEY, or configure Ollama."
+                         OPENROUTER_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, \
+                         TOGETHER_API_KEY, FIREWORKS_API_KEY, COHERE_API_KEY, \
+                         or configure Ollama."
                     );
                     None
                 }

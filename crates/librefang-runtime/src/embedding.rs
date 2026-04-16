@@ -456,6 +456,7 @@ pub fn detect_embedding_provider() -> Option<&'static str> {
     // Cloud providers — check API key env vars in priority order.
     let cloud_providers: &[(&str, &str)] = &[
         ("OPENAI_API_KEY", "openai"),
+        ("OPENROUTER_API_KEY", "openrouter"),
         ("GROQ_API_KEY", "groq"),
         ("MISTRAL_API_KEY", "mistral"),
         ("TOGETHER_API_KEY", "together"),
@@ -548,6 +549,7 @@ pub fn create_embedding_driver(
             let needs_v1 = matches!(
                 provider,
                 "openai"
+                    | "openrouter"
                     | "groq"
                     | "together"
                     | "fireworks"
@@ -564,6 +566,7 @@ pub fn create_embedding_driver(
         })
         .unwrap_or_else(|| match provider {
             "openai" => "https://api.openai.com/v1".to_string(),
+            "openrouter" => "https://openrouter.ai/api/v1".to_string(),
             "groq" => "https://api.groq.com/openai/v1".to_string(),
             "together" => "https://api.together.xyz/v1".to_string(),
             "fireworks" => "https://api.fireworks.ai/inference/v1".to_string(),
@@ -605,6 +608,7 @@ pub fn create_embedding_driver(
 fn provider_default_key_env(provider: &str) -> &'static str {
     match provider {
         "openai" => "OPENAI_API_KEY",
+        "openrouter" => "OPENROUTER_API_KEY",
         "groq" => "GROQ_API_KEY",
         "mistral" => "MISTRAL_API_KEY",
         "together" => "TOGETHER_API_KEY",
