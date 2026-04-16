@@ -615,7 +615,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
     if (isMultiLine) {
       return (
         <div className="flex justify-start py-2">
-          <div className="max-w-[min(90%,56ch)] text-xs text-text-dim/70 [&_code]:text-brand [&_code]:font-mono [&_ul]:space-y-1 [&_li]:list-none [&_li]:flex [&_li]:gap-2">
+          <div className="max-w-[min(90%,56ch)] text-xs text-text-dim/70 [&_code]:text-brand [&_code]:font-mono [&_ul]:space-y-1 [&_ul>li]:list-none [&_ul>li]:flex [&_ul>li]:gap-2">
             <MarkdownContent>{message.content}</MarkdownContent>
           </div>
         </div>
