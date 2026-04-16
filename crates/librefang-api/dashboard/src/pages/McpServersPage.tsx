@@ -267,6 +267,11 @@ function ServerCard({
   const toolsCount = conn?.tools_count ?? 0;
   const [showAllTools, setShowAllTools] = useState(false);
 
+  // Reset "show all" when tools section is collapsed
+  useEffect(() => {
+    if (!isExpanded) setShowAllTools(false);
+  }, [isExpanded]);
+
   const visibleTools = useMemo(() => {
     if (!conn?.tools) return [];
     if (showAllTools || conn.tools.length <= 5) return conn.tools;
@@ -551,7 +556,10 @@ export function McpServersPage() {
   const registryTemplates = registryQuery.data?.integrations ?? [];
   const configuredNames = new Set(configured.map(s => s.name));
 
-  const connectedCount = configured.filter(s => connectedMap.get(s.name)?.connected).length;
+  const connectedCount = useMemo(
+    () => configured.filter(s => connectedMap.get(s.name)?.connected).length,
+    [configured, connectedMap],
+  );
   const disconnectedCount = configured.length - connectedCount;
 
   return (
