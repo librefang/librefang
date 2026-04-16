@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, fanghubListSkills, installSkill, listHands, getSkillDetail, createSkill, type ClawHubBrowseItem, type FangHubSkill, type HandDefinitionItem, type SkillDetail } from "../api";
+import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, fanghubListSkills, installSkill, listHands, getSkillDetail, createSkill, type ClawHubBrowseItem, type FangHubSkill, type HandDefinitionItem } from "../api";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Card } from "../components/ui/Card";
@@ -16,7 +16,7 @@ import {
   Download, Trash2, Star, Loader2, Sparkles, Package,
   Code, GitBranch, Globe, Cloud, Monitor, Bot, Database,
   Briefcase, Shield, Terminal, Calendar, Store, Zap, RefreshCw,
-  Plus, History, Eye, RotateCcw, FileText, Tag,
+  Plus, History, Eye, FileText, Tag,
 } from "lucide-react";
 
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
@@ -1097,7 +1097,7 @@ export function SkillsPage() {
         onClose={() => setShowCreateModal(false)}
         onCreated={() => {
           queryClient.invalidateQueries({ queryKey: ["skills"] });
-          addToast({ type: "success", message: t("skills.evo_created", { defaultValue: "Skill created successfully" }) });
+          addToast(t("skills.evo_created", { defaultValue: "Skill created successfully" }), "success");
         }}
         t={t}
       />

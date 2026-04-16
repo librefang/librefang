@@ -162,7 +162,8 @@
     "setup_title": "Setup Required",
     "setup_description": "No configuration file detected. Click to auto-detect your LLM provider and generate a default config.",
     "setup_button": "Initialize",
-    "setup_running": "Initializing..."
+    "setup_running": "Initializing...",
+    "setup_wizard": "Use Wizard"
   },
   "agents": {
     "title": "Agents",
@@ -1652,9 +1653,37 @@
     "batch_disabled_totp": "Batch approve disabled when TOTP is enforced"
   },
   "wizard": {
-    "welcome": "Welcome",
+    "welcome": "Welcome to LibreFang",
+    "subtitle": "Connect a model provider and you're ready to chat, code, and orchestrate agents.",
     "step_1": "Step 1",
-    "connect_provider": "Connect Provider"
+    "connect_provider": "Connect a Provider",
+    "step_1_desc": "Pick an LLM provider to power your agents. You can add more later from the Providers page.",
+    "add_api_key": "Add API Key",
+    "step_2_desc": "Paste your {{provider}} API key. It is stored encrypted in the local vault.",
+    "api_key_label": "API Key",
+    "no_key_needed": "This provider does not require an API key — local or self-hosted.",
+    "env_hint": "Tip: you can also export {{env}} in your environment; the wizard will pick it up automatically.",
+    "provider_ready": "Ready",
+    "needs_key": "Needs Key",
+    "no_key": "No Key",
+    "no_providers": "No providers loaded. Is the daemon running?",
+    "already_configured": "Already configured",
+    "already_configured_desc": "This provider already has a valid key. You can skip to the next step or replace the key below.",
+    "provider_connected": "Provider connected successfully",
+    "provider_failed": "Could not connect: {{message}}",
+    "connect": "Connect & Test",
+    "finish_title": "You're all set",
+    "step_3_desc": "Confirm and we'll set this provider as default and initialize a starter agent.",
+    "step_3_hint": "The starter agent uses a balanced model and safe defaults. You can tune everything from the Agents and Settings pages afterwards.",
+    "summary_provider": "Provider",
+    "summary_status": "Status",
+    "finish_action": "Launch LibreFang",
+    "finalize_failed": "Setup failed: {{message}}",
+    "done_title": "LibreFang is ready",
+    "done_desc": "Your default provider is configured and a starter agent has been created. You can now chat or jump into the dashboard.",
+    "go_overview": "Go to Overview",
+    "start_chat": "Start Chatting",
+    "skip": "Skip wizard"
   },
   "models": {
     "section": "Infrastructure",

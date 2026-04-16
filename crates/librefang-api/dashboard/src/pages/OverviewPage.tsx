@@ -173,13 +173,21 @@ export function OverviewPage() {
               <h3 className="text-sm font-bold">{t("overview.setup_title")}</h3>
               <p className="mt-1 text-xs text-text-dim">{t("overview.setup_description")}</p>
             </div>
-            <button
-              onClick={handleInit}
-              disabled={initLoading}
-              className="shrink-0 rounded-xl bg-brand px-5 py-2.5 text-xs font-bold text-white shadow-lg shadow-brand/20 transition-all hover:shadow-xl hover:shadow-brand/30 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {initLoading ? t("overview.setup_running") : t("overview.setup_button")}
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => navigate({ to: "/wizard" })}
+                className="rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-xs font-bold text-text-main hover:border-brand/30 hover:text-brand transition-all"
+              >
+                {t("overview.setup_wizard", { defaultValue: "Use Wizard" })}
+              </button>
+              <button
+                onClick={handleInit}
+                disabled={initLoading}
+                className="rounded-xl bg-brand px-5 py-2.5 text-xs font-bold text-white shadow-lg shadow-brand/20 transition-all hover:shadow-xl hover:shadow-brand/30 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {initLoading ? t("overview.setup_running") : t("overview.setup_button")}
+              </button>
+            </div>
           </div>
         </Card>
       )}

@@ -162,7 +162,8 @@
     "setup_title": "需要初始化",
     "setup_description": "未检测到配置文件，点击自动检测 LLM 供应商并生成默认配置。",
     "setup_button": "初始化",
-    "setup_running": "初始化中..."
+    "setup_running": "初始化中...",
+    "setup_wizard": "使用向导"
   },
   "agents": {
     "title": "智能体",
@@ -1627,9 +1628,37 @@
     "batch_disabled_totp": "TOTP 强制启用时不可批量审批"
   },
   "wizard": {
-    "welcome": "欢迎",
+    "welcome": "欢迎使用 LibreFang",
+    "subtitle": "连接一个模型供应商后即可开始聊天、编程和编排 Agent。",
     "step_1": "第一步",
-    "connect_provider": "连接供应商"
+    "connect_provider": "连接模型供应商",
+    "step_1_desc": "选择一个 LLM 供应商作为 Agent 的推理引擎。之后可以在「供应商」页面添加更多。",
+    "add_api_key": "添加 API Key",
+    "step_2_desc": "粘贴您的 {{provider}} API Key。密钥会加密存储在本地保险库中。",
+    "api_key_label": "API Key",
+    "no_key_needed": "此供应商无需 API Key（本地或自托管）。",
+    "env_hint": "提示：您也可以在环境变量中设置 {{env}}，向导会自动识别。",
+    "provider_ready": "就绪",
+    "needs_key": "需要密钥",
+    "no_key": "无需密钥",
+    "no_providers": "未加载到任何供应商，请确认守护进程是否在运行。",
+    "already_configured": "已配置",
+    "already_configured_desc": "此供应商已有可用密钥。您可以直接下一步，或在下方替换密钥。",
+    "provider_connected": "供应商连接成功",
+    "provider_failed": "连接失败：{{message}}",
+    "connect": "连接并测试",
+    "finish_title": "一切就绪",
+    "step_3_desc": "确认后将把该供应商设为默认，并初始化一个入门 Agent。",
+    "step_3_hint": "入门 Agent 使用均衡模型与安全默认配置。之后可在「代理」与「设置」页面自定义。",
+    "summary_provider": "供应商",
+    "summary_status": "状态",
+    "finish_action": "启动 LibreFang",
+    "finalize_failed": "初始化失败：{{message}}",
+    "done_title": "LibreFang 已就绪",
+    "done_desc": "默认供应商已配置，入门 Agent 已创建。现在可以开始聊天或进入控制台。",
+    "go_overview": "进入总览",
+    "start_chat": "开始聊天",
+    "skip": "跳过向导"
   },
   "models": {
     "section": "模型管理",
