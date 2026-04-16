@@ -281,8 +281,10 @@ pub fn check_outbound_text_violation(payload: &str, sink: &TaintSink) -> Option<
         // that look like paths: start with `/` or `C:\`, or contain
         // multiple `/` segments with a file extension at the end.
         let looks_like_path = trimmed.starts_with('/')
-            || trimmed.starts_with("C:\\")
-            || trimmed.starts_with("D:\\")
+            || (trimmed.len() >= 3
+                && trimmed.as_bytes()[1] == b':'
+                && trimmed.as_bytes()[2] == b'\\')
+            || trimmed.starts_with("\\\\")
             || (trimmed.contains('/')
                 && trimmed
                     .rfind('.')
