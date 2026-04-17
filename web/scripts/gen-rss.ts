@@ -12,14 +12,14 @@ const OUT = join(__dirname, '..', 'public', 'feed.xml')
 const SITE = 'https://librefang.ai'
 const AUTHOR = 'LibreFang <noreply@librefang.ai>'
 
-interface Entry {
+export interface Entry {
   version: string
   date: string
   body: string
 }
 
 // Parse top-level versioned sections until we hit the next version or end.
-function parseEntries(md: string, max: number): Entry[] {
+export function parseEntries(md: string, max: number): Entry[] {
   const out: Entry[] = []
   // Match "## [2026.4.15] - 2026-04-15"
   const re = /^##\s+\[([^\]]+)\]\s*-\s*(\d{4}-\d{2}-\d{2})\s*$/gm
@@ -39,13 +39,13 @@ function parseEntries(md: string, max: number): Entry[] {
   return out
 }
 
-function escapeXml(s: string): string {
+export function escapeXml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
 // Render body Markdown to a plain-text summary. Full HTML conversion would be
 // overkill; keep the Markdown intact inside CDATA so feed readers render it.
-function renderEntry(e: Entry): string {
+export function renderEntry(e: Entry): string {
   const url = `${SITE}/changelog/#${e.version.replace(/\./g, '-')}`
   return `    <entry>
       <id>${url}</id>
@@ -57,27 +57,33 @@ function renderEntry(e: Entry): string {
     </entry>`
 }
 
-function main() {
-  const md = readFileSync(CHANGELOG, 'utf-8')
-  const entries = parseEntries(md, 30)
-  if (entries.length === 0) {
-    console.warn('No changelog entries matched — feed will be empty.')
-  }
+export function buildFeed(md: string, opts: { site?: string; author?: string; max?: number } = {}): { xml: string; entries: Entry[] } {
+  const site = opts.site ?? SITE
+  const author = opts.author ?? AUTHOR
+  const max = opts.max ?? 30
+  const entries = parseEntries(md, max)
   const latest = entries[0]?.date ?? new Date().toISOString().slice(0, 10)
-  const feed = `<?xml version="1.0" encoding="UTF-8"?>
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
   <title>LibreFang Changelog</title>
-  <link href="${SITE}/feed.xml" rel="self" />
-  <link href="${SITE}/changelog/" />
-  <id>${SITE}/feed.xml</id>
+  <link href="${site}/feed.xml" rel="self" />
+  <link href="${site}/changelog/" />
+  <id>${site}/feed.xml</id>
   <updated>${latest}T00:00:00Z</updated>
-  <author><name>${AUTHOR}</name></author>
+  <author><name>${author}</name></author>
 ${entries.map(renderEntry).join('\n')}
 </feed>
 `
+  return { xml, entries }
+}
+
+function main() {
+  const md = readFileSync(CHANGELOG, 'utf-8')
+  const { xml, entries } = buildFeed(md)
+  if (entries.length === 0) console.warn('No changelog entries matched — feed will be empty.')
   mkdirSync(dirname(OUT), { recursive: true })
-  writeFileSync(OUT, feed)
+  writeFileSync(OUT, xml)
   console.log(`Wrote ${entries.length} entries to ${OUT}`)
 }
 
-main()
+if (import.meta.url === `file://${process.argv[1]}`) main()

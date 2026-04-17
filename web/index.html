@@ -54,6 +54,25 @@
         document.documentElement.lang = lang;
         window.__INITIAL_LANG__ = lang;
 
+        // Localized meta description before React hydrates, so crawlers /
+        // link-unfurls that don't execute JS still see the right language.
+        var metaDesc = {
+          'zh':    'LibreFang — Agent 操作系统。基于 Rust，生产级运行时，7x24 运行自主 AI Agent。',
+          'zh-TW': 'LibreFang — Agent 作業系統。基於 Rust，生產級執行環境，7x24 運行自主 AI Agent。',
+          'ja':    'LibreFang — Agent オペレーティングシステム。Rust 製の本番グレードランタイムで自律 AI エージェントを 24 時間稼働。',
+          'ko':    'LibreFang — Agent 운영체제. Rust로 만든 프로덕션급 런타임으로 자율 AI 에이전트 24시간 운영.',
+          'de':    'LibreFang — Das Agent-Betriebssystem. Produktionsreife Rust-Laufzeit für autonome KI-Agenten rund um die Uhr.',
+          'es':    'LibreFang — El sistema operativo para Agents. Runtime Rust de grado de producción para agentes IA autónomos 24/7.',
+        };
+        if (metaDesc[lang]) {
+          var d = document.querySelector('meta[name="description"]');
+          if (d) d.setAttribute('content', metaDesc[lang]);
+          var og = document.querySelector('meta[property="og:description"]');
+          if (og) og.setAttribute('content', metaDesc[lang]);
+          var tw = document.querySelector('meta[name="twitter:description"]');
+          if (tw) tw.setAttribute('content', metaDesc[lang]);
+        }
+
         // Initialize theme
         var theme = localStorage.getItem('theme') || 'dark';
         document.documentElement.classList.add(theme);

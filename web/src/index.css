@@ -210,3 +210,25 @@ html {
     animation-duration: 0.25s;
   }
 }
+
+/* High-contrast mode support — users with prefers-contrast: more need
+ * stronger divides and text. Bump border opacity (default muted blacks sit
+ * near WCAG AA threshold) and darken dim text so secondary copy reads. */
+@media (prefers-contrast: more) {
+  .border-black\/10,
+  .border-black\/5 {
+    border-color: rgb(0 0 0 / 0.35) !important;
+  }
+  .dark .border-white\/10,
+  .dark .border-white\/5 {
+    border-color: rgb(255 255 255 / 0.45) !important;
+  }
+  .text-gray-400,
+  .text-gray-500 {
+    color: rgb(55 65 81) !important; /* gray-700 */
+  }
+  .dark .text-gray-400,
+  .dark .text-gray-500 {
+    color: rgb(209 213 219) !important; /* gray-300 */
+  }
+}

@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const OUT_DIR = join(__dirname, '..', 'public', 'og')
 
-interface CategoryDef {
+export interface CategoryDef {
   slug: string
   title: string
   subtitle: string
@@ -25,7 +25,7 @@ interface CategoryDef {
 
 // Colour palette chosen so each category is distinguishable at a glance in a
 // Slack/Twitter feed. Accents pulled from the existing tailwind palette.
-const CATEGORIES: CategoryDef[] = [
+export const CATEGORIES: CategoryDef[] = [
   { slug: 'skills',       title: 'Skills',       subtitle: '60 pluggable tool bundles', accent: '#f59e0b', icon: '⚡' },
   { slug: 'hands',        title: 'Hands',        subtitle: 'Autonomous capability units', accent: '#06b6d4', icon: '◉' },
   { slug: 'agents',       title: 'Agents',       subtitle: 'Pre-built agent templates', accent: '#a78bfa', icon: '◆' },
@@ -37,7 +37,7 @@ const CATEGORIES: CategoryDef[] = [
   { slug: 'integrations', title: 'Integrations', subtitle: 'First-party integrations', accent: '#22d3ee', icon: '⇌' },
 ]
 
-function render(def: CategoryDef): string {
+export function render(def: CategoryDef): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
   <rect width="1200" height="630" fill="#070b14"/>
 
@@ -91,4 +91,4 @@ function main() {
   console.log(`Wrote ${CATEGORIES.length} OG images to ${OUT_DIR}`)
 }
 
-main()
+if (import.meta.url === `file://${process.argv[1]}`) main()
