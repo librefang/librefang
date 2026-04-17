@@ -4715,6 +4715,7 @@ system_prompt = "You are a helpful assistant."
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let result = match tokio::time::timeout(
@@ -5374,6 +5375,7 @@ system_prompt = "You are a helpful assistant."
                 response_format: None,
                 timeout_secs: None,
                 extra_body: None,
+                agent_id: None,
             };
             let (complexity, routed_model) = router.select_model(&probe);
             // Check if the routed model's provider has a valid API key.
@@ -7752,6 +7754,7 @@ system_prompt = "You are a helpful assistant."
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let result = match tokio::time::timeout(
@@ -10397,6 +10400,7 @@ system_prompt = "You are a helpful assistant."
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let start = std::time::Instant::now();

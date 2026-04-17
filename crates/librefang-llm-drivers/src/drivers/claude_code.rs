@@ -288,22 +288,43 @@ impl ClaudeCodeDriver {
     /// `mcpServers` shape; the `type: "http"` transport points at the
     /// daemon's existing `/mcp` endpoint (see
     /// `librefang-api/src/routes/network.rs::mcp_http`).
-    fn write_mcp_config(bridge: &McpBridgeConfig) -> std::io::Result<PathBuf> {
+    fn write_mcp_config(
+        bridge: &McpBridgeConfig,
+        agent_id: Option<&str>,
+    ) -> std::io::Result<PathBuf> {
         let path =
             std::env::temp_dir().join(format!("librefang-mcp-{}.json", uuid::Uuid::new_v4()));
         let base = bridge.base_url.trim_end_matches('/');
         let url = format!("{base}/mcp");
 
+        // Collect per-connection headers. Claude CLI reuses the same config
+        // for every tool call in a CLI invocation, and one invocation serves
+        // exactly one agent, so agent identity can live on the connection
+        // instead of on each request.
+        let mut headers = serde_json::Map::new();
+        if let Some(key) = bridge.api_key.as_deref() {
+            if !key.trim().is_empty() {
+                headers.insert("X-API-Key".to_string(), serde_json::json!(key));
+            }
+        }
+        if let Some(id) = agent_id {
+            if !id.is_empty() {
+                // Used by `/mcp` to rehydrate `ToolExecContext` with the
+                // owning agent's workspace, tool allowlist, and skill
+                // allowlist. Without it, file/media/cron/schedule tools
+                // fail with "workspace sandbox not configured" or
+                // "Agent ID required" even though the agent is fully
+                // registered (issue #2699).
+                headers.insert("X-LibreFang-Agent-Id".to_string(), serde_json::json!(id));
+            }
+        }
+
         let mut server = serde_json::json!({
             "type": "http",
             "url": url,
         });
-        if let Some(key) = bridge.api_key.as_deref() {
-            if !key.trim().is_empty() {
-                server["headers"] = serde_json::json!({
-                    "X-API-Key": key,
-                });
-            }
+        if !headers.is_empty() {
+            server["headers"] = serde_json::Value::Object(headers);
         }
 
         let config = serde_json::json!({
@@ -533,7 +554,7 @@ impl LlmDriver for ClaudeCodeDriver {
 
         if !request.tools.is_empty() {
             if let Some(ref bridge) = self.mcp_bridge {
-                match Self::write_mcp_config(bridge) {
+                match Self::write_mcp_config(bridge, request.agent_id.as_deref()) {
                     Ok(path) => prepared.mcp_config_path = Some(path),
                     Err(e) => {
                         prepared.cleanup();
@@ -779,7 +800,7 @@ impl LlmDriver for ClaudeCodeDriver {
 
         if !request.tools.is_empty() {
             if let Some(ref bridge) = self.mcp_bridge {
-                match Self::write_mcp_config(bridge) {
+                match Self::write_mcp_config(bridge, request.agent_id.as_deref()) {
                     Ok(path) => prepared.mcp_config_path = Some(path),
                     Err(e) => {
                         prepared.cleanup();
@@ -1185,6 +1206,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1227,6 +1249,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1286,6 +1309,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1361,6 +1385,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1568,5 +1593,64 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .output();
         assert!(output.is_err(), "spawning a nonexistent binary should fail");
+    }
+
+    #[test]
+    fn test_mcp_config_carries_agent_id_header() {
+        // Regression: without the X-LibreFang-Agent-Id header, the /mcp
+        // endpoint has no way to rehydrate the caller's workspace / tool
+        // allowlist / skill allowlist / exec_policy, so every file_*,
+        // media_*, cron_create, schedule_create tool invoked from the
+        // spawned Claude CLI fails with "workspace sandbox not configured"
+        // or "Agent ID required" even though the agent is fully
+        // registered. See issue #2699.
+        let bridge = McpBridgeConfig {
+            base_url: "http://127.0.0.1:4545".to_string(),
+            api_key: Some("secret-key".to_string()),
+        };
+        let path = ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234")).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let headers = &cfg["mcpServers"]["librefang"]["headers"];
+        assert_eq!(headers["X-API-Key"], "secret-key");
+        assert_eq!(headers["X-LibreFang-Agent-Id"], "agent-1234");
+    }
+
+    #[test]
+    fn test_mcp_config_omits_agent_id_header_when_absent() {
+        // No agent_id → no X-LibreFang-Agent-Id header. The `/mcp`
+        // endpoint then falls back to its legacy unauthenticated
+        // behaviour (all context fields None), preserving backward
+        // compatibility for non-agent MCP clients that connect to /mcp
+        // directly.
+        let bridge = McpBridgeConfig {
+            base_url: "http://127.0.0.1:4545".to_string(),
+            api_key: Some("secret-key".to_string()),
+        };
+        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let headers = &cfg["mcpServers"]["librefang"]["headers"];
+        assert_eq!(headers["X-API-Key"], "secret-key");
+        assert!(headers.get("X-LibreFang-Agent-Id").is_none());
+    }
+
+    #[test]
+    fn test_mcp_config_no_headers_when_nothing_to_send() {
+        // Neither api_key nor agent_id set — the `headers` object must
+        // be omitted entirely (not an empty {}). Claude CLI tolerates
+        // either but the clean shape matches what the driver wrote
+        // before this change.
+        let bridge = McpBridgeConfig {
+            base_url: "http://127.0.0.1:4545".to_string(),
+            api_key: None,
+        };
+        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert!(cfg["mcpServers"]["librefang"].get("headers").is_none());
     }
 }

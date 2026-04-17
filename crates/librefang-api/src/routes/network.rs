@@ -52,7 +52,7 @@ pub fn protocol_router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_runtime::kernel_handle::KernelHandle;
@@ -867,6 +867,7 @@ pub async fn a2a_external_task_status(
 )]
 pub async fn mcp_http(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Gather all available tools (builtin + skills + MCP)
@@ -915,6 +916,41 @@ pub async fn mcp_http(
             .unwrap_or_else(|e| e.into_inner())
             .snapshot();
 
+        // Resolve the caller agent from the `X-LibreFang-Agent-Id` header,
+        // if any. When a CLI driver (e.g. claude-code's `--mcp-config`)
+        // re-exposes LibreFang tools to a spawned CLI, the driver writes
+        // the owning agent's ID into this header so we can rehydrate the
+        // ToolExecContext fields that the direct agent-loop path would
+        // populate (workspace_root, allowed_tools, allowed_skills,
+        // exec_policy, hand_allowed_env). Without it, every file/media/
+        // cron/schedule tool fails with "workspace sandbox not configured"
+        // or "Agent ID required" — issue #2699.
+        //
+        // Unauthenticated external MCP clients do not set this header and
+        // continue to run with `None` context: the fallback behaviour is
+        // unchanged.
+        let caller_entry = headers
+            .get("x-librefang-agent-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<librefang_types::agent::AgentId>().ok())
+            .and_then(|id| state.kernel.agent_registry().get(id));
+
+        let caller_agent_id_string = caller_entry.as_ref().map(|e| e.id.to_string());
+        let workspace_root = caller_entry
+            .as_ref()
+            .and_then(|e| e.manifest.workspace.as_deref());
+        let allowed_tools_vec = caller_entry
+            .as_ref()
+            .map(|e| e.manifest.capabilities.tools.clone());
+        let allowed_skills_vec = caller_entry.as_ref().map(|e| e.manifest.skills.clone());
+        let exec_policy = caller_entry
+            .as_ref()
+            .and_then(|e| e.manifest.exec_policy.as_ref());
+        let hand_allowed_env: Option<Vec<String>> = caller_entry
+            .as_ref()
+            .and_then(|e| e.manifest.metadata.get("hand_allowed_env"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
         // Execute the tool via the kernel's tool runner
         let kernel_handle: Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
             state.kernel.clone() as Arc<dyn librefang_runtime::kernel_handle::KernelHandle>;
@@ -935,18 +971,18 @@ pub async fn mcp_http(
             tool_name,
             &arguments,
             Some(&kernel_handle),
-            None, // allowed_tools
-            None, // caller_agent_id
+            allowed_tools_vec.as_deref(),
+            caller_agent_id_string.as_deref(),
             Some(&skill_snapshot),
-            None, // allowed_skills
+            allowed_skills_vec.as_deref(),
             Some(state.kernel.mcp_connections_ref()),
             Some(state.kernel.web_tools()),
             Some(state.kernel.browser()),
-            None,
-            None,
+            hand_allowed_env.as_deref(),
+            workspace_root,
             Some(state.kernel.media()),
-            None, // media_drivers
-            None, // exec_policy
+            Some(state.kernel.media_drivers()),
+            exec_policy,
             tts_opt,
             docker_opt,
             Some(state.kernel.processes()),
