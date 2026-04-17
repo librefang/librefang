@@ -35,7 +35,7 @@ const MAX_VERSION_HISTORY: usize = 10;
 // ── Types ───────────────────────────────────────────────────────────
 
 /// Result of a skill evolution operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EvolutionResult {
     /// Whether the operation succeeded.
     pub success: bool,
@@ -45,6 +45,15 @@ pub struct EvolutionResult {
     pub skill_name: String,
     /// New version after mutation (if any).
     pub version: Option<String>,
+    /// Fuzzy-match strategy that succeeded on a patch operation. Always
+    /// `None` for non-patch operations. Lets agents and the dashboard
+    /// programmatically distinguish Exact vs WhitespaceNormalized etc.
+    /// without regexing the message string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_strategy: Option<MatchStrategy>,
+    /// Number of occurrences replaced by a patch. `None` for non-patch ops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_count: Option<usize>,
 }
 
 /// A snapshot of a skill version for rollback.
@@ -840,6 +849,7 @@ pub fn create_skill(
         message: format!("Skill '{name}' created successfully"),
         skill_name: name.to_string(),
         version: Some("0.1.0".to_string()),
+        ..Default::default()
     })
 }
 
@@ -913,6 +923,7 @@ pub fn update_skill(
         message: format!("Skill '{name}' updated to v{new_version}"),
         skill_name: name.to_string(),
         version: Some(new_version),
+        ..Default::default()
     })
 }
 
@@ -1005,6 +1016,8 @@ pub fn patch_skill(
         ),
         skill_name: name.to_string(),
         version: Some(new_version),
+        match_strategy: Some(result.strategy),
+        match_count: Some(result.match_count),
     })
 }
 
@@ -1054,6 +1067,7 @@ pub fn uninstall_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult,
         message: format!("Skill '{name}' uninstalled"),
         skill_name: name.to_string(),
         version: None,
+        ..Default::default()
     })
 }
 
@@ -1118,6 +1132,7 @@ pub fn delete_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult, Sk
         message: format!("Skill '{name}' deleted"),
         skill_name: name.to_string(),
         version: None,
+        ..Default::default()
     })
 }
 
@@ -1252,6 +1267,7 @@ pub fn write_supporting_file(
         message: format!("File '{rel_path}' written to skill '{name}'"),
         skill_name: name.to_string(),
         version: None,
+        ..Default::default()
     })
 }
 
@@ -1328,6 +1344,7 @@ pub fn remove_supporting_file(
         message: format!("File '{rel_path}' removed from skill '{name}'"),
         skill_name: name.to_string(),
         version: None,
+        ..Default::default()
     })
 }
 
@@ -1484,6 +1501,7 @@ pub fn rollback_skill(
         message: format!("Skill '{name}' rolled back to v{new_version}"),
         skill_name: name.to_string(),
         version: Some(new_version),
+        ..Default::default()
     })
 }
 
