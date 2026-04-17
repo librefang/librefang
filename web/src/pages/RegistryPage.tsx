@@ -1,16 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, ArrowRight, Search, Loader2, AlertCircle, ExternalLink, Sparkles, Github, RotateCcw, Globe, ChevronDown } from 'lucide-react'
+import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, Github, ExternalLink } from 'lucide-react'
 import { useRegistry, getLocalizedDesc, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
-import { translations, languages } from './../i18n'
+import { translations } from './../i18n'
 import type { Translation } from './../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
 import { fetchRegistryRaw } from '../lib/registry-raw'
+import SubpageHeader from '../components/SubpageHeader'
 
 interface RegistryPageProps {
   category: RegistryCategory
+  onOpenSearch?: () => void
 }
 
 interface CategoryMeta {
@@ -62,9 +64,8 @@ async function fetchTrending(category: string): Promise<TrendingResp> {
   return res.json()
 }
 
-export default function RegistryPage({ category }: RegistryPageProps) {
+export default function RegistryPage({ category, onOpenSearch }: RegistryPageProps) {
   const lang = useAppStore(s => s.lang)
-  const switchLang = useAppStore(s => s.switchLang)
   const t = translations[lang] || translations['en']!
   const { data, isLoading, error, refetch, isFetching } = useRegistry()
   const queryClient = useQueryClient()
@@ -89,24 +90,6 @@ export default function RegistryPage({ category }: RegistryPageProps) {
     const curr = window.location.pathname + window.location.search + window.location.hash
     if (next !== curr) window.history.replaceState(null, '', next)
   }, [query, data, category])
-  const [langOpen, setLangOpen] = useState(false)
-  const langMenuRef = useRef<HTMLDivElement>(null)
-
-  // Close the language menu on outside click / Escape.
-  useEffect(() => {
-    if (!langOpen) return
-    const onDoc = (e: MouseEvent) => {
-      if (!langMenuRef.current?.contains(e.target as Node)) setLangOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setLangOpen(false) }
-    document.addEventListener('mousedown', onDoc)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [langOpen])
-  const currentLangName = languages.find(l => l.code === lang)?.name || 'English'
   const trendingQuery = useQuery<TrendingResp>({
     queryKey: ['registry-trending', category],
     queryFn: () => fetchTrending(category),
@@ -138,55 +121,15 @@ export default function RegistryPage({ category }: RegistryPageProps) {
     return Array.from(set).sort()
   }, [items])
 
-  const baseHref = lang === 'en' ? '/' : `/${lang}/`
   const langPrefix = lang === 'en' ? '' : `/${lang}`
 
   return (
     <main className="min-h-screen bg-surface">
-      {/* Top bar */}
-      <div className="border-b border-black/10 dark:border-white/5 bg-surface-100">
-        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-          <a href={baseHref} className="flex items-center gap-2 text-sm text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">
-            <ArrowLeft className="w-4 h-4" />
-            <span>{t.registry?.backHome || 'Home'}</span>
-          </a>
-          <div className="flex items-center gap-4">
-            {/* Language switcher — mirrors the homepage nav so users on
-                registry subpages can still change language and preserve
-                the current path (/skills → /zh/skills). */}
-            <div className="relative" ref={langMenuRef}>
-              <button
-                onClick={() => setLangOpen(v => !v)}
-                aria-label="Switch language"
-                aria-expanded={langOpen}
-                className="flex items-center gap-1.5 px-2 py-1 text-xs text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium"
-              >
-                <Globe className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">{currentLangName}</span>
-                <ChevronDown className={cn('w-3 h-3 transition-transform', langOpen && 'rotate-180')} />
-              </button>
-              {langOpen && (
-                <div className="absolute right-0 mt-2 w-36 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50">
-                  {languages.map(l => (
-                    <button
-                      key={l.code}
-                      onClick={() => { switchLang(l.code); setLangOpen(false) }}
-                      className={cn('block w-full text-left px-4 py-2.5 text-sm transition-colors', l.code === lang ? 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/5' : 'text-gray-600 dark:text-gray-400 hover:text-slate-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5')}
-                    >
-                      {l.name}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            <a href="https://github.com/librefang/librefang-registry" target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-xs text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-mono">
-              <Github className="w-3.5 h-3.5" />
-              <span>librefang/librefang-registry</span>
-              <ExternalLink className="w-3 h-3" />
-            </a>
-          </div>
-        </div>
-      </div>
+      <SubpageHeader
+        crumbs={[{ label: labels.title }]}
+        sourceUrl={`https://github.com/librefang/librefang-registry${meta.registryPath}`}
+        onOpenSearch={onOpenSearch}
+      />
 
       <section className="max-w-6xl mx-auto px-6 py-14">
         {/* Header */}

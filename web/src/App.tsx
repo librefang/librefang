@@ -1885,7 +1885,7 @@ export default function App() {
   if (isMetricsPage) {
     return (
       <Suspense fallback={suspenseFallback}>
-        <MetricsPage />
+        <MetricsPage onOpenSearch={() => setSearchOpen(true)} />
         {searchOpen && <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />}
       </Suspense>
     )
@@ -1895,8 +1895,8 @@ export default function App() {
     return (
       <Suspense fallback={suspenseFallback}>
         {registryRoute.kind === 'detail'
-          ? <RegistryDetailPage category={registryRoute.category} id={registryRoute.id} />
-          : <RegistryPage category={registryRoute.category} />}
+          ? <RegistryDetailPage category={registryRoute.category} id={registryRoute.id} onOpenSearch={() => setSearchOpen(true)} />
+          : <RegistryPage category={registryRoute.category} onOpenSearch={() => setSearchOpen(true)} />}
         {searchOpen && <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />}
       </Suspense>
     )

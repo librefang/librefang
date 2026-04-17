@@ -1,6 +1,6 @@
 import { useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, ArrowRight, Loader2, AlertCircle, ExternalLink, Sparkles, Github, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Loader2, AlertCircle, ExternalLink, Sparkles, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon } from 'lucide-react'
 import { useState } from 'react'
 import { useRegistry, getLocalizedDesc, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
@@ -8,11 +8,14 @@ import { translations } from '../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
 import { highlightToml } from '../lib/toml-highlight'
+import { renderMarkdown } from '../lib/minimal-markdown'
+import SubpageHeader from '../components/SubpageHeader'
 import { fetchRegistryRaw } from '../lib/registry-raw'
 
 interface RegistryDetailPageProps {
   category: RegistryCategory
   id: string
+  onOpenSearch?: () => void
 }
 
 const COMMIT_API = 'https://stats.librefang.ai/api/registry/commit'
@@ -50,6 +53,18 @@ function pathFor(category: RegistryCategory, id: string): string {
     case 'skills': return `skills/${id}/SKILL.toml`
     case 'mcp':    return `mcp/${id}.toml`
     default:       return `${category}/${id}.toml`
+  }
+}
+
+// README-ish path candidates by category. skills also ship a SKILL.md with the
+// prompt body (that's the canonical doc for them); everything else uses a
+// README.md if present.
+function readmePathsFor(category: RegistryCategory, id: string): string[] {
+  switch (category) {
+    case 'skills': return [`skills/${id}/SKILL.md`, `skills/${id}/README.md`]
+    case 'hands':  return [`hands/${id}/README.md`]
+    case 'agents': return [`agents/${id}/README.md`]
+    default:       return []
   }
 }
 
@@ -106,7 +121,7 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   )
 }
 
-export default function RegistryDetailPage({ category, id }: RegistryDetailPageProps) {
+export default function RegistryDetailPage({ category, id, onOpenSearch }: RegistryDetailPageProps) {
   const lang = useAppStore(s => s.lang)
   const t = translations[lang] || translations['en']!
   const { data: registry } = useRegistry()
@@ -169,6 +184,23 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
     } catch { /* ignore */ }
   }, [category, id])
 
+  // Try each candidate README path in order until one 200s. Skills have
+  // SKILL.md as canonical, other categories may or may not have a README.
+  const readmeQuery = useQuery<string | null>({
+    queryKey: ['registry-readme', category, id],
+    queryFn: async () => {
+      for (const p of readmePathsFor(category, id)) {
+        try {
+          const md = await fetchRegistryRaw(p)
+          if (md && md.trim()) return md
+        } catch { /* try next */ }
+      }
+      return null
+    },
+    staleTime: 1000 * 60 * 60,
+    retry: 0,
+  })
+
   const commitQuery = useQuery<CommitInfo>({
     queryKey: ['registry-commit', rawPath],
     queryFn: async () => {
@@ -180,7 +212,6 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
     retry: 1,
   })
 
-  const baseHref = lang === 'en' ? '/' : `/${lang}/`
   const catHref = lang === 'en' ? `/${category}` : `/${lang}/${category}`
   const categoryLabel = t.registry?.categories[category]?.title || category
   const desc = item ? getLocalizedDesc(item, lang) : ''
@@ -188,32 +219,14 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
 
   return (
     <main className="min-h-screen bg-surface">
-      <div className="border-b border-black/10 dark:border-white/5 bg-surface-100">
-        <div className="max-w-4xl mx-auto px-6 h-16 flex items-center justify-between">
-          <nav className="flex items-center gap-1.5 text-sm text-gray-500">
-            <a href={baseHref} className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors inline-flex items-center gap-1">
-              <ArrowLeft className="w-3.5 h-3.5" />
-              {t.registry?.backHome || 'Home'}
-            </a>
-            <span className="text-gray-300 dark:text-gray-700">/</span>
-            <a href={catHref} className="hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">
-              {categoryLabel}
-            </a>
-            <span className="text-gray-300 dark:text-gray-700">/</span>
-            <span className="text-slate-900 dark:text-white font-semibold truncate max-w-[180px] md:max-w-none">{item?.name || id}</span>
-          </nav>
-          <a
-            href={`https://github.com/librefang/librefang-registry/blob/main/${rawPath}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 text-xs text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-mono"
-          >
-            <Github className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Source</span>
-            <ExternalLink className="w-3 h-3" />
-          </a>
-        </div>
-      </div>
+      <SubpageHeader
+        crumbs={[
+          { label: categoryLabel, href: catHref },
+          { label: item?.name || id },
+        ]}
+        sourceUrl={`https://github.com/librefang/librefang-registry/blob/main/${rawPath}`}
+        onOpenSearch={onOpenSearch}
+      />
 
       <div className="max-w-6xl mx-auto px-6 py-12 lg:grid lg:grid-cols-[200px_1fr] lg:gap-12">
         {/* Sticky TOC — hidden below lg, otherwise pinned in the left gutter. */}
@@ -368,6 +381,19 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
           <pre className="overflow-x-auto text-xs md:text-sm font-mono leading-relaxed p-5 bg-surface-100 border border-black/10 dark:border-white/5 text-gray-700 dark:text-gray-300 whitespace-pre toml-highlight">
             <code>{highlightToml(rawQuery.data)}</code>
           </pre>
+        )}
+
+        {/* README — rendered inline when an adjacent README/SKILL.md exists. */}
+        {readmeQuery.data && (
+          <div id="readme" className="mt-12 pt-8 border-t border-black/10 dark:border-white/5 group scroll-mt-20">
+            <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4 flex items-center">
+              {t.registry?.readme || 'README'}
+              <AnchorLink id="readme" title={t.registry?.copyLink || 'Copy link'} />
+            </h2>
+            <div className="max-w-none">
+              {renderMarkdown(readmeQuery.data)}
+            </div>
+          </div>
         )}
 
         {/* Related items in the same category */}

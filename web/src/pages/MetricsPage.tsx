@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Loader2, BarChart3 } from 'lucide-react'
+import { Loader2, BarChart3 } from 'lucide-react'
 import { useAppStore } from '../store'
 import { translations } from '../i18n'
+import SubpageHeader from '../components/SubpageHeader'
 
 const METRICS_API = 'https://stats.librefang.ai/api/registry/metrics'
 
@@ -18,28 +19,29 @@ async function fetchMetrics(): Promise<Metrics> {
   return res.json()
 }
 
-export default function MetricsPage() {
+interface MetricsPageProps {
+  onOpenSearch?: () => void
+}
+
+export default function MetricsPage({ onOpenSearch }: MetricsPageProps) {
   const lang = useAppStore(s => s.lang)
-  const t = translations[lang] || translations['en']!
+  // `translations[lang]` kept for future copy; metrics page is currently
+  // English-first (content is numeric / CLI-style).
+  void translations[lang]
   const { data, isLoading, error } = useQuery<Metrics>({
     queryKey: ['registry-metrics'],
     queryFn: fetchMetrics,
     staleTime: 1000 * 60 * 5,
     retry: 1,
   })
-  const baseHref = lang === 'en' ? '/' : `/${lang}/`
   const langPrefix = lang === 'en' ? '' : `/${lang}`
 
   return (
     <main className="min-h-screen bg-surface">
-      <div className="border-b border-black/10 dark:border-white/5 bg-surface-100">
-        <div className="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
-          <a href={baseHref} className="inline-flex items-center gap-2 text-sm text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">
-            <ArrowLeft className="w-4 h-4" />
-            {t.registry?.backHome || 'Home'}
-          </a>
-        </div>
-      </div>
+      <SubpageHeader
+        crumbs={[{ label: 'Metrics' }]}
+        onOpenSearch={onOpenSearch}
+      />
 
       <section className="max-w-5xl mx-auto px-6 py-14">
         <div className="mb-8">

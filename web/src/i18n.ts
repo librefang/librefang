@@ -150,6 +150,7 @@ export interface Translation {
     previous: string
     next: string
     prevNext: string
+    readme: string
     categories: {
       skills: { title: string; desc: string }
       mcp: { title: string; desc: string }
@@ -422,6 +423,7 @@ export const translations: Record<string, Translation> = {
       previous: 'Previous',
       next: 'Next',
       prevNext: 'Previous / next in category',
+      readme: 'README',
       categories: {
         skills: { title: 'Skills', desc: 'Pluggable tool bundles — Python, WASM, Node, or prompt-only skills that extend what an agent can do.' },
         mcp:    { title: 'MCP Servers', desc: 'Model Context Protocol servers that plug external tools and data sources directly into any agent.' },
@@ -657,6 +659,7 @@ export const translations: Record<string, Translation> = {
       previous: '上一个',
       next: '下一个',
       prevNext: '同分类上一个 / 下一个',
+      readme: '说明文档',
       categories: {
         skills:   { title: '技能', desc: '可插拔的工具包 —— Python、WASM、Node 或 prompt-only 技能，扩展 Agent 的能力边界。' },
         mcp:      { title: 'MCP 服务器', desc: 'Model Context Protocol 服务器，把外部工具与数据直接挂接到任何 Agent。' },
@@ -892,6 +895,7 @@ export const translations: Record<string, Translation> = {
       previous: '上一個',
       next: '下一個',
       prevNext: '同分類上一個 / 下一個',
+      readme: '說明文件',
       categories: {
         skills:   { title: '技能', desc: '可插拔的工具組 —— Python、WASM、Node 或 prompt-only 技能，擴展 Agent 的能力邊界。' },
         mcp:      { title: 'MCP 伺服器', desc: 'Model Context Protocol 伺服器，把外部工具與資料直接接入任何 Agent。' },
@@ -1127,6 +1131,7 @@ export const translations: Record<string, Translation> = {
       previous: '前へ',
       next: '次へ',
       prevNext: 'カテゴリ内の前後',
+      readme: 'README',
       categories: {
         skills:   { title: 'スキル', desc: 'プラグ可能なツールバンドル —— Python、WASM、Node、または prompt-only スキルで Agent の能力を拡張。' },
         mcp:      { title: 'MCP サーバー', desc: 'Model Context Protocol サーバーで、外部ツールとデータソースを任意の Agent に直接接続。' },
@@ -1362,6 +1367,7 @@ export const translations: Record<string, Translation> = {
       previous: '이전',
       next: '다음',
       prevNext: '카테고리 내 이전 / 다음',
+      readme: 'README',
       categories: {
         skills:   { title: '스킬', desc: '플러그 가능한 도구 번들 —— Python, WASM, Node 또는 prompt-only 스킬로 Agent의 능력 확장.' },
         mcp:      { title: 'MCP 서버', desc: 'Model Context Protocol 서버로 외부 도구와 데이터 소스를 모든 Agent에 직접 연결.' },
@@ -1597,6 +1603,7 @@ export const translations: Record<string, Translation> = {
       previous: 'Zurück',
       next: 'Weiter',
       prevNext: 'Vorheriges / nächstes in der Kategorie',
+      readme: 'README',
       categories: {
         skills:   { title: 'Skills', desc: 'Austauschbare Tool-Bundles — Python-, WASM-, Node- oder Prompt-Only-Skills, die die Fähigkeiten eines Agenten erweitern.' },
         mcp:      { title: 'MCP-Server', desc: 'Model-Context-Protocol-Server, die externe Tools und Datenquellen direkt in jeden Agenten einbinden.' },
@@ -1832,6 +1839,7 @@ export const translations: Record<string, Translation> = {
       previous: 'Anterior',
       next: 'Siguiente',
       prevNext: 'Anterior / siguiente en la categoría',
+      readme: 'README',
       categories: {
         skills:   { title: 'Skills', desc: 'Paquetes de herramientas conectables — skills Python, WASM, Node o prompt-only que amplían las capacidades del agente.' },
         mcp:      { title: 'Servidores MCP', desc: 'Servidores Model Context Protocol que conectan herramientas y fuentes de datos externas directamente a cualquier agente.' },
