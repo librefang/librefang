@@ -107,6 +107,9 @@ export function useCreateAgentSession() {
   });
 }
 
+// Canonical session-switch hook. Invalidates both cache slices so ChatPage
+// (agent-scoped sessions list) and SessionsPage (global sessions list) stay
+// in sync regardless of which page triggered the switch.
 export function useSwitchAgentSession() {
   const qc = useQueryClient();
   return useMutation({
@@ -115,17 +118,28 @@ export function useSwitchAgentSession() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.sessions(variables.agentId) });
+      qc.invalidateQueries({ queryKey: sessionKeys.lists() });
     },
   });
 }
 
+// Canonical session-delete hook. Caller supplies `agentId` when known so the
+// agent-scoped sessions list can be narrowly invalidated; otherwise we fall
+// back to invalidating the full agents cache. Always invalidates the global
+// sessions list so SessionsPage stays fresh.
 export function useDeleteAgentSession() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: deleteSession,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentKeys.all });
-      qc.invalidateQueries({ queryKey: sessionKeys.all });
+    mutationFn: ({ sessionId }: { sessionId: string; agentId?: string }) =>
+      deleteSession(sessionId),
+    onSuccess: (_data, variables) => {
+      if (variables.agentId) {
+        qc.invalidateQueries({ queryKey: agentKeys.sessions(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      } else {
+        qc.invalidateQueries({ queryKey: agentKeys.all });
+      }
+      qc.invalidateQueries({ queryKey: sessionKeys.lists() });
     },
   });
 }
@@ -146,7 +160,11 @@ export function useActivatePromptVersion() {
   return useMutation({
     mutationFn: ({ versionId, agentId }: { versionId: string; agentId: string }) =>
       activatePromptVersion(versionId, agentId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: agentKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.promptVersions(variables.agentId) });
+      // Active version may be surfaced on the agent detail view.
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+    },
   });
 }
 
@@ -160,7 +178,9 @@ export function useCreatePromptVersion() {
       agentId: string;
       version: Parameters<typeof createPromptVersion>[1];
     }) => createPromptVersion(agentId, version),
-    onSuccess: () => qc.invalidateQueries({ queryKey: agentKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.promptVersions(variables.agentId) });
+    },
   });
 }
 
@@ -174,7 +194,9 @@ export function useCreateExperiment() {
       agentId: string;
       experiment: Parameters<typeof createExperiment>[1];
     }) => createExperiment(agentId, experiment),
-    onSuccess: () => qc.invalidateQueries({ queryKey: agentKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
+    },
   });
 }
 

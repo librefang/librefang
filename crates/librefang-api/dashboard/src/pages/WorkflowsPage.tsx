@@ -72,6 +72,7 @@ export function WorkflowsPage() {
   const handleRun = async () => {
     if (!selectedWorkflowId) return;
     setDryRunResult(null);
+    dryRunMutation.reset();
     try {
       await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
       addToast(t("workflows.run_started", { defaultValue: "Run started" }), "success");
