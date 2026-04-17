@@ -143,6 +143,9 @@ export interface Translation {
     relatedIn: string
     retry: string
     openInDashboard: string
+    lastUpdated: string
+    copyLink: string
+    trending: string
     categories: {
       skills: { title: string; desc: string }
       mcp: { title: string; desc: string }
@@ -190,7 +193,7 @@ export const translations: Record<string, Translation> = {
         'deploy on any hardware',
         'monitor with 16 security layers',
       ],
-      desc: 'LibreFang is a production-grade runtime for autonomous AI agents. Single binary, 15 built-in capability units, 44 channel adapters. Built in Rust for the workloads that can\'t afford to go down.',
+      desc: 'LibreFang is a production-grade runtime for autonomous AI agents. Single binary, {handsCount} built-in capability units, {channelsCount} channel adapters. Built in Rust for the workloads that can\'t afford to go down.',
       getStarted: 'Get Started',
       viewGithub: 'View on GitHub',
     },
@@ -274,7 +277,7 @@ export const translations: Record<string, Translation> = {
       requires: 'Requires',
       includes: 'Includes',
       reqItems: ['Linux / macOS / Windows', '64MB RAM minimum', 'x86_64 or ARM64', 'LLM API Key'],
-      incItems: ['15 built-in Hands', '44 channel adapters', '50 LLM providers', 'Desktop app (Tauri 2.0)'],
+      incItems: ['{handsCount} built-in Hands', '{channelsCount} channel adapters', '{providersCount} LLM providers', 'Desktop app (Tauri 2.0)'],
     },
     faq: {
       label: 'FAQ',
@@ -393,6 +396,9 @@ export const translations: Record<string, Translation> = {
       relatedIn: 'More {category}',
       retry: 'Retry',
       openInDashboard: 'Or install via local dashboard',
+      lastUpdated: 'Updated',
+      copyLink: 'Copy link to this section',
+      trending: 'Trending',
       categories: {
         skills: { title: 'Skills', desc: 'Pluggable tool bundles — Python, WASM, Node, or prompt-only skills that extend what an agent can do.' },
         mcp:    { title: 'MCP Servers', desc: 'Model Context Protocol servers that plug external tools and data sources directly into any agent.' },
@@ -429,7 +435,7 @@ export const translations: Record<string, Translation> = {
         '部署到任意硬件',
         '16 层安全防护',
       ],
-      desc: 'LibreFang 是面向自主 AI Agent 的生产级运行时。单一二进制文件，15 个内置能力单元，44 个渠道适配器。Rust 构建，为不能停机的负载而生。',
+      desc: 'LibreFang 是面向自主 AI Agent 的生产级运行时。单一二进制文件，{handsCount} 个内置能力单元，{channelsCount} 个渠道适配器。Rust 构建，为不能停机的负载而生。',
       getStarted: '开始使用',
       viewGithub: '查看 GitHub',
     },
@@ -487,7 +493,7 @@ export const translations: Record<string, Translation> = {
       requires: '系统要求',
       includes: '包含内容',
       reqItems: ['Linux / macOS / Windows', '最低 64MB 内存', 'x86_64 或 ARM64', 'LLM API 密钥'],
-      incItems: ['15 个内置 Hands', '44 个渠道适配器', '50 个 LLM 提供商', '桌面应用 (Tauri 2.0)'],
+      incItems: ['{handsCount} 个内置 Hands', '{channelsCount} 个渠道适配器', '{providersCount} 个 LLM 提供商', '桌面应用 (Tauri 2.0)'],
     },
     faq: {
       label: '常见问题',
@@ -606,6 +612,9 @@ export const translations: Record<string, Translation> = {
       relatedIn: '更多{category}',
       retry: '重试',
       openInDashboard: '或在本地仪表盘中安装',
+      lastUpdated: '更新于',
+      copyLink: '复制此段链接',
+      trending: '热门',
       categories: {
         skills:   { title: '技能', desc: '可插拔的工具包 —— Python、WASM、Node 或 prompt-only 技能，扩展 Agent 的能力边界。' },
         mcp:      { title: 'MCP 服务器', desc: 'Model Context Protocol 服务器，把外部工具与数据直接挂接到任何 Agent。' },
@@ -642,7 +651,7 @@ export const translations: Record<string, Translation> = {
         '部署到任意硬體',
         '16 層安全防護',
       ],
-      desc: 'LibreFang 是面向自主 AI Agent 的生產級執行環境。單一二進位檔案，15 個內建能力單元，44 個頻道適配器。Rust 打造，為不能停機的負載而生。',
+      desc: 'LibreFang 是面向自主 AI Agent 的生產級執行環境。單一二進位檔案，{handsCount} 個內建能力單元，{channelsCount} 個頻道適配器。Rust 打造，為不能停機的負載而生。',
       getStarted: '開始使用',
       viewGithub: '查看 GitHub',
     },
@@ -700,7 +709,7 @@ export const translations: Record<string, Translation> = {
       requires: '系統需求',
       includes: '包含內容',
       reqItems: ['Linux / macOS / Windows', '最低 64MB 記憶體', 'x86_64 或 ARM64', 'LLM API 金鑰'],
-      incItems: ['15 個內建 Hands', '44 個頻道適配器', '50 個 LLM 供應商', '桌面應用 (Tauri 2.0)'],
+      incItems: ['{handsCount} 個內建 Hands', '{channelsCount} 個頻道適配器', '{providersCount} 個 LLM 供應商', '桌面應用 (Tauri 2.0)'],
     },
     faq: {
       label: '常見問題',
@@ -819,6 +828,9 @@ export const translations: Record<string, Translation> = {
       relatedIn: '更多{category}',
       retry: '重試',
       openInDashboard: '或在本地儀表盤中安裝',
+      lastUpdated: '更新於',
+      copyLink: '複製此段連結',
+      trending: '熱門',
       categories: {
         skills:   { title: '技能', desc: '可插拔的工具組 —— Python、WASM、Node 或 prompt-only 技能，擴展 Agent 的能力邊界。' },
         mcp:      { title: 'MCP 伺服器', desc: 'Model Context Protocol 伺服器，把外部工具與資料直接接入任何 Agent。' },
@@ -855,7 +867,7 @@ export const translations: Record<string, Translation> = {
         'あらゆるハードウェアにデプロイ',
         '16層のセキュリティで保護',
       ],
-      desc: 'LibreFang は自律型 AI エージェントのための本番グレードランタイムです。シングルバイナリ、15 の内蔵ケイパビリティユニット、44 チャネルアダプタ。ダウンタイムが許されないワークロードのために Rust で構築。',
+      desc: 'LibreFang は自律型 AI エージェントのための本番グレードランタイムです。シングルバイナリ、{handsCount} の内蔵ケイパビリティユニット、{channelsCount} チャネルアダプタ。ダウンタイムが許されないワークロードのために Rust で構築。',
       getStarted: '始める',
       viewGithub: 'GitHub で見る',
     },
@@ -913,7 +925,7 @@ export const translations: Record<string, Translation> = {
       requires: '要件',
       includes: '含まれるもの',
       reqItems: ['Linux / macOS / Windows', '最低64MB RAM', 'x86_64 または ARM64', 'LLM API キー'],
-      incItems: ['15の内蔵Hands', '44チャネルアダプタ', '50のLLMプロバイダ', 'デスクトップアプリ (Tauri 2.0)'],
+      incItems: ['{handsCount}の内蔵Hands', '{channelsCount}チャネルアダプタ', '{providersCount}のLLMプロバイダ', 'デスクトップアプリ (Tauri 2.0)'],
     },
     faq: {
       label: 'FAQ',
@@ -1032,6 +1044,9 @@ export const translations: Record<string, Translation> = {
       relatedIn: '他の{category}',
       retry: '再試行',
       openInDashboard: 'またはローカルダッシュボードからインストール',
+      lastUpdated: '更新',
+      copyLink: 'このセクションのリンクをコピー',
+      trending: '人気',
       categories: {
         skills:   { title: 'スキル', desc: 'プラグ可能なツールバンドル —— Python、WASM、Node、または prompt-only スキルで Agent の能力を拡張。' },
         mcp:      { title: 'MCP サーバー', desc: 'Model Context Protocol サーバーで、外部ツールとデータソースを任意の Agent に直接接続。' },
@@ -1068,7 +1083,7 @@ export const translations: Record<string, Translation> = {
         '모든 하드웨어에 배포',
         '16개 보안 레이어로 보호',
       ],
-      desc: 'LibreFang은 자율 AI 에이전트를 위한 프로덕션급 런타임입니다. 단일 바이너리, 15개 내장 기능 유닛, 44개 채널 어댑터. 다운타임이 허용되지 않는 워크로드를 위해 Rust로 구축.',
+      desc: 'LibreFang은 자율 AI 에이전트를 위한 프로덕션급 런타임입니다. 단일 바이너리, {handsCount}개 내장 기능 유닛, {channelsCount}개 채널 어댑터. 다운타임이 허용되지 않는 워크로드를 위해 Rust로 구축.',
       getStarted: '시작하기',
       viewGithub: 'GitHub 보기',
     },
@@ -1126,7 +1141,7 @@ export const translations: Record<string, Translation> = {
       requires: '요구 사항',
       includes: '포함 내용',
       reqItems: ['Linux / macOS / Windows', '최소 64MB RAM', 'x86_64 또는 ARM64', 'LLM API 키'],
-      incItems: ['15개 내장 Hands', '44개 채널 어댑터', '50개 LLM 제공자', '데스크톱 앱 (Tauri 2.0)'],
+      incItems: ['{handsCount}개 내장 Hands', '{channelsCount}개 채널 어댑터', '{providersCount}개 LLM 제공자', '데스크톱 앱 (Tauri 2.0)'],
     },
     faq: {
       label: 'FAQ',
@@ -1245,6 +1260,9 @@ export const translations: Record<string, Translation> = {
       relatedIn: '더 많은 {category}',
       retry: '다시 시도',
       openInDashboard: '또는 로컬 대시보드에서 설치',
+      lastUpdated: '업데이트',
+      copyLink: '이 섹션 링크 복사',
+      trending: '인기',
       categories: {
         skills:   { title: '스킬', desc: '플러그 가능한 도구 번들 —— Python, WASM, Node 또는 prompt-only 스킬로 Agent의 능력 확장.' },
         mcp:      { title: 'MCP 서버', desc: 'Model Context Protocol 서버로 외부 도구와 데이터 소스를 모든 Agent에 직접 연결.' },
@@ -1281,7 +1299,7 @@ export const translations: Record<string, Translation> = {
         'auf jeder Hardware deployen',
         '16 Sicherheitsschichten nutzen',
       ],
-      desc: 'LibreFang ist eine produktionsreife Laufzeitumgebung für autonome KI-Agenten. Einzelne Binärdatei, 15 eingebaute Fähigkeitseinheiten, 44 Kanaladapter. In Rust gebaut für Workloads, die nicht ausfallen dürfen.',
+      desc: 'LibreFang ist eine produktionsreife Laufzeitumgebung für autonome KI-Agenten. Einzelne Binärdatei, {handsCount} eingebaute Fähigkeitseinheiten, {channelsCount} Kanaladapter. In Rust gebaut für Workloads, die nicht ausfallen dürfen.',
       getStarted: 'Loslegen',
       viewGithub: 'Auf GitHub ansehen',
     },
@@ -1339,7 +1357,7 @@ export const translations: Record<string, Translation> = {
       requires: 'Voraussetzungen',
       includes: 'Enthalten',
       reqItems: ['Linux / macOS / Windows', 'Mindestens 64MB RAM', 'x86_64 oder ARM64', 'LLM API-Schlüssel'],
-      incItems: ['15 eingebaute Hands', '44 Kanaladapter', '50 LLM-Anbieter', 'Desktop-App (Tauri 2.0)'],
+      incItems: ['{handsCount} eingebaute Hands', '{channelsCount} Kanaladapter', '{providersCount} LLM-Anbieter', 'Desktop-App (Tauri 2.0)'],
     },
     faq: {
       label: 'FAQ',
@@ -1458,6 +1476,9 @@ export const translations: Record<string, Translation> = {
       relatedIn: 'Mehr {category}',
       retry: 'Erneut versuchen',
       openInDashboard: 'Oder im lokalen Dashboard installieren',
+      lastUpdated: 'Aktualisiert',
+      copyLink: 'Link zu diesem Abschnitt kopieren',
+      trending: 'Beliebt',
       categories: {
         skills:   { title: 'Skills', desc: 'Austauschbare Tool-Bundles — Python-, WASM-, Node- oder Prompt-Only-Skills, die die Fähigkeiten eines Agenten erweitern.' },
         mcp:      { title: 'MCP-Server', desc: 'Model-Context-Protocol-Server, die externe Tools und Datenquellen direkt in jeden Agenten einbinden.' },
@@ -1494,7 +1515,7 @@ export const translations: Record<string, Translation> = {
         'desplegar en cualquier hardware',
         'monitorizar con 16 capas de seguridad',
       ],
-      desc: 'LibreFang es un runtime de grado de producción para agentes de IA autónomos. Un solo binario, 15 unidades de capacidad integradas, 44 adaptadores de canal. Construido en Rust para cargas de trabajo que no pueden caer.',
+      desc: 'LibreFang es un runtime de grado de producción para agentes de IA autónomos. Un solo binario, {handsCount} unidades de capacidad integradas, {channelsCount} adaptadores de canal. Construido en Rust para cargas de trabajo que no pueden caer.',
       getStarted: 'Comenzar',
       viewGithub: 'Ver en GitHub',
     },
@@ -1552,7 +1573,7 @@ export const translations: Record<string, Translation> = {
       requires: 'Requisitos',
       includes: 'Incluye',
       reqItems: ['Linux / macOS / Windows', 'Mínimo 64MB RAM', 'x86_64 o ARM64', 'Clave API LLM'],
-      incItems: ['15 Hands integradas', '44 adaptadores de canal', '50 proveedores LLM', 'App de escritorio (Tauri 2.0)'],
+      incItems: ['{handsCount} Hands integradas', '{channelsCount} adaptadores de canal', '{providersCount} proveedores LLM', 'App de escritorio (Tauri 2.0)'],
     },
     faq: {
       label: 'FAQ',
@@ -1671,6 +1692,9 @@ export const translations: Record<string, Translation> = {
       relatedIn: 'Más {category}',
       retry: 'Reintentar',
       openInDashboard: 'O instala desde el dashboard local',
+      lastUpdated: 'Actualizado',
+      copyLink: 'Copiar enlace a esta sección',
+      trending: 'Tendencia',
       categories: {
         skills:   { title: 'Skills', desc: 'Paquetes de herramientas conectables — skills Python, WASM, Node o prompt-only que amplían las capacidades del agente.' },
         mcp:      { title: 'Servidores MCP', desc: 'Servidores Model Context Protocol que conectan herramientas y fuentes de datos externas directamente a cualquier agente.' },

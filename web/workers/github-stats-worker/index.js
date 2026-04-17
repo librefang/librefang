@@ -162,6 +162,18 @@ function handleFetch(request, env, ctx) {
     return handleRegistryRaw(env, cors, url.searchParams.get('path') || '')
   }
 
+  if (path === '/api/registry/commit' && request.method === 'GET') {
+    return handleRegistryCommit(env, cors, url.searchParams.get('path') || '')
+  }
+
+  if (path === '/api/registry/click' && request.method === 'POST') {
+    return handleRegistryClick(env, cors, request, ctx)
+  }
+
+  if (path === '/api/registry/trending' && request.method === 'GET') {
+    return handleRegistryTrending(env, cors, url.searchParams.get('category') || '')
+  }
+
   if (path === '/api/releases' && request.method === 'GET') {
     return handleReleases(env, cors)
   }
@@ -479,6 +491,135 @@ async function handleRegistry(env, cors, ctx, forceRefresh = false) {
       headers: { 'Content-Type': 'application/json', ...cors }
     })
   }
+}
+
+// ─── Registry item commit metadata ───
+// Returns { sha, date, message } for the last commit that touched a given
+// registry path. Lets detail pages show "Updated 3d ago" without each visitor
+// hitting api.github.com directly.
+async function handleRegistryCommit(env, cors, rawPath) {
+  const allowedTop = /^(hands|channels|providers|integrations|workflows|agents|plugins|skills|mcp)\//
+  if (!rawPath || !allowedTop.test(rawPath) || rawPath.includes('..')) {
+    return new Response(JSON.stringify({ error: 'invalid path' }), {
+      status: 400, headers: { 'Content-Type': 'application/json', ...cors }
+    })
+  }
+  const cacheKey = `registry_commit:${rawPath}`
+  const cacheTimeKey = `${cacheKey}:time`
+  const fresh = 1000 * 60 * 60 * 6 // 6h — commit metadata doesn't move fast
+
+  const [cached, cacheTimeRaw] = await Promise.all([
+    env.KV.get(cacheKey),
+    env.KV.get(cacheTimeKey),
+  ])
+  const cacheTime = parseInt(cacheTimeRaw || '0', 10)
+  if (cached && (Date.now() - cacheTime < fresh)) {
+    return new Response(cached, {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600', ...cors }
+    })
+  }
+
+  const ghHeaders = { 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'LibrefangStats/1.0' }
+  if (env.GITHUB_TOKEN) ghHeaders['Authorization'] = `token ${env.GITHUB_TOKEN}`
+  try {
+    const apiUrl = `https://api.github.com/repos/librefang/librefang-registry/commits?path=${encodeURIComponent(rawPath)}&per_page=1`
+    const upstream = await fetch(apiUrl, { headers: ghHeaders })
+    if (!upstream.ok) {
+      if (cached) {
+        return new Response(cached, {
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=60', ...cors }
+        })
+      }
+      return new Response(JSON.stringify({ error: `upstream ${upstream.status}` }), {
+        status: upstream.status, headers: { 'Content-Type': 'application/json', ...cors }
+      })
+    }
+    const commits = await upstream.json()
+    const first = Array.isArray(commits) && commits.length > 0 ? commits[0] : null
+    const result = first ? {
+      sha: first.sha,
+      date: first.commit?.author?.date || first.commit?.committer?.date || null,
+      message: (first.commit?.message || '').split('\n')[0].slice(0, 200),
+    } : { sha: null, date: null, message: null }
+    const json = JSON.stringify(result)
+    await Promise.all([
+      env.KV.put(cacheKey, json, { expirationTtl: 60 * 60 * 24 * 7 }),
+      env.KV.put(cacheTimeKey, String(Date.now()), { expirationTtl: 60 * 60 * 24 * 7 }),
+    ])
+    return new Response(json, {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600', ...cors }
+    })
+  } catch (e) {
+    if (cached) {
+      return new Response(cached, {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=60', ...cors }
+      })
+    }
+    return new Response(JSON.stringify({ error: e.message }), {
+      status: 500, headers: { 'Content-Type': 'application/json', ...cors }
+    })
+  }
+}
+
+// ─── Registry click tracking ───
+// Fire-and-forget POST increments a per-(category,id) counter in a single
+// JSON blob per category. We keep one blob per category (max 9) instead of
+// one KV key per item because KV list ops are expensive, and 60–300 items per
+// category * 9 categories is small enough to keep in one JSON.
+const CATEGORIES = ['hands', 'channels', 'providers', 'integrations', 'workflows', 'agents', 'plugins', 'skills', 'mcp']
+const ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i
+
+async function handleRegistryClick(env, cors, request, ctx) {
+  let body
+  try { body = await request.json() }
+  catch { return new Response('invalid json', { status: 400, headers: cors }) }
+  const { category, id } = body || {}
+  if (!CATEGORIES.includes(category) || !ID_RE.test(id)) {
+    return new Response('invalid payload', { status: 400, headers: cors })
+  }
+  const key = `registry_clicks:${category}`
+  // Use waitUntil so we don't block the response on the KV write.
+  const doUpdate = async () => {
+    let counts = {}
+    try {
+      const raw = await env.KV.get(key)
+      if (raw) counts = JSON.parse(raw)
+    } catch (_) { counts = {} }
+    counts[id] = (counts[id] || 0) + 1
+    // Cap the map so a registry with thousands of ids can't grow unbounded.
+    const entries = Object.entries(counts)
+    if (entries.length > 500) {
+      entries.sort((a, b) => b[1] - a[1])
+      counts = Object.fromEntries(entries.slice(0, 500))
+    }
+    await env.KV.put(key, JSON.stringify(counts))
+  }
+  if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(doUpdate())
+  else await doUpdate()
+  return new Response('{"ok":true}', {
+    headers: { 'Content-Type': 'application/json', ...cors }
+  })
+}
+
+async function handleRegistryTrending(env, cors, category) {
+  if (!CATEGORIES.includes(category)) {
+    return new Response(JSON.stringify({ error: 'invalid category' }), {
+      status: 400, headers: { 'Content-Type': 'application/json', ...cors }
+    })
+  }
+  const key = `registry_clicks:${category}`
+  let counts = {}
+  try {
+    const raw = await env.KV.get(key)
+    if (raw) counts = JSON.parse(raw)
+  } catch (_) { counts = {} }
+  const top = Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([id, clicks]) => ({ id, clicks }))
+  return new Response(JSON.stringify({ category, top }), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600', ...cors }
+  })
 }
 
 // ─── Scheduled: full registry refresh with TOML details ───

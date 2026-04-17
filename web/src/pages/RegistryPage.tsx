@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, ArrowRight, Search, Loader2, AlertCircle, ExternalLink, Sparkles, Github, RotateCcw } from 'lucide-react'
 import { useRegistry, getLocalizedDesc, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
@@ -59,12 +59,28 @@ async function fetchRaw(path: string): Promise<string> {
   return res.text()
 }
 
+const TRENDING_API = 'https://stats.librefang.ai/api/registry/trending'
+
+interface TrendingResp { category: string; top: { id: string; clicks: number }[] }
+
+async function fetchTrending(category: string): Promise<TrendingResp> {
+  const res = await fetch(`${TRENDING_API}?category=${encodeURIComponent(category)}`)
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
 export default function RegistryPage({ category }: RegistryPageProps) {
   const lang = useAppStore(s => s.lang)
   const t = translations[lang] || translations['en']!
   const { data, isLoading, error, refetch, isFetching } = useRegistry()
   const queryClient = useQueryClient()
   const [query, setQuery] = useState('')
+  const trendingQuery = useQuery<TrendingResp>({
+    queryKey: ['registry-trending', category],
+    queryFn: () => fetchTrending(category),
+    staleTime: 1000 * 60 * 15,
+    retry: 0,
+  })
 
   const { items, count } = getCategoryItems(data, category)
   const labels = getCategoryLabels(t, category)
@@ -138,6 +154,36 @@ export default function RegistryPage({ category }: RegistryPageProps) {
             </div>
           )}
         </div>
+
+        {/* Trending strip — shows the top-clicked items in this category.
+            Hidden when fewer than 3 clicks exist (noise). */}
+        {trendingQuery.data && trendingQuery.data.top.length >= 3 && (() => {
+          const idToItem = new Map(items.map(i => [i.id, i]))
+          const trending = trendingQuery.data.top
+            .map(t => idToItem.get(t.id))
+            .filter((x): x is Detail => !!x)
+            .slice(0, 5)
+          if (trending.length < 3) return null
+          return (
+            <div className="mb-6 flex flex-wrap items-center gap-2">
+              <span className="text-xs font-mono text-amber-500/80 uppercase tracking-widest flex items-center gap-1.5">
+                <Sparkles className="w-3 h-3" /> {t.registry?.trending || 'Trending'}
+              </span>
+              {trending.map(item => {
+                const href = `${langPrefix}/${category}/${item.id}`
+                return (
+                  <a
+                    key={item.id}
+                    href={href}
+                    className="text-xs font-semibold text-cyan-600 dark:text-cyan-400 hover:underline"
+                  >
+                    {item.name}
+                  </a>
+                )
+              })}
+            </div>
+          )
+        })()}
 
         {/* Category chips (click to filter by category string) */}
         {categories.length > 0 && (

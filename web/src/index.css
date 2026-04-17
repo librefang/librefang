@@ -191,3 +191,13 @@ html {
   outline-offset: 2px;
   border-radius: 4px;
 }
+
+/* TOML manifest highlighting. Token classes emitted by lib/toml-highlight.tsx.
+ * Colors chosen to read well on both light and dark surface-100 backgrounds. */
+.toml-highlight .tk-header  { color: #06b6d4; font-weight: 700; }
+.toml-highlight .tk-key     { color: #a78bfa; }
+.toml-highlight .tk-str     { color: #34d399; }
+.toml-highlight .tk-num     { color: #f59e0b; }
+.toml-highlight .tk-bool    { color: #f87171; font-weight: 600; }
+.toml-highlight .tk-comment { color: #94a3b8; font-style: italic; }
+.toml-highlight .tk-punct   { color: inherit; }

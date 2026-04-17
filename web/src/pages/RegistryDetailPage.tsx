@@ -1,12 +1,13 @@
-import { useMemo } from 'react'
+import { useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Loader2, AlertCircle, ExternalLink, Sparkles, Github, Copy, Check, Terminal, FileText, RotateCcw } from 'lucide-react'
+import { ArrowLeft, Loader2, AlertCircle, ExternalLink, Sparkles, Github, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon } from 'lucide-react'
 import { useState } from 'react'
 import { useRegistry, getLocalizedDesc, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
 import { translations } from '../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
+import { highlightToml } from '../lib/toml-highlight'
 
 interface RegistryDetailPageProps {
   category: RegistryCategory
@@ -14,6 +15,30 @@ interface RegistryDetailPageProps {
 }
 
 const RAW_API = 'https://stats.librefang.ai/api/registry/raw'
+const COMMIT_API = 'https://stats.librefang.ai/api/registry/commit'
+const CLICK_API = 'https://stats.librefang.ai/api/registry/click'
+
+interface CommitInfo { sha: string | null; date: string | null; message: string | null }
+
+// Compact relative time: "3d ago", "2mo ago", "1y ago". Falls back to absolute
+// date for anything older than ~a year or if parsing fails.
+function relTime(iso: string | null): string {
+  if (!iso) return ''
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return ''
+  const diff = Date.now() - then
+  const sec = Math.round(diff / 1000)
+  if (sec < 60) return `${sec}s ago`
+  const min = Math.round(sec / 60)
+  if (min < 60) return `${min}m ago`
+  const hr = Math.round(min / 60)
+  if (hr < 24) return `${hr}h ago`
+  const day = Math.round(hr / 24)
+  if (day < 30) return `${day}d ago`
+  const mo = Math.round(day / 30)
+  if (mo < 12) return `${mo}mo ago`
+  return new Date(iso).toISOString().slice(0, 10)
+}
 
 // How to resolve a category + id to a file path inside librefang-registry.
 // Directory-backed categories (hands/agents/skills) use <UPPER>.toml inside
@@ -48,6 +73,29 @@ async function fetchRaw(path: string): Promise<string> {
 
 function isPopular(item: Detail | undefined) {
   return item?.tags?.includes('popular') ?? false
+}
+
+function AnchorLink({ id, title }: { id: string; title: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <a
+      href={`#${id}`}
+      onClick={(e) => {
+        e.preventDefault()
+        const url = `${window.location.origin}${window.location.pathname}#${id}`
+        navigator.clipboard.writeText(url)
+        // Also update history so the hash is visible in the URL bar.
+        history.replaceState(null, '', `#${id}`)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      }}
+      aria-label={title}
+      title={title}
+      className="opacity-0 group-hover:opacity-70 hover:!opacity-100 ml-1 inline-flex items-center text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-opacity"
+    >
+      {copied ? <Check className="w-3 h-3" /> : <LinkIcon className="w-3 h-3" />}
+    </a>
+  )
 }
 
 function CopyButton({ text, label }: { text: string; label: string }) {
@@ -92,6 +140,36 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
     queryKey: ['registry-raw', rawPath],
     queryFn: () => fetchRaw(rawPath),
     staleTime: 1000 * 60 * 60,
+    retry: 1,
+  })
+  // Fire-and-forget click tracking so trending can surface on list pages.
+  // navigator.sendBeacon is queued by the browser even on unload, and doesn't
+  // block the page at all. Some browsers fall back to fetch keepalive.
+  useEffect(() => {
+    const body = JSON.stringify({ category, id })
+    try {
+      if ('sendBeacon' in navigator) {
+        const blob = new Blob([body], { type: 'application/json' })
+        navigator.sendBeacon(CLICK_API, blob)
+      } else {
+        fetch(CLICK_API, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          keepalive: true,
+        }).catch(() => { /* ignore */ })
+      }
+    } catch { /* ignore */ }
+  }, [category, id])
+
+  const commitQuery = useQuery<CommitInfo>({
+    queryKey: ['registry-commit', rawPath],
+    queryFn: async () => {
+      const res = await fetch(`${COMMIT_API}?path=${encodeURIComponent(rawPath)}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      return res.json()
+    },
+    staleTime: 1000 * 60 * 60 * 6,
     retry: 1,
   })
 
@@ -166,7 +244,7 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
           )}
 
           {item?.tags && item.tags.length > 0 && (
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-2 mb-3">
               {item.tags.filter(tag => tag !== 'popular').map(tag => (
                 <span key={tag} className="text-xs font-mono text-gray-500 border border-black/10 dark:border-white/10 px-2 py-0.5">
                   {tag}
@@ -174,15 +252,24 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
               ))}
             </div>
           )}
+          {commitQuery.data?.date && (
+            <div
+              className="text-[11px] font-mono text-gray-400 dark:text-gray-600"
+              title={commitQuery.data.message ? `${commitQuery.data.message} — ${commitQuery.data.date}` : commitQuery.data.date}
+            >
+              {t.registry?.lastUpdated || 'Updated'} {relTime(commitQuery.data.date)}
+            </div>
+          )}
         </div>
 
         {/* Install / use command */}
         {COMMAND_TEMPLATE[category] ? (
-          <div className="mb-8">
+          <div id="use-it" className="mb-8 group scroll-mt-20">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest flex items-center gap-2">
                 <Terminal className="w-3.5 h-3.5" />
                 {t.registry?.useIt || 'Use it'}
+                <AnchorLink id="use-it" title={t.registry?.copyLink || 'Copy link'} />
               </h2>
               <CopyButton text={COMMAND_TEMPLATE[category]!.replace('{id}', id)} label={t.registry?.copy || 'Copy'} />
             </div>
@@ -216,9 +303,10 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
         )}
 
         {/* Manifest */}
-        <div className="mb-6 flex items-center justify-between">
-          <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest">
+        <div id="manifest" className="mb-6 flex items-center justify-between group scroll-mt-20">
+          <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest flex items-center">
             {t.registry?.manifest || 'Manifest'}
+            <AnchorLink id="manifest" title={t.registry?.copyLink || 'Copy link'} />
           </h2>
           {rawQuery.data && (
             <CopyButton text={rawQuery.data} label={t.registry?.copy || 'Copy'} />
@@ -255,16 +343,17 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
         )}
 
         {rawQuery.data && (
-          <pre className="overflow-x-auto text-xs md:text-sm font-mono leading-relaxed p-5 bg-surface-100 border border-black/10 dark:border-white/5 text-gray-700 dark:text-gray-300 whitespace-pre">
-            <code>{rawQuery.data}</code>
+          <pre className="overflow-x-auto text-xs md:text-sm font-mono leading-relaxed p-5 bg-surface-100 border border-black/10 dark:border-white/5 text-gray-700 dark:text-gray-300 whitespace-pre toml-highlight">
+            <code>{highlightToml(rawQuery.data)}</code>
           </pre>
         )}
 
         {/* Related items in the same category */}
         {related.length > 0 && (
-          <div className="mt-12 pt-8 border-t border-black/10 dark:border-white/5">
-            <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">
+          <div id="related" className="mt-12 pt-8 border-t border-black/10 dark:border-white/5 group scroll-mt-20">
+            <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4 flex items-center">
               {t.registry?.relatedIn?.replace('{category}', categoryLabel) || `More ${categoryLabel}`}
+              <AnchorLink id="related" title={t.registry?.copyLink || 'Copy link'} />
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {related.map(rel => {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Terminal, Cpu, Shield, Zap, Network, ChevronRight, ChevronDown, ExternalLink,
@@ -15,11 +15,14 @@ import type { Translation } from './i18n'
 import { useRegistry, getLocalizedDesc } from './useRegistry'
 import { useAppStore } from './store'
 import { cn } from './lib/utils'
-import DeployPage from './pages/DeployPage'
-import ChangelogPage from './pages/ChangelogPage'
-import RegistryPage from './pages/RegistryPage'
-import RegistryDetailPage from './pages/RegistryDetailPage'
-import SearchDialog from './components/SearchDialog'
+// Lazy-load everything that isn't the homepage. Homepage visitors get a
+// ~40KB smaller initial bundle; registry/deploy/changelog visitors pay only
+// once on navigation (and Suspense falls back to a blank frame for ~50ms).
+const DeployPage = lazy(() => import('./pages/DeployPage'))
+const ChangelogPage = lazy(() => import('./pages/ChangelogPage'))
+const RegistryPage = lazy(() => import('./pages/RegistryPage'))
+const RegistryDetailPage = lazy(() => import('./pages/RegistryDetailPage'))
+const SearchDialog = lazy(() => import('./components/SearchDialog'))
 import type { RegistryCategory } from './useRegistry'
 
 
@@ -197,7 +200,7 @@ function Nav({ t, lang, onSwitchLang, onOpenSearch }: NavProps) {
     <nav className={cn('fixed top-0 left-0 right-0 z-50 transition-all duration-300', scrolled && 'bg-surface/90 backdrop-blur-md border-b border-black/10 dark:border-white/5')}>
       <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
         <a href="/" className="flex items-center gap-2.5">
-          <img src="/logo.png" alt="LibreFang" className="w-8 h-8 rounded" />
+          <img src="/logo.png" alt="LibreFang" width="32" height="32" decoding="async" fetchPriority="high" className="w-8 h-8 rounded" />
           <span className="font-bold text-slate-900 dark:text-white tracking-tight">LibreFang</span>
         </a>
 
@@ -482,7 +485,12 @@ function Hero({ t, registry }: SectionProps & { registry?: import('./useRegistry
             </FadeIn>
 
             <FadeIn delay={300}>
-              <p className="text-gray-600 dark:text-gray-400 text-base leading-relaxed mb-8">{t.hero.desc}</p>
+              <p className="text-gray-600 dark:text-gray-400 text-base leading-relaxed mb-8">
+                {t.hero.desc
+                  .replace('{handsCount}', String(registry?.handsCount ?? 15))
+                  .replace('{channelsCount}', String(registry?.channelsCount ?? 44))
+                  .replace('{providersCount}', String(registry?.providersCount ?? 50))}
+              </p>
             </FadeIn>
 
             <FadeIn delay={400}>
@@ -1153,6 +1161,13 @@ function Downloads(_props: SectionProps) {
 
 // ─── Install ───
 function Install({ t }: SectionProps) {
+  const { data: registry } = useRegistry()
+  const substitute = (s: string) => s
+    .replace('{handsCount}', String(registry?.handsCount ?? 15))
+    .replace('{channelsCount}', String(registry?.channelsCount ?? 44))
+    .replace('{providersCount}', String(registry?.providersCount ?? 50))
+    .replace('{skillsCount}', String(registry?.skillsCount ?? 60))
+    .replace('{agentsCount}', String(registry?.agentsCount ?? 32))
   const [copied, setCopied] = useState(false)
   const [os, setOs] = useState<'mac' | 'windows' | 'linux' | 'unknown'>('unknown')
   const cmd = os === 'windows' ? 'irm https://librefang.ai/install.ps1 | iex' : 'curl -fsSL https://librefang.ai/install | sh'
@@ -1256,7 +1271,7 @@ function Install({ t }: SectionProps) {
               <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">{t.install.includes}</div>
               <ul className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
                 {t.install.incItems.map((item, i) => (
-                  <li key={i} className="flex items-center gap-2"><span className="w-1 h-1 bg-amber-400 rounded-full" /> {item}</li>
+                  <li key={i} className="flex items-center gap-2"><span className="w-1 h-1 bg-amber-400 rounded-full" /> {substitute(item)}</li>
                 ))}
               </ul>
             </div>
@@ -1529,7 +1544,7 @@ function Footer({ t }: SectionProps) {
     <footer className="border-t border-black/10 dark:border-white/5 py-12 px-6">
       <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
         <div className="flex items-center gap-2.5">
-          <img src="/logo.png" alt="LibreFang" className="w-6 h-6 rounded" />
+          <img src="/logo.png" alt="LibreFang" width="24" height="24" decoding="async" loading="lazy" className="w-6 h-6 rounded" />
           <span className="text-sm font-semibold text-gray-600 dark:text-gray-400">LibreFang</span>
           <span className="text-xs text-gray-400 dark:text-gray-600 font-mono">Agent OS</span>
         </div>
@@ -1769,27 +1784,39 @@ export default function App() {
     }
   }, [lang, t, isDeployPage, isChangelogPage, registryRoute])
 
+  const suspenseFallback = (
+    <div className="min-h-screen flex items-center justify-center text-gray-400">
+      <div className="w-6 h-6 rounded-full border-2 border-cyan-500 border-t-transparent animate-spin" />
+    </div>
+  )
+
   if (isDeployPage) {
-    return (<>
-      <DeployPage />
-      <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />
-    </>)
+    return (
+      <Suspense fallback={suspenseFallback}>
+        <DeployPage />
+        {searchOpen && <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />}
+      </Suspense>
+    )
   }
 
   if (isChangelogPage) {
-    return (<>
-      <ChangelogPage />
-      <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />
-    </>)
+    return (
+      <Suspense fallback={suspenseFallback}>
+        <ChangelogPage />
+        {searchOpen && <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />}
+      </Suspense>
+    )
   }
 
   if (registryRoute) {
-    return (<>
-      {registryRoute.kind === 'detail'
-        ? <RegistryDetailPage category={registryRoute.category} id={registryRoute.id} />
-        : <RegistryPage category={registryRoute.category} />}
-      <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />
-    </>)
+    return (
+      <Suspense fallback={suspenseFallback}>
+        {registryRoute.kind === 'detail'
+          ? <RegistryDetailPage category={registryRoute.category} id={registryRoute.id} />
+          : <RegistryPage category={registryRoute.category} />}
+        {searchOpen && <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />}
+      </Suspense>
+    )
   }
 
   return (
@@ -1798,7 +1825,11 @@ export default function App() {
         Skip to content
       </a>
       <Nav t={t} lang={lang} onSwitchLang={switchLang} onOpenSearch={() => setSearchOpen(true)} />
-      <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />
+      {searchOpen && (
+        <Suspense fallback={null}>
+          <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />
+        </Suspense>
+      )}
       <Hero t={t} registry={registry} />
       <div className="glow-line" />
       <Architecture t={t} />
