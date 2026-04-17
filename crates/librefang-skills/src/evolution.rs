@@ -188,17 +188,45 @@ fn acquire_skill_lock(skill_dir: &Path) -> Result<std::fs::File, SkillError> {
 
 // ── Atomic file I/O ─────────────────────────────────────────────────
 
+/// Monotonic per-process counter used by `atomic_write` to derive a
+/// unique temp-file name. The per-skill flock already serializes
+/// mutations *within* the evolution API, but this counter closes a
+/// temp-file write-write race when any two threads in the same process
+/// target the same final path through different call paths (e.g., two
+/// `record_skill_usage` calls on distinct skill dirs that happen to
+/// share a filename, or any future helper that skips the lock).
+static ATOMIC_WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Write content to a file atomically: write to temp, then rename.
+///
+/// Temp-file naming includes pid, thread id, a monotonic counter, and
+/// a nanosecond timestamp so collisions are extremely unlikely even
+/// under concurrent callers targeting the same final path.
 fn atomic_write(path: &Path, content: &str) -> Result<(), SkillError> {
     let parent = path
         .parent()
         .ok_or_else(|| SkillError::Io(std::io::Error::other("no parent directory")))?;
     std::fs::create_dir_all(parent)?;
 
+    // Keep the thread-id string to ASCII-safe chars — `ThreadId`'s
+    // Debug output looks like `ThreadId(12)`, not `42`, so extract
+    // just the alphanumeric part for a clean filename.
+    let tid: String = format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let ctr = ATOMIC_WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let temp_path = parent.join(format!(
-        ".tmp.{}.{}",
+        ".tmp.{}.{}.{}.{}.{}",
         path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
+        std::process::id(),
+        tid,
+        ctr,
+        nanos,
     ));
 
     std::fs::write(&temp_path, content).inspect_err(|_| {

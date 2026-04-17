@@ -3635,13 +3635,23 @@ pub async fn get_supporting_file(
         return ApiErrorResponse::bad_request("Missing 'path' query parameter").into_json_tuple();
     };
     // Reject absolute paths and traversal early — defense in depth even
-    // before canonicalisation runs.
-    if rel_path.is_empty()
-        || std::path::Path::new(rel_path).is_absolute()
-        || rel_path.contains("..")
-    {
+    // before canonicalisation runs. Check by `Path::Component` rather
+    // than a substring scan: the old `contains("..")` rejected legit
+    // names like `config..bak.md` and `..prefix.txt`, while still
+    // missing the bare Windows-style `foo\..\bar` (components are
+    // resolved differently).
+    if rel_path.is_empty() || std::path::Path::new(rel_path).is_absolute() {
         return ApiErrorResponse::bad_request(format!("Invalid path: {rel_path}"))
             .into_json_tuple();
+    }
+    if std::path::Path::new(rel_path)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return ApiErrorResponse::bad_request(format!(
+            "Path traversal ('..') is not allowed: {rel_path}"
+        ))
+        .into_json_tuple();
     }
 
     let skill = match clone_installed_skill(&state, &name) {
