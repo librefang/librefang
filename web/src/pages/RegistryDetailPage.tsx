@@ -79,10 +79,15 @@ function readmePathsFor(category: RegistryCategory, id: string): string[] {
 // Commands the CLI actually exposes (verified against librefang-cli/src/main.rs).
 // Categories without an install-by-id subcommand get a different hint.
 const COMMAND_TEMPLATE: Partial<Record<RegistryCategory, string>> = {
-  skills:   'librefang skill install {id}',
-  hands:    'librefang hand activate {id}',
-  agents:   'librefang agent new {id}',
-  channels: 'librefang channel setup {id}',
+  skills:       'librefang skill install {id}',
+  hands:        'librefang hand activate {id}',
+  agents:       'librefang agent new {id}',
+  channels:     'librefang channel setup {id}',
+  // `librefang add <name>` is the one-click MCP-server installer the
+  // CLI exposes for every integrations/ entry — also reached as /mcp
+  // via the category alias.
+  integrations: 'librefang add {id}',
+  mcp:          'librefang add {id}',
 }
 
 function isPopular(item: Detail | undefined) {
