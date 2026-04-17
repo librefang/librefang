@@ -36,6 +36,17 @@ import { getStatusVariant } from "../lib/status";
 import { useDashboardSnapshot } from "../lib/queries/runtime";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
+import { AgentManifestForm } from "../components/AgentManifestForm";
+import {
+  emptyManifestExtras,
+  emptyManifestForm,
+  parseManifestToml,
+  serializeManifestForm,
+  validateManifestForm,
+  type ManifestExtras,
+  type ManifestFormState,
+} from "../lib/agentManifest";
+import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
 import {
   agentQueries,
   useAgentTemplates,
@@ -66,10 +77,14 @@ export function AgentsPage() {
   const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
   const [, setDetailLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
-  const [createMode, setCreateMode] = useState<"template" | "toml">("template");
+  const [createMode, setCreateMode] = useState<"form" | "template" | "toml">("form");
   const [templateName, setTemplateName] = useState("");
   const [manifestToml, setManifestToml] = useState("");
   const [templateTomlLoading, setTemplateTomlLoading] = useState(false);
+  const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
+  const [formExtras, setFormExtras] = useState<ManifestExtras>(emptyManifestExtras);
+  const [formErrors, setFormErrors] = useState<Set<string>>(new Set());
+  const [tomlParseError, setTomlParseError] = useState<string | null>(null);
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
   const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
@@ -277,12 +292,81 @@ export function AgentsPage() {
     { enabled: !!modelDraft.provider.trim() },
   );
 
+  // Separate models query for the create-form's chosen provider. We don't
+  // reuse modelsQuery because that one is gated on the inline-edit widget's
+  // selection, which is unrelated to the create modal.
+  const formModelsQuery = useModels(
+    { provider: formState.model.provider },
+    { enabled: showCreate && createMode === "form" && !!formState.model.provider.trim() },
+  );
+
   const providersQuery = useProviders();
 
   const configuredProviders = useMemo(
     () => (providersQuery.data ?? []).filter(p => isProviderAvailable(p.auth_status)),
     [providersQuery.data],
   );
+
+  // Form-mode option lists (only providers that have credentials configured).
+  const formProviderOptions = useMemo(
+    () => configuredProviders.map((p) => ({ name: p.id })),
+    [configuredProviders],
+  );
+  const formModelOptions = useMemo(
+    () =>
+      (formModelsQuery.data?.models ?? []).map((m) => ({
+        provider: m.provider,
+        id: m.id,
+      })),
+    [formModelsQuery.data?.models],
+  );
+  const serializedFormToml = useMemo(
+    () => serializeManifestForm(formState, formExtras),
+    [formState, formExtras],
+  );
+  const serializedFormMarkdown = useMemo(
+    () => generateManifestMarkdown(formState, formExtras),
+    [formState, formExtras],
+  );
+  const [previewTab, setPreviewTab] = useState<"toml" | "markdown">("toml");
+
+  // Single close path for the create modal so the X button, the
+  // Cancel button, and any future "close on success" all clear the
+  // same transient state (validation errors, TOML parse error). Form
+  // and TOML drafts themselves persist by design.
+  const closeCreateModal = () => {
+    setShowCreate(false);
+    setFormErrors(new Set());
+    setTomlParseError(null);
+  };
+
+  // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
+  // serialized output into the textarea so advanced users can keep editing.
+  // Going TOML→Form parses what's in the textarea, populating the form
+  // and stashing unmapped fields ([thinking], [tools.*], etc.) in extras
+  // so they survive a re-serialize.
+  const switchCreateMode = (next: "form" | "template" | "toml") => {
+    if (next === createMode) return;
+    if (next === "form" && manifestToml.trim() && manifestToml !== serializedFormToml) {
+      const parsed = parseManifestToml(manifestToml);
+      if (!parsed.ok) {
+        setTomlParseError(
+          parsed.line !== undefined
+            ? `Line ${parsed.line}:${parsed.column ?? 0} — ${parsed.message}`
+            : parsed.message,
+        );
+        return;
+      }
+      setFormState(parsed.form);
+      setFormExtras(parsed.extras);
+      setTomlParseError(null);
+    }
+    if (next === "toml" && createMode === "form") {
+      setManifestToml(serializedFormToml);
+      setTomlParseError(null);
+    }
+    setCreateMode(next);
+  };
 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
@@ -1021,21 +1105,107 @@ export function AgentsPage() {
       )}
 
       {/* Create Agent Modal */}
-      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("agents.create_agent")} size="lg">
+      <Modal
+        isOpen={showCreate}
+        onClose={closeCreateModal}
+        title={t("agents.create_agent")}
+        size="4xl"
+      >
         <div className="p-5 space-y-4">
-          {/* Mode tabs */}
+          {/* Mode tabs — switching between Form and TOML round-trips the
+              manifest in both directions. We only re-parse when content
+              actually differs, so re-clicking the same tab is a no-op. */}
           <div className="flex gap-2">
-            <button onClick={() => setCreateMode("template")}
+            <button onClick={() => switchCreateMode("form")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "form" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+              {t("agents.from_form")}
+            </button>
+            <button onClick={() => switchCreateMode("template")}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
               {t("agents.from_template")}
             </button>
-            <button onClick={() => setCreateMode("toml")}
+            <button onClick={() => switchCreateMode("toml")}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "toml" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
               {t("agents.from_toml")}
             </button>
           </div>
+          {tomlParseError && (
+            // The error is set when leaving TOML→Form fails, so the user
+            // is bounced back to TOML; the message must show on the TOML
+            // tab too, otherwise the rejected switch is invisible.
+            <p className="text-xs text-error">
+              {t("agents.form.toml_parse_error", { msg: tomlParseError })}
+            </p>
+          )}
 
-          {createMode === "template" ? (
+          {createMode === "form" ? (
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-4 max-h-[60vh] overflow-y-auto pr-1">
+              <AgentManifestForm
+                value={formState}
+                onChange={setFormState}
+                providers={formProviderOptions}
+                models={formModelOptions}
+                invalidFields={formErrors}
+                extras={formExtras}
+              />
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewTab("toml")}
+                      className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
+                        previewTab === "toml"
+                          ? "bg-brand text-white"
+                          : "text-text-dim hover:text-text"
+                      }`}
+                    >
+                      {t("agents.form.preview_toml")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewTab("markdown")}
+                      className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
+                        previewTab === "markdown"
+                          ? "bg-brand text-white"
+                          : "text-text-dim hover:text-text"
+                      }`}
+                    >
+                      {t("agents.form.preview_markdown")}
+                    </button>
+                  </div>
+                  <div className="flex gap-2 items-center">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const text =
+                          previewTab === "toml" ? serializedFormToml : serializedFormMarkdown;
+                        void navigator.clipboard.writeText(text).then(() =>
+                          addToast(t("agents.form.copied"), "success"),
+                        );
+                      }}
+                      className="text-[10px] font-bold text-text-dim hover:text-brand"
+                      title={t("agents.form.copy")}
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                    {previewTab === "toml" && (
+                      <button
+                        type="button"
+                        onClick={() => switchCreateMode("toml")}
+                        className="text-[10px] font-bold text-brand hover:underline"
+                      >
+                        {t("agents.form.switch_to_toml")}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <pre className="rounded-xl border border-border-subtle bg-main px-3 py-2 text-[11px] font-mono text-text-dim overflow-auto max-h-[55vh] whitespace-pre-wrap break-all">
+                  {previewTab === "toml" ? serializedFormToml : serializedFormMarkdown}
+                </pre>
+              </div>
+            </div>
+          ) : createMode === "template" ? (
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
               <select value={templateName}
@@ -1076,7 +1246,13 @@ export function AgentsPage() {
           ) : (
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.manifest_toml")}</label>
-              <textarea value={manifestToml} onChange={e => setManifestToml(e.target.value)}
+              <textarea value={manifestToml} onChange={e => {
+                  setManifestToml(e.target.value);
+                  // Clear stale parse error so the user gets fresh feedback
+                  // on their next switch attempt instead of seeing a message
+                  // that may already be addressed.
+                  if (tomlParseError) setTomlParseError(null);
+                }}
                 placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n\n[thinking]\nbudget_tokens = 10000\nstream_thinking = false'}
                 rows={12}
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-none" />
@@ -1093,12 +1269,35 @@ export function AgentsPage() {
 
           <div className="flex gap-2 pt-2">
             <Button variant="primary" className="flex-1"
-              onClick={() => spawnMutation.mutate(createMode === "template" ? { template: templateName } : { manifest_toml: manifestToml })}
-              disabled={spawnMutation.isPending || templateTomlLoading || (createMode === "template" ? !templateName.trim() : !manifestToml.trim())}>
+              onClick={() => {
+                if (createMode === "form") {
+                  const errors = validateManifestForm(formState);
+                  setFormErrors(new Set(errors));
+                  if (errors.length > 0) return;
+                  spawnMutation.mutate({ manifest_toml: serializedFormToml });
+                  return;
+                }
+                spawnMutation.mutate(
+                  createMode === "template"
+                    ? { template: templateName }
+                    : { manifest_toml: manifestToml },
+                );
+              }}
+              disabled={
+                spawnMutation.isPending ||
+                templateTomlLoading ||
+                (createMode === "form"
+                  ? !formState.name.trim() ||
+                    !formState.model.provider.trim() ||
+                    !formState.model.model.trim()
+                  : createMode === "template"
+                    ? !templateName.trim()
+                    : !manifestToml.trim())
+              }>
               {spawnMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
               {t("agents.create_agent")}
             </Button>
-            <Button variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
+            <Button variant="secondary" onClick={closeCreateModal}>{t("common.cancel")}</Button>
           </div>
         </div>
       </Modal>

@@ -40,6 +40,7 @@ export {
   getFullConfig,
   getConfigSchema,
   fetchRegistrySchema,
+  getRawConfigToml,
   // goals
   listGoals,
   listGoalTemplates,
@@ -51,6 +52,7 @@ export {
   getHandStats,
   getHandSession,
   getHandInstanceStatus,
+  getHandManifestToml,
   // mcp
   listMcpServers,
   listAvailableIntegrations,

@@ -1949,6 +1949,7 @@ async fn generate_search_queries(
         response_format: None,
         timeout_secs: Some(15),
         extra_body: None,
+        agent_id: None,
     };
 
     let response =
@@ -2570,6 +2571,7 @@ pub async fn run_agent_loop(
             } else {
                 Some(manifest.model.extra_params.clone())
             },
+            agent_id: Some(agent_id_str.clone()),
         };
 
         // Notify phase: Thinking
@@ -3578,6 +3580,7 @@ pub async fn run_agent_loop_streaming(
             } else {
                 Some(manifest.model.extra_params.clone())
             },
+            agent_id: Some(agent_id_str.clone()),
         };
 
         // Notify phase: on first iteration emit Streaming; on subsequent

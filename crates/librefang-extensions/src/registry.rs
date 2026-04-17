@@ -33,12 +33,19 @@ impl IntegrationRegistry {
         }
     }
 
-    /// Load integration templates from `home_dir/integrations/`. Returns count loaded.
+    /// Load integration templates from `home_dir/mcp/`. Falls back to
+    /// `home_dir/integrations/` for backward compatibility with installs
+    /// from before the registry rename. Returns count loaded.
     pub fn load_templates(&mut self, home_dir: &std::path::Path) -> usize {
-        let integrations_dir = home_dir.join("integrations");
+        let mcp_dir = home_dir.join("mcp");
+        let templates_dir = if mcp_dir.exists() {
+            mcp_dir
+        } else {
+            home_dir.join("integrations")
+        };
         let mut count = 0usize;
 
-        if let Ok(entries) = std::fs::read_dir(&integrations_dir) {
+        if let Ok(entries) = std::fs::read_dir(&templates_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if !path.is_file() {
