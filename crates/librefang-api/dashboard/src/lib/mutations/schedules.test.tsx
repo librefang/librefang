@@ -1,10 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 import * as http from "../http/client";
 import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule, useUpdateTrigger, useDeleteTrigger } from "./schedules";
 import { cronKeys, scheduleKeys, triggerKeys } from "../queries/keys";
+import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
   createSchedule: vi.fn(),
@@ -14,30 +13,18 @@ vi.mock("../http/client", () => ({
   deleteTrigger: vi.fn(),
 }));
 
-function createWrapper() {
-  const qc = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  return {
-    qc,
-    wrapper: ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    ),
-  };
-}
-
 describe("useCreateSchedule", () => {
   beforeEach(() => {
     vi.mocked(http.createSchedule).mockResolvedValue({} as any);
   });
 
   it("invalidates scheduleKeys.all and cronKeys.all", async () => {
-    const { qc, wrapper } = createWrapper();
-    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useCreateSchedule(), { wrapper });
 
-    result.current.mutate({ agent_id: "agent-1", cron: "0 * * * *" });
+    result.current.mutate({ name: "test schedule", agent_id: "agent-1", cron: "0 * * * *" });
 
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledTimes(2);
@@ -57,8 +44,8 @@ describe("useUpdateSchedule", () => {
   });
 
   it("invalidates scheduleKeys.all and cronKeys.all", async () => {
-    const { qc, wrapper } = createWrapper();
-    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useUpdateSchedule(), { wrapper });
 
@@ -78,12 +65,12 @@ describe("useUpdateSchedule", () => {
 
 describe("useDeleteSchedule", () => {
   beforeEach(() => {
-    vi.mocked(http.deleteSchedule).mockResolvedValue(undefined);
+    vi.mocked(http.deleteSchedule).mockResolvedValue({} as any);
   });
 
   it("invalidates scheduleKeys.all and cronKeys.all", async () => {
-    const { qc, wrapper } = createWrapper();
-    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useDeleteSchedule(), { wrapper });
 
@@ -107,8 +94,8 @@ describe("useUpdateTrigger", () => {
   });
 
   it("invalidates triggerKeys.all", async () => {
-    const { qc, wrapper } = createWrapper();
-    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useUpdateTrigger(), { wrapper });
 
@@ -126,8 +113,8 @@ describe("useDeleteTrigger", () => {
   });
 
   it("invalidates triggerKeys.all", async () => {
-    const { qc, wrapper } = createWrapper();
-    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useDeleteTrigger(), { wrapper });
 

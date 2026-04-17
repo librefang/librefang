@@ -1,7 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 
 // ── Mock API layer ──
 const { mockListApprovals, mockFetchApprovalCount } = vi.hoisted(() => ({
@@ -32,13 +30,7 @@ import { useApprovals, useApprovalCount } from "./approvals";
 import { useAvailableIntegrations } from "./mcp";
 import { usePluginRegistries } from "./plugins";
 import { approvalKeys, mcpKeys, pluginKeys } from "./keys";
-
-function createWrapper() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  };
-}
+import { createQueryClientWrapper } from "../test/query-client";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -49,7 +41,7 @@ beforeEach(() => {
 describe("useApprovals", () => {
   it("should not fetch when enabled is false", async () => {
     const { result } = renderHook(() => useApprovals({ enabled: false }), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -59,8 +51,8 @@ describe("useApprovals", () => {
   });
 
   it("should fetch by default when enabled is undefined", async () => {
-    const { result } = renderHook(() => useApprovals(), {
-      wrapper: createWrapper(),
+    renderHook(() => useApprovals(), {
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     // enabled defaults to undefined → query is enabled by default
@@ -76,7 +68,7 @@ describe("useApprovals", () => {
     mockListApprovals.mockResolvedValue(mockData);
 
     const { result } = renderHook(() => useApprovals({ enabled: true }), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.data).toEqual(mockData));
@@ -88,18 +80,15 @@ describe("useApprovals", () => {
   it("should use approvalKeys.lists() as queryKey", async () => {
     mockListApprovals.mockResolvedValue([]);
 
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => useApprovals({ enabled: true }), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(approvalKeys.lists())).toBeDefined();
+      expect(queryClient.getQueryCache().find({ queryKey: approvalKeys.lists() })).toBeDefined();
     });
     expect(
-      qc.getQueryCache().find(approvalKeys.lists())?.queryKey,
+      queryClient.getQueryCache().find({ queryKey: approvalKeys.lists() })?.queryKey,
     ).toEqual(approvalKeys.lists());
   });
 });
@@ -110,7 +99,7 @@ describe("useAvailableIntegrations", () => {
   it("should not fetch when enabled is false", async () => {
     const { result } = renderHook(
       () => useAvailableIntegrations({ enabled: false }),
-      { wrapper: createWrapper() },
+      { wrapper: createQueryClientWrapper().wrapper },
     );
 
     expect(result.current.data).toBeUndefined();
@@ -120,8 +109,8 @@ describe("useAvailableIntegrations", () => {
   });
 
   it("should fetch by default when enabled is undefined", async () => {
-    const { result } = renderHook(() => useAvailableIntegrations(), {
-      wrapper: createWrapper(),
+    renderHook(() => useAvailableIntegrations(), {
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     // mcpQueries.integrations() sets enabled: opts.enabled which is undefined
@@ -137,7 +126,7 @@ describe("useAvailableIntegrations", () => {
 
     const { result } = renderHook(
       () => useAvailableIntegrations({ enabled: true }),
-      { wrapper: createWrapper() },
+      { wrapper: createQueryClientWrapper().wrapper },
     );
 
     await waitFor(() => expect(result.current.data).toEqual(mockData));
@@ -149,18 +138,15 @@ describe("useAvailableIntegrations", () => {
   it("should use mcpKeys.integrations() as queryKey", async () => {
     mockListAvailableIntegrations.mockResolvedValue({ integrations: [] });
 
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => useAvailableIntegrations({ enabled: true }), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(mcpKeys.integrations())).toBeDefined();
+      expect(queryClient.getQueryCache().find({ queryKey: mcpKeys.integrations() })).toBeDefined();
     });
     expect(
-      qc.getQueryCache().find(mcpKeys.integrations())?.queryKey,
+      queryClient.getQueryCache().find({ queryKey: mcpKeys.integrations() })?.queryKey,
     ).toEqual(mcpKeys.integrations());
   });
 });
@@ -170,7 +156,7 @@ describe("useAvailableIntegrations", () => {
 describe("usePluginRegistries", () => {
   it("should not fetch when enabled is false", async () => {
     const { result } = renderHook(() => usePluginRegistries(false), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -180,8 +166,8 @@ describe("usePluginRegistries", () => {
   });
 
   it("should fetch by default when enabled is undefined", async () => {
-    const { result } = renderHook(() => usePluginRegistries(undefined), {
-      wrapper: createWrapper(),
+    renderHook(() => usePluginRegistries(undefined), {
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     // enabled is undefined → useQuery treats it as true → WILL fetch
@@ -195,7 +181,7 @@ describe("usePluginRegistries", () => {
     mockListPluginRegistries.mockResolvedValue(mockData);
 
     const { result } = renderHook(() => usePluginRegistries(true), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.data).toEqual(mockData));
@@ -207,38 +193,27 @@ describe("usePluginRegistries", () => {
   it("should use pluginKeys.registries() as queryKey", async () => {
     mockListPluginRegistries.mockResolvedValue({ registries: [] });
 
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => usePluginRegistries(true), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(pluginKeys.registries())).toBeDefined();
+      expect(queryClient.getQueryCache().find({ queryKey: pluginKeys.registries() })).toBeDefined();
     });
     expect(
-      qc.getQueryCache().find(pluginKeys.registries())?.queryKey,
+      queryClient.getQueryCache().find({ queryKey: pluginKeys.registries() })?.queryKey,
     ).toEqual(pluginKeys.registries());
   });
 });
 
 // ── useApprovalCount ──
 
-function createWrapperWithClient() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const wrapper = function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  };
-  return { wrapper, qc };
-}
-
 describe("useApprovalCount", () => {
   it("should fetch by default (always enabled)", async () => {
     mockFetchApprovalCount.mockResolvedValue({ count: 5 });
 
     const { result } = renderHook(() => useApprovalCount(), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.data).toEqual({ count: 5 }));
@@ -248,45 +223,47 @@ describe("useApprovalCount", () => {
   it("should use default refetchInterval when not provided", async () => {
     mockFetchApprovalCount.mockResolvedValue({ count: 0 });
 
-    const { wrapper, qc } = createWrapperWithClient();
+    const { wrapper, queryClient } = createQueryClientWrapper();
     renderHook(() => useApprovalCount(), { wrapper });
 
     await vi.waitFor(() => {
-      const query = qc.getQueryCache().find({ queryKey: approvalKeys.count() });
+      const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.count() });
       expect(query).toBeDefined();
     });
 
-    const query = qc.getQueryCache().find({ queryKey: approvalKeys.count() })!;
-    expect(query.options.refetchInterval).toBe(15_000);
+    const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.count() });
+    expect(query).toBeDefined();
+    expect((query?.options as { refetchInterval?: number }).refetchInterval).toBe(15_000);
   });
 
   it("should override refetchInterval when provided", async () => {
     mockFetchApprovalCount.mockResolvedValue({ count: 0 });
 
-    const { wrapper, qc } = createWrapperWithClient();
+    const { wrapper, queryClient } = createQueryClientWrapper();
     renderHook(() => useApprovalCount({ refetchInterval: 5_000 }), { wrapper });
 
     await vi.waitFor(() => {
-      const query = qc.getQueryCache().find({ queryKey: approvalKeys.count() });
+      const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.count() });
       expect(query).toBeDefined();
     });
 
-    const query = qc.getQueryCache().find({ queryKey: approvalKeys.count() })!;
-    expect(query.options.refetchInterval).toBe(5_000);
+    const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.count() });
+    expect(query).toBeDefined();
+    expect((query?.options as { refetchInterval?: number }).refetchInterval).toBe(5_000);
   });
 
   it("should use approvalKeys.count() as queryKey", async () => {
     mockFetchApprovalCount.mockResolvedValue({ count: 0 });
 
-    const { wrapper, qc } = createWrapperWithClient();
+    const { wrapper, queryClient } = createQueryClientWrapper();
     renderHook(() => useApprovalCount(), { wrapper });
 
     await vi.waitFor(() => {
-      const query = qc.getQueryCache().find({ queryKey: approvalKeys.count() });
+      const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.count() });
       expect(query).toBeDefined();
     });
 
-    const query = qc.getQueryCache().find({ queryKey: approvalKeys.count() })!;
+    const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.count() })!;
     expect(query.queryKey).toEqual(approvalKeys.count());
   });
 });

@@ -1,10 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 import * as http from "../http/client";
 import { usePromptVersions, useExperiments, useExperimentMetrics } from "./agents";
 import { agentKeys } from "./keys";
+import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
   listPromptVersions: vi.fn(),
@@ -13,15 +12,6 @@ vi.mock("../http/client", () => ({
   ApiError: class ApiError extends Error {},
 }));
 
-function createWrapper() {
-  const qc = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  };
-}
-
 describe("usePromptVersions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -29,7 +19,7 @@ describe("usePromptVersions", () => {
 
   it("should be disabled when agentId is empty string", () => {
     const { result } = renderHook(() => usePromptVersions(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -40,12 +30,23 @@ describe("usePromptVersions", () => {
 
   it("should be enabled and fetch when agentId is valid", async () => {
     const mockData = [
-      { id: "v1", agent_id: "agent-1", version: 1, is_active: true, created_at: "2024-01-01T00:00:00Z" },
+      {
+        id: "v1",
+        agent_id: "agent-1",
+        version: 1,
+        content_hash: "hash-1",
+        system_prompt: "system",
+        tools: [],
+        variables: [],
+        created_at: "2024-01-01T00:00:00Z",
+        created_by: "tester",
+        is_active: true,
+      },
     ];
     vi.mocked(http.listPromptVersions).mockResolvedValue(mockData);
 
     const { result } = renderHook(() => usePromptVersions("agent-1"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -60,20 +61,15 @@ describe("usePromptVersions", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => usePromptVersions("test-agent"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(agentKeys.promptVersions("test-agent"))).toBeDefined();
+      expect(queryClient.getQueryCache().find({ queryKey: agentKeys.promptVersions("test-agent") })).toBeDefined();
     });
 
-    const cache = qc.getQueryCache().find(agentKeys.promptVersions("test-agent"));
+    const cache = queryClient.getQueryCache().find({ queryKey: agentKeys.promptVersions("test-agent") });
     expect(cache).toBeDefined();
     expect(cache?.queryKey).toEqual(agentKeys.promptVersions("test-agent"));
   });
@@ -86,7 +82,7 @@ describe("useExperiments", () => {
 
   it("should be disabled when agentId is empty string", () => {
     const { result } = renderHook(() => useExperiments(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -97,12 +93,25 @@ describe("useExperiments", () => {
 
   it("should be enabled and fetch when agentId is valid", async () => {
     const mockData = [
-      { id: "exp-1", agent_id: "agent-1", name: "Test Experiment", status: "running", created_at: "2024-01-01T00:00:00Z" },
+      {
+        id: "exp-1",
+        agent_id: "agent-1",
+        name: "Test Experiment",
+        status: "running" as const,
+        traffic_split: [100],
+        success_criteria: {
+          require_user_helpful: true,
+          require_no_tool_errors: true,
+          require_non_empty: true,
+        },
+        created_at: "2024-01-01T00:00:00Z",
+        variants: [{ name: "A", prompt_version_id: "v1" }],
+      },
     ];
     vi.mocked(http.listExperiments).mockResolvedValue(mockData);
 
     const { result } = renderHook(() => useExperiments("agent-1"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -117,20 +126,15 @@ describe("useExperiments", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => useExperiments("test-agent"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(agentKeys.experiments("test-agent"))).toBeDefined();
+      expect(queryClient.getQueryCache().find({ queryKey: agentKeys.experiments("test-agent") })).toBeDefined();
     });
 
-    const cache = qc.getQueryCache().find(agentKeys.experiments("test-agent"));
+    const cache = queryClient.getQueryCache().find({ queryKey: agentKeys.experiments("test-agent") });
     expect(cache).toBeDefined();
     expect(cache?.queryKey).toEqual(agentKeys.experiments("test-agent"));
   });
@@ -143,7 +147,7 @@ describe("useExperimentMetrics", () => {
 
   it("should be disabled when experimentId is empty string", () => {
     const { result } = renderHook(() => useExperimentMetrics(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -154,12 +158,22 @@ describe("useExperimentMetrics", () => {
 
   it("should be enabled and fetch when experimentId is valid", async () => {
     const mockData = [
-      { variant_id: "v1", success_rate: 0.95, avg_tokens: 100, total_cost_usd: 0.01 },
+      {
+        variant_id: "v1",
+        variant_name: "Variant A",
+        total_requests: 10,
+        successful_requests: 9,
+        failed_requests: 1,
+        success_rate: 0.95,
+        avg_latency_ms: 100,
+        avg_cost_usd: 0.001,
+        total_cost_usd: 0.01,
+      },
     ];
     vi.mocked(http.getExperimentMetrics).mockResolvedValue(mockData);
 
     const { result } = renderHook(() => useExperimentMetrics("exp-1"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -174,24 +188,19 @@ describe("useExperimentMetrics", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    const mockData = [{ variant_id: "v1", success_rate: 0.5 }];
+    const mockData = [{ variant_id: "v1", variant_name: "Variant A", total_requests: 2, successful_requests: 1, failed_requests: 1, success_rate: 0.5, avg_latency_ms: 50, avg_cost_usd: 0.01, total_cost_usd: 0.02 }];
     vi.mocked(http.getExperimentMetrics).mockResolvedValue(mockData);
 
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => useExperimentMetrics("test-exp"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(agentKeys.experimentMetrics("test-exp"))).toBeDefined();
+      expect(queryClient.getQueryCache().find({ queryKey: agentKeys.experimentMetrics("test-exp") })).toBeDefined();
     });
 
     expect(
-      qc.getQueryCache().find(agentKeys.experimentMetrics("test-exp"))?.queryKey,
+      queryClient.getQueryCache().find({ queryKey: agentKeys.experimentMetrics("test-exp") })?.queryKey,
     ).toEqual(agentKeys.experimentMetrics("test-exp"));
   });
 });

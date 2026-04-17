@@ -1,7 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, type MockedFunction } from "vitest";
 import { renderHook } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 import {
   useRestoreBackup,
   useCreateBackup,
@@ -18,6 +16,7 @@ import {
   useSkillHubInstall,
 } from "./skills";
 import { runtimeKeys, overviewKeys, skillKeys, fanghubKeys, sessionKeys } from "../queries/keys";
+import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../../api", () => ({
   restoreBackup: vi.fn().mockResolvedValue({ message: "ok" }),
@@ -38,14 +37,8 @@ vi.mock("../http/client", () => ({
 
 describe("useRestoreBackup", () => {
   it("invalidates runtimeKeys.backups() and overviewKeys.snapshot()", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
-
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    );
 
     const { result } = renderHook(() => useRestoreBackup(), { wrapper });
 
@@ -65,14 +58,8 @@ describe("useRestoreBackup", () => {
 
 describe("useFangHubInstall", () => {
   it("invalidates skillKeys.all and fanghubKeys.all", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
-
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    );
 
     const { result } = renderHook(() => useFangHubInstall(), { wrapper });
 
@@ -90,14 +77,8 @@ describe("useFangHubInstall", () => {
   });
 
   it("invalidates skillKeys.all and fanghubKeys.all with hand parameter", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
-
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    );
 
     const { result } = renderHook(() => useFangHubInstall(), { wrapper });
 
@@ -120,18 +101,13 @@ describe.each([
   { name: "useDeleteBackup", hook: useDeleteBackup, mutator: () => "backup-1", invalidateKeys: [runtimeKeys.backups()] },
 ] as const)("$name", ({ hook, mutator, invalidateKeys }) => {
   it("invalidates correct keys", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    );
+    const typedHook = hook as MockedFunction<typeof hook>;
+    const { result } = renderHook(() => typedHook(), { wrapper });
 
-    const { result } = renderHook(() => hook(), { wrapper });
-
-    result.current.mutate(mutator() as any);
+    result.current.mutate(mutator() as never);
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
@@ -147,14 +123,8 @@ describe.each([
   { name: "useRetryTask", hook: useRetryTask, id: "task-2", invalidateKeys: [runtimeKeys.tasks()] },
 ] as const)("$name", ({ hook, id, invalidateKeys }) => {
   it("invalidates correct keys", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
-
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    );
 
     const { result } = renderHook(() => hook(), { wrapper });
 
@@ -171,14 +141,8 @@ describe.each([
 
 describe("useCleanupSessions", () => {
   it("invalidates sessionKeys.all", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
-
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    );
 
     const { result } = renderHook(() => useCleanupSessions(), { wrapper });
 
@@ -195,14 +159,8 @@ describe("useCleanupSessions", () => {
 
 describe("useShutdownServer", () => {
   it("calls shutdownServer without invalidating queries", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
-
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    );
 
     const { result } = renderHook(() => useShutdownServer(), { wrapper });
 
@@ -221,14 +179,8 @@ describe.each([
   { name: "useSkillHubInstall", hook: useSkillHubInstall, input: { slug: "test-skill", hand: "test-hand" } },
 ] as const)("$name", ({ hook, input }) => {
   it("invalidates skillKeys.all", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
-
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    );
 
     const { result } = renderHook(() => hook(), { wrapper });
 

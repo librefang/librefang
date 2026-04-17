@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactNode } from "react";
+import type { HandInstanceItem, HandInstanceStatus } from "../../api";
 import {
   useHandStats,
   useHandStatsBatch,
@@ -78,12 +79,8 @@ describe("useHandStats", () => {
     renderHook(() => useHandStats("hand-2"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(handKeys.stats("hand-2"))).toBeDefined();
+      expect(qc.getQueryData(handKeys.stats("hand-2"))).toEqual(mockStats);
     });
-
-    expect(
-      qc.getQueryCache().find(handKeys.stats("hand-2"))?.queryKey,
-    ).toEqual(handKeys.stats("hand-2"));
   });
 });
 
@@ -132,12 +129,10 @@ describe("useHandStatsBatch", () => {
     renderHook(() => useHandStatsBatch(ids), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(handKeys.statsBatch(ids))).toBeDefined();
+      expect(qc.getQueryData(handKeys.statsBatch(ids))).toBeDefined();
     });
 
-    expect(
-      qc.getQueryCache().find(handKeys.statsBatch(ids))?.queryKey,
-    ).toEqual(handKeys.statsBatch(ids));
+    expect(qc.getQueryData(handKeys.statsBatch(ids))).toEqual({ h1: {}, h2: {} });
   });
 
   it("should skip failed requests gracefully", async () => {
@@ -220,18 +215,14 @@ describe("useHandSession", () => {
     const wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={qc}>{children}</QueryClientProvider>
     );
-    const mockSession = { instance_id: "hand-3" };
+    const mockSession = { instance_id: "hand-3", messages: [] };
     vi.mocked(client.getHandSession).mockResolvedValue(mockSession);
 
     renderHook(() => useHandSession("hand-3"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(handKeys.session("hand-3"))).toBeDefined();
+      expect(qc.getQueryData(handKeys.session("hand-3"))).toEqual(mockSession);
     });
-
-    expect(
-      qc.getQueryCache().find(handKeys.session("hand-3"))?.queryKey,
-    ).toEqual(handKeys.session("hand-3"));
   });
 });
 
@@ -248,9 +239,12 @@ describe("useHandInstanceStatus", () => {
   });
 
   it("should be enabled when instanceId is valid", async () => {
-    const mockStatus = {
+    const mockStatus: HandInstanceStatus = {
       instance_id: "inst-1",
+      hand_id: "hand-1",
       status: "running",
+      activated_at: "2024-01-01T00:00:00Z",
+      config: {},
     };
     vi.mocked(client.getHandInstanceStatus).mockResolvedValue(mockStatus);
 
@@ -274,7 +268,7 @@ describe("useHandInstanceStatus", () => {
     const wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={qc}>{children}</QueryClientProvider>
     );
-    const mockStatus = { instance_id: "inst-2" };
+    const mockStatus: HandInstanceStatus = { instance_id: "inst-2", hand_id: "hand-2", status: "running", activated_at: "2024-01-01T00:00:00Z", config: {} };
     vi.mocked(client.getHandInstanceStatus).mockResolvedValue(mockStatus);
 
     const { result } = renderHook(() => useHandInstanceStatus("inst-2"), {
@@ -381,9 +375,9 @@ describe("useActiveHandsWhen", () => {
   });
 
   it("should be enabled when enabled is true", async () => {
-    const mockHands = [
-      { hand_id: "h1", status: "active" },
-      { hand_id: "h2", status: "active" },
+    const mockHands: HandInstanceItem[] = [
+      { instance_id: "inst-1", hand_id: "h1", status: "active" },
+      { instance_id: "inst-2", hand_id: "h2", status: "active" },
     ];
     vi.mocked(client.listActiveHands).mockResolvedValue(mockHands);
 
@@ -407,7 +401,7 @@ describe("useActiveHandsWhen", () => {
     const wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={qc}>{children}</QueryClientProvider>
     );
-    const mockHands = [{ hand_id: "h1" }];
+    const mockHands: HandInstanceItem[] = [{ instance_id: "inst-1", hand_id: "h1" }];
     vi.mocked(client.listActiveHands).mockResolvedValue(mockHands);
 
     const { result } = renderHook(() => useActiveHandsWhen(true), {

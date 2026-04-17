@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactNode } from "react";
+import type { RegistrySchema } from "../../api";
 import { useRegistrySchema, useRawConfigToml } from "./config";
 import * as client from "../http/client";
 import { registryKeys, configKeys } from "./keys";
@@ -35,7 +36,7 @@ describe("useRegistrySchema", () => {
   });
 
   it("should be enabled when contentType is valid", async () => {
-    const mockSchema = { type: "object", properties: {} };
+    const mockSchema: RegistrySchema = { fields: {} };
     vi.mocked(client.fetchRegistrySchema).mockResolvedValue(mockSchema);
 
     const { result } = renderHook(() => useRegistrySchema("application/json"), {
@@ -54,7 +55,7 @@ describe("useRegistrySchema", () => {
   });
 
   it("should use registryKeys.schema(contentType) as queryKey", async () => {
-    const mockSchema = { type: "object" };
+    const mockSchema: RegistrySchema = { sections: {} };
     vi.mocked(client.fetchRegistrySchema).mockResolvedValue(mockSchema);
 
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -65,11 +66,11 @@ describe("useRegistrySchema", () => {
     renderHook(() => useRegistrySchema("text/plain"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(registryKeys.schema("text/plain"))).toBeDefined();
+      expect(qc.getQueryCache().find({ queryKey: registryKeys.schema("text/plain") })).toBeDefined();
     });
 
     expect(
-      qc.getQueryCache().find(registryKeys.schema("text/plain"))?.queryKey,
+      qc.getQueryCache().find({ queryKey: registryKeys.schema("text/plain") })?.queryKey,
     ).toEqual(registryKeys.schema("text/plain"));
   });
 });
@@ -116,11 +117,11 @@ describe("useRawConfigToml", () => {
     renderHook(() => useRawConfigToml(true), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(configKeys.rawToml())).toBeDefined();
+      expect(qc.getQueryCache().find({ queryKey: configKeys.rawToml() })).toBeDefined();
     });
 
     expect(
-      qc.getQueryCache().find(configKeys.rawToml())?.queryKey,
+      qc.getQueryCache().find({ queryKey: configKeys.rawToml() })?.queryKey,
     ).toEqual(configKeys.rawToml());
   });
 });

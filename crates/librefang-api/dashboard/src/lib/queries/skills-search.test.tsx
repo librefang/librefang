@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactNode } from "react";
+import type { ClawHubBrowseResponse, ClawHubSkillDetail } from "../../api";
 import {
   useClawHubSearch,
   useClawHubSkill,
@@ -45,7 +46,7 @@ describe("useClawHubSearch", () => {
   });
 
   it("should fetch when query is valid", async () => {
-    const mockResults = [{ slug: "skill-a", name: "Skill A" }];
+    const mockResults: ClawHubBrowseResponse = { items: [{ slug: "skill-a", name: "Skill A", description: "desc", version: "1.0.0" }] };
     vi.mocked(httpClient.clawhubSearch).mockResolvedValue(mockResults);
 
     const { result } = renderHook(() => useClawHubSearch("test"), {
@@ -60,7 +61,7 @@ describe("useClawHubSearch", () => {
 
   it("should use the correct queryKey", async () => {
     const qc = createQueryClient();
-    vi.mocked(httpClient.clawhubSearch).mockResolvedValue([]);
+    vi.mocked(httpClient.clawhubSearch).mockResolvedValue({ items: [] });
 
     const { result } = renderHook(() => useClawHubSearch("test"), {
       wrapper: createWrapper(qc),
@@ -86,7 +87,7 @@ describe("useClawHubSkill", () => {
   });
 
   it("should fetch when slug is valid", async () => {
-    const mockSkill = { slug: "my-skill", name: "My Skill" };
+    const mockSkill: ClawHubSkillDetail = { slug: "my-skill", name: "My Skill", description: "desc", version: "1.0.0", author: "tester", stars: 0, downloads: 0, tags: [], readme: "# My Skill" };
     vi.mocked(httpClient.clawhubGetSkill).mockResolvedValue(mockSkill);
 
     const { result } = renderHook(() => useClawHubSkill("my-skill"), {
@@ -101,7 +102,7 @@ describe("useClawHubSkill", () => {
 
   it("should use the correct queryKey", async () => {
     const qc = createQueryClient();
-    vi.mocked(httpClient.clawhubGetSkill).mockResolvedValue({});
+    vi.mocked(httpClient.clawhubGetSkill).mockResolvedValue({ slug: "my-skill", name: "My Skill", description: "desc", version: "1.0.0", author: "tester", stars: 0, downloads: 0, tags: [], readme: "# My Skill" });
 
     const { result } = renderHook(() => useClawHubSkill("my-skill"), {
       wrapper: createWrapper(qc),
@@ -127,7 +128,7 @@ describe("useSkillHubSearch", () => {
   });
 
   it("should fetch when query is valid", async () => {
-    const mockResults = [{ slug: "skill-b", name: "Skill B" }];
+    const mockResults: ClawHubBrowseResponse = { items: [{ slug: "skill-b", name: "Skill B", description: "desc", version: "1.0.0" }] };
     vi.mocked(httpClient.skillhubSearch).mockResolvedValue(mockResults);
 
     const { result } = renderHook(() => useSkillHubSearch("test"), {
@@ -142,7 +143,7 @@ describe("useSkillHubSearch", () => {
 
   it("should use the correct queryKey", async () => {
     const qc = createQueryClient();
-    vi.mocked(httpClient.skillhubSearch).mockResolvedValue([]);
+    vi.mocked(httpClient.skillhubSearch).mockResolvedValue({ items: [] });
 
     const { result } = renderHook(() => useSkillHubSearch("test"), {
       wrapper: createWrapper(qc),
@@ -168,7 +169,7 @@ describe("useSkillHubSkill", () => {
   });
 
   it("should fetch when slug is valid", async () => {
-    const mockSkill = { slug: "my-skill", name: "My Skill" };
+    const mockSkill: ClawHubSkillDetail = { slug: "my-skill", name: "My Skill", description: "desc", version: "1.0.0", author: "tester", stars: 0, downloads: 0, tags: [], readme: "# My Skill" };
     vi.mocked(httpClient.skillhubGetSkill).mockResolvedValue(mockSkill);
 
     const { result } = renderHook(() => useSkillHubSkill("my-skill"), {
@@ -183,7 +184,7 @@ describe("useSkillHubSkill", () => {
 
   it("should use the correct queryKey", async () => {
     const qc = createQueryClient();
-    vi.mocked(httpClient.skillhubGetSkill).mockResolvedValue({});
+    vi.mocked(httpClient.skillhubGetSkill).mockResolvedValue({ slug: "my-skill", name: "My Skill", description: "desc", version: "1.0.0", author: "tester", stars: 0, downloads: 0, tags: [], readme: "# My Skill" });
 
     const { result } = renderHook(() => useSkillHubSkill("my-skill"), {
       wrapper: createWrapper(qc),

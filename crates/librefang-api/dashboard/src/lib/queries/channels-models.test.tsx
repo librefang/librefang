@@ -1,24 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 import { useCommsEvents } from "./channels";
 import { useModels, useModelOverrides } from "./models";
 import * as httpClient from "../http/client";
 import { commsKeys, modelKeys } from "./keys";
+import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
   listCommsEvents: vi.fn(),
   listModels: vi.fn(),
   getModelOverrides: vi.fn(),
 }));
-
-function createWrapper() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  };
-}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -30,7 +22,7 @@ describe("useCommsEvents", () => {
     vi.mocked(httpClient.listCommsEvents).mockResolvedValue(mockEvents);
 
     const { result } = renderHook(() => useCommsEvents(), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -41,7 +33,7 @@ describe("useCommsEvents", () => {
 
   it("should not fetch when enabled is false", () => {
     const { result } = renderHook(() => useCommsEvents(50, { enabled: false }), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -55,7 +47,7 @@ describe("useCommsEvents", () => {
     vi.mocked(httpClient.listCommsEvents).mockResolvedValue(mockEvents);
 
     const { result } = renderHook(() => useCommsEvents(50, { enabled: true }), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -67,17 +59,14 @@ describe("useCommsEvents", () => {
   it("should use the correct queryKey", async () => {
     vi.mocked(httpClient.listCommsEvents).mockResolvedValue([]);
 
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
     renderHook(() => useCommsEvents(100, { enabled: true }), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(commsKeys.events(100))).toBeDefined();
+      expect(queryClient.getQueryCache().find({ queryKey: commsKeys.events(100) })).toBeDefined();
     });
     expect(
-      qc.getQueryCache().find(commsKeys.events(100))?.queryKey,
+      queryClient.getQueryCache().find({ queryKey: commsKeys.events(100) })?.queryKey,
     ).toEqual(commsKeys.events(100));
   });
 });
@@ -88,7 +77,7 @@ describe("useModels", () => {
     vi.mocked(httpClient.listModels).mockResolvedValue(mockResponse);
 
     const { result } = renderHook(() => useModels(), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -99,7 +88,7 @@ describe("useModels", () => {
 
   it("should not fetch when enabled is false", () => {
     const { result } = renderHook(() => useModels({}, { enabled: false }), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -113,7 +102,7 @@ describe("useModels", () => {
     vi.mocked(httpClient.listModels).mockResolvedValue(mockResponse);
 
     const { result } = renderHook(() => useModels({}, { enabled: true }), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -128,7 +117,7 @@ describe("useModels", () => {
 
     const filters = { provider: "anthropic", tier: "premium" };
     const { result } = renderHook(() => useModels(filters, { enabled: true }), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -140,17 +129,14 @@ describe("useModels", () => {
     vi.mocked(httpClient.listModels).mockResolvedValue({ models: [], total: 0, available: 0 });
 
     const filters = { provider: "openai" };
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
     renderHook(() => useModels(filters, { enabled: true }), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(modelKeys.list(filters))).toBeDefined();
+      expect(queryClient.getQueryCache().find({ queryKey: modelKeys.list(filters) })).toBeDefined();
     });
     expect(
-      qc.getQueryCache().find(modelKeys.list(filters))?.queryKey,
+      queryClient.getQueryCache().find({ queryKey: modelKeys.list(filters) })?.queryKey,
     ).toEqual(modelKeys.list(filters));
   });
 });
@@ -158,7 +144,7 @@ describe("useModels", () => {
 describe("useModelOverrides", () => {
   it("should be disabled when modelKey is empty string", () => {
     const { result } = renderHook(() => useModelOverrides(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -172,7 +158,7 @@ describe("useModelOverrides", () => {
     vi.mocked(httpClient.getModelOverrides).mockResolvedValue(mockOverrides);
 
     const { result } = renderHook(() => useModelOverrides("gpt-4"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -184,17 +170,14 @@ describe("useModelOverrides", () => {
   it("should use the correct queryKey", async () => {
     vi.mocked(httpClient.getModelOverrides).mockResolvedValue({});
 
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
     renderHook(() => useModelOverrides("claude-3"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(modelKeys.overrides("claude-3"))).toBeDefined();
+      expect(queryClient.getQueryCache().find({ queryKey: modelKeys.overrides("claude-3") })).toBeDefined();
     });
     expect(
-      qc.getQueryCache().find(modelKeys.overrides("claude-3"))?.queryKey,
+      queryClient.getQueryCache().find({ queryKey: modelKeys.overrides("claude-3") })?.queryKey,
     ).toEqual(modelKeys.overrides("claude-3"));
   });
 });

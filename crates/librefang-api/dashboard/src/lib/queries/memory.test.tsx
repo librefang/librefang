@@ -92,10 +92,11 @@ describe("useMemoryHealth", () => {
     );
 
     await waitFor(() => expect(healthResult.current.data).toBeDefined());
+    await waitFor(() => expect(memoryResult.current.data).toBe(true));
 
-    const healthKey = healthResult.current.queryKey;
-    const memoryKey = memoryResult.current.queryKey;
-
-    expect(memoryKey).toEqual(healthKey);
+    expect(healthDetailQueryOptions().queryKey).toEqual(runtimeKeys.healthDetail());
+    expect(qc.getQueryData(runtimeKeys.healthDetail())).toEqual({
+      memory: { embedding_available: true },
+    });
   });
 });

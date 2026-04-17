@@ -1,27 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 import { useAgentDetail, useAgentSessions, useAgentTemplates } from "./agents";
 import * as httpClient from "../http/client";
 import { agentKeys } from "./keys";
+import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
   getAgentDetail: vi.fn(),
   listAgentSessions: vi.fn(),
   listAgentTemplates: vi.fn(),
 }));
-
-function createWrapper() {
-  const qc = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
-  };
-}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -30,7 +18,7 @@ beforeEach(() => {
 describe("useAgentDetail", () => {
   it("should be disabled when agentId is empty string", () => {
     const { result } = renderHook(() => useAgentDetail(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -44,7 +32,7 @@ describe("useAgentDetail", () => {
     vi.mocked(httpClient.getAgentDetail).mockResolvedValue(mockAgent);
 
     const { result } = renderHook(() => useAgentDetail("agent-1"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -54,20 +42,15 @@ describe("useAgentDetail", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => useAgentDetail("test-id"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(agentKeys.detail("test-id"))).toBeDefined();
+      expect(queryClient.getQueryCache().find({ queryKey: agentKeys.detail("test-id") })).toBeDefined();
     });
 
-    const cache = qc.getQueryCache().find(agentKeys.detail("test-id"));
+    const cache = queryClient.getQueryCache().find({ queryKey: agentKeys.detail("test-id") });
     expect(cache).toBeDefined();
     expect(cache?.queryKey).toEqual(agentKeys.detail("test-id"));
   });
@@ -76,7 +59,7 @@ describe("useAgentDetail", () => {
 describe("useAgentSessions", () => {
   it("should be disabled when agentId is empty string", () => {
     const { result } = renderHook(() => useAgentSessions(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -86,11 +69,11 @@ describe("useAgentSessions", () => {
   });
 
   it("should be enabled when agentId is a valid string", async () => {
-    const mockSessions = [{ id: "session-1", agentId: "agent-1" }];
+    const mockSessions = [{ session_id: "session-1", agent_id: "agent-1" }];
     vi.mocked(httpClient.listAgentSessions).mockResolvedValue(mockSessions);
 
     const { result } = renderHook(() => useAgentSessions("agent-1"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -102,11 +85,11 @@ describe("useAgentSessions", () => {
 
 describe("useAgentTemplates", () => {
   it("should fetch by default when enabled is not provided", async () => {
-    const mockTemplates = [{ id: "template-1", name: "Test Template" }];
+    const mockTemplates = [{ name: "Test Template", description: "Test description" }];
     vi.mocked(httpClient.listAgentTemplates).mockResolvedValue(mockTemplates);
 
     const { result } = renderHook(() => useAgentTemplates(), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -117,7 +100,7 @@ describe("useAgentTemplates", () => {
 
   it("should not fetch when enabled is false", () => {
     const { result } = renderHook(() => useAgentTemplates({ enabled: false }), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -127,11 +110,11 @@ describe("useAgentTemplates", () => {
   });
 
   it("should fetch when enabled is true", async () => {
-    const mockTemplates = [{ id: "template-1", name: "Test Template" }];
+    const mockTemplates = [{ name: "Test Template", description: "Test description" }];
     vi.mocked(httpClient.listAgentTemplates).mockResolvedValue(mockTemplates);
 
     const { result } = renderHook(() => useAgentTemplates({ enabled: true }), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));

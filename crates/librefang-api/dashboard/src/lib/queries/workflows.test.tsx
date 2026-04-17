@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactNode } from "react";
+import type { WorkflowRunDetail } from "../../api";
 import { useWorkflowRuns, useWorkflowRunDetail, workflowQueries } from "./workflows";
 import * as httpClient from "../http/client";
 import { workflowKeys } from "./keys";
@@ -68,7 +69,7 @@ describe("useWorkflowRunDetail", () => {
   });
 
   it("should fetch when runId is valid", async () => {
-    const mockRun = { id: "run-1", status: "running", steps: [] };
+    const mockRun: WorkflowRunDetail = { id: "run-1", workflow_id: "wf-1", workflow_name: "Test Workflow", input: "{}", state: "running", started_at: "2024-01-01T00:00:00Z", step_results: [] };
     vi.mocked(httpClient.getWorkflowRun).mockResolvedValue(mockRun);
 
     const { result } = renderHook(() => useWorkflowRunDetail("run-1"), {

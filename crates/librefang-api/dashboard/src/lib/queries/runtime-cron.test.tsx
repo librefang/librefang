@@ -68,10 +68,10 @@ describe("useCronJobs", () => {
     );
     renderHook(() => useCronJobs("test-agent"), { wrapper });
     await waitFor(() => {
-      expect(qc.getQueryCache().find(cronKeys.jobs("test-agent"))).toBeDefined();
+      expect(qc.getQueryCache().find({ queryKey: cronKeys.jobs("test-agent") })).toBeDefined();
     });
     expect(
-      qc.getQueryCache().find(cronKeys.jobs("test-agent"))?.queryKey,
+      qc.getQueryCache().find({ queryKey: cronKeys.jobs("test-agent") })?.queryKey,
     ).toEqual(cronKeys.jobs("test-agent"));
   });
 });

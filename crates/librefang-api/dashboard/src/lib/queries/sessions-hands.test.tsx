@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactNode } from "react";
+import type { HandSettingsResponse, SessionDetailResponse } from "../../api";
 import { useSessionDetails } from "./sessions";
 import { useHandDetail, useHandSettings } from "./hands";
 import { sessionKeys, handKeys } from "./keys";
@@ -37,7 +38,7 @@ describe("useSessionDetails", () => {
   });
 
   it("should be enabled when sessionId is valid", async () => {
-    const mockSession = { id: "sess-1", status: "active" };
+    const mockSession: SessionDetailResponse = { session_id: "sess-1" };
     vi.mocked(client.getSessionDetails).mockResolvedValue(mockSession);
 
     const { result } = renderHook(() => useSessionDetails("sess-1"), {
@@ -56,7 +57,7 @@ describe("useSessionDetails", () => {
   });
 
   it("should use sessionKeys.detail(sessionId) as queryKey", async () => {
-    vi.mocked(client.getSessionDetails).mockResolvedValue({ id: "sess-2" });
+    vi.mocked(client.getSessionDetails).mockResolvedValue({ session_id: "sess-2" });
 
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const wrapper = ({ children }: { children: ReactNode }) => (
@@ -65,10 +66,10 @@ describe("useSessionDetails", () => {
     renderHook(() => useSessionDetails("sess-2"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(sessionKeys.detail("sess-2"))).toBeDefined();
+      expect(qc.getQueryCache().find({ queryKey: sessionKeys.detail("sess-2") })).toBeDefined();
     });
     expect(
-      qc.getQueryCache().find(sessionKeys.detail("sess-2"))?.queryKey,
+      qc.getQueryCache().find({ queryKey: sessionKeys.detail("sess-2") })?.queryKey,
     ).toEqual(sessionKeys.detail("sess-2"));
   });
 });
@@ -114,10 +115,10 @@ describe("useHandDetail", () => {
     renderHook(() => useHandDetail("hand-2"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(handKeys.detail("hand-2"))).toBeDefined();
+      expect(qc.getQueryCache().find({ queryKey: handKeys.detail("hand-2") })).toBeDefined();
     });
     expect(
-      qc.getQueryCache().find(handKeys.detail("hand-2"))?.queryKey,
+      qc.getQueryCache().find({ queryKey: handKeys.detail("hand-2") })?.queryKey,
     ).toEqual(handKeys.detail("hand-2"));
   });
 });
@@ -135,7 +136,7 @@ describe("useHandSettings", () => {
   });
 
   it("should be enabled when handId is valid", async () => {
-    const mockSettings = { handId: "hand-3", theme: "dark" };
+    const mockSettings: HandSettingsResponse = { hand_id: "hand-3", current_values: { theme: "dark" } };
     vi.mocked(client.getHandSettings).mockResolvedValue(mockSettings);
 
     const { result } = renderHook(() => useHandSettings("hand-3"), {
@@ -154,7 +155,7 @@ describe("useHandSettings", () => {
   });
 
   it("should use handKeys.settings(handId) as queryKey", async () => {
-    vi.mocked(client.getHandSettings).mockResolvedValue({ handId: "hand-4" });
+    vi.mocked(client.getHandSettings).mockResolvedValue({ hand_id: "hand-4" });
 
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const wrapper = ({ children }: { children: ReactNode }) => (
@@ -163,10 +164,10 @@ describe("useHandSettings", () => {
     renderHook(() => useHandSettings("hand-4"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find(handKeys.settings("hand-4"))).toBeDefined();
+      expect(qc.getQueryCache().find({ queryKey: handKeys.settings("hand-4") })).toBeDefined();
     });
     expect(
-      qc.getQueryCache().find(handKeys.settings("hand-4"))?.queryKey,
+      qc.getQueryCache().find({ queryKey: handKeys.settings("hand-4") })?.queryKey,
     ).toEqual(handKeys.settings("hand-4"));
   });
 });
