@@ -64,13 +64,42 @@ async function fetchToml(path: string, fallbackId: string): Promise<Detail | nul
   return parseToml(await res.text(), fallbackId)
 }
 
-async function fetchBatch(items: GHItem[], resolvePath: (item: GHItem) => string): Promise<Detail[]> {
+// Skills ship as SKILL.md with YAML frontmatter instead of TOML.
+// Only `name` and `description` are guaranteed; id falls back to the
+// directory name and category is always "skills".
+async function fetchSkillMd(path: string, fallbackId: string): Promise<Detail | null> {
+  const res = await fetch(`${RAW}/${path}`)
+  if (!res.ok) return null
+  const text = await res.text()
+  const fm = text.match(/^---\s*\n([\s\S]*?)\n---/)
+  if (!fm) return null
+  const block = fm[1]!
+  const get = (key: string) => {
+    const m = block.match(new RegExp(`^${key}\\s*:\\s*"?([^"\\n]*?)"?\\s*$`, 'm'))
+    return m ? m[1]!.trim() : ''
+  }
+  return {
+    id: get('id') || fallbackId,
+    name: get('name') || fallbackId,
+    description: get('description'),
+    category: 'skills',
+    icon: '',
+  }
+}
+
+type Fetcher = (path: string, fallbackId: string) => Promise<Detail | null>
+
+async function fetchBatch(
+  items: GHItem[],
+  resolvePath: (item: GHItem) => string,
+  fetcher: Fetcher = fetchToml,
+): Promise<Detail[]> {
   const out: Detail[] = []
   for (let i = 0; i < items.length; i += 10) {
     const slice = items.slice(i, i + 10)
     const details = await Promise.all(slice.map(item => {
       const id = item.name.endsWith('.toml') ? item.name.replace(/\.toml$/, '') : item.name
-      return fetchToml(resolvePath(item), id)
+      return fetcher(resolvePath(item), id)
     }))
     for (const d of details) if (d) out.push(d)
   }
@@ -109,17 +138,22 @@ async function main() {
     `${plugins.length} plugins, ${skills.length} skills, ${mcp.length} mcp`
   )
 
-  // Fetch full TOML details for all categories in parallel.
-  // Directory-based: manifest at <dir>/<UPPER>.toml
-  // File-based: item name already is <id>.toml
+  // Fetch manifest details for all categories in parallel.
+  // Directory-based: manifest at <dir>/<NAME>.{toml,md}; naming varies per category.
+  // File-based: item name already is <id>.toml.
+  //   hands    → HAND.toml   (uppercase)
+  //   agents   → agent.toml  (lowercase)
+  //   skills   → SKILL.md    (YAML frontmatter, not TOML)
+  //   plugins  → plugin.toml (directory-based, lowercase)
+  //   mcp      → MCP.toml    or bare file
   const [handDetails, agentDetails, skillDetails, channelDetails, providerDetails, workflowDetails, pluginDetails, integrationDetails, mcpDetails] = await Promise.all([
     fetchBatch(hands, h => `hands/${h.name}/HAND.toml`),
-    fetchBatch(agents, a => `agents/${a.name}/AGENT.toml`),
-    fetchBatch(skills, s => `skills/${s.name}/SKILL.toml`),
+    fetchBatch(agents, a => `agents/${a.name}/agent.toml`),
+    fetchBatch(skills, s => `skills/${s.name}/SKILL.md`, fetchSkillMd),
     fetchBatch(channels, c => `channels/${c.name}`),
     fetchBatch(providers, p => `providers/${p.name}`),
     fetchBatch(workflows, w => `workflows/${w.name}`),
-    fetchBatch(plugins, p => `plugins/${p.name}`),
+    fetchBatch(plugins, p => `plugins/${p.name}/plugin.toml`),
     fetchBatch(integrations, i => `integrations/${i.name}`),
     fetchBatch(mcp, m => m.name.endsWith('.toml') ? `mcp/${m.name}` : `mcp/${m.name}/MCP.toml`),
   ])

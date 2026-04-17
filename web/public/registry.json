@@ -2983,9 +2983,890 @@
       }
     }
   ],
-  "agents": [],
-  "plugins": [],
-  "skills": [],
+  "agents": [
+    {
+      "id": "academic-researcher",
+      "name": "academic-researcher",
+      "description": "Academic research agent. Searches scholarly papers, summarizes findings, and generates literature reviews.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "research",
+        "academic",
+        "papers",
+        "literature-review",
+        "science"
+      ]
+    },
+    {
+      "id": "analyst",
+      "name": "analyst",
+      "description": "Data analyst. Processes data, generates insights, creates reports.",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "architect",
+      "name": "architect",
+      "description": "System architect. Designs software architectures, evaluates trade-offs, creates technical specifications.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "architecture",
+        "design",
+        "planning"
+      ]
+    },
+    {
+      "id": "assistant",
+      "name": "assistant",
+      "description": "General-purpose assistant agent. The default OpenClaw agent for everyday tasks, questions, and conversations.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "general",
+        "assistant",
+        "default",
+        "multipurpose",
+        "conversation",
+        "productivity"
+      ]
+    },
+    {
+      "id": "code-reviewer",
+      "name": "code-reviewer",
+      "description": "Senior code reviewer. Reviews PRs, identifies issues, suggests improvements with production standards.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "review",
+        "code-quality",
+        "best-practices"
+      ]
+    },
+    {
+      "id": "coder",
+      "name": "coder",
+      "description": "Expert software engineer. Reads, writes, and analyzes code.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "coding",
+        "implementation",
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "id": "customer-support",
+      "name": "customer-support",
+      "description": "Customer support agent for ticket handling, issue resolution, and customer communication.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "support",
+        "customer-service",
+        "tickets",
+        "helpdesk",
+        "communication",
+        "resolution"
+      ]
+    },
+    {
+      "id": "data-scientist",
+      "name": "data-scientist",
+      "description": "Data scientist. Analyzes datasets, builds models, creates visualizations, performs statistical analysis.",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "debugger",
+      "name": "debugger",
+      "description": "Expert debugger. Traces bugs, analyzes stack traces, performs root cause analysis.",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "devops-lead",
+      "name": "devops-lead",
+      "description": "DevOps lead. Manages CI/CD, infrastructure, deployments, monitoring, and incident response.",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "doc-writer",
+      "name": "doc-writer",
+      "description": "Technical writer. Creates documentation, README files, API docs, tutorials, and architecture guides.",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "email-assistant",
+      "name": "email-assistant",
+      "description": "Email triage, drafting, scheduling, and inbox management agent.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "email",
+        "communication",
+        "triage",
+        "drafting",
+        "scheduling",
+        "productivity"
+      ]
+    },
+    {
+      "id": "health-tracker",
+      "name": "health-tracker",
+      "description": "Wellness tracking agent for health metrics, medication reminders, fitness goals, and lifestyle habits.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "health",
+        "wellness",
+        "fitness",
+        "medication",
+        "habits",
+        "tracking"
+      ]
+    },
+    {
+      "id": "hello-world",
+      "name": "hello-world",
+      "description": "A friendly greeting agent that can read files, search the web, and answer everyday questions.",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "home-automation",
+      "name": "home-automation",
+      "description": "Smart home control agent for IoT device management, automation rules, and home monitoring.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "smart-home",
+        "iot",
+        "automation",
+        "devices",
+        "monitoring",
+        "home"
+      ]
+    },
+    {
+      "id": "legal-assistant",
+      "name": "legal-assistant",
+      "description": "Legal assistant agent for contract review, legal research, compliance checking, and document drafting.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "legal",
+        "contracts",
+        "compliance",
+        "research",
+        "review",
+        "documents"
+      ]
+    },
+    {
+      "id": "meeting-assistant",
+      "name": "meeting-assistant",
+      "description": "Meeting notes, action items, agenda preparation, and follow-up tracking agent.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "meetings",
+        "notes",
+        "action-items",
+        "agenda",
+        "follow-up",
+        "productivity"
+      ]
+    },
+    {
+      "id": "ops",
+      "name": "ops",
+      "description": "DevOps agent. Monitors systems, runs diagnostics, manages deployments.",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "orchestrator",
+      "name": "orchestrator",
+      "description": "Meta-agent that decomposes complex tasks, delegates to specialist agents, and synthesizes results.",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "personal-finance",
+      "name": "personal-finance",
+      "description": "Personal finance agent for budget tracking, expense analysis, savings goals, and financial planning.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "finance",
+        "budget",
+        "expenses",
+        "savings",
+        "planning",
+        "money"
+      ]
+    },
+    {
+      "id": "planner",
+      "name": "planner",
+      "description": "Project planner. Creates project plans, breaks down epics, estimates effort, identifies risks and dependencies.",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "recipe-assistant",
+      "name": "recipe-assistant",
+      "description": "Cooking assistant that helps with recipes, meal plans, ingredient substitutions, and portion adjustments.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "cooking",
+        "recipes",
+        "meal-planning",
+        "nutrition",
+        "food"
+      ]
+    },
+    {
+      "id": "recruiter",
+      "name": "recruiter",
+      "description": "Recruiting agent for resume screening, candidate outreach, job description writing, and hiring pipeline management.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "recruiting",
+        "hiring",
+        "resume",
+        "outreach",
+        "talent",
+        "hr"
+      ]
+    },
+    {
+      "id": "researcher",
+      "name": "researcher",
+      "description": "Research agent. Fetches web content and synthesizes information.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "research",
+        "analysis",
+        "web"
+      ]
+    },
+    {
+      "id": "sales-assistant",
+      "name": "sales-assistant",
+      "description": "Sales assistant agent for CRM updates, outreach drafting, pipeline management, and deal tracking.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "sales",
+        "crm",
+        "outreach",
+        "pipeline",
+        "prospecting",
+        "deals"
+      ]
+    },
+    {
+      "id": "security-auditor",
+      "name": "security-auditor",
+      "description": "Security specialist. Reviews code for vulnerabilities, checks configurations, performs threat modeling.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "security",
+        "audit",
+        "vulnerability"
+      ]
+    },
+    {
+      "id": "social-media",
+      "name": "social-media",
+      "description": "Social media content creation, scheduling, and engagement strategy agent.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "social-media",
+        "content",
+        "marketing",
+        "engagement",
+        "scheduling",
+        "analytics"
+      ]
+    },
+    {
+      "id": "test-engineer",
+      "name": "test-engineer",
+      "description": "Quality assurance engineer. Designs test strategies, writes tests, validates correctness.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "testing",
+        "qa",
+        "validation"
+      ]
+    },
+    {
+      "id": "translator",
+      "name": "translator",
+      "description": "Multi-language translation agent for document translation, localization, and cross-cultural communication.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "translation",
+        "languages",
+        "localization",
+        "multilingual",
+        "communication",
+        "i18n"
+      ]
+    },
+    {
+      "id": "travel-planner",
+      "name": "travel-planner",
+      "description": "Trip planning agent for itinerary creation, booking research, budget estimation, and travel logistics.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "travel",
+        "planning",
+        "itinerary",
+        "booking",
+        "logistics",
+        "vacation"
+      ]
+    },
+    {
+      "id": "tutor",
+      "name": "tutor",
+      "description": "Teaching and explanation agent for learning, tutoring, and educational content creation.",
+      "category": "",
+      "icon": "",
+      "tags": [
+        "education",
+        "teaching",
+        "tutoring",
+        "learning",
+        "explanation",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "writer",
+      "name": "writer",
+      "description": "Content writer. Creates documentation, articles, and technical writing.",
+      "category": "",
+      "icon": ""
+    }
+  ],
+  "plugins": [
+    {
+      "id": "auto-summarizer",
+      "name": "auto-summarizer",
+      "description": "Maintains a running conversation summary to help agents handle long conversations without losing context",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "context-decay",
+      "name": "context-decay",
+      "description": "Time-based memory decay with relevance scoring for natural context forgetting",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "conversation-logger",
+      "name": "conversation-logger",
+      "description": "Logs all conversations to JSONL files for auditing, analytics, and debugging",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "episodic-memory",
+      "name": "episodic-memory",
+      "description": "Episode-based memory segmentation and recall for cross-conversation context continuity",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "guardrails",
+      "name": "guardrails",
+      "description": "Safety filter that detects potentially harmful content patterns and injects warnings into agent context",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "keyword-memory",
+      "name": "keyword-memory",
+      "description": "Extracts keywords and named entities from user messages and returns them as contextual memories",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "mempalace-indexer",
+      "name": "mempalace-indexer",
+      "description": "Auto-index conversations into MemPalace and recall relevant memories. No API keys, no cloud.",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "sentiment-tracker",
+      "name": "sentiment-tracker",
+      "description": "Analyzes user message sentiment and injects emotional context so agents can respond with appropriate tone",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "todo-tracker",
+      "name": "todo-tracker",
+      "description": "Detects action items and tasks mentioned in conversations, persists them, and recalls them as context",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "topic-memory",
+      "name": "topic-memory",
+      "description": "Topic-aware memory recall with keyword clustering for cross-conversation context",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "user-profile",
+      "name": "user-profile",
+      "description": "Persistent user profiling from conversation patterns for personalized agent responses",
+      "category": "",
+      "icon": ""
+    }
+  ],
+  "skills": [
+    {
+      "id": "ansible",
+      "name": "ansible",
+      "description": "Ansible automation expert for playbooks, roles, inventories, and infrastructure management",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "api-tester",
+      "name": "api-tester",
+      "description": "API testing expert for curl, REST, GraphQL, authentication, and debugging",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "aws",
+      "name": "aws",
+      "description": "AWS cloud services expert for EC2, S3, Lambda, IAM, and AWS CLI",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "azure",
+      "name": "azure",
+      "description": "Microsoft Azure expert for az CLI, AKS, App Service, and cloud infrastructure",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "ci-cd",
+      "name": "ci-cd",
+      "description": "CI/CD pipeline expert for GitHub Actions, GitLab CI, Jenkins, and deployment automation",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "code-reviewer",
+      "name": "code-reviewer",
+      "description": "Code review specialist focused on patterns, bugs, security, and performance",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "compliance",
+      "name": "compliance",
+      "description": "Compliance expert for SOC 2, GDPR, HIPAA, PCI-DSS, and security frameworks",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "confluence",
+      "name": "confluence",
+      "description": "Confluence wiki expert for page structure, spaces, macros, and content organization",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "crypto-expert",
+      "name": "crypto-expert",
+      "description": "Cryptography expert for TLS, symmetric/asymmetric encryption, hashing, and key management",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "css-expert",
+      "name": "css-expert",
+      "description": "CSS expert for flexbox, grid, animations, responsive design, and modern layout techniques",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "data-analyst",
+      "name": "data-analyst",
+      "description": "Data analysis expert for statistics, visualization, pandas, and exploration",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "data-pipeline",
+      "name": "data-pipeline",
+      "description": "Data pipeline expert for ETL, Apache Spark, Airflow, dbt, and data quality",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "docker",
+      "name": "docker",
+      "description": "Docker expert for containers, Compose, Dockerfiles, and debugging",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "elasticsearch",
+      "name": "elasticsearch",
+      "description": "Elasticsearch expert for queries, mappings, aggregations, index management, and cluster operations",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "email-writer",
+      "name": "email-writer",
+      "description": "Professional email writing expert for tone, structure, clarity, and business communication",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "figma-expert",
+      "name": "figma-expert",
+      "description": "Figma design expert for components, auto-layout, design systems, and developer handoff",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "gcp",
+      "name": "gcp",
+      "description": "Google Cloud Platform expert for gcloud CLI, GKE, Cloud Run, and managed services",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "git-expert",
+      "name": "git-expert",
+      "description": "Git operations expert for branching, rebasing, conflicts, and workflows",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "github",
+      "name": "github",
+      "description": "GitHub operations expert for PRs, issues, code review, Actions, and gh CLI",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "golang-expert",
+      "name": "golang-expert",
+      "description": "Go programming expert for goroutines, channels, interfaces, modules, and concurrency patterns",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "graphql-expert",
+      "name": "graphql-expert",
+      "description": "GraphQL expert for schema design, resolvers, subscriptions, and performance optimization",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "helm",
+      "name": "helm",
+      "description": "Helm chart expert for Kubernetes package management, templating, and dependency management",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "interview-prep",
+      "name": "interview-prep",
+      "description": "Technical interview preparation expert for algorithms, system design, and behavioral questions",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "jira",
+      "name": "jira",
+      "description": "Jira project management expert for issues, sprints, workflows, and reporting",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "kubernetes",
+      "name": "kubernetes",
+      "description": "Kubernetes operations expert for kubectl, pods, deployments, and debugging",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "linear-tools",
+      "name": "linear-tools",
+      "description": "Linear project management expert for issues, cycles, projects, and workflow automation",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "linux-networking",
+      "name": "linux-networking",
+      "description": "Linux networking expert for iptables, nftables, routing, DNS, and network troubleshooting",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "llm-finetuning",
+      "name": "llm-finetuning",
+      "description": "LLM fine-tuning expert for LoRA, QLoRA, dataset preparation, and training optimization",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "ml-engineer",
+      "name": "ml-engineer",
+      "description": "Machine learning engineer expert for PyTorch, scikit-learn, model evaluation, and MLOps",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "mongodb",
+      "name": "mongodb",
+      "description": "MongoDB operations expert for queries, aggregation pipelines, indexes, and schema design",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "nextjs-expert",
+      "name": "nextjs-expert",
+      "description": "Next.js expert for App Router, SSR/SSG, API routes, middleware, and deployment",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "nginx",
+      "name": "nginx",
+      "description": "Nginx configuration expert for reverse proxy, load balancing, TLS, and performance tuning",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "notion",
+      "name": "notion",
+      "description": "Notion workspace management and content creation specialist",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "oauth-expert",
+      "name": "oauth-expert",
+      "description": "OAuth 2.0 and OpenID Connect expert for authorization flows, PKCE, and token management",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "openapi-expert",
+      "name": "openapi-expert",
+      "description": "OpenAPI/Swagger expert for API specification design, validation, and code generation",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "pdf-reader",
+      "name": "pdf-reader",
+      "description": "PDF content extraction and analysis specialist",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "postgres-expert",
+      "name": "postgres-expert",
+      "description": "PostgreSQL expert for query optimization, indexing, extensions, and database administration",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "presentation",
+      "name": "presentation",
+      "description": "Presentation expert for slide structure, storytelling, visual design, and audience engagement",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "project-manager",
+      "name": "project-manager",
+      "description": "Project management expert for Agile, estimation, risk management, and stakeholder communication",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "prometheus",
+      "name": "prometheus",
+      "description": "Prometheus monitoring expert for PromQL, alerting rules, Grafana dashboards, and observability",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "prompt-engineer",
+      "name": "prompt-engineer",
+      "description": "Prompt engineering expert for chain-of-thought, few-shot learning, evaluation, and LLM optimization",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "python-expert",
+      "name": "python-expert",
+      "description": "Python expert for stdlib, packaging, type hints, async/await, and performance optimization",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "react-expert",
+      "name": "react-expert",
+      "description": "React expert for hooks, state management, Server Components, and performance optimization",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "redis-expert",
+      "name": "redis-expert",
+      "description": "Redis expert for data structures, caching patterns, Lua scripting, and cluster operations",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "regex-expert",
+      "name": "regex-expert",
+      "description": "Regular expression expert for crafting, debugging, and explaining patterns",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "rust-expert",
+      "name": "rust-expert",
+      "description": "Rust programming expert for ownership, lifetimes, async/await, traits, and unsafe code",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "security-audit",
+      "name": "security-audit",
+      "description": "Security audit expert for OWASP Top 10, CVE analysis, code review, and penetration testing methodology",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "sentry",
+      "name": "sentry",
+      "description": "Sentry error tracking and debugging specialist",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "shell-scripting",
+      "name": "shell-scripting",
+      "description": "Shell scripting expert for Bash, POSIX compliance, error handling, and automation",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "slack-tools",
+      "name": "slack-tools",
+      "description": "Slack workspace management and automation specialist",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "sql-analyst",
+      "name": "sql-analyst",
+      "description": "SQL query expert for optimization, schema design, and data analysis",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "sqlite-expert",
+      "name": "sqlite-expert",
+      "description": "SQLite expert for WAL mode, query optimization, embedded patterns, and advanced features",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "sysadmin",
+      "name": "sysadmin",
+      "description": "System administration expert for Linux, macOS, Windows, services, and monitoring",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "technical-writer",
+      "name": "technical-writer",
+      "description": "Technical writing expert for API docs, READMEs, ADRs, and developer documentation",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "terraform",
+      "name": "terraform",
+      "description": "Terraform IaC expert for providers, modules, state management, and planning",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "typescript-expert",
+      "name": "typescript-expert",
+      "description": "TypeScript expert for type system, generics, utility types, and strict mode patterns",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "vector-db",
+      "name": "vector-db",
+      "description": "Vector database expert for embeddings, similarity search, RAG patterns, and indexing strategies",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "wasm-expert",
+      "name": "wasm-expert",
+      "description": "WebAssembly expert for WASI, component model, Rust/C compilation, and browser integration",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "web-search",
+      "name": "web-search",
+      "description": "Web search and research specialist for finding and synthesizing information",
+      "category": "skills",
+      "icon": ""
+    },
+    {
+      "id": "writing-coach",
+      "name": "writing-coach",
+      "description": "Writing improvement specialist for grammar, style, clarity, and structure",
+      "category": "skills",
+      "icon": ""
+    }
+  ],
   "mcp": [],
   "handsCount": 17,
   "channelsCount": 44,
@@ -2996,5 +3877,5 @@
   "pluginsCount": 11,
   "skillsCount": 60,
   "mcpCount": 0,
-  "fetchedAt": "2026-04-17T03:57:44.410Z"
+  "fetchedAt": "2026-04-17T07:25:05.398Z"
 }
