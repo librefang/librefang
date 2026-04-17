@@ -339,13 +339,11 @@ impl WizardState {
             KeyCode::Esc => {
                 self.step = WizardStep::Provider;
             }
-            KeyCode::Enter => {
-                if !self.api_key_input.is_empty() {
-                    if let Some(p) = self.selected_provider_info() {
-                        self.model_input = catalog_default_model(p.name, p.default_model);
-                    }
-                    self.step = WizardStep::Model;
+            KeyCode::Enter if !self.api_key_input.is_empty() => {
+                if let Some(p) = self.selected_provider_info() {
+                    self.model_input = catalog_default_model(p.name, p.default_model);
                 }
+                self.step = WizardStep::Model;
             }
             KeyCode::Char(c) => {
                 self.api_key_input.push(c);
