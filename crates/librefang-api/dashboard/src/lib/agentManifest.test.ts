@@ -236,7 +236,13 @@ params = { region = "us" }
     expect(result.form.autonomous.max_iterations).toBe("100");
     expect(result.form.autonomous.heartbeat_channel).toBe("telegram");
     expect(result.form.fallback_models).toEqual([
-      { provider: "anthropic", model: "claude-3-5-sonnet", api_key_env: "", base_url: "" },
+      {
+        provider: "anthropic",
+        model: "claude-3-5-sonnet",
+        api_key_env: "",
+        base_url: "",
+        extras: {},
+      },
     ]);
     expect(result.form.context_injection).toEqual([
       { name: "policy", content: "Always be polite.", position: "before_user", condition: "" },
@@ -307,6 +313,90 @@ max_cost_per_hour_usd = 1
     // And [model.exotic_subtable] should still be addressable as a model
     // sub-table after the round-trip, not silently re-scoped to top-level.
     expect(reparsed.extras.model.exotic_subtable).toEqual({ foo: "bar" });
+  });
+
+  it("does not emit both exec_policy shorthand and [exec_policy] table", () => {
+    // Codex P1 regression: when TOML carries a full [exec_policy] table
+    // and the user later picks a shorthand string in the form, the old
+    // serializer wrote BOTH `exec_policy = "allowlist"` and the
+    // preserved `[exec_policy]` table — TOML rejects this as a key/table
+    // redefinition conflict.
+    const toml = `name = "a"
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+
+[exec_policy]
+mode = "allowlist"
+allowed_commands = ["ls"]
+timeout_secs = 30
+`;
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.extras.topLevel.exec_policy).toBeTruthy();
+
+    // User picks a shorthand in the form.
+    parsed.form.exec_policy_shorthand = "deny";
+    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
+    // Output must still be valid TOML (no duplicate exec_policy key).
+    const reparsed = parseManifestToml(reserialized);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.exec_policy_shorthand).toBe("deny");
+    // The full table must be gone — the shorthand wins.
+    expect(reparsed.extras.topLevel.exec_policy).toBeUndefined();
+  });
+
+  it("rejects negative and out-of-range integers in number fields", () => {
+    // Codex P2 regression: parseInteger used to accept any JS number,
+    // including negatives (which u32/u64 deserializers reject) and
+    // values above MAX_SAFE_INTEGER (which lose precision before
+    // serialization).
+    const form = emptyManifestForm();
+    form.name = "a";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.max_tokens = "-100";
+    form.resources.max_llm_tokens_per_hour = "9999999999999999999"; // > MAX_SAFE_INTEGER
+
+    const toml = serializeManifestForm(form);
+    expect(toml).not.toContain("max_tokens =");
+    expect(toml).not.toContain("max_llm_tokens_per_hour =");
+  });
+
+  it("preserves per-fallback-model extra_params on round-trip", () => {
+    // Codex P2 regression: FallbackModel has #[serde(flatten)] extra_params,
+    // which the parser used to drop. Provider-specific fields like
+    // `enable_memory` (Qwen) survive a round-trip now.
+    const toml = `name = "a"
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+
+[[fallback_models]]
+provider = "qwen"
+model = "qwen-3.6"
+enable_memory = true
+custom_param = "preserved"
+`;
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.fallback_models[0].extras).toEqual({
+      enable_memory: true,
+      custom_param: "preserved",
+    });
+    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
+    const reparsed = parseManifestToml(reserialized);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.fallback_models[0].extras).toEqual({
+      enable_memory: true,
+      custom_param: "preserved",
+    });
   });
 
   it("schedule round-trips through every variant", () => {

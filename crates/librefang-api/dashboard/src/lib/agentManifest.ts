@@ -42,6 +42,10 @@ export interface ManifestFormState {
     model: string;
     api_key_env: string;
     base_url: string;
+    // FallbackModel uses #[serde(flatten)] for provider-specific
+    // params (e.g. Qwen's enable_memory). Hold them here so round-trips
+    // through the form don't strip provider customisations.
+    extras: TomlTable;
   }>;
 
   resources: {
@@ -271,6 +275,12 @@ const FORM_RESOURCE_KEYS = new Set([
   "max_cpu_time_ms",
   "max_network_bytes_per_hour",
 ]);
+const FALLBACK_MODEL_KEYS = new Set([
+  "provider",
+  "model",
+  "api_key_env",
+  "base_url",
+]);
 const FORM_CAPABILITY_KEYS = new Set([
   "network",
   "shell",
@@ -296,11 +306,17 @@ const escapeTomlString = (value: string): string =>
 const tomlArray = (values: string[]): string =>
   `[${values.map(escapeTomlString).join(", ")}]`;
 
+// All integer manifest fields the form touches map to unsigned Rust
+// types (u32/u64). Reject negatives and anything beyond JS's safe-integer
+// range — the latter would silently lose precision before reaching the
+// kernel, the former is rejected server-side anyway. For form UX, "garbage
+// in → field omitted" is friendlier than a server-side error after submit.
 const parseInteger = (raw: string): number | null => {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   const n = Number(trimmed);
   if (!Number.isFinite(n) || !Number.isInteger(n)) return null;
+  if (n < 0 || n > Number.MAX_SAFE_INTEGER) return null;
   return n;
 };
 
@@ -308,7 +324,9 @@ const parseFloatish = (raw: string): number | null => {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   const n = Number(trimmed);
-  return Number.isFinite(n) ? n : null;
+  if (!Number.isFinite(n)) return null;
+  if (n < 0) return null; // all our float fields are cost/quota — never negative
+  return n;
 };
 
 const writeStringScalar = (lines: string[], key: string, value: string): void => {
@@ -368,7 +386,6 @@ export const serializeManifestForm = (
   const scheduleLine = renderSchedule(form.schedule);
   if (scheduleLine) lines.push(scheduleLine);
 
-  // exec_policy shorthand (full table form goes through extras).
   if (form.exec_policy_shorthand) {
     writeStringScalar(lines, "exec_policy", form.exec_policy_shorthand);
   }
@@ -378,9 +395,14 @@ export const serializeManifestForm = (
   if (responseFormatLine) lines.push(responseFormatLine);
 
   // Top-level extras — split scalars (BEFORE table headers) and tables (AFTER).
-  const { inline: topInlineExtras, tables: topTableExtras } = splitTopLevelExtras(
-    extras.topLevel,
-  );
+  // Mutually exclusive with the form's exec_policy shorthand: emitting both
+  // a scalar `exec_policy = "..."` and a `[exec_policy]` table is a TOML
+  // key/table redefinition conflict, so the shorthand wins when set.
+  const filteredTopExtras = form.exec_policy_shorthand
+    ? omitKey(extras.topLevel, "exec_policy")
+    : extras.topLevel;
+  const { inline: topInlineExtras, tables: topTableExtras } =
+    splitTopLevelExtras(filteredTopExtras);
   for (const line of renderExtraScalars(topInlineExtras)) lines.push(line);
 
   // Section-extras that contain nested tables must NOT be inlined inside
@@ -480,6 +502,11 @@ export const serializeManifestForm = (
     writeStringScalar(body, "model", fb.model.trim());
     writeStringScalar(body, "api_key_env", fb.api_key_env.trim());
     writeStringScalar(body, "base_url", fb.base_url.trim());
+    // Re-emit provider-specific extras (e.g. Qwen's enable_memory). Same
+    // newline-defence as the section-extras path: refuse multi-line
+    // output that would re-anchor scoping inside this `[[fallback_models]]`
+    // table item.
+    body.push(...renderExtraScalars(fb.extras ?? {}));
     if (body.length) lines.push("", "[[fallback_models]]", ...body);
   }
 
@@ -645,6 +672,11 @@ const splitTopLevelExtras = (
 const isArrayOfTables = (v: unknown): boolean =>
   Array.isArray(v) && v.length > 0 && v.every((item) => isTomlTable(item));
 
+const omitKey = (table: TomlTable, key: string): TomlTable => {
+  const { [key]: _omit, ...rest } = table;
+  return rest;
+};
+
 // Form-validation errors. Returns an empty array when submittable.
 export const validateManifestForm = (form: ManifestFormState): string[] => {
   const errors: string[] = [];
@@ -763,16 +795,16 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.model.base_url = asString(modelTable.base_url);
   extras.model = stripKnown(modelTable, FORM_MODEL_KEYS);
 
-  // [[fallback_models]]
+  // [[fallback_models]] — capture provider-specific flatten extras too,
+  // so e.g. Qwen's enable_memory survives a TOML→Form→TOML round-trip.
   if (Array.isArray(parsed.fallback_models)) {
-    form.fallback_models = parsed.fallback_models
-      .filter(isTomlTable)
-      .map((fb) => ({
-        provider: asString(fb.provider),
-        model: asString(fb.model),
-        api_key_env: asString(fb.api_key_env),
-        base_url: asString(fb.base_url),
-      }));
+    form.fallback_models = parsed.fallback_models.filter(isTomlTable).map((fb) => ({
+      provider: asString(fb.provider),
+      model: asString(fb.model),
+      api_key_env: asString(fb.api_key_env),
+      base_url: asString(fb.base_url),
+      extras: stripKnown(fb, FALLBACK_MODEL_KEYS),
+    }));
   }
 
   // [resources]

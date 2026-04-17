@@ -512,7 +512,7 @@ export function AgentManifestForm({
             update({
               fallback_models: [
                 ...value.fallback_models,
-                { provider: "", model: "", api_key_env: "", base_url: "" },
+                { provider: "", model: "", api_key_env: "", base_url: "", extras: {} },
               ],
             })
           }
