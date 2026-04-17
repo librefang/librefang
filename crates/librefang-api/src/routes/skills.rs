@@ -3578,13 +3578,30 @@ fn clone_installed_skill(
     state: &Arc<AppState>,
     name: &str,
 ) -> Result<librefang_skills::InstalledSkill, (StatusCode, Json<serde_json::Value>)> {
-    let registry = state
-        .kernel
-        .skill_registry_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    registry.get(name).cloned().ok_or_else(|| {
-        ApiErrorResponse::not_found(format!("Skill '{name}' not found")).into_json_tuple()
+    // Try the live registry first. Fall back to disk for skills that
+    // exist on the filesystem but haven't been hot-reloaded into the
+    // in-memory registry yet — e.g. after a just-completed
+    // `skill_evolve_create` from within the same dashboard session.
+    {
+        let registry = state
+            .kernel
+            .skill_registry_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = registry.get(name) {
+            return Ok(s.clone());
+        }
+    }
+    let skills_dir = state.kernel.home_dir().join("skills");
+    librefang_skills::evolution::load_installed_skill_from_disk(&skills_dir, name).map_err(|e| {
+        match e {
+            librefang_skills::SkillError::NotFound(_) => {
+                ApiErrorResponse::not_found(format!("Skill '{name}' not found")).into_json_tuple()
+            }
+            other => {
+                ApiErrorResponse::bad_request(format!("Skill '{name}': {other}")).into_json_tuple()
+            }
+        }
     })
 }
 

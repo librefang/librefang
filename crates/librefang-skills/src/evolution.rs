@@ -1520,6 +1520,58 @@ pub fn record_skill_usage(skill_dir: &Path) -> Result<(), SkillError> {
     save_evolution_meta(skill_dir, &meta)
 }
 
+/// Build an `InstalledSkill` by reading `skill.toml` + `prompt_context.md`
+/// straight from disk, bypassing whatever in-memory registry snapshot
+/// the caller has.
+///
+/// Needed because registry hot-reload happens AFTER the agent loop
+/// finishes, but within a single turn an agent can call
+/// `skill_evolve_create` followed by `skill_evolve_update`. Between
+/// those two tool invocations the in-memory registry still doesn't
+/// know the newly-created skill exists, so `registry.get(name)` would
+/// return None and the update would bail with "not found" even though
+/// the skill dir is right there on disk.
+///
+/// Callers should prefer `registry.get(name)` and fall back to this
+/// when the registry doesn't have a fresh-enough view.
+pub fn load_installed_skill_from_disk(
+    skills_dir: &Path,
+    name: &str,
+) -> Result<InstalledSkill, SkillError> {
+    validate_name(name)?;
+    let skill_dir = skills_dir.join(name);
+    if !skill_dir.exists() {
+        return Err(SkillError::NotFound(format!(
+            "Skill '{name}' directory does not exist"
+        )));
+    }
+    let manifest_path = skill_dir.join("skill.toml");
+    let toml_str = std::fs::read_to_string(&manifest_path)?;
+    let mut manifest: SkillManifest = toml::from_str(&toml_str)?;
+
+    // Progressive loading: pull prompt_context.md if the inline field is empty.
+    if manifest
+        .prompt_context
+        .as_ref()
+        .is_none_or(|c| c.is_empty())
+    {
+        let prompt_path = skill_dir.join("prompt_context.md");
+        if prompt_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&prompt_path) {
+                if !content.is_empty() {
+                    manifest.prompt_context = Some(content);
+                }
+            }
+        }
+    }
+
+    Ok(InstalledSkill {
+        manifest,
+        path: skill_dir,
+        enabled: true,
+    })
+}
+
 // ── Skill config variable discovery ─────────────────────────────────
 
 /// A config variable declared by a skill.

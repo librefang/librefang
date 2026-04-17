@@ -4903,9 +4903,23 @@ async fn tool_skill_evolve_update(
         .as_str()
         .ok_or("Missing 'changelog' parameter")?;
 
-    let skill = registry
-        .get(name)
-        .ok_or_else(|| format!("Skill '{name}' not found"))?;
+    // Registry hot-reload happens AFTER the turn finishes, so within
+    // the same turn `create` followed by `update` would find the
+    // registry cache still stale. Fall back to loading straight from
+    // disk when the cache misses — if the skill truly doesn't exist
+    // the helper returns NotFound too.
+    let skill_owned;
+    let skill = match registry.get(name) {
+        Some(s) => s,
+        None => {
+            skill_owned = librefang_skills::evolution::load_installed_skill_from_disk(
+                registry.skills_dir(),
+                name,
+            )
+            .map_err(|e| format!("Skill '{name}' not found: {e}"))?;
+            &skill_owned
+        }
+    };
 
     let author = agent_author_tag(caller_agent_id);
     match librefang_skills::evolution::update_skill(skill, prompt_context, changelog, Some(&author))
@@ -4934,9 +4948,19 @@ async fn tool_skill_evolve_patch(
         .ok_or("Missing 'changelog' parameter")?;
     let replace_all = input["replace_all"].as_bool().unwrap_or(false);
 
-    let skill = registry
-        .get(name)
-        .ok_or_else(|| format!("Skill '{name}' not found"))?;
+    // Same-turn create→patch fallback (see tool_skill_evolve_update).
+    let skill_owned;
+    let skill = match registry.get(name) {
+        Some(s) => s,
+        None => {
+            skill_owned = librefang_skills::evolution::load_installed_skill_from_disk(
+                registry.skills_dir(),
+                name,
+            )
+            .map_err(|e| format!("Skill '{name}' not found: {e}"))?;
+            &skill_owned
+        }
+    };
 
     let author = agent_author_tag(caller_agent_id);
     match librefang_skills::evolution::patch_skill(
@@ -4976,9 +5000,19 @@ async fn tool_skill_evolve_rollback(
     ensure_not_frozen(registry)?;
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
 
-    let skill = registry
-        .get(name)
-        .ok_or_else(|| format!("Skill '{name}' not found"))?;
+    // Same-turn create→rollback fallback (see tool_skill_evolve_update).
+    let skill_owned;
+    let skill = match registry.get(name) {
+        Some(s) => s,
+        None => {
+            skill_owned = librefang_skills::evolution::load_installed_skill_from_disk(
+                registry.skills_dir(),
+                name,
+            )
+            .map_err(|e| format!("Skill '{name}' not found: {e}"))?;
+            &skill_owned
+        }
+    };
 
     let author = agent_author_tag(caller_agent_id);
     match librefang_skills::evolution::rollback_skill(skill, Some(&author)) {
@@ -4999,9 +5033,19 @@ async fn tool_skill_evolve_write_file(
         .as_str()
         .ok_or("Missing 'content' parameter")?;
 
-    let skill = registry
-        .get(name)
-        .ok_or_else(|| format!("Skill '{name}' not found"))?;
+    // Same-turn create→write_file fallback.
+    let skill_owned;
+    let skill = match registry.get(name) {
+        Some(s) => s,
+        None => {
+            skill_owned = librefang_skills::evolution::load_installed_skill_from_disk(
+                registry.skills_dir(),
+                name,
+            )
+            .map_err(|e| format!("Skill '{name}' not found: {e}"))?;
+            &skill_owned
+        }
+    };
 
     match librefang_skills::evolution::write_supporting_file(skill, path, content) {
         Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
@@ -5018,9 +5062,19 @@ async fn tool_skill_evolve_remove_file(
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
     let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
 
-    let skill = registry
-        .get(name)
-        .ok_or_else(|| format!("Skill '{name}' not found"))?;
+    // Same-turn fallback (see tool_skill_evolve_update).
+    let skill_owned;
+    let skill = match registry.get(name) {
+        Some(s) => s,
+        None => {
+            skill_owned = librefang_skills::evolution::load_installed_skill_from_disk(
+                registry.skills_dir(),
+                name,
+            )
+            .map_err(|e| format!("Skill '{name}' not found: {e}"))?;
+            &skill_owned
+        }
+    };
 
     match librefang_skills::evolution::remove_supporting_file(skill, path) {
         Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
