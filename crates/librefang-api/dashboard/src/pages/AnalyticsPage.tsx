@@ -1,8 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatCompact, formatCost } from "../lib/format";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { getUsageSummary, listUsageByAgent, listUsageByModel, getUsageDaily, getBudgetStatus, updateBudget, getUsageByModelPerformance } from "../api";
+import { useUsageSummary, useUsageByAgent, useUsageByModel, useUsageDaily, useModelPerformance, useBudgetStatus } from "../lib/queries/analytics";
+import { useUpdateBudget } from "../lib/mutations/analytics";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -11,19 +11,16 @@ import { BarChart3, DollarSign, Shield, Save, Loader2, Cpu, Users, Zap, Trending
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from "recharts";
 
-const REFRESH_MS = 30000;
-
 export function AnalyticsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
 
-  const usageQuery = useQuery({ queryKey: ["usage", "summary"], queryFn: getUsageSummary, refetchInterval: REFRESH_MS });
-  const usageByAgentQuery = useQuery({ queryKey: ["usage", "byAgent"], queryFn: listUsageByAgent, refetchInterval: REFRESH_MS });
-  const usageByModelQuery = useQuery({ queryKey: ["usage", "byModel"], queryFn: listUsageByModel, refetchInterval: REFRESH_MS });
-  const dailyQuery = useQuery({ queryKey: ["usage", "daily"], queryFn: getUsageDaily, refetchInterval: REFRESH_MS });
-  const budgetQuery = useQuery({ queryKey: ["budget"], queryFn: getBudgetStatus, refetchInterval: REFRESH_MS });
-  const modelPerformanceQuery = useQuery({ queryKey: ["usage", "modelPerformance"], queryFn: getUsageByModelPerformance, refetchInterval: REFRESH_MS });
-  const budgetMutation = useMutation({ mutationFn: updateBudget, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["budget"] }) });
+  const usageQuery = useUsageSummary();
+  const usageByAgentQuery = useUsageByAgent();
+  const usageByModelQuery = useUsageByModel();
+  const dailyQuery = useUsageDaily();
+  const budgetQuery = useBudgetStatus();
+  const modelPerformanceQuery = useModelPerformance();
+  const budgetMutation = useUpdateBudget();
 
   const usage = usageQuery.data ?? null;
   const usageByAgent = useMemo(() => [...(usageByAgentQuery.data ?? [])].filter((a: any) => !a.is_hand).sort((a: any, b: any) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0)), [usageByAgentQuery.data]);
