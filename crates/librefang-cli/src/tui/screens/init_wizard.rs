@@ -812,36 +812,30 @@ pub fn run() -> InitResult {
                                 state.key_test = KeyTestState::Idle;
                                 state.step = Step::Provider;
                             }
-                            KeyCode::Enter => {
+                            KeyCode::Enter
                                 if !state.api_key_input.is_empty()
-                                    && state.key_test == KeyTestState::Idle
-                                {
-                                    if let Some(p) = state.provider() {
-                                        let _ =
-                                            dotenv::save_env_key(p.env_var, &state.api_key_input);
-                                    }
-                                    state.key_test = KeyTestState::Testing;
-                                    let provider_name = state
-                                        .provider()
-                                        .map(|p| p.name.to_string())
-                                        .unwrap_or_default();
-                                    let key_value = state.api_key_input.clone();
-                                    let tx = test_tx.clone();
-                                    std::thread::spawn(move || {
-                                        let ok = crate::test_api_key(&provider_name, &key_value);
-                                        let _ = tx.send(ok);
-                                    });
+                                    && state.key_test == KeyTestState::Idle =>
+                            {
+                                if let Some(p) = state.provider() {
+                                    let _ = dotenv::save_env_key(p.env_var, &state.api_key_input);
                                 }
+                                state.key_test = KeyTestState::Testing;
+                                let provider_name = state
+                                    .provider()
+                                    .map(|p| p.name.to_string())
+                                    .unwrap_or_default();
+                                let key_value = state.api_key_input.clone();
+                                let tx = test_tx.clone();
+                                std::thread::spawn(move || {
+                                    let ok = crate::test_api_key(&provider_name, &key_value);
+                                    let _ = tx.send(ok);
+                                });
                             }
-                            KeyCode::Char(c) => {
-                                if state.key_test == KeyTestState::Idle {
-                                    state.api_key_input.push(c);
-                                }
+                            KeyCode::Char(c) if state.key_test == KeyTestState::Idle => {
+                                state.api_key_input.push(c);
                             }
-                            KeyCode::Backspace => {
-                                if state.key_test == KeyTestState::Idle {
-                                    state.api_key_input.pop();
-                                }
+                            KeyCode::Backspace if state.key_test == KeyTestState::Idle => {
+                                state.api_key_input.pop();
                             }
                             _ => {}
                         }
