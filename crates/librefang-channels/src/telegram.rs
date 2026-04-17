@@ -83,7 +83,7 @@ fn url_filename(url_str: &str, fallback: &str) -> String {
         .ok()
         .and_then(|u| {
             u.path_segments()
-                .and_then(|segs| segs.last().map(|s| s.to_string()))
+                .and_then(|mut segs| segs.next_back().map(|s| s.to_string()))
                 .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| fallback.to_string())
