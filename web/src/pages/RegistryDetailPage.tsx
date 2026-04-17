@@ -9,7 +9,7 @@ import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
 import { highlightToml } from '../lib/toml-highlight'
 import { renderMarkdown } from '../lib/minimal-markdown'
-import SubpageHeader from '../components/SubpageHeader'
+import SiteHeader from '../components/SiteHeader'
 import { fetchRegistryRaw } from '../lib/registry-raw'
 
 interface RegistryDetailPageProps {
@@ -218,8 +218,8 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
   const popular = isPopular(item)
 
   return (
-    <main className="min-h-screen bg-surface">
-      <SubpageHeader
+    <main className="min-h-screen bg-surface pt-16">
+      <SiteHeader
         crumbs={[
           { label: categoryLabel, href: catHref },
           { label: item?.name || id },

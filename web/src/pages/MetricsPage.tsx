@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Loader2, BarChart3 } from 'lucide-react'
 import { useAppStore } from '../store'
 import { translations } from '../i18n'
-import SubpageHeader from '../components/SubpageHeader'
+import SiteHeader from '../components/SiteHeader'
 
 const METRICS_API = 'https://stats.librefang.ai/api/registry/metrics'
 
@@ -37,8 +37,8 @@ export default function MetricsPage({ onOpenSearch }: MetricsPageProps) {
   const langPrefix = lang === 'en' ? '' : `/${lang}`
 
   return (
-    <main className="min-h-screen bg-surface">
-      <SubpageHeader
+    <main className="min-h-screen bg-surface pt-16">
+      <SiteHeader
         crumbs={[{ label: 'Metrics' }]}
         onOpenSearch={onOpenSearch}
       />

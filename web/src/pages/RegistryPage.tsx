@@ -8,7 +8,8 @@ import type { Translation } from './../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
 import { fetchRegistryRaw } from '../lib/registry-raw'
-import SubpageHeader from '../components/SubpageHeader'
+import SiteHeader from '../components/SiteHeader'
+// Fixed top header needs content to start below its 64px band.
 
 interface RegistryPageProps {
   category: RegistryCategory
@@ -124,8 +125,8 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   const langPrefix = lang === 'en' ? '' : `/${lang}`
 
   return (
-    <main className="min-h-screen bg-surface">
-      <SubpageHeader
+    <main className="min-h-screen bg-surface pt-16">
+      <SiteHeader
         crumbs={[{ label: labels.title }]}
         sourceUrl={`https://github.com/librefang/librefang-registry${meta.registryPath}`}
         onOpenSearch={onOpenSearch}

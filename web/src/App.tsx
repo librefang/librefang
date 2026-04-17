@@ -1,16 +1,15 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Terminal, Cpu, Shield, Zap, Network, ChevronRight, ChevronDown, ExternalLink,
-  Copy, Check, Menu, X, Box, Layers, Radio, Eye,
+  Terminal, Cpu, Shield, Zap, Network, ChevronRight, ExternalLink,
+  Copy, Check, Box, Layers, Radio, Eye,
   Scissors, Users, Globe, ArrowRight, Github, Monitor,
   Star, GitFork, CircleDot, GitPullRequest, MessageSquare,
-  Sun, Moon, Sparkles, History, RotateCcw, FileEdit, Trash2, FilePlus,
-  Search
+  Sparkles, History, RotateCcw, FileEdit, Trash2, FilePlus,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
-import { translations, languages } from './i18n'
+import { translations } from './i18n'
 import type { Translation } from './i18n'
 import { useRegistry, getLocalizedDesc } from './useRegistry'
 import { useAppStore } from './store'
@@ -25,6 +24,7 @@ const RegistryDetailPage = lazy(() => import('./pages/RegistryDetailPage'))
 const MetricsPage = lazy(() => import('./pages/MetricsPage'))
 const SearchDialog = lazy(() => import('./components/SearchDialog'))
 const InstallBanner = lazy(() => import('./components/InstallBanner'))
+import SiteHeader from './components/SiteHeader'
 import type { RegistryCategory } from './useRegistry'
 
 
@@ -98,354 +98,6 @@ function FadeIn({ children, className = '', delay = 0 }: FadeInProps) {
   )
 }
 
-// ─── Nav ───
-interface NavProps {
-  t: Translation
-  lang: string
-  onSwitchLang: (code: string) => void
-  onOpenSearch?: () => void
-}
-
-function Nav({ t, lang, onSwitchLang, onOpenSearch }: NavProps) {
-  const [open, setOpen] = useState(false)
-  const [langOpen, setLangOpen] = useState(false)
-  const [featuresOpen, setFeaturesOpen] = useState(false)
-  const [scrolled, setScrolled] = useState(false)
-  const [activeSection, setActiveSection] = useState('')
-  const theme = useAppStore((s) => s.theme)
-  const toggleTheme = useAppStore((s) => s.toggleTheme)
-  const currentLangName = languages.find(l => l.code === lang)?.name || 'English'
-
-  useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 20)
-    window.addEventListener('scroll', onScroll, { passive: true })
-    return () => window.removeEventListener('scroll', onScroll)
-  }, [])
-
-  useEffect(() => {
-    const sections = document.querySelectorAll('section[id]')
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            setActiveSection(entry.target.id)
-          }
-        }
-      },
-      { threshold: 0.3, rootMargin: '-80px 0px -50% 0px' }
-    )
-    sections.forEach(s => observer.observe(s))
-    return () => observer.disconnect()
-  }, [])
-
-  useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { setOpen(false); setLangOpen(false); setFeaturesOpen(false) }
-    }
-    const handleClickOutside = (e: MouseEvent) => {
-      if (langOpen && !(e.target as HTMLElement).closest('[data-lang-menu]')) setLangOpen(false)
-      if (featuresOpen && !(e.target as HTMLElement).closest('[data-features-menu]')) setFeaturesOpen(false)
-    }
-    document.addEventListener('keydown', handleEscape)
-    document.addEventListener('click', handleClickOutside)
-    return () => {
-      document.removeEventListener('keydown', handleEscape)
-      document.removeEventListener('click', handleClickOutside)
-    }
-  }, [langOpen, featuresOpen])
-
-  interface NavLink {
-    label: string
-    href: string
-    external?: boolean
-    highlight?: boolean
-  }
-
-  // Registry page entries route to dedicated /<category> pages that render
-  // the registry contents via the CF worker proxy.
-  const langPrefix = lang === 'en' ? '' : `/${lang}`
-  const registryLink = (cat: string, label: string, highlight?: boolean): NavLink => ({
-    label,
-    href: `${langPrefix}/${cat}`,
-    highlight,
-  })
-
-  const rc = t.registry?.categories
-  const featureLinks: NavLink[] = [
-    registryLink('hands',      rc?.hands.title     || 'Hands'),
-    registryLink('agents',     rc?.agents.title    || 'Agents'),
-    registryLink('skills',     rc?.skills.title    || 'Skills', true),
-    registryLink('mcp',        rc?.mcp.title       || 'MCP Servers'),
-    registryLink('plugins',    rc?.plugins.title   || 'Plugins'),
-    registryLink('providers',  rc?.providers.title || 'Providers'),
-    registryLink('workflows',  rc?.workflows.title || 'Workflows'),
-    registryLink('channels',   rc?.channels.title  || 'Channels'),
-  ]
-  // On-page sections — the homepage anchors we removed from the flat nav.
-  // Links are full paths with a hash so they work whether the visitor is on
-  // the homepage (anchor jump) or on a /skills-style page (cross-page nav).
-  const homeHref = lang === 'en' ? '/' : `/${lang}/`
-  const anchorLinks: NavLink[] = [
-    { label: t.nav.architecture, href: `${homeHref}#architecture` },
-    { label: t.nav.workflows || t.workflows?.label || 'Workflows', href: `${homeHref}#workflows` },
-    { label: t.nav.performance, href: `${homeHref}#performance` },
-  ]
-  const links: NavLink[] = [
-    { label: t.nav.install, href: '#install' },
-    { label: t.nav.downloads || 'Downloads', href: '#downloads' },
-    { label: t.nav.docs, href: 'https://docs.librefang.ai', external: true },
-  ]
-  const featureActiveIds = ['architecture', 'hands', 'workflows', 'performance', 'evolution']
-  const isFeatureActive = featureActiveIds.includes(activeSection)
-
-  return (
-    <nav className={cn('fixed top-0 left-0 right-0 z-50 transition-all duration-300', scrolled && 'bg-surface/90 backdrop-blur-md border-b border-black/10 dark:border-white/5')}>
-      <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-        <a href="/" className="flex items-center gap-2.5">
-          <img src="/logo.png" alt="LibreFang" width="32" height="32" decoding="async" fetchPriority="high" className="w-8 h-8 rounded" />
-          <span className="font-bold text-slate-900 dark:text-white tracking-tight">LibreFang</span>
-        </a>
-
-        <div className="hidden md:flex items-center gap-1">
-          {/* Features dropdown (collapses architecture/hands/workflows/performance/evolution) */}
-          <div className="relative" data-features-menu>
-            <button
-              className={cn(
-                'flex items-center gap-1 px-3 py-1.5 text-sm transition-colors font-medium',
-                isFeatureActive || featuresOpen ? 'text-cyan-600 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400'
-              )}
-              onClick={() => setFeaturesOpen(!featuresOpen)}
-              aria-label={t.nav.features || 'Features'}
-              aria-expanded={featuresOpen}
-            >
-              {t.nav.features || 'Features'}
-              <ChevronDown className={cn('w-3 h-3 transition-transform', featuresOpen && 'rotate-180')} />
-            </button>
-            {featuresOpen && (
-              <div className="absolute left-0 mt-2 w-64 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50 py-1">
-                <div className="px-4 pt-2 pb-1 text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest">
-                  {t.nav.registry || 'Registry'}
-                </div>
-                {featureLinks.map(link => (
-                  <a
-                    key={link.label}
-                    href={link.href}
-                    onClick={() => { setFeaturesOpen(false); trackEvent('click', `nav_feature_${link.href}`) }}
-                    className={cn(
-                      'flex items-center justify-between px-4 py-2 text-sm transition-colors',
-                      link.highlight ? 'text-amber-600 dark:text-amber-300 hover:bg-amber-500/10' : 'text-gray-700 dark:text-gray-300 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-black/5 dark:hover:bg-white/5'
-                    )}
-                  >
-                    <span>{link.label}</span>
-                    {link.highlight && <Sparkles className="w-3.5 h-3.5" />}
-                  </a>
-                ))}
-                <div className="border-t border-black/10 dark:border-white/10 mt-2 pt-2" />
-                <div className="px-4 pb-1 text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest">
-                  {t.nav.learnMore || 'Learn More'}
-                </div>
-                {anchorLinks.map(link => (
-                  <a
-                    key={link.label}
-                    href={link.href}
-                    onClick={(e) => {
-                      // If already on the homepage, do smooth-scroll instead of full nav.
-                      if (window.location.pathname === homeHref || window.location.pathname === homeHref.replace(/\/$/, '')) {
-                        const hash = link.href.split('#')[1]
-                        if (hash) {
-                          e.preventDefault()
-                          const el = document.getElementById(hash)
-                          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                        }
-                      }
-                      setFeaturesOpen(false)
-                    }}
-                    className="flex items-center justify-between px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                  >
-                    <span>{link.label}</span>
-                  </a>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {links.map(link => (
-            <a
-              key={link.label}
-              href={link.href}
-              target={link.external ? '_blank' : undefined}
-              rel={link.external ? 'noopener noreferrer' : undefined}
-              aria-current={activeSection === link.href.replace('#', '') ? 'page' : undefined}
-              onClick={(e) => {
-                if (link.href.startsWith('#')) {
-                  e.preventDefault()
-                  const el = document.querySelector(link.href)
-                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                }
-              }}
-              className={cn(
-                'px-3 py-1.5 text-sm transition-colors font-medium flex items-center gap-1',
-                activeSection === link.href.replace('#', '') ? 'text-cyan-600 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400'
-              )}
-            >
-              {link.label}
-              {link.external && <ExternalLink className="w-3 h-3" />}
-            </a>
-          ))}
-
-          {/* Language switcher */}
-          <div className="relative ml-2" data-lang-menu>
-            <button
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium"
-              onClick={() => setLangOpen(!langOpen)}
-              aria-label="Switch language"
-              aria-expanded={langOpen}
-            >
-              <Globe className="w-3.5 h-3.5" />
-              <span className="hidden lg:inline">{currentLangName}</span>
-              <ChevronDown className={cn('w-3 h-3 transition-transform', langOpen && 'rotate-180')} />
-            </button>
-            {langOpen && (
-              <div className="absolute right-0 mt-2 w-36 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50">
-                {languages.map(l => (
-                  <button
-                    key={l.code}
-                    onClick={() => { onSwitchLang(l.code); setLangOpen(false) }}
-                    className={cn('block w-full text-left px-4 py-2.5 text-sm transition-colors', l.code === lang ? 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/5' : 'text-gray-600 dark:text-gray-400 hover:text-slate-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5')}
-                  >
-                    {l.name}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {onOpenSearch && (
-            <button
-              onClick={onOpenSearch}
-              className="ml-1 flex items-center gap-1.5 px-2 py-1 text-xs text-gray-500 dark:text-gray-400 border border-black/10 dark:border-white/10 rounded hover:text-cyan-600 dark:hover:text-cyan-400 hover:border-cyan-500/30 transition-colors"
-              aria-label={t.search?.title || 'Search'}
-            >
-              <Search className="w-3.5 h-3.5" />
-              <kbd className="font-mono text-[10px] px-1 py-0.5 bg-surface-200 rounded">⌘K</kbd>
-            </button>
-          )}
-
-          <button
-            onClick={toggleTheme}
-            className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"
-            aria-label="Toggle theme"
-          >
-            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
-
-          <a
-            href="https://github.com/librefang/librefang"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-3 px-4 py-1.5 text-sm font-semibold text-cyan-600 dark:text-cyan-400 border border-cyan-500/30 rounded hover:bg-cyan-500/10 transition-all"
-          >
-            GitHub
-          </a>
-        </div>
-
-        <div className="flex md:hidden items-center gap-1">
-          {onOpenSearch && (
-            <button onClick={onOpenSearch} aria-label={t.search?.title || 'Search'} className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">
-              <Search className="w-4 h-4" />
-            </button>
-          )}
-          <button onClick={toggleTheme} className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors" aria-label="Toggle theme">
-            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
-          <div className="relative" data-lang-menu>
-            <button className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors" onClick={() => setLangOpen(!langOpen)} aria-label="Switch language">
-              <Globe className="w-4 h-4" />
-            </button>
-            {langOpen && (
-              <div className="absolute right-0 mt-2 w-36 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50">
-                {languages.map(l => (
-                  <button key={l.code} onClick={() => { onSwitchLang(l.code); setLangOpen(false) }} className={cn('block w-full text-left px-4 py-2.5 text-sm transition-colors', l.code === lang ? 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/5' : 'text-gray-600 dark:text-gray-400 hover:text-slate-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5')}>{l.name}</button>
-                ))}
-              </div>
-            )}
-          </div>
-          <button className="p-2 text-gray-600 dark:text-gray-400" onClick={() => setOpen(!open)} aria-label="Toggle menu">
-            {open ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-          </button>
-        </div>
-      </div>
-
-      {open && (
-        <div className="md:hidden bg-surface-100 border-t border-black/10 dark:border-white/5 px-6 py-4 space-y-1">
-          <div className="pb-1">
-            <div className="text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest py-1.5">
-              {t.nav.registry || 'Registry'}
-            </div>
-            {featureLinks.map(link => (
-              <a
-                key={link.label}
-                href={link.href}
-                onClick={() => setOpen(false)}
-                className={cn(
-                  'flex items-center justify-between py-2 pl-3 text-sm transition-colors font-medium',
-                  link.highlight
-                    ? 'text-amber-600 dark:text-amber-300'
-                    : 'text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400'
-                )}
-              >
-                <span>{link.label}</span>
-                {link.highlight && <Sparkles className="w-3.5 h-3.5" />}
-              </a>
-            ))}
-            <div className="text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest py-1.5 mt-2">
-              {t.nav.learnMore || 'Learn More'}
-            </div>
-            {anchorLinks.map(link => (
-              <a
-                key={link.label}
-                href={link.href}
-                onClick={() => setOpen(false)}
-                className="block py-2 pl-3 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium"
-              >
-                {link.label}
-              </a>
-            ))}
-          </div>
-          {links.map(link => (
-            <a
-              key={link.label}
-              href={link.href}
-              onClick={(e) => {
-                if (link.href.startsWith('#')) {
-                  e.preventDefault()
-                  const el = document.querySelector(link.href)
-                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                }
-                setOpen(false)
-              }}
-              aria-current={activeSection === link.href.replace('#', '') ? 'page' : undefined}
-              className="block py-2.5 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium"
-            >
-              {link.label}
-            </a>
-          ))}
-          <div className="pt-2 border-t border-black/10 dark:border-white/5 mt-2 flex flex-wrap gap-2">
-            {languages.map(l => (
-              <button
-                key={l.code}
-                onClick={() => { onSwitchLang(l.code); setOpen(false) }}
-                className={cn('px-3 py-1.5 text-xs rounded', l.code === lang ? 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/10' : 'text-gray-500 hover:text-slate-900 dark:hover:text-white')}
-              >
-                {l.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-    </nav>
-  )
-}
 
 // ─── Hero ───
 interface SectionProps {
@@ -1696,7 +1348,6 @@ function isHomepagePath(pathname: string): boolean {
 // ─── App ───
 export default function App() {
   const lang = useAppStore((s) => s.lang)
-  const switchLang = useAppStore((s) => s.switchLang)
   const [isDeployPage] = useState(() => window.location.pathname.startsWith('/deploy'))
   const [isChangelogPage] = useState(() => window.location.pathname.startsWith('/changelog'))
   const [isMetricsPage] = useState(() => /^\/(?:[a-z]{2}(?:-[A-Z]{2})?\/)?metrics\/?$/.test(window.location.pathname))
@@ -1930,7 +1581,7 @@ export default function App() {
       <a href="#architecture" className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-[60] focus:px-4 focus:py-2 focus:bg-cyan-500 focus:text-surface focus:font-bold focus:rounded">
         Skip to content
       </a>
-      <Nav t={t} lang={lang} onSwitchLang={switchLang} onOpenSearch={() => setSearchOpen(true)} />
+      <SiteHeader onOpenSearch={() => setSearchOpen(true)} onTrackEvent={trackEvent} />
       {searchOpen && (
         <Suspense fallback={null}>
           <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />
