@@ -3,8 +3,8 @@
 // Includes one-time migration from old individual KV keys (stars_YYYY-MM-DD)
 
 export default {
-  async fetch(request, env) {
-    return handleFetch(request, env)
+  async fetch(request, env, ctx) {
+    return handleFetch(request, env, ctx)
   },
 
   async scheduled(event, env, ctx) {
@@ -134,7 +134,7 @@ async function recordDailyStats(env) {
   }
 }
 
-function handleFetch(request, env) {
+function handleFetch(request, env, ctx) {
   const url = new URL(request.url)
   const path = url.pathname
 
@@ -155,7 +155,7 @@ function handleFetch(request, env) {
 
   if (path === '/api/registry' && request.method === 'GET') {
     const forceRefresh = url.searchParams.has('refresh')
-    return handleRegistry(env, cors, forceRefresh)
+    return handleRegistry(env, cors, ctx, forceRefresh)
   }
 
   if (path === '/api/releases' && request.method === 'GET') {
@@ -332,108 +332,63 @@ async function handleReleases(env, cors) {
   }
 }
 
-// ─── Registry proxy with KV cache (1 hour) ───
+// ─── Registry proxy (stale-while-revalidate) ───
+// Fresh KV cache (< FRESH_TTL): served directly.
+// Stale KV cache (FRESH_TTL..MAX_AGE): served immediately + triggers a
+//   background full refresh via ctx.waitUntil so the NEXT request is fresh.
+// Missing cache: do a full refresh inline so the first visitor gets real data
+//   instead of a degraded names-only snapshot. Daily cron is now just a
+//   safety net for when the site has zero traffic for a long time.
 const REGISTRY_API = 'https://api.github.com/repos/librefang/librefang-registry/contents'
+const FRESH_TTL = 1000 * 60 * 60        // 1 hour — serve directly from KV
+const MAX_STALE = 1000 * 60 * 60 * 24   // beyond this, don't even serve stale
 
-async function handleRegistry(env, cors, forceRefresh = false) {
+async function handleRegistry(env, cors, ctx, forceRefresh = false) {
   const cacheKey = 'registry_data'
   const cacheTimeKey = 'registry_data_time'
-  const cacheDuration = 1000 * 60 * 60 // 1 hour
 
   try {
-    if (!forceRefresh) {
-      const [cached, cacheTime] = await Promise.all([
-        env.KV.get(cacheKey),
-        env.KV.get(cacheTimeKey),
-      ])
-      if (cached && cacheTime && (Date.now() - parseInt(cacheTime, 10) < cacheDuration)) {
-        return new Response(cached, {
-          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600', ...cors }
-        })
+    const [cached, cacheTimeRaw] = await Promise.all([
+      env.KV.get(cacheKey),
+      env.KV.get(cacheTimeKey),
+    ])
+    const cacheTime = parseInt(cacheTimeRaw || '0', 10)
+    const age = cacheTime ? Date.now() - cacheTime : Infinity
+
+    // Fresh — return as-is.
+    if (cached && !forceRefresh && age < FRESH_TTL) {
+      return new Response(cached, {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600', ...cors }
+      })
+    }
+
+    // Stale but usable — serve immediately, refresh in background.
+    if (cached && !forceRefresh && age < MAX_STALE) {
+      if (ctx && typeof ctx.waitUntil === 'function') {
+        ctx.waitUntil(refreshRegistryCache(env))
       }
+      return new Response(cached, {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=60', ...cors }
+      })
     }
 
-    const ghHeaders = {
-      'Accept': 'application/vnd.github.v3+json',
-      'User-Agent': 'LibrefangStats/1.0',
-    }
-    if (env.GITHUB_TOKEN) {
-      ghHeaders['Authorization'] = `token ${env.GITHUB_TOKEN}`
-    }
-
-    async function fetchDir(path) {
-      const res = await fetch(`${REGISTRY_API}/${path}`, { headers: ghHeaders })
-      if (!res.ok) return []
-      const items = await res.json()
-      return items.filter(f => (f.type === 'dir' || f.name.endsWith('.toml')) && f.name !== 'README.md')
+    // Cold start or explicit refresh — do a full refresh inline.
+    // This DOES make the first visitor wait, but it's a one-off.
+    await refreshRegistryCache(env)
+    const fresh = await env.KV.get(cacheKey)
+    if (fresh) {
+      return new Response(fresh, {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600', ...cors }
+      })
     }
 
-    const [handDirs, channelFiles, providerFiles, integrationFiles, workflowFiles, agentDirs, pluginFiles, skillDirs, mcpFiles] = await Promise.all([
-      fetchDir('hands'),
-      fetchDir('channels'),
-      fetchDir('providers'),
-      fetchDir('integrations'),
-      fetchDir('workflows'),
-      fetchDir('agents'),
-      fetchDir('plugins'),
-      fetchDir('skills'),
-      fetchDir('mcp'),
-    ])
-
-    const filter = (items) => items.filter(f => f.name !== 'README.md')
-    const hands = filter(handDirs)
-    const channels = filter(channelFiles)
-    const providers = filter(providerFiles)
-    const integrations = filter(integrationFiles)
-    const workflows = filter(workflowFiles)
-    const agents = filter(agentDirs)
-    const plugins = filter(pluginFiles)
-    const skills = filter(skillDirs)
-    const mcp = filter(mcpFiles)
-
-    // Names-only fallback (cheap, no TOML fetches). Full details come from
-    // build-time registry.json merge on the client side, or from the
-    // scheduled refreshRegistryCache which runs once a day.
-    const bareNames = (items, isDir) => items.map(item => {
-      const id = isDir ? item.name : item.name.replace('.toml', '')
-      const name = id.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-      return { id, name, description: '', category: '', icon: '' }
-    })
-
-    const result = {
-      hands: bareNames(hands, true),
-      channels: bareNames(channels, false),
-      providers: bareNames(providers, false),
-      integrations: bareNames(integrations, false),
-      workflows: bareNames(workflows, false),
-      agents: bareNames(agents, true),
-      plugins: bareNames(plugins, false),
-      skills: bareNames(skills, true),
-      mcp: bareNames(mcp, false),
-      handsCount: hands.length,
-      channelsCount: channels.length,
-      providersCount: providers.length,
-      integrationsCount: integrations.length,
-      workflowsCount: workflows.length,
-      agentsCount: agents.length,
-      pluginsCount: plugins.length,
-      skillsCount: skills.length,
-      mcpCount: mcp.length,
-      fetchedAt: new Date().toISOString(),
-    }
-
-    const json = JSON.stringify(result)
-
-    await Promise.all([
-      env.KV.put(cacheKey, json),
-      env.KV.put(cacheTimeKey, String(Date.now())),
-    ])
-
-    return new Response(json, {
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600', ...cors }
+    // refreshRegistryCache failed — emit an empty shell so the page can still
+    // render the build-time registry.json side of the merge.
+    return new Response(JSON.stringify({ error: 'registry unavailable', fetchedAt: new Date().toISOString() }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...cors }
     })
   } catch (e) {
-    // Fallback: try returning stale cache
     const stale = await env.KV.get(cacheKey)
     if (stale) {
       return new Response(stale, {
