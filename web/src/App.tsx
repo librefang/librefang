@@ -1605,6 +1605,35 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
+  // Maintain hreflang alternates for every page load / locale switch so the
+  // same /skills page in zh/ja/de/etc is recognized as a single translated
+  // resource by search engines instead of competing duplicates.
+  useEffect(() => {
+    const ORIGIN = 'https://librefang.ai'
+    const bareParts = window.location.pathname.split('/').filter(Boolean)
+    if (bareParts.length > 0 && LOCALES.includes(bareParts[0]!)) {
+      bareParts.shift()
+    }
+    const barePath = bareParts.length > 0 ? '/' + bareParts.join('/') : '/'
+    // Remove any previously-injected hreflang tags so switching pages doesn't
+    // leave stale ones behind.
+    document.head.querySelectorAll('link[rel="alternate"][data-hreflang="1"]').forEach(el => el.remove())
+    const insertLink = (hreflang: string, href: string) => {
+      const link = document.createElement('link')
+      link.rel = 'alternate'
+      link.hreflang = hreflang
+      link.href = href
+      link.setAttribute('data-hreflang', '1')
+      document.head.appendChild(link)
+    }
+    insertLink('x-default', ORIGIN + barePath)
+    insertLink('en', ORIGIN + barePath)
+    for (const locale of LOCALES) {
+      const suffix = barePath === '/' ? '/' : barePath
+      insertLink(locale, `${ORIGIN}/${locale}${suffix === '/' ? '' : suffix}`)
+    }
+  }, [lang, registryRoute])
+
   const t = translations[lang] || translations['en']!
   const { data: registry } = useRegistry()
 
@@ -1619,12 +1648,22 @@ export default function App() {
       return
     }
     if (registryRoute) {
-      const label = t.registry?.categories[registryRoute.category]?.title || registryRoute.category
-      if (registryRoute.kind === 'detail') {
-        document.title = `${registryRoute.id} — ${label} — LibreFang`
-      } else {
-        document.title = `${label} — LibreFang Registry`
-      }
+      const cat = t.registry?.categories[registryRoute.category]
+      const label = cat?.title || registryRoute.category
+      const desc = cat?.desc || ''
+      const title = registryRoute.kind === 'detail'
+        ? `${registryRoute.id} — ${label} — LibreFang`
+        : `${label} — LibreFang Registry`
+      const descText = registryRoute.kind === 'detail'
+        ? `${registryRoute.id} — ${desc}`.slice(0, 280)
+        : desc
+      document.title = title
+      const descMeta = document.querySelector('meta[name="description"]')
+      if (descMeta && descText) descMeta.setAttribute('content', descText)
+      const ogTitle = document.querySelector('meta[property="og:title"]')
+      if (ogTitle) ogTitle.setAttribute('content', title)
+      const ogDesc = document.querySelector('meta[property="og:description"]')
+      if (ogDesc && descText) ogDesc.setAttribute('content', descText)
       return
     }
     if (t.meta) {

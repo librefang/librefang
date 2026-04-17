@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Loader2, AlertCircle, ExternalLink, Sparkles, Github, Copy, Check } from 'lucide-react'
+import { ArrowLeft, Loader2, AlertCircle, ExternalLink, Sparkles, Github, Copy, Check, Terminal, FileText } from 'lucide-react'
 import { useState } from 'react'
 import { useRegistry, getLocalizedDesc, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
@@ -26,6 +26,15 @@ function pathFor(category: RegistryCategory, id: string): string {
     case 'mcp':    return `mcp/${id}.toml`
     default:       return `${category}/${id}.toml`
   }
+}
+
+// Commands the CLI actually exposes (verified against librefang-cli/src/main.rs).
+// Categories without an install-by-id subcommand get a different hint.
+const COMMAND_TEMPLATE: Partial<Record<RegistryCategory, string>> = {
+  skills:   'librefang skill install {id}',
+  hands:    'librefang hand activate {id}',
+  agents:   'librefang agent new {id}',
+  channels: 'librefang channel setup {id}',
 }
 
 async function fetchRaw(path: string): Promise<string> {
@@ -65,6 +74,18 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
 
   const { items } = getCategoryItems(registry, category)
   const item = useMemo(() => items.find(x => x.id === id), [items, id])
+  // Related = same category, excluding self. Popular first, then alphabetical,
+  // cap at 6 so the section is a browse surface not a wall of text.
+  const related = useMemo(() => {
+    const rest = items.filter(x => x.id !== id)
+    rest.sort((a, b) => {
+      const ap = a.tags?.includes('popular') ? 0 : 1
+      const bp = b.tags?.includes('popular') ? 0 : 1
+      if (ap !== bp) return ap - bp
+      return a.name.localeCompare(b.name)
+    })
+    return rest.slice(0, 6)
+  }, [items, id])
 
   const rawPath = pathFor(category, id)
   const rawQuery = useQuery({
@@ -155,6 +176,33 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
           )}
         </div>
 
+        {/* Install / use command */}
+        {COMMAND_TEMPLATE[category] ? (
+          <div className="mb-8">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest flex items-center gap-2">
+                <Terminal className="w-3.5 h-3.5" />
+                {t.registry?.useIt || 'Use it'}
+              </h2>
+              <CopyButton text={COMMAND_TEMPLATE[category]!.replace('{id}', id)} label={t.registry?.copy || 'Copy'} />
+            </div>
+            <pre className="overflow-x-auto text-sm font-mono leading-relaxed p-4 bg-slate-950/90 dark:bg-black text-gray-100 border border-cyan-500/20">
+              <code>
+                <span className="text-cyan-400 select-none">$ </span>
+                {COMMAND_TEMPLATE[category]!.replace('{id}', id)}
+              </code>
+            </pre>
+          </div>
+        ) : (
+          <div className="mb-8 flex items-start gap-3 p-4 border border-black/10 dark:border-white/5 bg-surface-100">
+            <FileText className="w-4 h-4 text-gray-400 shrink-0 mt-0.5" />
+            <p className="text-sm text-gray-500 leading-relaxed">
+              {t.registry?.configOnly?.replace('{category}', categoryLabel) ||
+                `${categoryLabel} entries are configured through ~/.librefang/config.toml rather than a CLI install command. Copy the manifest below and paste it into the matching section of your config.`}
+            </p>
+          </div>
+        )}
+
         {/* Manifest */}
         <div className="mb-6 flex items-center justify-between">
           <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest">
@@ -188,6 +236,43 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
           <pre className="overflow-x-auto text-xs md:text-sm font-mono leading-relaxed p-5 bg-surface-100 border border-black/10 dark:border-white/5 text-gray-700 dark:text-gray-300 whitespace-pre">
             <code>{rawQuery.data}</code>
           </pre>
+        )}
+
+        {/* Related items in the same category */}
+        {related.length > 0 && (
+          <div className="mt-12 pt-8 border-t border-black/10 dark:border-white/5">
+            <h2 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">
+              {t.registry?.relatedIn?.replace('{category}', categoryLabel) || `More ${categoryLabel}`}
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {related.map(rel => {
+                const relDesc = getLocalizedDesc(rel, lang)
+                const relPopular = rel.tags?.includes('popular')
+                const relHref = `${lang === 'en' ? '' : `/${lang}`}/${category}/${rel.id}`
+                return (
+                  <a
+                    key={rel.id}
+                    href={relHref}
+                    className={cn(
+                      'group block border p-4 transition-all hover:-translate-y-0.5',
+                      relPopular
+                        ? 'border-amber-500/30 bg-amber-500/5 hover:border-amber-500/50'
+                        : 'border-black/10 dark:border-white/5 bg-surface-100 hover:border-cyan-500/30'
+                    )}
+                  >
+                    <div className="flex items-center gap-2 mb-1.5 min-w-0">
+                      {rel.icon && <span className="text-lg leading-none shrink-0" aria-hidden>{rel.icon}</span>}
+                      <h3 className="text-sm font-bold text-slate-900 dark:text-white truncate">{rel.name}</h3>
+                      {relPopular && <Sparkles className="w-3 h-3 text-amber-500 shrink-0" />}
+                    </div>
+                    {relDesc && (
+                      <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{relDesc}</p>
+                    )}
+                  </a>
+                )
+              })}
+            </div>
+          </div>
         )}
 
         {/* Back to category */}

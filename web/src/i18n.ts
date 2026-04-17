@@ -138,6 +138,9 @@ export interface Translation {
     copy: string
     manifestErrorTitle: string
     allIn: string
+    useIt: string
+    configOnly: string
+    relatedIn: string
     categories: {
       skills: { title: string; desc: string }
       mcp: { title: string; desc: string }
@@ -374,6 +377,9 @@ export const translations: Record<string, Translation> = {
       copy: 'Copy',
       manifestErrorTitle: 'Could not load manifest',
       allIn: 'All {category}',
+      useIt: 'Use it',
+      configOnly: '{category} entries are configured through ~/.librefang/config.toml rather than a CLI install command. Copy the manifest below and paste it into the matching section of your config.',
+      relatedIn: 'More {category}',
       categories: {
         skills: { title: 'Skills', desc: 'Pluggable tool bundles — Python, WASM, Node, or prompt-only skills that extend what an agent can do.' },
         mcp:    { title: 'MCP Servers', desc: 'Model Context Protocol servers that plug external tools and data sources directly into any agent.' },
@@ -573,6 +579,9 @@ export const translations: Record<string, Translation> = {
       copy: '复制',
       manifestErrorTitle: '无法加载清单',
       allIn: '所有{category}',
+      useIt: '如何使用',
+      configOnly: '{category}通过 ~/.librefang/config.toml 配置，不走 CLI 安装命令。复制下面的清单，粘贴到配置文件中对应段落即可。',
+      relatedIn: '更多{category}',
       categories: {
         skills:   { title: '技能', desc: '可插拔的工具包 —— Python、WASM、Node 或 prompt-only 技能，扩展 Agent 的能力边界。' },
         mcp:      { title: 'MCP 服务器', desc: 'Model Context Protocol 服务器，把外部工具与数据直接挂接到任何 Agent。' },
@@ -772,6 +781,9 @@ export const translations: Record<string, Translation> = {
       copy: '複製',
       manifestErrorTitle: '無法載入清單',
       allIn: '所有{category}',
+      useIt: '如何使用',
+      configOnly: '{category}透過 ~/.librefang/config.toml 設定，沒有 CLI 安裝指令。請複製下方清單，貼入設定檔中對應段落。',
+      relatedIn: '更多{category}',
       categories: {
         skills:   { title: '技能', desc: '可插拔的工具組 —— Python、WASM、Node 或 prompt-only 技能，擴展 Agent 的能力邊界。' },
         mcp:      { title: 'MCP 伺服器', desc: 'Model Context Protocol 伺服器，把外部工具與資料直接接入任何 Agent。' },
@@ -971,6 +983,9 @@ export const translations: Record<string, Translation> = {
       copy: 'コピー',
       manifestErrorTitle: 'マニフェストを読み込めません',
       allIn: 'すべての{category}',
+      useIt: '使い方',
+      configOnly: '{category}は CLI の install コマンドではなく、~/.librefang/config.toml で設定します。下のマニフェストをコピーして設定ファイルの該当セクションに貼り付けてください。',
+      relatedIn: '他の{category}',
       categories: {
         skills:   { title: 'スキル', desc: 'プラグ可能なツールバンドル —— Python、WASM、Node、または prompt-only スキルで Agent の能力を拡張。' },
         mcp:      { title: 'MCP サーバー', desc: 'Model Context Protocol サーバーで、外部ツールとデータソースを任意の Agent に直接接続。' },
@@ -1170,6 +1185,9 @@ export const translations: Record<string, Translation> = {
       copy: '복사',
       manifestErrorTitle: '매니페스트를 불러올 수 없습니다',
       allIn: '모든 {category}',
+      useIt: '사용 방법',
+      configOnly: '{category}은(는) CLI 설치 명령이 아니라 ~/.librefang/config.toml에서 설정합니다. 아래 매니페스트를 복사해 설정 파일의 해당 섹션에 붙여넣으세요.',
+      relatedIn: '더 많은 {category}',
       categories: {
         skills:   { title: '스킬', desc: '플러그 가능한 도구 번들 —— Python, WASM, Node 또는 prompt-only 스킬로 Agent의 능력 확장.' },
         mcp:      { title: 'MCP 서버', desc: 'Model Context Protocol 서버로 외부 도구와 데이터 소스를 모든 Agent에 직접 연결.' },
@@ -1369,6 +1387,9 @@ export const translations: Record<string, Translation> = {
       copy: 'Kopieren',
       manifestErrorTitle: 'Manifest konnte nicht geladen werden',
       allIn: 'Alle {category}',
+      useIt: 'Verwenden',
+      configOnly: '{category}-Einträge werden über ~/.librefang/config.toml konfiguriert, nicht per CLI-Install-Befehl. Manifest unten kopieren und in den passenden Abschnitt der Config einfügen.',
+      relatedIn: 'Mehr {category}',
       categories: {
         skills:   { title: 'Skills', desc: 'Austauschbare Tool-Bundles — Python-, WASM-, Node- oder Prompt-Only-Skills, die die Fähigkeiten eines Agenten erweitern.' },
         mcp:      { title: 'MCP-Server', desc: 'Model-Context-Protocol-Server, die externe Tools und Datenquellen direkt in jeden Agenten einbinden.' },
@@ -1568,6 +1589,9 @@ export const translations: Record<string, Translation> = {
       copy: 'Copiar',
       manifestErrorTitle: 'No se pudo cargar el manifiesto',
       allIn: 'Todos los {category}',
+      useIt: 'Cómo usar',
+      configOnly: 'Los elementos de {category} se configuran mediante ~/.librefang/config.toml en lugar de un comando CLI. Copia el manifiesto y pégalo en la sección correspondiente de tu config.',
+      relatedIn: 'Más {category}',
       categories: {
         skills:   { title: 'Skills', desc: 'Paquetes de herramientas conectables — skills Python, WASM, Node o prompt-only que amplían las capacidades del agente.' },
         mcp:      { title: 'Servidores MCP', desc: 'Servidores Model Context Protocol que conectan herramientas y fuentes de datos externas directamente a cualquier agente.' },
