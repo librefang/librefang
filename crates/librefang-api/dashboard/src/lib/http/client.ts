@@ -53,7 +53,10 @@ export {
   getHandInstanceStatus,
   // mcp
   listMcpServers,
-  listAvailableIntegrations,
+  getMcpServer,
+  listMcpCatalog,
+  getMcpCatalogEntry,
+  getMcpHealth,
   // memory
   listMemories,
   searchMemories,
@@ -143,6 +146,8 @@ export {
   addMcpServer,
   updateMcpServer,
   deleteMcpServer,
+  reconnectMcpServer,
+  reloadMcp,
   // memory
   addMemoryFromText,
   updateMemory,

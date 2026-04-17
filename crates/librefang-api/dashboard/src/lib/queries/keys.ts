@@ -249,7 +249,10 @@ export const mediaKeys = {
 export const mcpKeys = {
   all: ["mcp"] as const,
   servers: () => [...mcpKeys.all, "servers"] as const,
-  integrations: () => [...mcpKeys.all, "integrations"] as const,
+  server: (id: string) => [...mcpKeys.servers(), id] as const,
+  catalog: () => [...mcpKeys.all, "catalog"] as const,
+  catalogEntry: (id: string) => [...mcpKeys.catalog(), id] as const,
+  health: () => [...mcpKeys.all, "health"] as const,
 };
 
 export const pluginKeys = {

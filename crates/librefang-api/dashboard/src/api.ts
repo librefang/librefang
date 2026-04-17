@@ -2631,8 +2631,13 @@ export async function createRegistryContent(
 // ---------------------------------------------------------------------------
 
 // ── MCP Servers API ─────────────────────────────────────────────────────
+//
+// The MCP API is unified under `/api/mcp/*` — both raw-configured servers
+// (from `config.toml`) and catalog-installed servers live in the same
+// `/api/mcp/servers` collection. `template_id` tracks provenance when a
+// server was installed from a catalog entry.
 
-export interface McpServerTransport {
+export interface McpTransport {
   type: "stdio" | "sse" | "http";
   command?: string;
   args?: string[];
@@ -2640,11 +2645,15 @@ export interface McpServerTransport {
 }
 
 export interface McpServerConfigured {
+  /** Stable identifier; falls back to `name` when the backend omits it. */
+  id?: string;
   name: string;
-  transport: McpServerTransport;
+  transport: McpTransport;
   timeout_secs?: number;
   env?: string[];
   headers?: string[];
+  /** Catalog template this server was installed from, when applicable. */
+  template_id?: string;
   auth_state?: { state: string; auth_url?: string; message?: string };
 }
 
@@ -2666,9 +2675,13 @@ export async function listMcpServers(): Promise<McpServersResponse> {
   return get<McpServersResponse>("/api/mcp/servers");
 }
 
-// ── Registry Integrations (available MCP server templates) ────────
+export async function getMcpServer(id: string): Promise<McpServerConfigured> {
+  return get<McpServerConfigured>(`/api/mcp/servers/${encodeURIComponent(id)}`);
+}
 
-export interface IntegrationRequiredEnv {
+// ── MCP Catalog (read-only browse of registry templates) ────────
+
+export interface McpCatalogRequiredEnv {
   name: string;
   label: string;
   help?: string;
@@ -2676,14 +2689,7 @@ export interface IntegrationRequiredEnv {
   get_url?: string;
 }
 
-export interface IntegrationTransport {
-  type: "stdio" | "sse" | "http";
-  command?: string;
-  args?: string[];
-  url?: string;
-}
-
-export interface IntegrationTemplate {
+export interface McpCatalogEntry {
   id: string;
   name: string;
   description: string;
@@ -2691,34 +2697,81 @@ export interface IntegrationTemplate {
   category?: string;
   installed: boolean;
   tags?: string[];
-  transport?: IntegrationTransport;
-  required_env?: IntegrationRequiredEnv[];
+  transport?: McpTransport;
+  required_env?: McpCatalogRequiredEnv[];
   has_oauth?: boolean;
   setup_instructions?: string;
 }
 
-export interface AvailableIntegrationsResponse {
-  integrations: IntegrationTemplate[];
+export interface McpCatalogResponse {
+  entries: McpCatalogEntry[];
   count: number;
 }
 
-export async function listAvailableIntegrations(): Promise<AvailableIntegrationsResponse> {
-  return get<AvailableIntegrationsResponse>("/api/integrations/available");
+export async function listMcpCatalog(): Promise<McpCatalogResponse> {
+  return get<McpCatalogResponse>("/api/mcp/catalog");
 }
 
-export async function addMcpServer(server: Omit<McpServerConfigured, "name"> & { name: string }): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/mcp/servers", server);
+export async function getMcpCatalogEntry(id: string): Promise<McpCatalogEntry> {
+  return get<McpCatalogEntry>(`/api/mcp/catalog/${encodeURIComponent(id)}`);
 }
 
-export async function updateMcpServer(name: string, server: Partial<McpServerConfigured>): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`, server);
+// ── MCP Server mutations ────────────────────────────────────────────────
+
+/** Install a server from a catalog template with the supplied credentials. */
+export type AddMcpServerFromTemplate = {
+  template_id: string;
+  credentials?: Record<string, string>;
+};
+
+/** Create a server from a raw spec (same shape as a configured entry). */
+export type AddMcpServerSpec = Omit<McpServerConfigured, "id"> & { name: string };
+
+/**
+ * Body is either `{ template_id, credentials }` to install a catalog entry,
+ * or a raw `McpServerConfigured` spec. The backend disambiguates by the
+ * presence of `template_id`.
+ */
+export async function addMcpServer(
+  body: AddMcpServerFromTemplate | AddMcpServerSpec,
+): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/mcp/servers", body);
 }
 
-export async function deleteMcpServer(name: string): Promise<ApiActionResponse> {
-  return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`);
+export async function updateMcpServer(
+  id: string,
+  server: Partial<McpServerConfigured>,
+): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`, server);
 }
 
-// MCP OAuth Auth
+export async function deleteMcpServer(id: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`);
+}
+
+export async function reconnectMcpServer(id: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/reconnect`, {});
+}
+
+// ── MCP Health & Reload ────────────────────────────────────────────────
+
+export interface McpHealthResponse {
+  ok: boolean;
+  status?: string;
+  servers?: { id?: string; name: string; connected: boolean; message?: string }[];
+  [key: string]: unknown;
+}
+
+export async function getMcpHealth(): Promise<McpHealthResponse> {
+  return get<McpHealthResponse>("/api/mcp/health");
+}
+
+export async function reloadMcp(): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/mcp/reload", {});
+}
+
+// ── MCP OAuth Auth ──────────────────────────────────────────────────────
+
 export interface McpAuthStatusResponse {
   server: string;
   auth: { state: string; auth_url?: string; message?: string };
@@ -2729,16 +2782,16 @@ export interface McpAuthStartResponse {
   server: string;
 }
 
-export async function getMcpAuthStatus(name: string): Promise<McpAuthStatusResponse> {
-  return get<McpAuthStatusResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/status`);
+export async function getMcpAuthStatus(id: string): Promise<McpAuthStatusResponse> {
+  return get<McpAuthStatusResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/status`);
 }
 
-export async function startMcpAuth(name: string): Promise<McpAuthStartResponse> {
-  return post<McpAuthStartResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/start`, {});
+export async function startMcpAuth(id: string): Promise<McpAuthStartResponse> {
+  return post<McpAuthStartResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/start`, {});
 }
 
-export async function revokeMcpAuth(name: string): Promise<{ server: string; state: string }> {
-  return del<{ server: string; state: string }>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/revoke`);
+export async function revokeMcpAuth(id: string): Promise<{ server: string; state: string }> {
+  return del<{ server: string; state: string }>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/revoke`);
 }
 
 // ---------------------------------------------------------------------------
