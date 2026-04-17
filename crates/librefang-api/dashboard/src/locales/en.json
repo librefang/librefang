@@ -504,7 +504,6 @@
     "filter_unreachable": "Unreachable",
     "results": "results",
     "config": "Configure",
-    "config_hint": "Configuration coming soon",
     "configure_provider": "Configure Provider",
     "key_saved": "API Key saved",
     "key_removed": "API Key removed",
