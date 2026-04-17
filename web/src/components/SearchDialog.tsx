@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ClipboardEventHandler } from 'react'
 import { Search, X, Sparkles, Hash } from 'lucide-react'
 import { useRegistry, getLocalizedDesc } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
@@ -208,18 +208,46 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
     }
   }
 
+  // Paste handler: when a user pastes a URL or "category/id" string that
+  // matches an existing registry item, navigate straight to it. Prevents
+  // the "type your entire pasted URL into the search" UX where it barely
+  // matches anything because of the scheme / host prefix.
+  const onPaste: ClipboardEventHandler<HTMLInputElement> = (e) => {
+    const raw = e.clipboardData.getData('text').trim()
+    if (!raw) return
+    // Strip scheme + host if a full URL was pasted.
+    const path = raw.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+/, '').replace(/[?#].*$/, '')
+    const segs = path.split('/').filter(Boolean)
+    // Tolerate a leading lang prefix (zh/ja/...) when present.
+    const langs = new Set(['zh', 'zh-TW', 'ja', 'ko', 'de', 'es'])
+    const [first, ...rest] = segs
+    const parts = first && langs.has(first) ? rest : segs
+    if (parts.length >= 2 && CATEGORIES.includes(parts[0] as RegistryCategory)) {
+      const cat = parts[0] as RegistryCategory
+      const id = parts[1]!
+      const hit = itemHits.find(h => h.kind === 'item' && h.category === cat && h.item.id === id)
+      if (hit) { e.preventDefault(); navigate(hit); return }
+    }
+    // Bare ID paste — match against any category.
+    if (parts.length === 1 && parts[0]) {
+      const id = parts[0]
+      const hit = itemHits.find(h => h.kind === 'item' && h.item.id === id)
+      if (hit) { e.preventDefault(); navigate(hit); return }
+    }
+  }
+
   if (!open) return null
 
   return (
     <div
-      className="fixed inset-0 z-[100] bg-black/40 backdrop-blur-sm flex items-start justify-center pt-[10vh] px-4"
+      className="fixed inset-0 z-[100] bg-black/40 backdrop-blur-sm flex items-start justify-center sm:pt-[10vh] sm:px-4"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
       aria-label={t.search?.title || 'Search registry'}
     >
       <div
-        className="w-full max-w-2xl bg-surface border border-black/10 dark:border-white/10 rounded-lg shadow-2xl overflow-hidden"
+        className="w-full h-full sm:h-auto sm:max-w-2xl bg-surface sm:border border-black/10 dark:border-white/10 sm:rounded-lg shadow-2xl overflow-hidden flex flex-col"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center gap-3 px-4 py-3 border-b border-black/10 dark:border-white/10">
@@ -229,6 +257,7 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
             type="search"
             value={query}
             onChange={e => setQuery(e.target.value)}
+            onPaste={onPaste}
             placeholder={t.search?.placeholder || 'Search skills, hands, agents, providers...'}
             className="flex-1 bg-transparent outline-none text-slate-900 dark:text-white placeholder-gray-400 text-sm"
           />
@@ -241,7 +270,7 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
           </button>
         </div>
 
-        <div className="max-h-[60vh] overflow-y-auto">
+        <div className="flex-1 overflow-y-auto sm:max-h-[60vh]">
           {filtered.length === 0 && (
             <div className="px-4 py-12 text-center text-sm text-gray-500">
               {query.trim()

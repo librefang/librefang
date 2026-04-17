@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, Github, ExternalLink } from 'lucide-react'
+import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, Github, ExternalLink, ArrowUpDown, Star } from 'lucide-react'
 import { useRegistry, getLocalizedDesc, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
 import { translations } from './../i18n'
@@ -10,6 +10,7 @@ import { cn } from '../lib/utils'
 import { fetchRegistryRaw } from '../lib/registry-raw'
 import SiteHeader from '../components/SiteHeader'
 import Breadcrumbs from '../components/Breadcrumbs'
+import { useFavorites } from '../lib/useFavorites'
 // Fixed top header needs content to start below its 64px band.
 
 interface RegistryPageProps {
@@ -47,13 +48,31 @@ function isPopular(item: Detail) {
   return item.tags?.includes('popular') ?? false
 }
 
-function sortItems(items: Detail[]): Detail[] {
-  return [...items].sort((a, b) => {
-    const ap = isPopular(a) ? 0 : 1
-    const bp = isPopular(b) ? 0 : 1
-    if (ap !== bp) return ap - bp
-    return a.name.localeCompare(b.name)
-  })
+type SortKey = 'popular' | 'nameAsc' | 'nameDesc' | 'trending'
+
+function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, number>): Detail[] {
+  const arr = [...items]
+  switch (key) {
+    case 'nameAsc':
+      return arr.sort((a, b) => a.name.localeCompare(b.name))
+    case 'nameDesc':
+      return arr.sort((a, b) => b.name.localeCompare(a.name))
+    case 'trending':
+      return arr.sort((a, b) => {
+        const ac = trendingIds.get(a.id) ?? -1
+        const bc = trendingIds.get(b.id) ?? -1
+        if (ac !== bc) return bc - ac
+        return a.name.localeCompare(b.name)
+      })
+    case 'popular':
+    default:
+      return arr.sort((a, b) => {
+        const ap = isPopular(a) ? 0 : 1
+        const bp = isPopular(b) ? 0 : 1
+        if (ap !== bp) return ap - bp
+        return a.name.localeCompare(b.name)
+      })
+  }
 }
 
 const TRENDING_API = 'https://stats.librefang.ai/api/registry/trending'
@@ -71,6 +90,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   const t = translations[lang] || translations['en']!
   const { data, isLoading, error, refetch, isFetching } = useRegistry()
   const queryClient = useQueryClient()
+  const { isFavorite, toggle: toggleFavorite } = useFavorites()
   // Seed from ?category= so bookmarks / shared links preserve the filter.
   // The grid's filter treats query as a substring against id/name/desc/
   // category, so a category name in this slot filters to that chip.
@@ -78,8 +98,16 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
     if (typeof window === 'undefined') return ''
     return new URLSearchParams(window.location.search).get('category') || ''
   })
+  const [sortBy, setSortBy] = useState<SortKey>(() => {
+    if (typeof window === 'undefined') return 'popular'
+    const raw = new URLSearchParams(window.location.search).get('sort')
+    return (['popular', 'nameAsc', 'nameDesc', 'trending'] as SortKey[]).includes(raw as SortKey)
+      ? (raw as SortKey)
+      : 'popular'
+  })
   // Keep URL in sync when the filter matches a real category chip; skip
   // arbitrary search text so the URL bar doesn't fill with keystrokes.
+  // Also mirror sortBy so bookmarks / shared links preserve the view.
   useEffect(() => {
     if (typeof window === 'undefined') return
     const cats = new Set<string>()
@@ -88,10 +116,12 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
     const q = query.trim()
     if (q && cats.has(q)) url.searchParams.set('category', q)
     else url.searchParams.delete('category')
+    if (sortBy !== 'popular') url.searchParams.set('sort', sortBy)
+    else url.searchParams.delete('sort')
     const next = url.pathname + (url.searchParams.toString() ? '?' + url.searchParams.toString() : '') + url.hash
     const curr = window.location.pathname + window.location.search + window.location.hash
     if (next !== curr) window.history.replaceState(null, '', next)
-  }, [query, data, category])
+  }, [query, data, category, sortBy])
   const trendingQuery = useQuery<TrendingResp>({
     queryKey: ['registry-trending', category],
     queryFn: () => fetchTrending(category),
@@ -103,11 +133,26 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   const labels = getCategoryLabels(t, category)
   const meta = CATEGORY_META[category]
 
+  const trendingIds = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const row of trendingQuery.data?.top ?? []) m.set(row.id, row.clicks)
+    return m
+  }, [trendingQuery.data])
+
   const filtered = useMemo(() => {
-    const sorted = sortItems(items)
-    if (!query.trim()) return sorted
+    const sorted = sortItems(items, sortBy, trendingIds)
+    // Favorites always pin to the top within whatever sort the user picked.
+    // Stable partition so relative order inside each group is preserved.
+    const pinned: Detail[] = []
+    const rest: Detail[] = []
+    for (const i of sorted) {
+      if (isFavorite(category, i.id)) pinned.push(i)
+      else rest.push(i)
+    }
+    const combined = [...pinned, ...rest]
+    if (!query.trim()) return combined
     const q = query.toLowerCase()
-    return sorted.filter(i => {
+    return combined.filter(i => {
       const desc = getLocalizedDesc(i, lang).toLowerCase()
       return i.id.toLowerCase().includes(q)
           || i.name.toLowerCase().includes(q)
@@ -115,7 +160,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
           || (i.category || '').toLowerCase().includes(q)
           || (i.tags || []).some(tag => tag.toLowerCase().includes(q))
     })
-  }, [items, query, lang])
+  }, [items, query, lang, sortBy, trendingIds, isFavorite, category])
 
   const categories = useMemo(() => {
     const set = new Set<string>()
@@ -146,21 +191,40 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
           <p className="text-gray-600 dark:text-gray-400 text-lg max-w-3xl">{labels.desc}</p>
         </div>
 
-        {/* Search */}
-        <div className="relative mb-10 max-w-xl">
-          <Search className="w-4 h-4 text-gray-400 absolute left-4 top-1/2 -translate-y-1/2" />
-          <input
-            type="search"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder={t.registry?.searchPlaceholder || 'Search...'}
-            className="w-full pl-11 pr-4 py-3 bg-surface-100 border border-black/10 dark:border-white/10 rounded text-sm text-slate-900 dark:text-white placeholder-gray-400 focus:outline-none focus:border-cyan-500/40 transition-colors"
-          />
-          {query && (
-            <div className="mt-2 text-xs text-gray-500">
-              {filtered.length} {t.registry?.matching || 'matches'}
-            </div>
-          )}
+        {/* Search + Sort */}
+        <div className="mb-10 flex flex-col sm:flex-row gap-3 sm:items-start">
+          <div className="relative flex-1 max-w-xl">
+            <Search className="w-4 h-4 text-gray-400 absolute left-4 top-1/2 -translate-y-1/2" />
+            <input
+              type="search"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder={t.registry?.searchPlaceholder || 'Search...'}
+              className="w-full pl-11 pr-4 py-3 bg-surface-100 border border-black/10 dark:border-white/10 rounded text-sm text-slate-900 dark:text-white placeholder-gray-400 focus:outline-none focus:border-cyan-500/40 transition-colors"
+            />
+            {query && (
+              <div className="mt-2 text-xs text-gray-500">
+                {filtered.length} {t.registry?.matching || 'matches'}
+              </div>
+            )}
+          </div>
+          <label className="relative inline-flex items-center gap-2">
+            <ArrowUpDown className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <span className="sr-only">{t.registry?.sort?.label || 'Sort'}</span>
+            <select
+              value={sortBy}
+              onChange={e => setSortBy(e.target.value as SortKey)}
+              className="pl-9 pr-8 py-3 bg-surface-100 border border-black/10 dark:border-white/10 rounded text-sm text-slate-900 dark:text-white focus:outline-none focus:border-cyan-500/40 transition-colors appearance-none cursor-pointer"
+              aria-label={t.registry?.sort?.label || 'Sort'}
+            >
+              <option value="popular">{t.registry?.sort?.popular || 'Popular'}</option>
+              <option value="nameAsc">{t.registry?.sort?.nameAsc || 'Name A–Z'}</option>
+              <option value="nameDesc">{t.registry?.sort?.nameDesc || 'Name Z–A'}</option>
+              <option value="trending" disabled={!trendingQuery.data || trendingIds.size === 0}>
+                {t.registry?.sort?.trending || 'Most clicked'}
+              </option>
+            </select>
+          </label>
         </div>
 
         {/* Trending strip — shows the top-clicked items in this category.
@@ -308,6 +372,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                   staleTime: 1000 * 60 * 60,
                 }).catch(() => { /* prefetch failure is silent */ })
               }
+              const starred = isFavorite(category, item.id)
               return (
                 <a
                   key={item.id}
@@ -315,13 +380,25 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                   onMouseEnter={prefetch}
                   onFocus={prefetch}
                   className={cn(
-                    'group block border p-5 transition-all hover:-translate-y-0.5',
+                    'group relative block border p-5 transition-all hover:-translate-y-0.5',
                     popular
                       ? 'border-amber-500/30 bg-amber-500/5 hover:border-amber-500/50'
                       : 'border-black/10 dark:border-white/5 bg-surface-100 hover:border-cyan-500/30'
                   )}
                 >
-                  <div className="flex items-start justify-between gap-2 mb-3">
+                  <button
+                    type="button"
+                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleFavorite(category, item.id) }}
+                    aria-label={starred ? 'Unstar' : 'Star'}
+                    aria-pressed={starred}
+                    className={cn(
+                      'absolute top-3 right-3 p-1 transition-colors',
+                      starred ? 'text-amber-500' : 'text-gray-300 dark:text-gray-600 hover:text-amber-500'
+                    )}
+                  >
+                    <Star className="w-3.5 h-3.5" fill={starred ? 'currentColor' : 'none'} />
+                  </button>
+                  <div className="flex items-start justify-between gap-2 mb-3 pr-6">
                     <div className="flex items-center gap-2 min-w-0">
                       {item.icon && (
                         <span className="text-xl leading-none shrink-0" aria-hidden>
