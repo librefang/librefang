@@ -315,6 +315,57 @@ max_cost_per_hour_usd = 1
     expect(reparsed.extras.model.exotic_subtable).toEqual({ foo: "bar" });
   });
 
+  it("does not emit both response_format form-mode and preserved [response_format] extras", () => {
+    // Same shape as the exec_policy P1: TOML carries an unmappable
+    // response_format → preserved as extras → user picks json/json_schema
+    // in form. Without the mutual-exclusion filter, both get emitted and
+    // the result is a TOML key/table redefinition conflict.
+    const toml = `name = "a"
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+
+[response_format]
+type = "future_format_we_dont_understand"
+custom = "x"
+`;
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.response_format.mode).toBe("text"); // unmappable → defaults to text
+    expect(parsed.extras.topLevel.response_format).toBeTruthy();
+
+    // User explicitly picks json in the form.
+    parsed.form.response_format = { mode: "json" };
+    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
+    const reparsed = parseManifestToml(reserialized);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.response_format.mode).toBe("json");
+    // Old preserved table must not have followed along.
+    expect(reparsed.extras.topLevel.response_format).toBeUndefined();
+  });
+
+  it("parseResponseFormatField always yields a string schema", () => {
+    // Codex-style regression: JSON.stringify(undefined, null, 2) returns
+    // undefined, which would flow into a `<textarea value={…}>` and
+    // trigger React's uncontrolled→controlled warning.
+    const toml = `name = "a"
+response_format = { type = "json_schema", name = "user" }
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+`;
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.response_format.mode).toBe("json_schema");
+    if (parsed.form.response_format.mode !== "json_schema") return;
+    expect(typeof parsed.form.response_format.schema).toBe("string");
+  });
+
   it("does not emit both exec_policy shorthand and [exec_policy] table", () => {
     // Codex P1 regression: when TOML carries a full [exec_policy] table
     // and the user later picks a shorthand string in the form, the old

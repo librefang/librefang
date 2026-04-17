@@ -1114,7 +1114,10 @@ export function AgentsPage() {
               {t("agents.from_toml")}
             </button>
           </div>
-          {tomlParseError && createMode !== "toml" && (
+          {tomlParseError && (
+            // The error is set when leaving TOML→Form fails, so the user
+            // is bounced back to TOML; the message must show on the TOML
+            // tab too, otherwise the rejected switch is invisible.
             <p className="text-xs text-error">
               {t("agents.form.toml_parse_error", { msg: tomlParseError })}
             </p>
@@ -1227,7 +1230,13 @@ export function AgentsPage() {
           ) : (
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.manifest_toml")}</label>
-              <textarea value={manifestToml} onChange={e => setManifestToml(e.target.value)}
+              <textarea value={manifestToml} onChange={e => {
+                  setManifestToml(e.target.value);
+                  // Clear stale parse error so the user gets fresh feedback
+                  // on their next switch attempt instead of seeing a message
+                  // that may already be addressed.
+                  if (tomlParseError) setTomlParseError(null);
+                }}
                 placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n\n[thinking]\nbudget_tokens = 10000\nstream_thinking = false'}
                 rows={12}
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-none" />

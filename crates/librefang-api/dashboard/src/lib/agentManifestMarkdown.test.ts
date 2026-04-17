@@ -113,6 +113,58 @@ describe("generateManifestMarkdown", () => {
     expect(md).toContain("**Enabled**: ✗");
   });
 
+  it("renders advanced first-class fields when populated", () => {
+    const form = emptyManifestForm();
+    form.name = "auto";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.schedule = { mode: "periodic", cron: "0 9 * * *" };
+    form.fallback_models = [
+      { provider: "anthropic", model: "claude-3-5-sonnet", api_key_env: "", base_url: "", extras: {} },
+    ];
+    form.thinking = { enabled: true, budget_tokens: "5000", stream_thinking: true };
+    form.autonomous = {
+      enabled: true,
+      max_iterations: "100",
+      max_restarts: "10",
+      heartbeat_interval_secs: "30",
+      heartbeat_timeout_secs: "",
+      heartbeat_keep_recent: "",
+      heartbeat_channel: "telegram",
+      quiet_hours: "",
+    };
+    form.routing = {
+      enabled: true,
+      simple_model: "claude-haiku",
+      medium_model: "claude-sonnet",
+      complex_model: "claude-opus",
+      simple_threshold: "100",
+      complex_threshold: "500",
+    };
+    form.context_injection = [
+      { name: "policy", content: "Be polite.", position: "before_user", condition: "" },
+    ];
+    form.response_format = { mode: "json" };
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("## Schedule");
+    expect(md).toContain("0 9 * * *");
+    expect(md).toContain("## Fallback Models");
+    expect(md).toContain("anthropic");
+    expect(md).toContain("claude-3-5-sonnet");
+    expect(md).toContain("## Extended Thinking");
+    expect(md).toContain("5000");
+    expect(md).toContain("## Autonomous Guardrails");
+    expect(md).toContain("telegram");
+    expect(md).toContain("## Model Routing");
+    expect(md).toContain("claude-haiku");
+    expect(md).toContain("## Context Injections");
+    expect(md).toContain("Be polite.");
+    expect(md).toContain("## Response Format");
+    expect(md).toContain("json");
+  });
+
   it("falls back to a placeholder name when blank", () => {
     const form = emptyManifestForm();
     const md = generateManifestMarkdown(form);

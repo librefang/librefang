@@ -395,12 +395,18 @@ export const serializeManifestForm = (
   if (responseFormatLine) lines.push(responseFormatLine);
 
   // Top-level extras — split scalars (BEFORE table headers) and tables (AFTER).
-  // Mutually exclusive with the form's exec_policy shorthand: emitting both
-  // a scalar `exec_policy = "..."` and a `[exec_policy]` table is a TOML
-  // key/table redefinition conflict, so the shorthand wins when set.
-  const filteredTopExtras = form.exec_policy_shorthand
-    ? omitKey(extras.topLevel, "exec_policy")
-    : extras.topLevel;
+  // Drop any key the form is about to emit itself, otherwise we'd produce
+  // a duplicate key that smol-toml (and the kernel) rejects:
+  //   - exec_policy: form emits the shorthand, extras may carry the full table
+  //   - response_format: form emits text/json/json_schema, extras may carry
+  //     an unmappable `type = "future_format"` table that survived parse
+  let filteredTopExtras = extras.topLevel;
+  if (form.exec_policy_shorthand) {
+    filteredTopExtras = omitKey(filteredTopExtras, "exec_policy");
+  }
+  if (form.response_format.mode !== "text") {
+    filteredTopExtras = omitKey(filteredTopExtras, "response_format");
+  }
   const { inline: topInlineExtras, tables: topTableExtras } =
     splitTopLevelExtras(filteredTopExtras);
   for (const line of renderExtraScalars(topInlineExtras)) lines.push(line);
@@ -677,6 +683,16 @@ const omitKey = (table: TomlTable, key: string): TomlTable => {
   return rest;
 };
 
+const stringifyOrEmpty = (value: unknown): string => {
+  if (value === undefined || value === null) return "{}";
+  try {
+    const out = JSON.stringify(value, null, 2);
+    return typeof out === "string" ? out : "{}";
+  } catch {
+    return "{}";
+  }
+};
+
 // Form-validation errors. Returns an empty array when submittable.
 export const validateManifestForm = (form: ManifestFormState): string[] => {
   const errors: string[] = [];
@@ -928,13 +944,12 @@ const parseResponseFormatField = (raw: unknown): ManifestFormState["response_for
     return {
       mode: "json_schema",
       name: asString(raw.name),
-      schema: (() => {
-        try {
-          return JSON.stringify(raw.schema, null, 2);
-        } catch {
-          return "{}";
-        }
-      })(),
+      // JSON.stringify(undefined) returns undefined (not a string!), which
+      // would break the `schema: string` type and trigger React's
+      // uncontrolled→controlled warning when fed to <textarea value={…}>.
+      // Default to `{}` whenever the source schema is missing or
+      // unrenderable.
+      schema: stringifyOrEmpty(raw.schema),
       strict: asBoolean(raw.strict, false),
     };
   }

@@ -101,6 +101,8 @@ export const generateManifestMarkdown = (
   pushList(lines, "Tool allowlist", form.tool_allowlist);
   pushList(lines, "Tool blocklist", form.tool_blocklist);
 
+  pushAdvancedFormSections(lines, form);
+
   // Advanced — anything in extras that survived round-trip.
   const advancedLines = renderExtras(extras);
   if (advancedLines.length) {
@@ -115,6 +117,102 @@ export const generateManifestMarkdown = (
   }
 
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+};
+
+// Render the advanced first-class form fields when populated. Keeping
+// these here (rather than in the extras appendix) means a generated
+// Markdown for an autonomous-mode agent actually documents that it's
+// autonomous, instead of silently omitting the gating config.
+const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): void => {
+  if (form.schedule.mode !== "reactive") {
+    lines.push("## Schedule");
+    lines.push("");
+    lines.push(`- **Mode**: \`${form.schedule.mode}\``);
+    if (form.schedule.mode === "periodic") {
+      lines.push(`- **Cron**: \`${form.schedule.cron}\``);
+    } else if (form.schedule.mode === "proactive") {
+      if (form.schedule.conditions.length) {
+        lines.push(`- **Conditions**: ${form.schedule.conditions.map((c) => `\`${c}\``).join(", ")}`);
+      }
+    } else if (form.schedule.mode === "continuous") {
+      lines.push(`- **Check interval**: \`${form.schedule.check_interval_secs}s\``);
+    }
+    lines.push("");
+  }
+
+  if (form.fallback_models.length) {
+    lines.push("## Fallback Models");
+    lines.push("");
+    lines.push("| # | Provider | Model |");
+    lines.push("|---|----------|-------|");
+    form.fallback_models.forEach((fb, i) => {
+      lines.push(`| ${i + 1} | ${fb.provider || "_(empty)_"} | ${fb.model || "_(empty)_"} |`);
+    });
+    lines.push("");
+  }
+
+  if (form.thinking.enabled) {
+    lines.push("## Extended Thinking");
+    lines.push("");
+    pushBullet(lines, "Budget tokens", form.thinking.budget_tokens);
+    lines.push(`- **Stream thinking**: ${form.thinking.stream_thinking ? "✓" : "✗"}`);
+    lines.push("");
+  }
+
+  if (form.autonomous.enabled) {
+    lines.push("## Autonomous Guardrails");
+    lines.push("");
+    pushBullet(lines, "Max iterations", form.autonomous.max_iterations);
+    pushBullet(lines, "Max restarts", form.autonomous.max_restarts);
+    pushBullet(lines, "Heartbeat interval", form.autonomous.heartbeat_interval_secs);
+    pushBullet(lines, "Heartbeat timeout", form.autonomous.heartbeat_timeout_secs);
+    pushBullet(lines, "Heartbeat keep recent", form.autonomous.heartbeat_keep_recent);
+    pushBullet(lines, "Heartbeat channel", form.autonomous.heartbeat_channel);
+    pushBullet(lines, "Quiet hours", form.autonomous.quiet_hours);
+    lines.push("");
+  }
+
+  if (form.routing.enabled) {
+    lines.push("## Model Routing");
+    lines.push("");
+    pushBullet(lines, "Simple", form.routing.simple_model);
+    pushBullet(lines, "Medium", form.routing.medium_model);
+    pushBullet(lines, "Complex", form.routing.complex_model);
+    pushBullet(lines, "Simple threshold", form.routing.simple_threshold);
+    pushBullet(lines, "Complex threshold", form.routing.complex_threshold);
+    lines.push("");
+  }
+
+  if (form.context_injection.length) {
+    lines.push("## Context Injections");
+    lines.push("");
+    form.context_injection.forEach((ci, i) => {
+      lines.push(`**${i + 1}. ${ci.name || "(unnamed)"}** _(${ci.position})_`);
+      if (ci.condition) lines.push(`- **Condition**: \`${ci.condition}\``);
+      lines.push("");
+      lines.push("```");
+      lines.push(ci.content);
+      lines.push("```");
+      lines.push("");
+    });
+  }
+
+  if (form.response_format.mode !== "text") {
+    lines.push("## Response Format");
+    lines.push("");
+    lines.push(`- **Mode**: \`${form.response_format.mode}\``);
+    if (form.response_format.mode === "json_schema") {
+      pushBullet(lines, "Schema name", form.response_format.name);
+      lines.push(`- **Strict**: ${form.response_format.strict ? "✓" : "✗"}`);
+      if (form.response_format.schema.trim()) {
+        lines.push("");
+        lines.push("```json");
+        lines.push(form.response_format.schema);
+        lines.push("```");
+      }
+    }
+    lines.push("");
+  }
 };
 
 const pushBullet = (lines: string[], label: string, value: string): void => {
