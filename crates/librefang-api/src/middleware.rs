@@ -402,6 +402,7 @@ pub async fn auth(
             | "/api/hands/active"
             | "/api/skills"
             | "/api/sessions"
+            | "/api/mcp/servers"
             | "/api/mcp/installed"
             | "/api/mcp/catalog"
             | "/api/mcp/health"
