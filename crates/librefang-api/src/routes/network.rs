@@ -939,9 +939,29 @@ pub async fn mcp_http(
         let workspace_root = caller_entry
             .as_ref()
             .and_then(|e| e.manifest.workspace.as_deref());
-        let allowed_tools_vec = caller_entry
-            .as_ref()
-            .map(|e| e.manifest.capabilities.tools.clone());
+        // Build the allowed-tool-name list the same way the direct agent-loop
+        // path does: `kernel.available_tools(id)` already resolves declared
+        // tools + ToolProfile expansion + skill-evolution defaults + MCP
+        // server scoping + `tool_allowlist`/`tool_blocklist` + global
+        // `tool_policy` + the `ToolAll` capability + the browser toggle.
+        // Then mirror the kernel's per-message mode filter (Observe/Assist/
+        // Full) that `send_message` applies before handing tools to
+        // `run_agent_loop` (kernel/mod.rs:3997, 5148, 6852).
+        //
+        // Using `manifest.capabilities.tools` raw would silently break every
+        // agent that declares `capabilities.tools = []` (the common
+        // "unrestricted" default) because `execute_tool` treats `Some([])`
+        // as "deny all" — the exact symptom would be every tool coming back
+        // as "Permission denied" through the bridge even though the agent
+        // was allowed everything on the direct path.
+        let allowed_tools_vec = caller_entry.as_ref().map(|e| {
+            let tools = state.kernel.available_tools(e.id);
+            e.mode
+                .filter_tools((*tools).clone())
+                .into_iter()
+                .map(|t| t.name)
+                .collect::<Vec<String>>()
+        });
         let allowed_skills_vec = caller_entry.as_ref().map(|e| e.manifest.skills.clone());
         let exec_policy = caller_entry
             .as_ref()

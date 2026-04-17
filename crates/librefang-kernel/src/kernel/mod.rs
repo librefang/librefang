@@ -9839,7 +9839,7 @@ system_prompt = "You are a helpful assistant."
     ///
     /// If `capabilities.tools` is empty (or contains `"*"`), all tools are
     /// available (backwards compatible).
-    fn available_tools(&self, agent_id: AgentId) -> Arc<Vec<ToolDefinition>> {
+    pub fn available_tools(&self, agent_id: AgentId) -> Arc<Vec<ToolDefinition>> {
         let cfg = self.config.load();
         // Check the tool list cache first — avoids recomputing builtins, skill tools,
         // and MCP tools on every message for the same agent.

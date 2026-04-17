@@ -1844,6 +1844,60 @@ async fn test_mcp_http_invalid_agent_header_falls_back_to_unauthenticated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_mcp_http_unrestricted_agent_can_call_any_tool() {
+    // Regression guard: a manifest with `capabilities.tools = []`
+    // (or no [capabilities] section at all — same result) means
+    // "unrestricted" on the direct agent-loop path. The bridge must
+    // match that semantics. A naive implementation that passes the
+    // raw `manifest.capabilities.tools` as `allowed_tools` would
+    // produce `Some([])`, which `execute_tool` reads as "deny all"
+    // and every tool invoked through the bridge would return
+    // "Permission denied: agent does not have capability to use tool
+    // 'cron_list'" even though the direct path allows everything.
+    //
+    // The bridge must resolve the allowed-tool set the same way
+    // `kernel::send_message` does: `kernel.available_tools(id)` +
+    // `entry.mode.filter_tools(...)`.
+    const UNRESTRICTED_MANIFEST: &str = r#"
+name = "unrestricted-test-agent"
+version = "0.1.0"
+description = "Agent with no tool restrictions"
+author = "test"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are a test agent."
+"#;
+
+    let server = start_test_server().await;
+
+    let client = reqwest::Client::new();
+    let spawn_resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": UNRESTRICTED_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spawn_resp.status(), 201);
+    let spawn_body: serde_json::Value = spawn_resp.json().await.unwrap();
+    let agent_id = spawn_body["agent_id"].as_str().unwrap().to_string();
+
+    let (status, body) = call_mcp_cron_list(&server, Some(&agent_id)).await;
+    assert_eq!(status, 200);
+    let is_error = body["result"]["isError"].as_bool().unwrap_or(false);
+    let content = body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        !is_error,
+        "unrestricted agent must be able to call cron_list through the bridge; got content={content}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_mcp_http_enforces_agent_tool_allowlist() {
     // The caller-context rehydration must ALSO propagate the agent's
     // `capabilities.tools` allowlist so the bridge can't be used to
