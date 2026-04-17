@@ -86,7 +86,7 @@ jobs:
         with:
           key: desktop-${{ matrix.platform.rust_target }}-${{ github.ref_name }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
 
