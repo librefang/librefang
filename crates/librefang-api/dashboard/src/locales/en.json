@@ -2122,14 +2122,25 @@
     "connection_closed_non_recoverable": "Connection closed due to a non-recoverable error",
     "max_reconnect_exceeded": "Max reconnection attempts reached. Please connect manually.",
     "root_warning": "Warning: The daemon is running as root. Terminal commands execute with full privileges.",
+    "enter_fullscreen": "Enter fullscreen",
+    "exit_fullscreen": "Exit fullscreen (Esc)",
     "tabs": {
       "new": "New tab",
       "unnamed": "Unnamed",
       "limit_reached": "Window limit reached",
       "switch_failed": "Failed to switch window",
       "create_failed": "Failed to create window",
+      "create_success": "Window created",
       "delete_failed": "Failed to close window",
-      "tmux_unavailable": "tmux is not available on this host"
+      "tmux_unavailable": "tmux is not available on this host",
+      "create_title": "New terminal window",
+      "create": "Create",
+      "creating": "Creating…",
+      "name_label": "Window name",
+      "name_placeholder": "Leave empty for auto-numbered",
+      "name_hint": "Letters, digits, space, dot, underscore or dash. Max 64 chars.",
+      "name_invalid": "Only letters, digits, space, . _ - are allowed (1–64 chars).",
+      "counter": "{{used}} / {{total}}"
     },
     "install_tmux": "Install tmux"
   },

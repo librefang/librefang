@@ -2129,14 +2129,25 @@
     "connection_closed_non_recoverable": "由于不可恢复的错误，连接已关闭",
     "max_reconnect_exceeded": "已达到最大重连次数，请手动连接。",
     "root_warning": "警告：守护进程以 root 身份运行。终端命令将以完整权限执行。",
+    "enter_fullscreen": "全屏",
+    "exit_fullscreen": "退出全屏（Esc）",
     "tabs": {
       "new": "新标签页",
       "unnamed": "未命名",
       "limit_reached": "已达窗口上限",
       "switch_failed": "切换窗口失败",
       "create_failed": "创建窗口失败",
+      "create_success": "窗口已创建",
       "delete_failed": "关闭窗口失败",
-      "tmux_unavailable": "此主机不支持 tmux"
+      "tmux_unavailable": "此主机不支持 tmux",
+      "create_title": "新建终端窗口",
+      "create": "创建",
+      "creating": "创建中…",
+      "name_label": "窗口名称",
+      "name_placeholder": "留空则自动编号",
+      "name_hint": "可用字母、数字、空格、点、下划线或短横线，最长 64 个字符。",
+      "name_invalid": "只允许字母、数字、空格和 . _ -（1–64 个字符）。",
+      "counter": "{{used}} / {{total}}"
     },
     "install_tmux": "安装 tmux"
   },

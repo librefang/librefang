@@ -1,4 +1,11 @@
-import { useState, useCallback, useRef, useEffect, type RefObject } from "react";
+import {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  useMemo,
+  type RefObject,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Plus, X, AlertCircle } from "lucide-react";
@@ -6,6 +13,8 @@ import { authHeader } from "../api";
 import { useUIStore } from "../lib/store";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
+import { Modal } from "./ui/Modal";
+import { Button } from "./ui/Button";
 
 interface WindowInfo {
   id: string;
@@ -53,7 +62,7 @@ export function TerminalTabs({
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { data: windows = [] } = useTmuxWindows(tmuxAvailable);
-  const [showNameInput, setShowNameInput] = useState(false);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -93,21 +102,55 @@ export function TerminalTabs({
   }, []);
 
   useEffect(() => {
-    if (showNameInput) {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }
-  }, [showNameInput]);
-
-  useEffect(() => {
     if (activeWindowId !== null || windows.length === 0) return;
     const active = windows.find((w) => w.active);
     onSwitchWindow(active ? active.id : windows[0].id);
   }, [windows, activeWindowId, onSwitchWindow]);
 
+  // Auto-focus the input when the modal opens.
+  useEffect(() => {
+    if (!isCreateOpen) return;
+    const tid = setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 50);
+    return () => clearTimeout(tid);
+  }, [isCreateOpen]);
+
+  const suggestedName = useMemo(() => {
+    const base = shellName || "sh";
+    const used = new Set(windows.map((w) => w.name));
+    for (let i = windows.length + 1; i <= maxWindows + 1; i++) {
+      const candidate = `${base}-${i}`;
+      if (!used.has(candidate)) return candidate;
+    }
+    return `${base}-${Date.now().toString().slice(-4)}`;
+  }, [shellName, windows, maxWindows]);
+
+  const addToast = useUIStore((s) => s.addToast);
+
+  const openCreateModal = useCallback(() => {
+    setNewName(suggestedName);
+    setCreateError(null);
+    setIsCreateOpen(true);
+  }, [suggestedName]);
+
+  const closeCreateModal = useCallback(() => {
+    if (creating) return;
+    setIsCreateOpen(false);
+    setNewName("");
+    setCreateError(null);
+  }, [creating]);
+
+  const trimmedName = newName.trim();
+  const nameValid = trimmedName === "" || WINDOW_NAME_RE.test(trimmedName);
+
   const handleCreate = useCallback(async () => {
     const name = newName.trim();
-    if (name && !WINDOW_NAME_RE.test(name)) return;
+    if (name !== "" && !WINDOW_NAME_RE.test(name)) {
+      setCreateError(t("terminal.tabs.name_invalid"));
+      return;
+    }
 
     setCreating(true);
     setCreateError(null);
@@ -127,13 +170,14 @@ export function TerminalTabs({
       }
       queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
       setNewName("");
-      setShowNameInput(false);
+      setIsCreateOpen(false);
+      addToast(t("terminal.tabs.create_success"), "success");
+    } catch {
+      setCreateError(t("terminal.tabs.create_failed"));
     } finally {
       setCreating(false);
     }
-  }, [newName, queryClient, t]);
-
-  const addToast = useUIStore((s) => s.addToast);
+  }, [newName, queryClient, t, addToast]);
 
   const handleCloseTab = useCallback(
     async (windowId: string, e: React.MouseEvent) => {
@@ -177,95 +221,137 @@ export function TerminalTabs({
   const atLimit = windows.length >= maxWindows;
 
   return (
-    <div className="flex items-center gap-1 px-2 py-1 bg-gray-900/80 border-b border-gray-700/50 overflow-x-auto">
-      {windows.map((w) => (
-        <button
-          key={w.id}
-          onClick={() => handleTabClick(w.id)}
-          className={`px-3 py-1 rounded-t text-sm whitespace-nowrap transition-colors ${
-            w.id === activeWindowId
-              ? "bg-[#1a1a2e] text-white border-t border-x border-gray-600"
-              : "text-gray-400 hover:text-gray-200 hover:bg-gray-800/50"
-          }`}
-        >
-          <span className="flex items-center gap-1">
-            {w.name || t("terminal.tabs.unnamed")}
-            {windows.length > 1 && (
-              <span
-                role="button"
-                tabIndex={0}
-                onClick={(e) => handleCloseTab(w.id, e)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") handleCloseTab(w.id, e as unknown as React.MouseEvent);
-                }}
-                className="text-gray-500 hover:text-red-400 cursor-pointer"
-              >
-                <X className="h-3 w-3" />
-              </span>
-            )}
-          </span>
-        </button>
-      ))}
-      {showNameInput ? (
-        <div className="flex items-center gap-1 ml-1">
-          <input
-            ref={inputRef}
-            value={newName}
-            onChange={(e) => {
-              setNewName(e.target.value);
-              setCreateError(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleCreate();
-              if (e.key === "Escape") {
-                setShowNameInput(false);
-                setNewName("");
-                setCreateError(null);
-              }
-            }}
-            placeholder={t("terminal.tabs.new")}
-            maxLength={64}
-            className="px-2 py-0.5 text-sm bg-gray-800 text-white border border-gray-600 rounded w-32 focus:outline-none focus:border-blue-500"
-            autoFocus
-          />
+    <>
+      <div className="flex items-center gap-1 px-2 py-1 bg-gray-900/80 border-b border-gray-700/50 overflow-x-auto shrink-0">
+        {windows.map((w) => (
           <button
-            onClick={handleCreate}
-            disabled={creating}
-            className="text-xs text-green-400 hover:text-green-300"
+            key={w.id}
+            onClick={() => handleTabClick(w.id)}
+            className={`px-3 py-1 rounded-t text-sm whitespace-nowrap transition-colors ${
+              w.id === activeWindowId
+                ? "bg-[#1a1a2e] text-white border-t border-x border-gray-600"
+                : "text-gray-400 hover:text-gray-200 hover:bg-gray-800/50"
+            }`}
           >
-            OK
-          </button>
-          <button
-            onClick={() => {
-              setShowNameInput(false);
-              setNewName("");
-              setCreateError(null);
-            }}
-            className="text-xs text-gray-500 hover:text-gray-300"
-          >
-            <X className="h-3 w-3" />
-          </button>
-          {createError && (
-            <span className="flex items-center gap-1 text-xs text-red-400">
-              <AlertCircle className="h-3 w-3" />
-              {createError}
+            <span className="flex items-center gap-1">
+              {w.name || t("terminal.tabs.unnamed")}
+              {windows.length > 1 && (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => handleCloseTab(w.id, e)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") handleCloseTab(w.id, e as unknown as React.MouseEvent);
+                  }}
+                  className="text-gray-500 hover:text-red-400 cursor-pointer"
+                >
+                  <X className="h-3 w-3" />
+                </span>
+              )}
             </span>
-          )}
-        </div>
-      ) : (
-        !atLimit && (
-          <button
-            onClick={() => {
-              setNewName(`${shellName}_${windows.length + 1}`);
-              setShowNameInput(true);
-            }}
-            className="p-1 text-gray-500 hover:text-gray-300 transition-colors"
-            title={t("terminal.tabs.new")}
-          >
-            <Plus className="h-4 w-4" />
           </button>
-        )
-      )}
-    </div>
+        ))}
+        <button
+          onClick={openCreateModal}
+          disabled={atLimit}
+          aria-label={t("terminal.tabs.new")}
+          className="p-1 text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-500"
+          title={
+            atLimit
+              ? t("terminal.tabs.limit_reached")
+              : t("terminal.tabs.new")
+          }
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+        <span className="ml-auto pr-1 text-xs text-gray-500 shrink-0 tabular-nums">
+          {t("terminal.tabs.counter", {
+            used: windows.length,
+            total: maxWindows,
+          })}
+        </span>
+      </div>
+
+      <Modal
+        isOpen={isCreateOpen}
+        onClose={closeCreateModal}
+        title={t("terminal.tabs.create_title")}
+        size="sm"
+      >
+        <div className="p-5 space-y-3">
+          <label className="block text-sm">
+            <span className="block text-text-dim mb-1.5">
+              {t("terminal.tabs.name_label")}
+            </span>
+            <input
+              ref={inputRef}
+              value={newName}
+              onChange={(e) => {
+                setNewName(e.target.value);
+                setCreateError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !creating && nameValid) {
+                  e.preventDefault();
+                  void handleCreate();
+                }
+              }}
+              placeholder={t("terminal.tabs.name_placeholder")}
+              maxLength={64}
+              aria-invalid={!nameValid}
+              className={`w-full px-3 py-2 text-sm bg-gray-800 text-white border rounded-lg focus:outline-none transition-colors ${
+                !nameValid || createError
+                  ? "border-red-500/70 focus:border-red-500"
+                  : "border-gray-600 focus:border-blue-500"
+              }`}
+            />
+          </label>
+
+          <p className="text-xs text-text-dim leading-relaxed">
+            {t("terminal.tabs.name_hint")}
+          </p>
+
+          {!nameValid && (
+            <div className="flex items-start gap-1.5 text-xs text-red-400">
+              <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+              <span>{t("terminal.tabs.name_invalid")}</span>
+            </div>
+          )}
+
+          {createError && nameValid && (
+            <div className="flex items-start gap-1.5 text-xs text-red-400">
+              <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+              <span>{createError}</span>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between pt-2">
+            <span className="text-xs text-text-dim tabular-nums">
+              {t("terminal.tabs.counter", {
+                used: windows.length,
+                total: maxWindows,
+              })}
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                onClick={closeCreateModal}
+                disabled={creating}
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button
+                onClick={() => void handleCreate()}
+                disabled={creating || !nameValid || atLimit}
+              >
+                {creating
+                  ? t("terminal.tabs.creating")
+                  : t("terminal.tabs.create")}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Modal>
+    </>
   );
 }

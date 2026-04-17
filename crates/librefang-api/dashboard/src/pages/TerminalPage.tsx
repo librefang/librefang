@@ -6,7 +6,11 @@ import { FitAddon } from "@xterm/addon-fit";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import { Terminal as TerminalIcon } from "lucide-react";
+import {
+  Terminal as TerminalIcon,
+  Maximize2,
+  Minimize2,
+} from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { buildAuthenticatedWebSocketUrl, authHeader } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -69,6 +73,7 @@ export function TerminalPage() {
   const [activeWindowId, setActiveWindowId] = useState<string | null>(null);
   const [shellName, setShellName] = useState<string>("sh");
   const [serverOs, setServerOs] = useState<string>("linux");
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const terminalEnabled = useUIStore((s) => s.terminalEnabled);
 
   useEffect(() => {
@@ -246,6 +251,42 @@ export function TerminalPage() {
     setActiveWindowId(id);
   }, []);
 
+  const toggleFullscreen = useCallback(() => {
+    setIsFullscreen((v) => !v);
+  }, []);
+
+  // Refit the terminal after fullscreen toggles, and notify the remote pty of
+  // the new size. We rAF twice so layout has actually settled before we measure.
+  useEffect(() => {
+    if (!terminalRef.current || !fitAddonRef.current) return;
+    const raf1 = requestAnimationFrame(() => {
+      const raf2 = requestAnimationFrame(() => {
+        try {
+          fitAddonRef.current?.fit();
+        } catch {
+          /* xterm not attached yet */
+        }
+        const term = terminalRef.current;
+        const ws = wsRef.current;
+        if (term && ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        }
+      });
+      return () => cancelAnimationFrame(raf2);
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, [isFullscreen]);
+
+  // ESC exits fullscreen.
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsFullscreen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isFullscreen]);
+
   useEffect(() => {
     if (terminalEnabled !== true) {
       return;
@@ -289,8 +330,20 @@ export function TerminalPage() {
     const handleResize = () => fitAddon.fit();
     window.addEventListener("resize", handleResize);
 
+    // Also refit when the container itself changes size (sidebar toggle,
+    // parent layout changes, etc) so we don't get a mismatched pty size.
+    const ro = new ResizeObserver(() => {
+      try {
+        fitAddon.fit();
+      } catch {
+        /* ignore */
+      }
+    });
+    ro.observe(containerRef.current);
+
     return () => {
       window.removeEventListener("resize", handleResize);
+      ro.disconnect();
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
@@ -324,62 +377,107 @@ export function TerminalPage() {
     );
   }
 
+  const statusLabel = error
+    ? t("terminal.subtitle_error", { error })
+    : isConnected
+      ? t("terminal.subtitle_connected")
+      : t("terminal.subtitle_disconnected");
+
+  const actions = (
+    <>
+      {!tmuxAvailable && isConnected && (
+        <Button onClick={handleInstallTmux} variant="secondary">
+          {t("terminal.install_tmux")}
+        </Button>
+      )}
+      <Button onClick={connect} disabled={isConnected || isConnecting}>
+        {isConnected
+          ? t("terminal.subtitle_connected")
+          : t("terminal.connect")}
+      </Button>
+      {isConnected && (
+        <Button onClick={disconnect} variant="secondary">
+          {t("terminal.disconnect")}
+        </Button>
+      )}
+      <Button
+        onClick={toggleFullscreen}
+        variant="secondary"
+        aria-label={
+          isFullscreen
+            ? t("terminal.exit_fullscreen")
+            : t("terminal.enter_fullscreen")
+        }
+        title={
+          isFullscreen
+            ? t("terminal.exit_fullscreen")
+            : t("terminal.enter_fullscreen")
+        }
+      >
+        {isFullscreen ? (
+          <Minimize2 className="h-4 w-4" />
+        ) : (
+          <Maximize2 className="h-4 w-4" />
+        )}
+      </Button>
+    </>
+  );
+
+  // The terminal body. Rendered identically in normal and fullscreen modes so
+  // xterm never unmounts — otherwise the pty session would be torn down every
+  // time we toggle fullscreen.
+  const terminalBody = (
+    <div className="h-full flex flex-col overflow-hidden">
+      {isRoot && (
+        <div className="bg-red-500/20 border border-red-500/50 text-red-300 px-4 py-2 text-sm shrink-0">
+          {t("terminal.root_warning")}
+        </div>
+      )}
+      <TerminalTabs
+        ws={wsRef.current}
+        tmuxAvailable={tmuxAvailable}
+        maxWindows={maxWindows}
+        activeWindowId={activeWindowId}
+        onSwitchWindow={handleSwitchWindow}
+        terminalRef={terminalRef}
+        fitAddonRef={fitAddonRef}
+        shellName={shellName}
+      />
+      <div
+        ref={containerRef}
+        className="flex-1 bg-[#1a1a2e] p-2 overflow-hidden min-h-0"
+      />
+    </div>
+  );
+
+  if (isFullscreen) {
+    return (
+      <div className="fixed inset-0 z-50 flex flex-col bg-[#1a1a2e]">
+        <div className="flex items-center justify-between gap-3 px-4 py-2 bg-surface border-b border-border-subtle shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <TerminalIcon className="h-4 w-4 text-text-dim shrink-0" />
+            <span className="font-semibold truncate">{t("nav.terminal")}</span>
+            <span className="text-xs text-text-dim truncate">· {statusLabel}</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">{actions}</div>
+        </div>
+        <div className="flex-1 min-h-0">{terminalBody}</div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-full">
       <PageHeader
         badge={t("terminal.badge")}
         title={t("nav.terminal")}
-        subtitle={
-          error
-            ? t("terminal.subtitle_error", { error })
-            : isConnected
-              ? t("terminal.subtitle_connected")
-              : t("terminal.subtitle_disconnected")
-        }
+        subtitle={statusLabel}
         icon={<TerminalIcon className="h-4 w-4" />}
-        actions={
-          <>
-            {!tmuxAvailable && isConnected && (
-              <Button onClick={handleInstallTmux} variant="secondary">
-                {t("terminal.install_tmux")}
-              </Button>
-            )}
-            <Button onClick={connect} disabled={isConnected || isConnecting}>
-              {isConnected
-                ? t("terminal.subtitle_connected")
-                : t("terminal.connect")}
-            </Button>
-            {isConnected && (
-              <Button onClick={disconnect} variant="secondary">
-                {t("terminal.disconnect")}
-              </Button>
-            )}
-          </>
-        }
+        actions={actions}
       />
-      <div className="flex-1 p-4">
-        <Card className="h-full">
-          {isRoot && (
-            <div className="bg-red-500/20 border border-red-500/50 text-red-300 px-4 py-2 rounded-lg text-sm mb-2">
-              {t("terminal.root_warning")}
-            </div>
-          )}
-          <TerminalTabs
-            ws={wsRef.current}
-            tmuxAvailable={tmuxAvailable}
-            maxWindows={maxWindows}
-            activeWindowId={activeWindowId}
-            onSwitchWindow={handleSwitchWindow}
-            terminalRef={terminalRef}
-            fitAddonRef={fitAddonRef}
-            shellName={shellName}
-          />
-          <div className="h-full flex flex-col overflow-hidden">
-            <div
-              ref={containerRef}
-              className="flex-1 bg-[#1a1a2e] rounded-b-lg p-2 overflow-hidden"
-            />
-          </div>
+      <div className="flex-1 p-4 min-h-0">
+        <Card className="h-full flex flex-col overflow-hidden" padding="none">
+          {terminalBody}
         </Card>
       </div>
     </div>
