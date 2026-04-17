@@ -36,6 +36,13 @@ import { getStatusVariant } from "../lib/status";
 import { useDashboardSnapshot } from "../lib/queries/runtime";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
+import { AgentManifestForm } from "../components/AgentManifestForm";
+import {
+  emptyManifestForm,
+  serializeManifestForm,
+  validateManifestForm,
+  type ManifestFormState,
+} from "../lib/agentManifest";
 import {
   agentQueries,
   useAgentTemplates,
@@ -66,10 +73,12 @@ export function AgentsPage() {
   const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
   const [, setDetailLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
-  const [createMode, setCreateMode] = useState<"template" | "toml">("template");
+  const [createMode, setCreateMode] = useState<"form" | "template" | "toml">("form");
   const [templateName, setTemplateName] = useState("");
   const [manifestToml, setManifestToml] = useState("");
   const [templateTomlLoading, setTemplateTomlLoading] = useState(false);
+  const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
+  const [formErrors, setFormErrors] = useState<Set<string>>(new Set());
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
   const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
@@ -277,11 +286,37 @@ export function AgentsPage() {
     { enabled: !!modelDraft.provider.trim() },
   );
 
+  // Separate models query for the create-form's chosen provider. We don't
+  // reuse modelsQuery because that one is gated on the inline-edit widget's
+  // selection, which is unrelated to the create modal.
+  const formModelsQuery = useModels(
+    { provider: formState.model.provider },
+    { enabled: showCreate && createMode === "form" && !!formState.model.provider.trim() },
+  );
+
   const providersQuery = useProviders();
 
   const configuredProviders = useMemo(
     () => (providersQuery.data ?? []).filter(p => isProviderAvailable(p.auth_status)),
     [providersQuery.data],
+  );
+
+  // Form-mode option lists (only providers that have credentials configured).
+  const formProviderOptions = useMemo(
+    () => configuredProviders.map((p) => ({ name: p.id })),
+    [configuredProviders],
+  );
+  const formModelOptions = useMemo(
+    () =>
+      (formModelsQuery.data?.models ?? []).map((m) => ({
+        provider: m.provider,
+        id: m.id,
+      })),
+    [formModelsQuery.data?.models],
+  );
+  const serializedFormToml = useMemo(
+    () => serializeManifestForm(formState),
+    [formState],
   );
 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
@@ -1025,6 +1060,10 @@ export function AgentsPage() {
         <div className="p-5 space-y-4">
           {/* Mode tabs */}
           <div className="flex gap-2">
+            <button onClick={() => setCreateMode("form")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "form" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+              {t("agents.from_form")}
+            </button>
             <button onClick={() => setCreateMode("template")}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
               {t("agents.from_template")}
@@ -1035,7 +1074,37 @@ export function AgentsPage() {
             </button>
           </div>
 
-          {createMode === "template" ? (
+          {createMode === "form" ? (
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-4 max-h-[60vh] overflow-y-auto pr-1">
+              <AgentManifestForm
+                value={formState}
+                onChange={setFormState}
+                providers={formProviderOptions}
+                models={formModelOptions}
+                invalidFields={formErrors}
+              />
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-[10px] font-bold text-text-dim uppercase">
+                    {t("agents.form.live_toml")}
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setManifestToml(serializedFormToml);
+                      setCreateMode("toml");
+                    }}
+                    className="text-[10px] font-bold text-brand hover:underline"
+                  >
+                    {t("agents.form.switch_to_toml")}
+                  </button>
+                </div>
+                <pre className="rounded-xl border border-border-subtle bg-main px-3 py-2 text-[11px] font-mono text-text-dim overflow-auto max-h-[55vh] whitespace-pre-wrap break-all">
+                  {serializedFormToml}
+                </pre>
+              </div>
+            </div>
+          ) : createMode === "template" ? (
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
               <select value={templateName}
@@ -1093,8 +1162,31 @@ export function AgentsPage() {
 
           <div className="flex gap-2 pt-2">
             <Button variant="primary" className="flex-1"
-              onClick={() => spawnMutation.mutate(createMode === "template" ? { template: templateName } : { manifest_toml: manifestToml })}
-              disabled={spawnMutation.isPending || templateTomlLoading || (createMode === "template" ? !templateName.trim() : !manifestToml.trim())}>
+              onClick={() => {
+                if (createMode === "form") {
+                  const errors = validateManifestForm(formState);
+                  setFormErrors(new Set(errors));
+                  if (errors.length > 0) return;
+                  spawnMutation.mutate({ manifest_toml: serializedFormToml });
+                  return;
+                }
+                spawnMutation.mutate(
+                  createMode === "template"
+                    ? { template: templateName }
+                    : { manifest_toml: manifestToml },
+                );
+              }}
+              disabled={
+                spawnMutation.isPending ||
+                templateTomlLoading ||
+                (createMode === "form"
+                  ? !formState.name.trim() ||
+                    !formState.model.provider.trim() ||
+                    !formState.model.model.trim()
+                  : createMode === "template"
+                    ? !templateName.trim()
+                    : !manifestToml.trim())
+              }>
               {spawnMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
               {t("agents.create_agent")}
             </Button>
