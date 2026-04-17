@@ -293,10 +293,20 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
           )}
           {commitQuery.data?.date && (
             <div
-              className="text-[11px] font-mono text-gray-400 dark:text-gray-600"
+              className="text-[11px] font-mono text-gray-400 dark:text-gray-600 flex items-center gap-3"
               title={commitQuery.data.message ? `${commitQuery.data.message} — ${commitQuery.data.date}` : commitQuery.data.date}
             >
-              {t.registry?.lastUpdated || 'Updated'} {relTime(commitQuery.data.date)}
+              <span>{t.registry?.lastUpdated || 'Updated'} {relTime(commitQuery.data.date)}</span>
+              <a
+                href={`https://github.com/librefang/librefang-registry/commits/main/${rawPath}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-cyan-600 dark:text-cyan-400 hover:underline"
+              >
+                {category === 'agents'
+                  ? (t.registry?.templateDiff || 'Template diff')
+                  : (t.registry?.viewHistory || 'History')}
+              </a>
             </div>
           )}
         </div>
