@@ -178,6 +178,8 @@ impl ClaudeCodeDriver {
     fn build_prompt(request: &CompletionRequest) -> PreparedPrompt {
         let mut parts = Vec::new();
         let mut image_dir: Option<PathBuf> = None;
+        let mut extra_image_dirs: std::collections::BTreeSet<PathBuf> =
+            std::collections::BTreeSet::new();
         let mut image_count = 0u32;
 
         if let Some(ref sys) = request.system {
@@ -245,6 +247,15 @@ impl ClaudeCodeDriver {
                                 // no temp copy needed (per DRVR-01).
                                 let file_path = std::path::Path::new(path);
                                 if file_path.exists() {
+                                    if let Some(parent) = file_path.parent() {
+                                        // Claude CLI refuses to read files outside
+                                        // the working directory or an explicit
+                                        // `--add-dir`. The bridge writes channel
+                                        // images to `/tmp/librefang_uploads/`, which
+                                        // is neither — register the parent so the
+                                        // `@<path>` reference below actually resolves.
+                                        extra_image_dirs.insert(parent.to_path_buf());
+                                    }
                                     msg_parts.push(format!("@{}", file_path.display()));
                                 } else {
                                     warn!(path = %path, "ImageFile path missing, skipping");
@@ -264,6 +275,7 @@ impl ClaudeCodeDriver {
         PreparedPrompt {
             text: parts.join("\n\n"),
             image_dir,
+            extra_image_dirs,
             mcp_config_path: None,
         }
     }
@@ -276,22 +288,43 @@ impl ClaudeCodeDriver {
     /// `mcpServers` shape; the `type: "http"` transport points at the
     /// daemon's existing `/mcp` endpoint (see
     /// `librefang-api/src/routes/network.rs::mcp_http`).
-    fn write_mcp_config(bridge: &McpBridgeConfig) -> std::io::Result<PathBuf> {
+    fn write_mcp_config(
+        bridge: &McpBridgeConfig,
+        agent_id: Option<&str>,
+    ) -> std::io::Result<PathBuf> {
         let path =
             std::env::temp_dir().join(format!("librefang-mcp-{}.json", uuid::Uuid::new_v4()));
         let base = bridge.base_url.trim_end_matches('/');
         let url = format!("{base}/mcp");
 
+        // Collect per-connection headers. Claude CLI reuses the same config
+        // for every tool call in a CLI invocation, and one invocation serves
+        // exactly one agent, so agent identity can live on the connection
+        // instead of on each request.
+        let mut headers = serde_json::Map::new();
+        if let Some(key) = bridge.api_key.as_deref() {
+            if !key.trim().is_empty() {
+                headers.insert("X-API-Key".to_string(), serde_json::json!(key));
+            }
+        }
+        if let Some(id) = agent_id {
+            if !id.is_empty() {
+                // Used by `/mcp` to rehydrate `ToolExecContext` with the
+                // owning agent's workspace, tool allowlist, and skill
+                // allowlist. Without it, file/media/cron/schedule tools
+                // fail with "workspace sandbox not configured" or
+                // "Agent ID required" even though the agent is fully
+                // registered (issue #2699).
+                headers.insert("X-LibreFang-Agent-Id".to_string(), serde_json::json!(id));
+            }
+        }
+
         let mut server = serde_json::json!({
             "type": "http",
             "url": url,
         });
-        if let Some(key) = bridge.api_key.as_deref() {
-            if !key.trim().is_empty() {
-                server["headers"] = serde_json::json!({
-                    "X-API-Key": key,
-                });
-            }
+        if !headers.is_empty() {
+            server["headers"] = serde_json::Value::Object(headers);
         }
 
         let config = serde_json::json!({
@@ -387,16 +420,31 @@ impl ClaudeCodeDriver {
 /// Prompt text plus optional temp directory containing decoded images.
 struct PreparedPrompt {
     text: String,
-    /// Temporary directory holding image files. The caller should pass this
-    /// path via `--add-dir` and remove it after the CLI exits.
+    /// Temporary directory this driver created to hold base64-decoded images
+    /// from `ContentBlock::Image` blocks. Owned: must be passed to `--add-dir`
+    /// AND removed by `cleanup()` after the CLI exits.
     image_dir: Option<PathBuf>,
+    /// Parent directories of `ContentBlock::ImageFile` paths — files already
+    /// on disk, owned by the bridge (or the caller). These must also be
+    /// passed to `--add-dir` so the CLI can read the referenced files, but
+    /// the driver MUST NOT delete them (not ours to clean up).
+    extra_image_dirs: std::collections::BTreeSet<PathBuf>,
     /// Temporary file holding the MCP bridge config (when tools are enabled).
     /// Passed to the CLI via `--mcp-config` and removed after the CLI exits.
     mcp_config_path: Option<PathBuf>,
 }
 
 impl PreparedPrompt {
-    /// Clean up temporary image files and MCP config, if any.
+    /// Iterate every directory that must be made readable to the CLI via
+    /// `--add-dir`: the driver-owned image temp dir (if any) plus every
+    /// externally-owned ImageFile parent directory.
+    fn add_dirs(&self) -> impl Iterator<Item = &PathBuf> {
+        self.image_dir.iter().chain(self.extra_image_dirs.iter())
+    }
+
+    /// Clean up temporary image files and MCP config, if any. Only removes
+    /// driver-owned artifacts; `extra_image_dirs` are intentionally left
+    /// alone because they belong to the bridge or the caller.
     fn cleanup(&self) {
         if let Some(ref dir) = self.image_dir {
             if let Err(e) = std::fs::remove_dir_all(dir) {
@@ -506,7 +554,7 @@ impl LlmDriver for ClaudeCodeDriver {
 
         if !request.tools.is_empty() {
             if let Some(ref bridge) = self.mcp_bridge {
-                match Self::write_mcp_config(bridge) {
+                match Self::write_mcp_config(bridge, request.agent_id.as_deref()) {
                     Ok(path) => prepared.mcp_config_path = Some(path),
                     Err(e) => {
                         prepared.cleanup();
@@ -534,8 +582,9 @@ impl LlmDriver for ClaudeCodeDriver {
             cmd.arg(arg);
         }
 
-        // Allow the CLI to read temp image files
-        if let Some(ref dir) = prepared.image_dir {
+        // Allow the CLI to read every directory containing referenced images:
+        // the driver-owned base64 temp dir plus bridge-owned ImageFile parents.
+        for dir in prepared.add_dirs() {
             cmd.arg("--add-dir").arg(dir);
         }
 
@@ -751,7 +800,7 @@ impl LlmDriver for ClaudeCodeDriver {
 
         if !request.tools.is_empty() {
             if let Some(ref bridge) = self.mcp_bridge {
-                match Self::write_mcp_config(bridge) {
+                match Self::write_mcp_config(bridge, request.agent_id.as_deref()) {
                     Ok(path) => prepared.mcp_config_path = Some(path),
                     Err(e) => {
                         prepared.cleanup();
@@ -779,8 +828,9 @@ impl LlmDriver for ClaudeCodeDriver {
             cmd.arg(arg);
         }
 
-        // Allow the CLI to read temp image files
-        if let Some(ref dir) = prepared.image_dir {
+        // Allow the CLI to read every directory containing referenced images:
+        // the driver-owned base64 temp dir plus bridge-owned ImageFile parents.
+        for dir in prepared.add_dirs() {
             cmd.arg("--add-dir").arg(dir);
         }
 
@@ -1156,6 +1206,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1198,6 +1249,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1214,6 +1266,141 @@ mod tests {
         // Cleanup
         prompt.cleanup();
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn test_build_prompt_with_image_file_registers_parent_dir() {
+        use librefang_types::message::{Message, MessageContent};
+
+        // Regression: `ContentBlock::ImageFile` points at a path on disk
+        // (written by the channel bridge, e.g. `/tmp/librefang_uploads/<uuid>.jpg`).
+        // The CLI refuses to read outside the working directory or an
+        // explicit `--add-dir`, so the driver must register the file's
+        // parent directory on `extra_image_dirs` and emit it via
+        // `add_dirs()` at spawn time.
+        let bridge_dir =
+            std::env::temp_dir().join(format!("librefang-imagefile-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&bridge_dir).unwrap();
+        let image_path = bridge_dir.join("photo.jpg");
+        std::fs::write(&image_path, b"fake jpg bytes").unwrap();
+
+        let request = CompletionRequest {
+            model: "claude-code/sonnet".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "What is in this image?".to_string(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::ImageFile {
+                        media_type: "image/jpeg".to_string(),
+                        path: image_path.to_string_lossy().to_string(),
+                    },
+                ]),
+                pinned: false,
+            }],
+            tools: vec![],
+            max_tokens: 1024,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+
+        let prompt = ClaudeCodeDriver::build_prompt(&request);
+
+        // The `@<abs-path>` reference is injected verbatim.
+        assert!(
+            prompt.text.contains(&format!("@{}", image_path.display())),
+            "prompt text must contain @-reference to ImageFile path: {}",
+            prompt.text
+        );
+
+        // No owned temp dir was created (no base64 blocks).
+        assert!(prompt.image_dir.is_none());
+
+        // The bridge-owned parent dir must be in `extra_image_dirs`.
+        assert_eq!(prompt.extra_image_dirs.len(), 1);
+        assert!(prompt.extra_image_dirs.contains(&bridge_dir));
+
+        // `add_dirs()` must surface the parent so spawn-site callers pass
+        // it as `--add-dir`.
+        let dirs: Vec<&PathBuf> = prompt.add_dirs().collect();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], &bridge_dir);
+
+        // Cleanup must NOT touch externally-owned dirs.
+        prompt.cleanup();
+        assert!(
+            bridge_dir.exists(),
+            "cleanup must leave bridge-owned dir in place"
+        );
+
+        // Manual cleanup of this test's fixture.
+        let _ = std::fs::remove_dir_all(&bridge_dir);
+    }
+
+    #[test]
+    fn test_add_dirs_combines_owned_and_external() {
+        // With both a base64 image (owned temp dir) and an ImageFile
+        // (external parent), `add_dirs()` must yield both, and `cleanup()`
+        // must only remove the owned one.
+        use librefang_types::message::{Message, MessageContent};
+
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+        let bridge_dir =
+            std::env::temp_dir().join(format!("librefang-mixed-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&bridge_dir).unwrap();
+        let image_path = bridge_dir.join("photo.jpg");
+        std::fs::write(&image_path, b"fake jpg bytes").unwrap();
+
+        let request = CompletionRequest {
+            model: "claude-code/sonnet".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: png_b64.to_string(),
+                    },
+                    ContentBlock::ImageFile {
+                        media_type: "image/jpeg".to_string(),
+                        path: image_path.to_string_lossy().to_string(),
+                    },
+                ]),
+                pinned: false,
+            }],
+            tools: vec![],
+            max_tokens: 1024,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+
+        let prompt = ClaudeCodeDriver::build_prompt(&request);
+        let owned = prompt.image_dir.clone().expect("base64 creates owned dir");
+
+        let dirs: Vec<PathBuf> = prompt.add_dirs().cloned().collect();
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs.contains(&owned));
+        assert!(dirs.contains(&bridge_dir));
+
+        prompt.cleanup();
+        assert!(!owned.exists(), "owned dir removed");
+        assert!(bridge_dir.exists(), "external dir preserved");
+
+        let _ = std::fs::remove_dir_all(&bridge_dir);
     }
 
     #[test]
@@ -1406,5 +1593,64 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .output();
         assert!(output.is_err(), "spawning a nonexistent binary should fail");
+    }
+
+    #[test]
+    fn test_mcp_config_carries_agent_id_header() {
+        // Regression: without the X-LibreFang-Agent-Id header, the /mcp
+        // endpoint has no way to rehydrate the caller's workspace / tool
+        // allowlist / skill allowlist / exec_policy, so every file_*,
+        // media_*, cron_create, schedule_create tool invoked from the
+        // spawned Claude CLI fails with "workspace sandbox not configured"
+        // or "Agent ID required" even though the agent is fully
+        // registered. See issue #2699.
+        let bridge = McpBridgeConfig {
+            base_url: "http://127.0.0.1:4545".to_string(),
+            api_key: Some("secret-key".to_string()),
+        };
+        let path = ClaudeCodeDriver::write_mcp_config(&bridge, Some("agent-1234")).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let headers = &cfg["mcpServers"]["librefang"]["headers"];
+        assert_eq!(headers["X-API-Key"], "secret-key");
+        assert_eq!(headers["X-LibreFang-Agent-Id"], "agent-1234");
+    }
+
+    #[test]
+    fn test_mcp_config_omits_agent_id_header_when_absent() {
+        // No agent_id → no X-LibreFang-Agent-Id header. The `/mcp`
+        // endpoint then falls back to its legacy unauthenticated
+        // behaviour (all context fields None), preserving backward
+        // compatibility for non-agent MCP clients that connect to /mcp
+        // directly.
+        let bridge = McpBridgeConfig {
+            base_url: "http://127.0.0.1:4545".to_string(),
+            api_key: Some("secret-key".to_string()),
+        };
+        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let headers = &cfg["mcpServers"]["librefang"]["headers"];
+        assert_eq!(headers["X-API-Key"], "secret-key");
+        assert!(headers.get("X-LibreFang-Agent-Id").is_none());
+    }
+
+    #[test]
+    fn test_mcp_config_no_headers_when_nothing_to_send() {
+        // Neither api_key nor agent_id set — the `headers` object must
+        // be omitted entirely (not an empty {}). Claude CLI tolerates
+        // either but the clean shape matches what the driver wrote
+        // before this change.
+        let bridge = McpBridgeConfig {
+            base_url: "http://127.0.0.1:4545".to_string(),
+            api_key: None,
+        };
+        let path = ClaudeCodeDriver::write_mcp_config(&bridge, None).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert!(cfg["mcpServers"]["librefang"].get("headers").is_none());
     }
 }

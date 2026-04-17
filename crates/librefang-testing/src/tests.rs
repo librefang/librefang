@@ -113,6 +113,7 @@ async fn test_mock_llm_driver_recording() {
         response_format: None,
         timeout_secs: None,
         extra_body: None,
+        agent_id: None,
     };
 
     // First call
@@ -284,6 +285,7 @@ async fn test_mock_llm_driver_custom_tokens_and_stop_reason() {
         response_format: None,
         timeout_secs: None,
         extra_body: None,
+        agent_id: None,
     };
 
     let resp = driver.complete(request).await.unwrap();
@@ -324,6 +326,7 @@ async fn test_failing_llm_driver() {
         response_format: None,
         timeout_secs: None,
         extra_body: None,
+        agent_id: None,
     };
 
     let result = driver.complete(request).await;

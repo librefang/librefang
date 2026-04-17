@@ -8,7 +8,7 @@ interface ModalProps {
   onClose: () => void;
   title?: string;
   /** Width cap. Defaults to "md" (max-w-md). */
-  size?: "sm" | "md" | "lg" | "xl" | "2xl";
+  size?: "sm" | "md" | "lg" | "xl" | "2xl" | "3xl" | "4xl" | "5xl";
   /** Hide the default close X button (e.g. if the body supplies its own). */
   hideCloseButton?: boolean;
   /** Disable close-on-backdrop-click (destructive flows). */
@@ -26,6 +26,9 @@ const SIZE_CLASSES: Record<NonNullable<ModalProps["size"]>, string> = {
   lg: "sm:max-w-lg",
   xl: "sm:max-w-xl",
   "2xl": "sm:max-w-2xl",
+  "3xl": "sm:max-w-3xl",
+  "4xl": "sm:max-w-4xl",
+  "5xl": "sm:max-w-5xl",
 };
 
 /// Shared modal shell. Handles the cross-cutting concerns every page
@@ -72,7 +75,22 @@ export function Modal({
     <div
       className="fixed inset-0 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4"
       style={{ zIndex }}
-      onClick={disableBackdropClose ? undefined : onClose}
+      onClick={
+        disableBackdropClose
+          ? undefined
+          : (e) => {
+              // Stop the click from bubbling to an ancestor backdrop.
+              // `fixed inset-0` positions the overlay relative to the
+              // viewport, but React synthetic events still follow the
+              // DOM ancestor chain — so when this Modal is rendered
+              // inside another backdrop-dismissable modal (e.g.
+              // TomlViewer mounted inside HandsPage's HandDetailPanel),
+              // closing this one via backdrop would otherwise also
+              // close its parent. See codex review on #2722.
+              e.stopPropagation();
+              onClose();
+            }
+      }
     >
       <div
         ref={dialogRef}

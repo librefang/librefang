@@ -1044,6 +1044,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.model, "gpt-4o");
@@ -1078,6 +1079,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.instructions.as_deref(), Some("System prompt."));
@@ -1104,6 +1106,7 @@ mod tests {
             response_format: Some(ResponseFormat::Json),
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         let instructions = api_req.instructions.expect("instructions");
@@ -1139,6 +1142,7 @@ mod tests {
             }),
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         let instructions = api_req.instructions.expect("instructions");

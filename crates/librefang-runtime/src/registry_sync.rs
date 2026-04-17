@@ -68,7 +68,9 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str
 
     // Pre-install core content users need out of the box.
     // Skills and plugins stay in registry — users install via dashboard.
-    for &dir_name in &["providers", "integrations", "channels"] {
+    // The upstream registry repo renamed `integrations/` to `mcp/`; keep the
+    // names symmetric on the home side so the directory layout matches.
+    for &dir_name in &["providers", "mcp", "channels"] {
         let src_dir = registry_cache.join(dir_name);
         if src_dir.exists() {
             sync_flat_files(&src_dir, &home_dir.join(dir_name), dir_name);
