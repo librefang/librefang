@@ -1187,13 +1187,30 @@ describe('ownerIntentsRelay', () => {
     assert.equal(ownerIntentsRelay('please say @bob hi'), true);
   });
 
-  it('returns true for Italian delegated-speech verbs', () => {
-    assert.equal(ownerIntentsRelay('rispondi a Federico che sto bene'), true);
-    assert.equal(ownerIntentsRelay('digli che arrivo'), true);
-    assert.equal(ownerIntentsRelay('saluta Caterina per me'), true);
-    assert.equal(ownerIntentsRelay('scrivi a Paolo'), true);
-    assert.equal(ownerIntentsRelay('chiedi a Mario il prezzo'), true);
-    assert.equal(ownerIntentsRelay('inoltra a tutti la comunicazione'), true);
+  it('Italian pack: recognises delegated-speech verbs, rejects owner→agent formal imperative', () => {
+    const { compileIntentRegex } = require('./lib/intent_patterns');
+    const re = compileIntentRegex(['it']);
+    // Positive — explicit recipient / verb-with-baked-in-object
+    assert.ok(re.test('rispondi a Federico che sto bene'));
+    assert.ok(re.test('digli che arrivo'));
+    assert.ok(re.test('saluta Caterina per me'));
+    assert.ok(re.test('scrivi a Paolo'));
+    assert.ok(re.test('chiedi a Mario il prezzo'));
+    assert.ok(re.test('inoltra a tutti la comunicazione'));
+    assert.ok(re.test('dica a Mario che sto bene'));
+    // Negative — owner addressing the bot, not a relay.
+    // Pre-fix regex matched bare `dica`, so "mi dica" triggered a false
+    // relay intent; the narrowed `dica\s+a\s+\w+` pattern blocks it.
+    assert.equal(re.test('mi dica'), false);
+    assert.equal(re.test('mi dica di più'), false);
+    assert.equal(re.test('Dica pure'), false);
+  });
+
+  it('multi-language union: both EN and IT patterns active simultaneously', () => {
+    const { compileIntentRegex } = require('./lib/intent_patterns');
+    const re = compileIntentRegex(['en', 'it']);
+    assert.ok(re.test('tell Alice I am busy'));
+    assert.ok(re.test('digli che arrivo'));
   });
 
   it('returns true for English delegated-speech verbs', () => {
@@ -1202,9 +1219,11 @@ describe('ownerIntentsRelay', () => {
     assert.equal(ownerIntentsRelay('write to the team'), true);
   });
 
-  it('is case-insensitive and whitespace-tolerant', () => {
-    assert.equal(ownerIntentsRelay('  RISPONDI A Mario ok'), true);
-    assert.equal(ownerIntentsRelay('DIGLI che sto arrivando'), true);
+  it('is case-insensitive (IT pack)', () => {
+    const { compileIntentRegex } = require('./lib/intent_patterns');
+    const re = compileIntentRegex(['it']);
+    assert.ok(re.test('  RISPONDI A Mario ok'.trim()));
+    assert.ok(re.test('DIGLI che sto arrivando'));
   });
 
   it('does not match partial words', () => {

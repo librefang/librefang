@@ -222,17 +222,30 @@ function dbUpdateLastSeen(jid, timestamp) {
 const CONFIG_PATH = process.env.LIBREFANG_CONFIG || path.join(os.homedir(), '.librefang', 'config.toml');
 
 function readWhatsAppConfig(configPath) {
-  const defaults = { default_agent: 'assistant', owner_numbers: [], conversation_ttl_hours: 24 };
+  const defaults = {
+    default_agent: 'assistant',
+    owner_numbers: [],
+    conversation_ttl_hours: 24,
+    // English-only by default keeps upstream deployments locale-neutral;
+    // set `[relay_intent].languages = ["en", "it", …]` in config.toml
+    // to enable extra language packs.
+    relay_intent_languages: ['en'],
+  };
   try {
     const content = fs.readFileSync(configPath, 'utf8');
     const parsed = toml.parse(content);
     const wa = parsed?.channels?.whatsapp || {};
+    const relay = parsed?.relay_intent || {};
     const cfg = {
       default_agent: wa.default_agent || defaults.default_agent,
       owner_numbers: Array.isArray(wa.owner_numbers) ? wa.owner_numbers : defaults.owner_numbers,
       conversation_ttl_hours: parseInt(wa.conversation_ttl_hours, 10) || defaults.conversation_ttl_hours,
+      relay_intent_languages:
+        Array.isArray(relay.languages) && relay.languages.length > 0
+          ? relay.languages
+          : defaults.relay_intent_languages,
     };
-    console.log(`[gateway] Read config from ${configPath}: default_agent="${cfg.default_agent}", owner_numbers=${JSON.stringify(cfg.owner_numbers)}, conversation_ttl_hours=${cfg.conversation_ttl_hours}`);
+    console.log(`[gateway] Read config from ${configPath}: default_agent="${cfg.default_agent}", owner_numbers=${JSON.stringify(cfg.owner_numbers)}, conversation_ttl_hours=${cfg.conversation_ttl_hours}, relay_intent_languages=${JSON.stringify(cfg.relay_intent_languages)}`);
     return cfg;
   } catch (err) {
     console.warn(`[gateway] Could not read ${configPath}: ${err.message} — using defaults/env vars`);
@@ -2132,21 +2145,19 @@ async function processMediaMessage(fullMsg, innerMsg, agentId) {
 // Only inject the relay instruction when the owner's message expresses an
 // explicit delegated-speech intent. Everything else is treated as owner
 // talking directly to the agent.
+// Regex compiled once at module load from the configured language
+// packs in `lib/intent_patterns.js`. Adding a locale is a file-level
+// change; adding the code to the config toggles it on.
+const RELAY_INTENT_RE = require('./lib/intent_patterns').compileIntentRegex(
+  tomlConfig.relay_intent_languages,
+);
+
 function ownerIntentsRelay(text) {
   const t = (text || '').trim().toLowerCase();
   if (!t) return false;
   if (t.startsWith('/relay') || t.startsWith('/reply')) return true;
   if (/(^|\s)@[\w.+-]+/.test(t)) return true;
-  // Phrases that always imply a third-party recipient.
-  if (/\b(rispondi a|scrivi a|scrivigli|digli|dille|dica|saluta|manda a|inoltra|chiedi a|reply to|write to|relay to)\b/.test(t)) {
-    return true;
-  }
-  // `tell` and `forward to` have legitimate non-relay uses
-  // ("tell me a joke", "looking forward to meeting you"), so require them
-  // to name an addressee rather than matching the verb alone.
-  if (/\btell\s+(?!me\b|us\b|you\b)\w+/.test(t)) return true;
-  if (/\bforward\s+(?:it|this|that|the\s+\w+|a\s+\w+)\s+to\s+\w+/.test(t)) return true;
-  return false;
+  return RELAY_INTENT_RE.test(t);
 }
 
 // ---------------------------------------------------------------------------
