@@ -218,7 +218,11 @@ impl MemoryExtractor for LlmMemoryExtractor {
                 .get("role")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            if role == "system" || role == "unknown" {
+            if role == "system" {
+                continue;
+            }
+            if role == "unknown" {
+                tracing::debug!(message = ?msg, "Skipping proactive memory message with unknown role");
                 continue;
             }
             let content = match msg.get("content") {
@@ -423,6 +427,7 @@ fn parse_decision_response(
     let action_str = parsed
         .get("action")
         .and_then(|v| v.as_str())
+        // Missing/non-string action falls through to default ADD below.
         .unwrap_or("")
         .to_uppercase();
 
