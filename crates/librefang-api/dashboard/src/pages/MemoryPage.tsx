@@ -2,7 +2,7 @@ import { formatDateTime } from "../lib/datetime";
 import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { type MemoryStatsResponse } from "../api";
-import { useMemoryStats, useMemoryConfig, useMemorySearchOrList } from "../lib/queries/memory";
+import { useMemoryStats, useMemoryConfig, useMemoryHealth, useMemorySearchOrList } from "../lib/queries/memory";
 import { useAddMemory, useUpdateMemory, useDeleteMemory, useCleanupMemories, useUpdateMemoryConfig } from "../lib/mutations/memory";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -306,9 +306,14 @@ export function MemoryPage() {
 
 
   const memoryConfigQuery = useMemoryConfig();
+  // Server-side liveness probe — distinct from "provider is configured".
+  // Defaults to false while loading so a misconfigured backend can't flash a
+  // green badge before the real health signal arrives.
+  const memoryHealthQuery = useMemoryHealth();
+  const embeddingAvailable = memoryHealthQuery.data ?? false;
   const memoryConfig = memoryConfigQuery.data
     ? {
-        embedding_available: Boolean(memoryConfigQuery.data.embedding_provider),
+        embedding_available: embeddingAvailable,
         embedding_provider: memoryConfigQuery.data.embedding_provider ?? "",
         embedding_model: memoryConfigQuery.data.embedding_model ?? "",
         extraction_model: memoryConfigQuery.data.proactive_memory?.extraction_model ?? "",
