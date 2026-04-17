@@ -2119,7 +2119,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         };
         let mut agent_entries_visible: Vec<_> = agent_entries.iter().collect();
         // Sort by last_active descending — matches AgentsPage default query order.
-        agent_entries_visible.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        agent_entries_visible.sort_by_key(|b| std::cmp::Reverse(b.last_active));
         agent_entries_visible
             .iter()
             .map(|e| super::agents::enrich_agent_json(e, &dm, &catalog))
