@@ -49,12 +49,38 @@ Domain files today: `agents`, `analytics`, `approvals`, `channels`, `config`, `g
      return useQuery(fooQueryOptions(filters));
    }
    ```
-4. Add mutations in `src/lib/mutations/<domain>.ts`. **Every write MUST invalidate**:
+4. Add mutations in `src/lib/mutations/<domain>.ts`. **Every write MUST invalidate**, and invalidation MUST live inside the hook — never push it to call sites. Pick the **narrowest** key that covers what actually changed:
+   - `fooKeys.detail(id)` — per-id updates (patch, rename, single-item status change).
+   - `fooKeys.lists()` — list-shape changes only (create, delete, reorder, filter-affecting flag).
+   - `fooKeys.all` — everything under the domain is dirty (bulk import, cache reset, cross-cutting schema migration).
+
+   Fan-out trade-off: invalidating `fooKeys.all` while N items are cached refetches the list plus every cached sub-key (`detail(id)`, plus any nested keys like `sessions(id)`, `experiments(id)`) for each of the N items. Use it only when that is the desired effect; otherwise prefer `detail(id)` or `lists()`.
+
    ```ts
+   // Narrow: per-id patch. Only the one detail + its dependents refetch.
+   export function useUpdateFoo() {
+     const qc = useQueryClient();
+     return useMutation({
+       mutationFn: (vars: { id: string; patch: FooPatch }) => updateFoo(vars.id, vars.patch),
+       onSuccess: (_data, vars) =>
+         qc.invalidateQueries({ queryKey: fooKeys.detail(vars.id) }),
+     });
+   }
+
+   // Lists-only: membership changed but no existing detail is stale.
    export function useCreateFoo() {
      const qc = useQueryClient();
      return useMutation({
        mutationFn: createFoo,
+       onSuccess: () => qc.invalidateQueries({ queryKey: fooKeys.lists() }),
+     });
+   }
+
+   // Broad: bulk import — every cached Foo is potentially stale.
+   export function useImportFoos() {
+     const qc = useQueryClient();
+     return useMutation({
+       mutationFn: importFoos,
        onSuccess: () => qc.invalidateQueries({ queryKey: fooKeys.all }),
      });
    }
@@ -93,6 +119,22 @@ Run all three after any change to `src/lib/queries/`, `src/lib/mutations/`, or `
 ## Conventions
 
 - TypeScript strict. No `any` in new hooks; lean on types from `src/api.ts` or `openapi/generated.ts`.
-- Keep `staleTime` / `refetchInterval` in the `queryOptions` (not at call sites) so every consumer shares the same caching policy.
+- The **shared default** `staleTime` / `refetchInterval` lives in the domain's `queryOptions` factory so consumers without special needs inherit one policy. Hooks **MUST accept** `enabled`, `staleTime`, and `refetchInterval` as optional overrides and pass them through to `useQuery`. Call sites only override when they have a legitimate reason — bell-icon polls fast but gated, bulk-management pages poll slowly, tabs gate by `activeTab === "events"` — and every override carries a short inline comment explaining why. See `src/lib/queries/mcp.ts` `useAvailableIntegrations({ enabled })` and the six enabled guards in `src/lib/queries/hands.ts` for reference shapes.
+  ```ts
+  type UseFooOptions = {
+    enabled?: boolean;
+    staleTime?: number;
+    refetchInterval?: number | false;
+  };
+  export function useFoo(filters?: FooFilters, options: UseFooOptions = {}) {
+    const { enabled, staleTime, refetchInterval } = options;
+    return useQuery({
+      ...fooQueryOptions(filters),
+      enabled,
+      staleTime,
+      refetchInterval,
+    });
+  }
+  ```
 - Mutation invalidation lives in the hook, never at the call site. Callers should not need to know which keys a mutation touches.
 - Commit convention matches the root repo: `feat(dashboard/<area>): ...`, `refactor(dashboard/queries): ...`, `fix(dashboard/<area>): ...`. Never include a `Co-Authored-By` footer.
