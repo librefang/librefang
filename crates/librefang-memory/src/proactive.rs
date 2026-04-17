@@ -467,7 +467,7 @@ impl ProactiveMemoryStore {
         if let Ok(mut counters) = self.consolidation_counters.lock() {
             if counters.len() > 1000 {
                 let mut entries: Vec<(String, u32)> = counters.drain().collect();
-                entries.sort_by(|a, b| b.1.cmp(&a.1));
+                entries.sort_by_key(|b| std::cmp::Reverse(b.1));
                 entries.truncate(500);
                 *counters = entries.into_iter().collect();
             }
@@ -685,7 +685,7 @@ impl ProactiveMemoryStore {
         }
 
         // Sort by created_at descending
-        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.sort_by_key(|b| std::cmp::Reverse(b.created_at));
 
         Ok(items)
     }
@@ -1482,7 +1482,7 @@ impl ProactiveMemoryStore {
 
         // Limit to 100 most recent items to avoid O(n^2) blowup
         if all_items.len() > 100 {
-            all_items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            all_items.sort_by_key(|b| std::cmp::Reverse(b.created_at));
             all_items.truncate(100);
         }
 

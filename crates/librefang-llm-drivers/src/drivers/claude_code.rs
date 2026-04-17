@@ -201,11 +201,10 @@ impl ClaudeCodeDriver {
                     let mut msg_parts = Vec::new();
                     for block in blocks {
                         match block {
-                            ContentBlock::Text { text, .. } => {
-                                if !text.is_empty() {
-                                    msg_parts.push(text.clone());
-                                }
+                            ContentBlock::Text { text, .. } if !text.is_empty() => {
+                                msg_parts.push(text.clone());
                             }
+                            ContentBlock::Text { .. } => {}
                             ContentBlock::Image { media_type, data } => {
                                 // Create temp dir on first image
                                 if image_dir.is_none() {

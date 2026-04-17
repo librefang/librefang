@@ -343,17 +343,16 @@ impl OpenAIDriver {
         // Convert messages
         for msg in &request.messages {
             match (&msg.role, &msg.content) {
-                (Role::System, MessageContent::Text(text)) => {
-                    if request.system.is_none() {
-                        oai_messages.push(OaiMessage {
-                            role: "system".to_string(),
-                            content: Some(OaiMessageContent::Text(text.clone())),
-                            tool_calls: None,
-                            tool_call_id: None,
-                            reasoning_content: None,
-                        });
-                    }
+                (Role::System, MessageContent::Text(text)) if request.system.is_none() => {
+                    oai_messages.push(OaiMessage {
+                        role: "system".to_string(),
+                        content: Some(OaiMessageContent::Text(text.clone())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                    });
                 }
+                (Role::System, MessageContent::Text(_)) => {}
                 (Role::User, MessageContent::Text(text)) => {
                     oai_messages.push(OaiMessage {
                         role: "user".to_string(),
