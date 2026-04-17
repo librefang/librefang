@@ -107,11 +107,11 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
   const anchorLinks: NavLink[] = [
     { label: t.nav.architecture,                                   href: anchor('architecture') },
     { label: t.nav.hands,                                          href: anchor('hands') },
-    { label: t.nav.evolution || t.evolution?.label || 'Evolution', href: anchor('evolution') },
     { label: t.nav.workflows || t.workflows?.label || 'Workflows', href: anchor('workflows') },
+    { label: t.nav.evolution || t.evolution?.label || 'Evolution', href: anchor('evolution') },
     { label: t.nav.performance,                                    href: anchor('performance') },
-    { label: t.nav.downloads  || 'Downloads',                      href: anchor('downloads') },
     { label: t.nav.install,                                        href: anchor('install') },
+    { label: t.nav.downloads  || 'Downloads',                      href: anchor('downloads') },
     { label: t.faq?.label     || 'FAQ',                            href: anchor('faq') },
     { label: t.githubStats?.label || 'Community',                  href: anchor('community') },
   ]
