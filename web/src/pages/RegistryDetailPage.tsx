@@ -10,6 +10,7 @@ import { cn } from '../lib/utils'
 import { highlightToml } from '../lib/toml-highlight'
 import { renderMarkdown } from '../lib/minimal-markdown'
 import SiteHeader from '../components/SiteHeader'
+import Breadcrumbs from '../components/Breadcrumbs'
 import { fetchRegistryRaw } from '../lib/registry-raw'
 
 interface RegistryDetailPageProps {
@@ -220,15 +221,18 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
   return (
     <main className="min-h-screen bg-surface pt-16">
       <SiteHeader
-        crumbs={[
-          { label: categoryLabel, href: catHref },
-          { label: item?.name || id },
-        ]}
+        isSubpage
         sourceUrl={`https://github.com/librefang/librefang-registry/blob/main/${rawPath}`}
         onOpenSearch={onOpenSearch}
       />
 
-      <div className="max-w-6xl mx-auto px-6 py-12 lg:grid lg:grid-cols-[200px_1fr] lg:gap-12">
+      <div className="max-w-6xl mx-auto px-6 py-8 lg:grid lg:grid-cols-[200px_1fr] lg:gap-12">
+        <div className="lg:col-span-2 mb-6">
+          <Breadcrumbs crumbs={[
+            { label: categoryLabel, href: catHref },
+            { label: item?.name || id },
+          ]} />
+        </div>
         {/* Sticky TOC — hidden below lg, otherwise pinned in the left gutter. */}
         <aside className="hidden lg:block">
           <nav className="sticky top-24 text-xs" aria-label={t.registry?.onThisPage || 'On this page'}>

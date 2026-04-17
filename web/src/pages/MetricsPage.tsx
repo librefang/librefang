@@ -3,6 +3,7 @@ import { Loader2, BarChart3 } from 'lucide-react'
 import { useAppStore } from '../store'
 import { translations } from '../i18n'
 import SiteHeader from '../components/SiteHeader'
+import Breadcrumbs from '../components/Breadcrumbs'
 
 const METRICS_API = 'https://stats.librefang.ai/api/registry/metrics'
 
@@ -38,12 +39,10 @@ export default function MetricsPage({ onOpenSearch }: MetricsPageProps) {
 
   return (
     <main className="min-h-screen bg-surface pt-16">
-      <SiteHeader
-        crumbs={[{ label: 'Metrics' }]}
-        onOpenSearch={onOpenSearch}
-      />
+      <SiteHeader isSubpage onOpenSearch={onOpenSearch} />
 
-      <section className="max-w-5xl mx-auto px-6 py-14">
+      <section className="max-w-5xl mx-auto px-6 py-10">
+        <Breadcrumbs crumbs={[{ label: 'Metrics' }]} className="mb-6" />
         <div className="mb-8">
           <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3 flex items-center gap-2">
             <BarChart3 className="w-3.5 h-3.5" />

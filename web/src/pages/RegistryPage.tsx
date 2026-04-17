@@ -9,6 +9,7 @@ import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
 import { fetchRegistryRaw } from '../lib/registry-raw'
 import SiteHeader from '../components/SiteHeader'
+import Breadcrumbs from '../components/Breadcrumbs'
 // Fixed top header needs content to start below its 64px band.
 
 interface RegistryPageProps {
@@ -127,12 +128,13 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   return (
     <main className="min-h-screen bg-surface pt-16">
       <SiteHeader
-        crumbs={[{ label: labels.title }]}
+        isSubpage
         sourceUrl={`https://github.com/librefang/librefang-registry${meta.registryPath}`}
         onOpenSearch={onOpenSearch}
       />
 
-      <section className="max-w-6xl mx-auto px-6 py-14">
+      <section className="max-w-6xl mx-auto px-6 py-10">
+        <Breadcrumbs crumbs={[{ label: labels.title }]} className="mb-6" />
         {/* Header */}
         <div className="mb-10">
           <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">

@@ -202,7 +202,7 @@ export const languages: Language[] = [
 
 export const translations: Record<string, Translation> = {
   en: {
-    nav: { architecture: 'Architecture', hands: 'Hands', performance: 'Performance', install: 'Install', downloads: 'Downloads', docs: 'Docs', features: 'Features', evolution: 'Skills Self-Evolution', workflows: 'Workflows', registry: 'Registry', learnMore: 'Learn More' },
+    nav: { architecture: 'Architecture', hands: 'Hands', performance: 'Performance', install: 'Install', downloads: 'Downloads', docs: 'Docs', features: 'Marketplace', evolution: 'Skills Self-Evolution', workflows: 'Workflows', registry: 'Registry', learnMore: 'Learn More' },
     hero: {
       badge: 'Open Source',
       title1: 'The Agent',
@@ -464,7 +464,7 @@ export const translations: Record<string, Translation> = {
   },
 
   zh: {
-    nav: { architecture: '架构', hands: '能力单元', performance: '性能', install: '安装', downloads: '下载', docs: '文档', features: '功能', evolution: '技能自我进化', workflows: '工作流', registry: '注册表', learnMore: '了解更多' },
+    nav: { architecture: '架构', hands: '能力单元', performance: '性能', install: '安装', downloads: '下载', docs: '文档', features: '市场', evolution: '技能自我进化', workflows: '工作流', registry: '注册表', learnMore: '了解更多' },
     hero: {
       badge: '开源',
       title1: 'Agent',
@@ -700,7 +700,7 @@ export const translations: Record<string, Translation> = {
   },
 
   'zh-TW': {
-    nav: { architecture: '架構', hands: '能力單元', performance: '效能', install: '安裝', downloads: '下載', docs: '文件', features: '功能', evolution: '技能自我進化', workflows: '工作流', registry: '註冊表', learnMore: '了解更多' },
+    nav: { architecture: '架構', hands: '能力單元', performance: '效能', install: '安裝', downloads: '下載', docs: '文件', features: '市場', evolution: '技能自我進化', workflows: '工作流', registry: '註冊表', learnMore: '了解更多' },
     hero: {
       badge: '開源',
       title1: 'Agent',
@@ -936,7 +936,7 @@ export const translations: Record<string, Translation> = {
   },
 
   ja: {
-    nav: { architecture: 'アーキテクチャ', hands: 'Hands', performance: 'パフォーマンス', install: 'インストール', downloads: 'ダウンロード', docs: 'ドキュメント', features: '機能', evolution: 'スキル自己進化', workflows: 'ワークフロー', registry: 'レジストリ', learnMore: '詳しく' },
+    nav: { architecture: 'アーキテクチャ', hands: 'Hands', performance: 'パフォーマンス', install: 'インストール', downloads: 'ダウンロード', docs: 'ドキュメント', features: 'マーケットプレイス', evolution: 'スキル自己進化', workflows: 'ワークフロー', registry: 'レジストリ', learnMore: '詳しく' },
     hero: {
       badge: 'オープンソース',
       title1: 'Agent',
@@ -1172,7 +1172,7 @@ export const translations: Record<string, Translation> = {
   },
 
   ko: {
-    nav: { architecture: '아키텍처', hands: 'Hands', performance: '성능', install: '설치', downloads: '다운로드', docs: '문서', features: '기능', evolution: '스킬 자가 진화', workflows: '워크플로', registry: '레지스트리', learnMore: '자세히' },
+    nav: { architecture: '아키텍처', hands: 'Hands', performance: '성능', install: '설치', downloads: '다운로드', docs: '문서', features: '마켓플레이스', evolution: '스킬 자가 진화', workflows: '워크플로', registry: '레지스트리', learnMore: '자세히' },
     hero: {
       badge: '오픈소스',
       title1: 'Agent',
@@ -1408,7 +1408,7 @@ export const translations: Record<string, Translation> = {
   },
 
   de: {
-    nav: { architecture: 'Architektur', hands: 'Hands', performance: 'Leistung', install: 'Installation', downloads: 'Downloads', docs: 'Dokumentation', features: 'Funktionen', evolution: 'Skill-Selbstentwicklung', workflows: 'Workflows', registry: 'Registry', learnMore: 'Mehr' },
+    nav: { architecture: 'Architektur', hands: 'Hands', performance: 'Leistung', install: 'Installation', downloads: 'Downloads', docs: 'Dokumentation', features: 'Marktplatz', evolution: 'Skill-Selbstentwicklung', workflows: 'Workflows', registry: 'Registry', learnMore: 'Mehr' },
     hero: {
       badge: 'Open Source',
       title1: 'Der Agent',
@@ -1644,7 +1644,7 @@ export const translations: Record<string, Translation> = {
   },
 
   es: {
-    nav: { architecture: 'Arquitectura', hands: 'Hands', performance: 'Rendimiento', install: 'Instalar', downloads: 'Descargas', docs: 'Documentación', features: 'Funciones', evolution: 'Autoevolución de Skills', workflows: 'Flujos de trabajo', registry: 'Registry', learnMore: 'Saber más' },
+    nav: { architecture: 'Arquitectura', hands: 'Hands', performance: 'Rendimiento', install: 'Instalar', downloads: 'Descargas', docs: 'Documentación', features: 'Marketplace', evolution: 'Autoevolución de Skills', workflows: 'Flujos de trabajo', registry: 'Registry', learnMore: 'Saber más' },
     hero: {
       badge: 'Código Abierto',
       title1: 'El Agente',
