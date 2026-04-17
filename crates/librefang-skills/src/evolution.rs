@@ -1465,8 +1465,25 @@ pub fn get_evolution_info(skill: &InstalledSkill) -> SkillEvolutionMeta {
 ///
 /// Serializes read-modify-write against the per-skill evolution lock so
 /// concurrent tool invocations don't clobber each other's increments.
+///
+/// If the skill directory was deleted between the tool dispatch and
+/// this increment (e.g., operator called `uninstall_skill` mid-flight),
+/// bail out with `NotFound` instead of proceeding to
+/// `save_evolution_meta`. Without the check, `atomic_write`'s
+/// `create_dir_all(parent)` would resurrect the deleted skill dir
+/// as a zombie — present on disk with only `.evolution.json`, not a
+/// loadable skill and confusing to operators.
 pub fn record_skill_usage(skill_dir: &Path) -> Result<(), SkillError> {
     let _lock = acquire_skill_lock(skill_dir)?;
+    if !skill_dir.exists() {
+        let name = skill_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("<unknown>");
+        return Err(SkillError::NotFound(format!(
+            "skill '{name}' was deleted before usage could be recorded"
+        )));
+    }
     let mut meta = load_evolution_meta(skill_dir);
     meta.use_count += 1;
     save_evolution_meta(skill_dir, &meta)
@@ -2084,6 +2101,40 @@ mod tests {
     }
 
     // ── Evolution metadata tests ───────────────────────────────────
+
+    #[test]
+    fn test_record_skill_usage_after_delete_does_not_resurrect_dir() {
+        // Race: agent dispatched a skill tool, spawn_blocking scheduled
+        // record_skill_usage, operator uninstalled the skill before the
+        // blocking task ran. Without the exists() check, atomic_write
+        // would `create_dir_all(parent)` and plant a zombie skill
+        // directory containing just `.evolution.json`. Confirm we now
+        // bail with NotFound and leave the filesystem clean.
+        let dir = TempDir::new().unwrap();
+        create_skill(
+            dir.path(),
+            "gone-skill",
+            "will be deleted",
+            "# x",
+            vec![],
+            None,
+        )
+        .unwrap();
+        let skill_dir = dir.path().join("gone-skill");
+        // Simulate uninstall having already run.
+        std::fs::remove_dir_all(&skill_dir).unwrap();
+        assert!(!skill_dir.exists());
+
+        let result = record_skill_usage(&skill_dir);
+        assert!(
+            matches!(result, Err(SkillError::NotFound(_))),
+            "expected NotFound, got {result:?}"
+        );
+        assert!(
+            !skill_dir.exists(),
+            "record_skill_usage must NOT resurrect the deleted skill dir"
+        );
+    }
 
     #[test]
     fn test_record_skill_usage() {
