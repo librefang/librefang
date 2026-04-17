@@ -4419,6 +4419,26 @@ system_prompt = "You are a helpful assistant."
                         }
                     }
 
+                    // Skill evolution hot-reload: mirror the non-streaming
+                    // `send_message_full` path so ChatPage / SSE clients
+                    // also pick up evolved skills immediately after a turn.
+                    // Without this, `GET /api/skills/{name}` kept serving
+                    // stale versions after `skill_evolve_*` tool calls —
+                    // the disk had v0.1.8 while the in-memory registry
+                    // was still at v0.1.7, requiring an explicit
+                    // `POST /api/skills/reload` to converge.
+                    if result
+                        .decision_traces
+                        .iter()
+                        .any(|t| t.tool_name.starts_with("skill_evolve_"))
+                    {
+                        tracing::info!(
+                            agent_id = %agent_id,
+                            "Agent used skill evolution tools (streaming) — reloading skill registry"
+                        );
+                        kernel_clone.reload_skills();
+                    }
+
                     Ok(result)
                 }
                 Err(e) => {
