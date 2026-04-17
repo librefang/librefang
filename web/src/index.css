@@ -168,3 +168,26 @@
 html {
   overflow-x: hidden;
 }
+
+/* Respect the user's OS setting — disable all animations and transitions
+ * (including framer-motion's, which fall through to CSS) for visitors who
+ * opt in to reduced motion. `!important` is justified here: framer-motion
+ * sets inline style transforms that would otherwise win the cascade. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Visible focus ring for keyboard navigation — focus-visible only, so
+ * mouse clicks don't get a ring but Tab traversal does. */
+:focus-visible {
+  outline: 2px solid rgb(6 182 212 / 0.65);
+  outline-offset: 2px;
+  border-radius: 4px;
+}

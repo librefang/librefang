@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <rect width="1200" height="630" fill="#070b14"/>
+
+  <defs>
+    <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse">
+      <path d="M 60 0 L 0 0 0 60" fill="none" stroke="#0f1729" stroke-width="0.5"/>
+    </pattern>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#f87171" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#f87171" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#grid)" opacity="0.6"/>
+  <circle cx="980" cy="160" r="320" fill="url(#glow)"/>
+
+  <!-- Top-left brand -->
+  <text x="80" y="96" font-family="Arial, Helvetica, sans-serif" font-size="20" fill="#475569">librefang.ai / registry</text>
+
+  <!-- Category title -->
+  <text x="80" y="260" font-family="Arial, Helvetica, sans-serif" font-size="112" font-weight="900" fill="#ffffff" letter-spacing="-3">Workflows</text>
+
+  <!-- Subtitle -->
+  <text x="80" y="320" font-family="Arial, Helvetica, sans-serif" font-size="30" fill="#f87171">Multi-step orchestrations</text>
+
+  <!-- Pills — a fake set of tags to hint at "a collection of things" -->
+  <g font-family="monospace" font-size="16" fill="#64748b">
+    <rect x="80" y="380" width="110" height="36" rx="4" fill="#0d1424" stroke="#1e293b"/>
+    <text x="135" y="404" text-anchor="middle">production</text>
+    <rect x="200" y="380" width="90" height="36" rx="4" fill="#0d1424" stroke="#1e293b"/>
+    <text x="245" y="404" text-anchor="middle">open source</text>
+    <rect x="300" y="380" width="74" height="36" rx="4" fill="#0d1424" stroke="#1e293b"/>
+    <text x="337" y="404" text-anchor="middle">Rust</text>
+  </g>
+
+  <!-- Big icon top-right -->
+  <text x="1050" y="340" font-family="Arial, Helvetica, sans-serif" font-size="360" fill="#f87171" opacity="0.18" text-anchor="middle">↠</text>
+
+  <!-- Bottom accent line -->
+  <rect x="80" y="560" width="160" height="3" rx="1.5" fill="#f87171" opacity="0.8"/>
+  <text x="80" y="594" font-family="Arial, Helvetica, sans-serif" font-size="18" fill="#94a3b8">LibreFang · the agent operating system</text>
+</svg>

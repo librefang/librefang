@@ -192,6 +192,18 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
                 {COMMAND_TEMPLATE[category]!.replace('{id}', id)}
               </code>
             </pre>
+            {/* Secondary: open the local dashboard if one is running. We don't
+                try to POST from the website (mixed-content + CORS friction);
+                we just deep-link. Clicking errors cleanly if no daemon is up. */}
+            <a
+              href={`http://127.0.0.1:4545/${category === 'hands' ? 'hands' : category === 'agents' ? 'agents' : 'skills'}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-3 inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"
+            >
+              {t.registry?.openInDashboard || 'Or install via local dashboard'}
+              <ExternalLink className="w-3 h-3" />
+            </a>
           </div>
         ) : (
           <div className="mb-8 flex items-start gap-3 p-4 border border-black/10 dark:border-white/5 bg-surface-100">

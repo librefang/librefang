@@ -1669,6 +1669,61 @@ export default function App() {
   const t = translations[lang] || translations['en']!
   const { data: registry } = useRegistry()
 
+  // JSON-LD structured data — lets Google show rich results. We rewrite a
+  // single <script id="ld-json"> tag so switching pages doesn't leak.
+  useEffect(() => {
+    const ORIGIN = 'https://librefang.ai'
+    let tag = document.getElementById('ld-json') as HTMLScriptElement | null
+    if (!tag) {
+      tag = document.createElement('script')
+      tag.id = 'ld-json'
+      tag.type = 'application/ld+json'
+      document.head.appendChild(tag)
+    }
+    let ld: Record<string, unknown> | null = null
+    if (registryRoute) {
+      const cat = t.registry?.categories[registryRoute.category]
+      const catLabel = cat?.title || registryRoute.category
+      const catDesc = cat?.desc || ''
+      const langPart = lang === 'en' ? '' : `/${lang}`
+      if (registryRoute.kind === 'detail') {
+        ld = {
+          '@context': 'https://schema.org',
+          '@type': 'SoftwareSourceCode',
+          name: registryRoute.id,
+          codeRepository: `https://github.com/librefang/librefang-registry/tree/main/${registryRoute.category}/${registryRoute.id}`,
+          programmingLanguage: 'TOML',
+          url: `${ORIGIN}${langPart}/${registryRoute.category}/${registryRoute.id}`,
+          about: catLabel,
+          inLanguage: lang,
+        }
+      } else {
+        ld = {
+          '@context': 'https://schema.org',
+          '@type': 'CollectionPage',
+          name: `${catLabel} — LibreFang Registry`,
+          description: catDesc,
+          url: `${ORIGIN}${langPart}/${registryRoute.category}`,
+          inLanguage: lang,
+        }
+      }
+    } else if (!isDeployPage && !isChangelogPage && t.meta) {
+      ld = {
+        '@context': 'https://schema.org',
+        '@type': 'SoftwareApplication',
+        name: 'LibreFang',
+        applicationCategory: 'DeveloperApplication',
+        operatingSystem: 'Linux, macOS, Windows',
+        description: t.meta.description,
+        url: ORIGIN + (lang === 'en' ? '/' : `/${lang}/`),
+        offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+        sameAs: ['https://github.com/librefang/librefang'],
+        inLanguage: lang,
+      }
+    }
+    tag.textContent = ld ? JSON.stringify(ld) : ''
+  }, [lang, t, registryRoute, isDeployPage, isChangelogPage])
+
   // Update meta tags on language change
   useEffect(() => {
     if (isDeployPage) {
@@ -1696,8 +1751,13 @@ export default function App() {
       if (ogTitle) ogTitle.setAttribute('content', title)
       const ogDesc = document.querySelector('meta[property="og:description"]')
       if (ogDesc && descText) ogDesc.setAttribute('content', descText)
+      const ogImage = document.querySelector('meta[property="og:image"]')
+      if (ogImage) ogImage.setAttribute('content', `https://librefang.ai/og/${registryRoute.category}.svg`)
       return
     }
+    // Non-registry route — restore the default OG image.
+    const ogImageDefault = document.querySelector('meta[property="og:image"]')
+    if (ogImageDefault) ogImageDefault.setAttribute('content', 'https://librefang.ai/og-image.svg')
     if (t.meta) {
       document.title = t.meta.title
       const descMeta = document.querySelector('meta[name="description"]')
