@@ -4201,10 +4201,21 @@ system_prompt = "You are a helpful assistant."
         drop(_config_guard);
 
         let handle = tokio::spawn(async move {
-            // Auto-compact if the session is large before running the loop
+            // Auto-compact if the session is large before running the loop.
+            // Pass the in-turn session id so the compactor operates on
+            // the SAME session the outer loop just measured. Using the
+            // plain `compact_agent_session(agent_id)` re-looked up via
+            // `entry.session_id`, which for channel-derived or
+            // `session_mode = "new"` sessions points at a *different*
+            // session — and the compactor ended up inspecting an empty
+            // one and returning "0 messages, threshold 30" while the
+            // real session was 57 messages deep and overflowing.
             if needs_compact {
                 info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
-                match kernel_clone.compact_agent_session(agent_id).await {
+                match kernel_clone
+                    .compact_agent_session_with_id(agent_id, Some(session.id))
+                    .await
+                {
                     Ok(msg) => {
                         info!(agent_id = %agent_id, "{msg}");
                         // Reload the session after compaction
@@ -4410,9 +4421,14 @@ system_prompt = "You are a helpful assistant."
                         let estimated = estimate_token_count(&session.messages, None, None);
                         if needs_compaction_by_tokens(estimated, &config) {
                             let kc = kernel_clone.clone();
+                            let sid = session.id;
                             tokio::spawn(async move {
                                 info!(agent_id = %agent_id, estimated_tokens = estimated, "Post-loop compaction triggered");
-                                if let Err(e) = kc.compact_agent_session(agent_id).await {
+                                // Pass the session id explicitly (same
+                                // reason as the pre-loop path above).
+                                if let Err(e) =
+                                    kc.compact_agent_session_with_id(agent_id, Some(sid)).await
+                                {
                                     warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
                                 }
                             });
@@ -6677,6 +6693,24 @@ system_prompt = "You are a helpful assistant."
     /// Replaces the existing text-truncation compaction with an intelligent
     /// LLM-generated summary of older messages, keeping only recent messages.
     pub async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String> {
+        self.compact_agent_session_with_id(agent_id, None).await
+    }
+
+    /// Compact a specific session. When `session_id_override` is `Some`,
+    /// that session is loaded instead of the one currently attached to
+    /// the agent's registry entry — needed by the streaming pre-loop
+    /// hook, which operates on an `effective_session_id` derived from
+    /// sender context / session_mode that can legitimately differ from
+    /// `entry.session_id`. Without this override, the streaming path's
+    /// pre-compaction call loaded the wrong (often empty) session and
+    /// logged `No compaction needed (0 messages, ...)` while the real
+    /// in-turn session had hundreds of messages and was about to
+    /// overflow the model's context.
+    pub async fn compact_agent_session_with_id(
+        &self,
+        agent_id: AgentId,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<String> {
         let cfg = self.config.load_full();
         use librefang_runtime::compactor::{compact_session, needs_compaction, CompactionConfig};
 
@@ -6684,12 +6718,13 @@ system_prompt = "You are a helpful assistant."
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
+        let target_session_id = session_id_override.unwrap_or(entry.session_id);
         let session = self
             .memory
-            .get_session(entry.session_id)
+            .get_session(target_session_id)
             .map_err(KernelError::LibreFang)?
             .unwrap_or_else(|| librefang_memory::session::Session {
-                id: entry.session_id,
+                id: target_session_id,
                 agent_id,
                 messages: Vec::new(),
                 context_window_tokens: 0,
