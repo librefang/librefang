@@ -1,7 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
 import { formatDateTime } from "../lib/datetime";
 import { useTranslation } from "react-i18next";
-import { getNetworkStatus, listPeers } from "../api";
+import { useNetworkStatus, usePeers } from "../lib/queries/network";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -9,22 +8,11 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { Network, Globe, Server, Wifi, WifiOff, Hash, Clock } from "lucide-react";
 
-const REFRESH_MS = 10000;
-
 export function NetworkPage() {
   const { t } = useTranslation();
 
-  const statusQuery = useQuery({
-    queryKey: ["network", "status"],
-    queryFn: getNetworkStatus,
-    refetchInterval: REFRESH_MS,
-  });
-
-  const peersQuery = useQuery({
-    queryKey: ["peers", "list"],
-    queryFn: listPeers,
-    refetchInterval: REFRESH_MS,
-  });
+  const statusQuery = useNetworkStatus();
+  const peersQuery = usePeers();
 
   const status = statusQuery.data;
   const peers = peersQuery.data ?? [];
