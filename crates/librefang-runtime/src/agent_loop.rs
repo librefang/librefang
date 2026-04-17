@@ -1490,6 +1490,7 @@ struct PromptSetupContext<'a> {
 struct PreparedMessages {
     messages: Vec<Message>,
     new_messages_start: usize,
+    repair_stats: crate::session_repair::RepairStats,
 }
 
 struct FinalizeEndTurnContext<'a> {
@@ -1810,7 +1811,8 @@ fn prepare_llm_messages(
         .cloned()
         .collect();
 
-    let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
+    let (mut messages, repair_stats) =
+        crate::session_repair::validate_and_repair_with_stats(&llm_messages);
 
     if let Some(cc_msg) = manifest
         .metadata
@@ -1844,7 +1846,35 @@ fn prepare_llm_messages(
     PreparedMessages {
         messages,
         new_messages_start,
+        repair_stats,
     }
+}
+
+/// Emit a single structured log line summarizing any repairs that session
+/// repair applied to the outgoing message history. Silent when the history
+/// was already well-formed (stats equal to default).
+fn log_repair_stats(
+    manifest: &AgentManifest,
+    session: &Session,
+    stats: &crate::session_repair::RepairStats,
+) {
+    if stats == &crate::session_repair::RepairStats::default() {
+        return;
+    }
+    info!(
+        agent = %manifest.name,
+        session_id = %session.id,
+        orphaned = stats.orphaned_results_removed,
+        empty = stats.empty_messages_removed,
+        merged = stats.messages_merged,
+        reordered = stats.results_reordered,
+        synthetic = stats.synthetic_results_inserted,
+        duplicates = stats.duplicates_removed,
+        rescued = stats.misplaced_results_rescued,
+        positional_synthetic = stats.positional_synthetic_inserted,
+        misplaced_ignored = stats.misplaced_results_ignored,
+        "Session repair applied fixes before LLM call"
+    );
 }
 
 /// Check if web search augmentation should be performed for this agent.
@@ -2418,12 +2448,14 @@ pub async fn run_agent_loop(
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
+        repair_stats,
     } = prepare_llm_messages(
         manifest,
         session,
         &effective_user_message,
         memory_context_msg,
     );
+    log_repair_stats(manifest, session, &repair_stats);
 
     // Web search augmentation: generate search queries via LLM, search the web,
     // and inject results into context for models without tool/function calling.
@@ -3377,12 +3409,14 @@ pub async fn run_agent_loop_streaming(
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
+        repair_stats,
     } = prepare_llm_messages(
         manifest,
         session,
         &effective_user_message,
         memory_context_msg,
     );
+    log_repair_stats(manifest, session, &repair_stats);
 
     // Web search augmentation: generate search queries via LLM, search the web,
     // and inject results into context for models without tool/function calling.
@@ -5559,6 +5593,7 @@ mod tests {
         let PreparedMessages {
             messages,
             new_messages_start,
+            ..
         } = prepare_llm_messages(
             &manifest,
             &mut session,

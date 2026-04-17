@@ -48,6 +48,7 @@ pub struct RepairStats {
 /// 1. Drops orphaned ToolResult blocks that have no matching ToolUse
 /// 2. Drops empty messages
 ///    - 2a. Rescues ToolResult blocks from assistant-role messages (crash artifacts)
+///    - 2a1. Enforces adjacent tool_result pairing per strict wire contract
 ///    - 2b. Reorders misplaced ToolResults to follow their matching ToolUse
 ///    - 2c. Inserts synthetic error results for unmatched ToolUse blocks
 ///    - 2d. Deduplicates ToolResults with the same tool_use_id
