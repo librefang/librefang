@@ -8,7 +8,7 @@ interface ModalProps {
   onClose: () => void;
   title?: string;
   /** Width cap. Defaults to "md" (max-w-md). */
-  size?: "sm" | "md" | "lg" | "xl" | "2xl";
+  size?: "sm" | "md" | "lg" | "xl" | "2xl" | "3xl" | "4xl" | "5xl";
   /** Hide the default close X button (e.g. if the body supplies its own). */
   hideCloseButton?: boolean;
   /** Disable close-on-backdrop-click (destructive flows). */
@@ -26,6 +26,9 @@ const SIZE_CLASSES: Record<NonNullable<ModalProps["size"]>, string> = {
   lg: "sm:max-w-lg",
   xl: "sm:max-w-xl",
   "2xl": "sm:max-w-2xl",
+  "3xl": "sm:max-w-3xl",
+  "4xl": "sm:max-w-4xl",
+  "5xl": "sm:max-w-5xl",
 };
 
 /// Shared modal shell. Handles the cross-cutting concerns every page

@@ -705,6 +705,9 @@
   "hands": {
     "title": "Hands",
     "subtitle": "可组合的功能扩展包。",
+    "view_manifest": "查看 HAND.toml",
+    "manifest_title": "HAND.toml — {{name}}",
+    "manifest_error": "加载 HAND.toml 失败",
     "available": "可用能力",
     "instances": "活跃实例",
     "running_now": "正在运行",
@@ -1312,6 +1315,9 @@
     "title": "系统配置",
     "desc": "查看和编辑 config.toml 配置项",
     "reload": "重新加载",
+    "view_raw_toml": "查看 TOML 源文件",
+    "raw_toml_title": "config.toml",
+    "raw_toml_error": "加载 config.toml 失败",
     "hot_reload": "热加载",
     "root_level": "根级",
     "no_section": "未找到配置项",
@@ -2215,5 +2221,14 @@
     "url_hint": "URL 必须以 http:// 或 https:// 开头",
     "env_setup_title": "配置 {{name}}",
     "env_setup_desc": "输入所需的 API 密钥和环境变量以完成安装。"
+  },
+  "toml_viewer": {
+    "tab_toml": "TOML",
+    "tab_markdown": "Markdown",
+    "copy": "复制到剪贴板",
+    "copied": "已复制",
+    "copy_failed": "复制失败",
+    "download": "下载",
+    "loading": "加载中…"
   }
 }

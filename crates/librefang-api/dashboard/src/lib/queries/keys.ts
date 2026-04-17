@@ -105,6 +105,8 @@ export const handKeys = {
     [...handKeys.all, "session", instanceId] as const,
   instanceStatus: (instanceId: string) =>
     [...handKeys.all, "instanceStatus", instanceId] as const,
+  manifest: (handId: string) =>
+    [...handKeys.all, "manifest", handId] as const,
 };
 
 export const workflowKeys = {
