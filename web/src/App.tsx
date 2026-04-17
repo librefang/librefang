@@ -22,6 +22,7 @@ const DeployPage = lazy(() => import('./pages/DeployPage'))
 const ChangelogPage = lazy(() => import('./pages/ChangelogPage'))
 const RegistryPage = lazy(() => import('./pages/RegistryPage'))
 const RegistryDetailPage = lazy(() => import('./pages/RegistryDetailPage'))
+const MetricsPage = lazy(() => import('./pages/MetricsPage'))
 const SearchDialog = lazy(() => import('./components/SearchDialog'))
 import type { RegistryCategory } from './useRegistry'
 
@@ -824,6 +825,67 @@ function Performance({ t }: SectionProps) {
 const evolutionHowIcons: LucideIcon[] = [Sparkles, Zap, Shield, History]
 const evolutionToolIcons: LucideIcon[] = [FilePlus, FileEdit, FileEdit, RotateCcw, FilePlus, Trash2]
 
+// ─── Browse-all registry cards ─────────────────────────────
+// Homepage navigation shortcut — 9 cards, one per registry category, each
+// showing live item counts from useRegistry and linking to /<cat>.
+function BrowseRegistry({ t }: SectionProps) {
+  const lang = useAppStore(s => s.lang)
+  const { data } = useRegistry()
+  const langPrefix = lang === 'en' ? '' : `/${lang}`
+  if (!t.registry) return null
+  const cats: { key: RegistryCategory; count?: number }[] = [
+    { key: 'hands',        count: data?.handsCount },
+    { key: 'agents',       count: data?.agentsCount },
+    { key: 'skills',       count: data?.skillsCount },
+    { key: 'providers',    count: data?.providersCount },
+    { key: 'workflows',    count: data?.workflowsCount },
+    { key: 'channels',     count: data?.channelsCount },
+    { key: 'plugins',      count: data?.pluginsCount },
+    { key: 'mcp',          count: data?.mcpCount },
+    { key: 'integrations', count: data?.integrationsCount },
+  ]
+  return (
+    <section id="browse" className="py-28 px-6 scroll-mt-20">
+      <div className="max-w-6xl mx-auto">
+        <FadeIn>
+          <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">
+            {t.registry.label}
+          </div>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">
+            {t.browse?.title || 'Browse the registry'}
+          </h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-12">
+            {t.browse?.desc || 'Every category at a glance — pick one to see every entry, sorted by popularity.'}
+          </p>
+        </FadeIn>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          {cats.map((c, i) => {
+            const meta = t.registry!.categories[c.key]
+            return (
+              <FadeIn key={c.key} delay={i * 40}>
+                <a
+                  href={`${langPrefix}/${c.key}`}
+                  className="group block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/30 p-5 transition-all hover:-translate-y-0.5"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-base font-bold text-slate-900 dark:text-white group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
+                      {meta.title}
+                    </h3>
+                    {c.count !== undefined && c.count > 0 && (
+                      <span className="text-xs font-mono font-bold text-amber-500">{c.count}</span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{meta.desc}</p>
+                </a>
+              </FadeIn>
+            )
+          })}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 function Evolution({ t }: SectionProps) {
   if (!t.evolution) return null
   const ev = t.evolution
@@ -1621,13 +1683,24 @@ function detectRegistryRoute(pathname: string): RegistryMatch | null {
   return null
 }
 
+// The homepage handles /, /zh, /zh/, /de, /de/, etc. Anything that isn't a
+// known dedicated route (deploy/changelog/metrics/registry) and isn't the
+// locale root should show a 404, not a silent homepage fallback.
+function isHomepagePath(pathname: string): boolean {
+  const parts = pathname.split('/').filter(Boolean)
+  if (parts.length === 0) return true
+  return parts.length === 1 && LOCALES.includes(parts[0]!)
+}
+
 // ─── App ───
 export default function App() {
   const lang = useAppStore((s) => s.lang)
   const switchLang = useAppStore((s) => s.switchLang)
   const [isDeployPage] = useState(() => window.location.pathname.startsWith('/deploy'))
   const [isChangelogPage] = useState(() => window.location.pathname.startsWith('/changelog'))
+  const [isMetricsPage] = useState(() => /^\/(?:[a-z]{2}(?:-[A-Z]{2})?\/)?metrics\/?$/.test(window.location.pathname))
   const [registryRoute] = useState<RegistryMatch | null>(() => detectRegistryRoute(window.location.pathname))
+  const [isHomepage] = useState(() => isHomepagePath(window.location.pathname))
   const [searchOpen, setSearchOpen] = useState(false)
 
   // Cmd/Ctrl+K opens global registry search, regardless of which page we're on.
@@ -1808,6 +1881,15 @@ export default function App() {
     )
   }
 
+  if (isMetricsPage) {
+    return (
+      <Suspense fallback={suspenseFallback}>
+        <MetricsPage />
+        {searchOpen && <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />}
+      </Suspense>
+    )
+  }
+
   if (registryRoute) {
     return (
       <Suspense fallback={suspenseFallback}>
@@ -1816,6 +1898,29 @@ export default function App() {
           : <RegistryPage category={registryRoute.category} />}
         {searchOpen && <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />}
       </Suspense>
+    )
+  }
+
+  if (!isHomepage) {
+    // Unknown route — render a 404 instead of silently falling back to the
+    // landing page. Set the response title; Cloudflare Pages still serves
+    // index.html (SPA) but crawlers see the proper page title.
+    return (
+      <main className="min-h-screen flex flex-col items-center justify-center px-6 text-center">
+        <div className="font-mono text-[10rem] leading-none text-cyan-500/30 select-none">404</div>
+        <h1 className="text-2xl md:text-3xl font-black tracking-tight mb-2 text-slate-900 dark:text-white">
+          {t.notFound?.title || 'Page not found'}
+        </h1>
+        <p className="text-gray-500 mb-6 max-w-sm">
+          {t.notFound?.desc || "We couldn't find what you were looking for."}
+        </p>
+        <a
+          href={lang === 'en' ? '/' : `/${lang}/`}
+          className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-bold text-surface bg-cyan-500 hover:bg-cyan-400 rounded transition-all"
+        >
+          {t.notFound?.home || 'Back to home'}
+        </a>
+      </main>
     )
   }
 
@@ -1835,6 +1940,7 @@ export default function App() {
       <Architecture t={t} />
       <div className="glow-line" />
       <Hands t={t} />
+      <BrowseRegistry t={t} />
       <Workflows t={t} />
       <Evolution t={t} />
       <Performance t={t} />

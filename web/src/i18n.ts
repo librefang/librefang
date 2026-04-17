@@ -146,6 +146,7 @@ export interface Translation {
     lastUpdated: string
     copyLink: string
     trending: string
+    onThisPage: string
     categories: {
       skills: { title: string; desc: string }
       mcp: { title: string; desc: string }
@@ -166,6 +167,15 @@ export interface Translation {
     hint: string
     kbd: string
     open: string
+  }
+  browse?: {
+    title: string
+    desc: string
+  }
+  notFound?: {
+    title: string
+    desc: string
+    home: string
   }
   footer: { docs: string; license: string; privacy: string; changelog: string }
 }
@@ -399,6 +409,7 @@ export const translations: Record<string, Translation> = {
       lastUpdated: 'Updated',
       copyLink: 'Copy link to this section',
       trending: 'Trending',
+      onThisPage: 'On this page',
       categories: {
         skills: { title: 'Skills', desc: 'Pluggable tool bundles — Python, WASM, Node, or prompt-only skills that extend what an agent can do.' },
         mcp:    { title: 'MCP Servers', desc: 'Model Context Protocol servers that plug external tools and data sources directly into any agent.' },
@@ -419,6 +430,15 @@ export const translations: Record<string, Translation> = {
       hint: 'Type to search across all registry entries.',
       kbd: '↑↓ navigate · ↵ open · esc close',
       open: 'Search',
+    },
+    browse: {
+      title: 'Browse the registry',
+      desc: 'Every category at a glance — pick one to see every entry, sorted by popularity.',
+    },
+    notFound: {
+      title: 'Page not found',
+      desc: "We couldn't find what you were looking for.",
+      home: 'Back to home',
     },
     footer: { docs: 'Docs', license: 'License', privacy: 'Privacy', changelog: 'Changelog' },
   },
@@ -615,6 +635,7 @@ export const translations: Record<string, Translation> = {
       lastUpdated: '更新于',
       copyLink: '复制此段链接',
       trending: '热门',
+      onThisPage: '本页导航',
       categories: {
         skills:   { title: '技能', desc: '可插拔的工具包 —— Python、WASM、Node 或 prompt-only 技能，扩展 Agent 的能力边界。' },
         mcp:      { title: 'MCP 服务器', desc: 'Model Context Protocol 服务器，把外部工具与数据直接挂接到任何 Agent。' },
@@ -635,6 +656,15 @@ export const translations: Record<string, Translation> = {
       hint: '输入以搜索所有注册表条目。',
       kbd: '↑↓ 导航 · ↵ 打开 · esc 关闭',
       open: '搜索',
+    },
+    browse: {
+      title: '浏览注册表',
+      desc: '9 个分类一览 —— 点击任一进入完整清单，按热度排序。',
+    },
+    notFound: {
+      title: '页面未找到',
+      desc: '我们没有找到你要找的内容。',
+      home: '返回首页',
     },
     footer: { docs: '文档', license: '许可证', privacy: '隐私', changelog: '更新日志' },
   },
@@ -831,6 +861,7 @@ export const translations: Record<string, Translation> = {
       lastUpdated: '更新於',
       copyLink: '複製此段連結',
       trending: '熱門',
+      onThisPage: '本頁導覽',
       categories: {
         skills:   { title: '技能', desc: '可插拔的工具組 —— Python、WASM、Node 或 prompt-only 技能，擴展 Agent 的能力邊界。' },
         mcp:      { title: 'MCP 伺服器', desc: 'Model Context Protocol 伺服器，把外部工具與資料直接接入任何 Agent。' },
@@ -851,6 +882,15 @@ export const translations: Record<string, Translation> = {
       hint: '輸入以搜尋所有註冊表條目。',
       kbd: '↑↓ 瀏覽 · ↵ 開啟 · esc 關閉',
       open: '搜尋',
+    },
+    browse: {
+      title: '瀏覽註冊表',
+      desc: '9 個分類一覽 —— 點擊任一進入完整清單，按熱度排序。',
+    },
+    notFound: {
+      title: '頁面未找到',
+      desc: '我們沒有找到你要找的內容。',
+      home: '返回首頁',
     },
     footer: { docs: '文件', license: '授權', privacy: '隱私', changelog: '更新日誌' },
   },
@@ -1047,6 +1087,7 @@ export const translations: Record<string, Translation> = {
       lastUpdated: '更新',
       copyLink: 'このセクションのリンクをコピー',
       trending: '人気',
+      onThisPage: 'このページ',
       categories: {
         skills:   { title: 'スキル', desc: 'プラグ可能なツールバンドル —— Python、WASM、Node、または prompt-only スキルで Agent の能力を拡張。' },
         mcp:      { title: 'MCP サーバー', desc: 'Model Context Protocol サーバーで、外部ツールとデータソースを任意の Agent に直接接続。' },
@@ -1067,6 +1108,15 @@ export const translations: Record<string, Translation> = {
       hint: '入力してレジストリ全体を検索します。',
       kbd: '↑↓ 移動 · ↵ 開く · esc 閉じる',
       open: '検索',
+    },
+    browse: {
+      title: 'レジストリを探す',
+      desc: '9 カテゴリを一望、選択して人気順の完全リストへ。',
+    },
+    notFound: {
+      title: 'ページが見つかりません',
+      desc: 'お探しのページは存在しません。',
+      home: 'ホームに戻る',
     },
     footer: { docs: 'ドキュメント', license: 'ライセンス', privacy: 'プライバシー', changelog: '変更履歴' },
   },
@@ -1263,6 +1313,7 @@ export const translations: Record<string, Translation> = {
       lastUpdated: '업데이트',
       copyLink: '이 섹션 링크 복사',
       trending: '인기',
+      onThisPage: '이 페이지',
       categories: {
         skills:   { title: '스킬', desc: '플러그 가능한 도구 번들 —— Python, WASM, Node 또는 prompt-only 스킬로 Agent의 능력 확장.' },
         mcp:      { title: 'MCP 서버', desc: 'Model Context Protocol 서버로 외부 도구와 데이터 소스를 모든 Agent에 직접 연결.' },
@@ -1283,6 +1334,15 @@ export const translations: Record<string, Translation> = {
       hint: '입력하여 모든 레지스트리 항목을 검색합니다.',
       kbd: '↑↓ 이동 · ↵ 열기 · esc 닫기',
       open: '검색',
+    },
+    browse: {
+      title: '레지스트리 탐색',
+      desc: '9개 카테고리를 한눈에 — 하나를 골라 인기순 전체 목록으로 이동.',
+    },
+    notFound: {
+      title: '페이지를 찾을 수 없습니다',
+      desc: '찾으시는 페이지를 찾을 수 없습니다.',
+      home: '홈으로',
     },
     footer: { docs: '문서', license: '라이선스', privacy: '개인정보', changelog: '변경 이력' },
   },
@@ -1479,6 +1539,7 @@ export const translations: Record<string, Translation> = {
       lastUpdated: 'Aktualisiert',
       copyLink: 'Link zu diesem Abschnitt kopieren',
       trending: 'Beliebt',
+      onThisPage: 'Auf dieser Seite',
       categories: {
         skills:   { title: 'Skills', desc: 'Austauschbare Tool-Bundles — Python-, WASM-, Node- oder Prompt-Only-Skills, die die Fähigkeiten eines Agenten erweitern.' },
         mcp:      { title: 'MCP-Server', desc: 'Model-Context-Protocol-Server, die externe Tools und Datenquellen direkt in jeden Agenten einbinden.' },
@@ -1499,6 +1560,15 @@ export const translations: Record<string, Translation> = {
       hint: 'Tippen, um alle Registry-Einträge zu durchsuchen.',
       kbd: '↑↓ navigieren · ↵ öffnen · esc schließen',
       open: 'Suche',
+    },
+    browse: {
+      title: 'Registry durchsuchen',
+      desc: 'Alle 9 Kategorien auf einen Blick — wähle eine für die vollständige Liste, sortiert nach Beliebtheit.',
+    },
+    notFound: {
+      title: 'Seite nicht gefunden',
+      desc: 'Wir konnten die gesuchte Seite nicht finden.',
+      home: 'Zurück zur Startseite',
     },
     footer: { docs: 'Dokumentation', license: 'Lizenz', privacy: 'Datenschutz', changelog: 'Changelog' },
   },
@@ -1695,6 +1765,7 @@ export const translations: Record<string, Translation> = {
       lastUpdated: 'Actualizado',
       copyLink: 'Copiar enlace a esta sección',
       trending: 'Tendencia',
+      onThisPage: 'En esta página',
       categories: {
         skills:   { title: 'Skills', desc: 'Paquetes de herramientas conectables — skills Python, WASM, Node o prompt-only que amplían las capacidades del agente.' },
         mcp:      { title: 'Servidores MCP', desc: 'Servidores Model Context Protocol que conectan herramientas y fuentes de datos externas directamente a cualquier agente.' },
@@ -1715,6 +1786,15 @@ export const translations: Record<string, Translation> = {
       hint: 'Escribe para buscar en todos los elementos del registry.',
       kbd: '↑↓ navegar · ↵ abrir · esc cerrar',
       open: 'Buscar',
+    },
+    browse: {
+      title: 'Explora el registry',
+      desc: 'Las 9 categorías de un vistazo — elige una para la lista completa, ordenada por popularidad.',
+    },
+    notFound: {
+      title: 'Página no encontrada',
+      desc: 'No pudimos encontrar lo que buscabas.',
+      home: 'Volver al inicio',
     },
     footer: { docs: 'Documentación', license: 'Licencia', privacy: 'Privacidad', changelog: 'Cambios' },
   },

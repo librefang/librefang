@@ -201,3 +201,12 @@ html {
 .toml-highlight .tk-bool    { color: #f87171; font-weight: 600; }
 .toml-highlight .tk-comment { color: #94a3b8; font-style: italic; }
 .toml-highlight .tk-punct   { color: inherit; }
+
+/* View-transition tuning for the theme toggle. Chromium crossfades by default
+ * but the snapshot can flash-flicker; slow it down slightly. */
+@supports (view-transition-name: none) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 0.25s;
+  }
+}

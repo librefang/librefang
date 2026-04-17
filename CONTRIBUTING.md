@@ -11,6 +11,7 @@ This guide covers everything you need to get started, from setting up your devel
 ## Table of Contents
 
 - [Ways to Contribute](#ways-to-contribute)
+- [Contributing to the Registry](#contributing-to-the-registry)
 - [Development Environment](#development-environment)
 - [Building and Testing](#building-and-testing)
 - [Code Style](#code-style)
@@ -93,6 +94,50 @@ cargo build --workspace        # Build
 cargo test --workspace         # Test
 cargo clippy --workspace --all-targets -- -D warnings  # Lint
 ```
+
+---
+
+## Contributing to the Registry
+
+The [`librefang-registry`](https://github.com/librefang/librefang-registry) repo is the shared catalog the website browses (at [librefang.ai/skills](https://librefang.ai/skills), `/hands`, etc.) and the CLI pulls from. Contributions are welcome without touching the main Rust codebase.
+
+### What lives in the registry
+
+| Path | Format | What it is |
+|------|--------|------------|
+| `skills/<id>/SKILL.toml` + Markdown | directory | A prompt-only or WASM skill bundle |
+| `hands/<id>/HAND.toml` | directory | An autonomous capability unit |
+| `agents/<id>/AGENT.toml` | directory | A pre-built agent template |
+| `channels/<id>.toml` | file | A messaging adapter manifest |
+| `providers/<id>.toml` | file | An LLM provider adapter manifest |
+| `workflows/<id>.toml` | file | A multi-step agent workflow |
+| `plugins/<id>.toml` | file | A runtime plugin manifest |
+| `mcp/<id>.toml` | file | An MCP server manifest |
+| `integrations/<id>.toml` | file | A first-party SaaS integration |
+
+### Submitting a new entry
+
+1. Fork [`librefang-registry`](https://github.com/librefang/librefang-registry).
+2. Add your manifest to the right category directory. Follow the schema of an existing neighbour.
+3. Required TOML fields for every entry: `id`, `name`, `description`, `category`, `icon` (one emoji).
+4. Add i18n descriptions in `[i18n.zh]`, `[i18n.ja]`, `[i18n.ko]` if you can — the website renders localized descriptions when available.
+5. Tag with `tags = ["popular"]` only if you've validated real usage; the site visually promotes popular entries.
+6. Open a PR against the registry repo. On merge, the entry is live on librefang.ai within an hour (the Cloudflare Worker at `stats.librefang.ai` runs stale-while-revalidate with a 1-hour fresh window).
+
+### Testing your manifest locally
+
+```bash
+# Run the official site against your local registry checkout
+cd librefang/web
+pnpm dev
+
+# Or install a single skill directly into a running daemon
+librefang skill install /path/to/librefang-registry/skills/your-skill
+```
+
+### What the website expects
+
+The website's detail pages expect the TOML to be parseable and render the raw contents. No HTML or Markdown is interpreted — readers see the TOML as-is with syntax highlighting. Keep descriptions concise (≤ 280 chars) so they fit in meta tags and social-share cards.
 
 ---
 

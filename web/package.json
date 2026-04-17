@@ -10,11 +10,12 @@
     ]
   },
   "scripts": {
-    "predev": "tsx scripts/fetch-registry.ts && tsx scripts/gen-og-images.ts",
+    "predev": "tsx scripts/fetch-registry.ts && tsx scripts/gen-og-images.ts && tsx scripts/gen-rss.ts",
     "dev": "vite",
     "fetch-registry": "tsx scripts/fetch-registry.ts",
     "gen-og": "tsx scripts/gen-og-images.ts",
-    "prebuild": "tsx scripts/fetch-registry.ts && tsx scripts/gen-og-images.ts",
+    "gen-rss": "tsx scripts/gen-rss.ts",
+    "prebuild": "tsx scripts/fetch-registry.ts && tsx scripts/gen-og-images.ts && tsx scripts/gen-rss.ts",
     "build": "vite build",
     "lint": "tsc --noEmit",
     "preview": "vite preview",

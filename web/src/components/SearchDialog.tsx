@@ -25,6 +25,29 @@ function isPopular(d: Detail) {
   return d.tags?.includes('popular') ?? false
 }
 
+// Simple subsequence fuzzy match: returns a bonus if every character of
+// query appears in order in target (not necessarily contiguous). Scores
+// higher when characters cluster tightly. Cheap: O(|target|) per call.
+function fuzzySubseq(query: string, target: string): number {
+  if (!query) return 0
+  const q = query.toLowerCase()
+  const t = target.toLowerCase()
+  let qi = 0
+  let lastMatch = -1
+  let gaps = 0
+  for (let i = 0; i < t.length && qi < q.length; i++) {
+    if (t[i] === q[qi]) {
+      if (lastMatch >= 0) gaps += (i - lastMatch - 1)
+      lastMatch = i
+      qi++
+    }
+  }
+  if (qi < q.length) return 0
+  // Reward short spans: full score when all chars are contiguous.
+  const span = lastMatch - (lastMatch - q.length + 1) + 1
+  return Math.max(20, 80 - Math.min(60, gaps)) - Math.min(15, span - q.length)
+}
+
 function scoreText(query: string, ...fields: string[]): number {
   const q = query.toLowerCase()
   const primary = (fields[0] || '').toLowerCase()
@@ -36,7 +59,9 @@ function scoreText(query: string, ...fields: string[]): number {
     if (f.includes(q)) return 150 - i * 20
   }
   if (primary.includes(q)) return 200
-  return 0
+  // Fall back to fuzzy subsequence for typo-tolerance.
+  const fz = fuzzySubseq(q, primary)
+  return fz
 }
 
 function scoreHit(query: string, item: Detail, localizedDesc: string): number {
@@ -53,7 +78,10 @@ function scoreHit(query: string, item: Detail, localizedDesc: string): number {
   if (desc.includes(q)) return 50
   if (cat.includes(q)) return 40
   if (item.tags?.some(tag => tag.toLowerCase().includes(q))) return 30
-  return 0
+  // Fuzzy fallback: subsequence match across id or name. Lower score so it
+  // never beats an exact substring hit on a different item.
+  const fz = Math.max(fuzzySubseq(q, id), fuzzySubseq(q, name))
+  return fz
 }
 
 export default function SearchDialog({ open, onClose }: SearchDialogProps) {
@@ -61,6 +89,14 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
   const t: Translation = translations[lang] || translations['en']!
   const { data } = useRegistry()
   const [query, setQuery] = useState('')
+  // Debounced value used for actual scoring. Typing 'react-expert' no longer
+  // triggers 12 full scoring passes; we coalesce bursts within 80ms.
+  const [debouncedQuery, setDebouncedQuery] = useState('')
+  useEffect(() => {
+    if (!query) { setDebouncedQuery(''); return }
+    const h = setTimeout(() => setDebouncedQuery(query), 80)
+    return () => clearTimeout(h)
+  }, [query])
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -90,7 +126,7 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
   const allHits = useMemo<Hit[]>(() => [...anchorHits, ...itemHits], [anchorHits, itemHits])
 
   const filtered = useMemo<Hit[]>(() => {
-    const q = query.trim()
+    const q = debouncedQuery.trim()
     if (!q) {
       // No query — show homepage anchors first (navigation shortcut), then a
       // sampling of popular items across categories.
@@ -132,7 +168,7 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
       if (out.length >= 40) break
     }
     return out
-  }, [allHits, itemHits, anchorHits, query, lang])
+  }, [allHits, itemHits, anchorHits, debouncedQuery, lang])
 
   useEffect(() => { setActiveIndex(0) }, [query])
 

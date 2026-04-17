@@ -174,6 +174,10 @@ function handleFetch(request, env, ctx) {
     return handleRegistryTrending(env, cors, url.searchParams.get('category') || '')
   }
 
+  if (path === '/api/registry/metrics' && request.method === 'GET') {
+    return handleRegistryMetrics(env, cors)
+  }
+
   if (path === '/api/releases' && request.method === 'GET') {
     return handleReleases(env, cors)
   }
@@ -619,6 +623,41 @@ async function handleRegistryTrending(env, cors, category) {
     .map(([id, clicks]) => ({ id, clicks }))
   return new Response(JSON.stringify({ category, top }), {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600', ...cors }
+  })
+}
+
+// ─── Registry metrics summary ───
+// Aggregates across all categories: total clicks per category + top 5 items
+// overall. Used by the /metrics page on the website.
+async function handleRegistryMetrics(env, cors) {
+  const perCategory = {}
+  const allItems = []
+  for (const cat of CATEGORIES) {
+    const raw = await env.KV.get(`registry_clicks:${cat}`)
+    if (!raw) { perCategory[cat] = { total: 0, items: 0 }; continue }
+    try {
+      const counts = JSON.parse(raw)
+      let total = 0
+      let items = 0
+      for (const [id, n] of Object.entries(counts)) {
+        total += n
+        items++
+        allItems.push({ category: cat, id, clicks: n })
+      }
+      perCategory[cat] = { total, items }
+    } catch (_) {
+      perCategory[cat] = { total: 0, items: 0 }
+    }
+  }
+  allItems.sort((a, b) => b.clicks - a.clicks)
+  const result = {
+    generatedAt: new Date().toISOString(),
+    perCategory,
+    topOverall: allItems.slice(0, 10),
+    totalClicks: allItems.reduce((s, x) => s + x.clicks, 0),
+  }
+  return new Response(JSON.stringify(result), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', ...cors }
   })
 }
 

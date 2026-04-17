@@ -208,7 +208,22 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
         </div>
       </div>
 
-      <section className="max-w-4xl mx-auto px-6 py-12">
+      <div className="max-w-6xl mx-auto px-6 py-12 lg:grid lg:grid-cols-[200px_1fr] lg:gap-12">
+        {/* Sticky TOC — hidden below lg, otherwise pinned in the left gutter. */}
+        <aside className="hidden lg:block">
+          <nav className="sticky top-24 text-xs" aria-label={t.registry?.onThisPage || 'On this page'}>
+            <div className="font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest mb-3">
+              {t.registry?.onThisPage || 'On this page'}
+            </div>
+            <ul className="space-y-2">
+              <li><a href="#use-it" className="text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">{t.registry?.useIt || 'Use it'}</a></li>
+              <li><a href="#manifest" className="text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">{t.registry?.manifest || 'Manifest'}</a></li>
+              <li><a href="#related" className="text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">{(t.registry?.relatedIn || 'More {category}').replace('{category}', categoryLabel)}</a></li>
+            </ul>
+          </nav>
+        </aside>
+
+      <section className="max-w-4xl mx-auto px-0 py-0">
         {/* Header card */}
         <div className={cn(
           'border p-6 md:p-8 mb-8',
@@ -397,6 +412,7 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
           </a>
         </div>
       </section>
+      </div>
     </main>
   )
 }
