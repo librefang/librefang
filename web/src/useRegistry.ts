@@ -139,10 +139,10 @@ export function useRegistry() {
 /** Return the items array and count for a given category. */
 export function getCategoryItems(data: RegistryData | undefined, category: RegistryCategory): { items: Detail[]; count: number } {
   if (!data) return { items: [], count: 0 }
-  // Upstream stores MCP servers inside integrations/ rather than a
-  // separate mcp/ directory, so /mcp[/<id>] aliases to integrations
-  // for data reads while keeping the "MCP Servers" label in the UI.
-  const effective = category === 'mcp' ? 'integrations' : category
+  // Legacy: the `integrations` category used to be a separate bucket
+  // but is now the same data as `mcp`. If someone hits /integrations
+  // (bookmark / old link), fall through so they see the real content.
+  const effective = category === 'integrations' ? 'mcp' : category
   const items = data[effective] ?? []
   const count = (data[`${effective}Count` as keyof RegistryData] as number | undefined) ?? items.length
   return { items, count }

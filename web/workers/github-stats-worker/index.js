@@ -768,23 +768,31 @@ async function refreshRegistryCache(env) {
   }
 
   try {
-    const [handDirs, channelFiles, providerFiles, integrationFiles, workflowFiles, agentDirs, pluginFiles, skillDirs, mcpFiles] = await Promise.all([
+    // Upstream is renaming `integrations/` → `mcp/`. Prefer the new
+    // name, fall back to the legacy path during rollout.
+    let mcpFiles = await fetchDir('mcp')
+    let mcpDir = 'mcp'
+    if (mcpFiles.length === 0) {
+      const legacy = await fetchDir('integrations')
+      if (legacy.length > 0) {
+        mcpFiles = legacy
+        mcpDir = 'integrations'
+      }
+    }
+    const [handDirs, channelFiles, providerFiles, workflowFiles, agentDirs, pluginFiles, skillDirs] = await Promise.all([
       fetchDir('hands'),
       fetchDir('channels'),
       fetchDir('providers'),
-      fetchDir('integrations'),
       fetchDir('workflows'),
       fetchDir('agents'),
       fetchDir('plugins'),
       fetchDir('skills'),
-      fetchDir('mcp'),
     ])
 
     const filter = (items) => items.filter(f => f.name !== 'README.md')
     const hands = filter(handDirs)
     const channels = filter(channelFiles)
     const providers = filter(providerFiles)
-    const integrations = filter(integrationFiles)
     const workflows = filter(workflowFiles)
     const agents = filter(agentDirs)
     const plugins = filter(pluginFiles)
@@ -799,7 +807,6 @@ async function refreshRegistryCache(env) {
         if (old.handsCount === hands.length &&
             old.channelsCount === channels.length &&
             old.providersCount === providers.length &&
-            old.integrationsCount === integrations.length &&
             old.workflowsCount === workflows.length &&
             old.agentsCount === agents.length &&
             old.pluginsCount === plugins.length &&
@@ -825,7 +832,7 @@ async function refreshRegistryCache(env) {
 
     // Directory-based: manifest lives inside <dir>/<UPPER>.toml
     // File-based: item name already ends in .toml
-    const [handDetails, agentDetails, skillDetails, channelDetails, providerDetails, workflowDetails, pluginDetails, integrationDetails, mcpDetails] = await Promise.all([
+    const [handDetails, agentDetails, skillDetails, channelDetails, providerDetails, workflowDetails, pluginDetails, mcpDetails] = await Promise.all([
       fetchBatch(hands, h => `hands/${h.name}/HAND.toml`),
       fetchBatch(agents, a => `agents/${a.name}/AGENT.toml`),
       fetchBatch(skills, s => `skills/${s.name}/SKILL.toml`),
@@ -833,15 +840,13 @@ async function refreshRegistryCache(env) {
       fetchBatch(providers, p => `providers/${p.name}`),
       fetchBatch(workflows, w => `workflows/${w.name}`),
       fetchBatch(plugins, p => `plugins/${p.name}`),
-      fetchBatch(integrations, i => `integrations/${i.name}`),
-      fetchBatch(mcp, m => m.name.endsWith('.toml') ? `mcp/${m.name}` : `mcp/${m.name}/MCP.toml`),
+      fetchBatch(mcp, m => m.name.endsWith('.toml') ? `${mcpDir}/${m.name}` : `${mcpDir}/${m.name}/MCP.toml`),
     ])
 
     const result = {
       hands: handDetails,
       channels: channelDetails,
       providers: providerDetails,
-      integrations: integrationDetails,
       workflows: workflowDetails,
       agents: agentDetails,
       plugins: pluginDetails,
@@ -850,7 +855,6 @@ async function refreshRegistryCache(env) {
       handsCount: hands.length,
       channelsCount: channels.length,
       providersCount: providers.length,
-      integrationsCount: integrations.length,
       workflowsCount: workflows.length,
       agentsCount: agents.length,
       pluginsCount: plugins.length,

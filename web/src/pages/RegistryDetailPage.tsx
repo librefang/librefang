@@ -58,8 +58,10 @@ function pathFor(category: RegistryCategory, id: string): string {
     // Skills ship SKILL.md with YAML frontmatter — there is no TOML
     // manifest, so the "manifest" section renders the markdown source.
     case 'skills':  return `skills/${id}/SKILL.md`
-    // MCP servers live under integrations/ upstream.
-    case 'mcp':     return `integrations/${id}.toml`
+    // Upstream dir is `mcp/` as of PR #64 in librefang-registry; the
+    // worker raw-file proxy allows both paths during the rollout so
+    // the fetch still resolves if the rename hasn't propagated yet.
+    case 'mcp':     return `mcp/${id}.toml`
     default:        return `${category}/${id}.toml`
   }
 }

@@ -2823,1474 +2823,6 @@
       "icon": ""
     }
   ],
-  "integrations": [
-    {
-      "id": "aws",
-      "name": "AWS",
-      "description": "Manage Amazon Web Services resources including S3, EC2, Lambda, and more through the MCP server",
-      "category": "cloud",
-      "icon": "lucide:cloud",
-      "tags": [
-        "cloud",
-        "amazon",
-        "infrastructure",
-        "s3",
-        "ec2",
-        "lambda",
-        "devops"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "AWS",
-          "description": "通过 MCP 服务器管理 Amazon Web Services 资源（S3、EC2、Lambda 等）。"
-        },
-        "zh-TW": {
-          "name": "AWS",
-          "description": "透過 MCP 伺服器管理 Amazon Web Services 資源（S3、EC2、Lambda 等）。"
-        },
-        "ja": {
-          "name": "AWS",
-          "description": "MCP サーバー経由で AWS リソース（S3、EC2、Lambda 等）を管理。"
-        },
-        "ko": {
-          "name": "AWS",
-          "description": "MCP 서버를 통해 AWS 리소스(S3, EC2, Lambda 등)를 관리."
-        },
-        "de": {
-          "name": "AWS",
-          "description": "Verwaltet AWS-Ressourcen (S3, EC2, Lambda u. a.) über den MCP-Server."
-        },
-        "es": {
-          "name": "AWS",
-          "description": "Gestiona recursos de AWS (S3, EC2, Lambda, etc.) a través del servidor MCP."
-        },
-        "fr": {
-          "name": "AWS",
-          "description": "Gère les ressources AWS (S3, EC2, Lambda, etc.) via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "azure-mcp",
-      "name": "Microsoft Azure",
-      "description": "Manage Azure resources including VMs, Storage, and App Services through the MCP server",
-      "category": "cloud",
-      "icon": "lucide:diamond",
-      "tags": [
-        "cloud",
-        "microsoft",
-        "infrastructure",
-        "azure",
-        "devops",
-        "enterprise"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Microsoft Azure",
-          "description": "通过 MCP 服务器管理 Azure 资源（虚拟机、存储、App Services 等）。"
-        },
-        "zh-TW": {
-          "name": "Microsoft Azure",
-          "description": "透過 MCP 伺服器管理 Azure 資源（虛擬機、儲存體、App Services 等）。"
-        },
-        "ja": {
-          "name": "Microsoft Azure",
-          "description": "MCP サーバー経由で Azure リソース（VM、ストレージ、App Services）を管理。"
-        },
-        "ko": {
-          "name": "Microsoft Azure",
-          "description": "MCP 서버를 통해 Azure 리소스(VM, 스토리지, App Services)를 관리."
-        },
-        "de": {
-          "name": "Microsoft Azure",
-          "description": "Verwaltet Azure-Ressourcen (VMs, Storage, App Services) über den MCP-Server."
-        },
-        "es": {
-          "name": "Microsoft Azure",
-          "description": "Gestiona recursos de Azure (VMs, Storage, App Services) a través del servidor MCP."
-        },
-        "fr": {
-          "name": "Microsoft Azure",
-          "description": "Gère les ressources Azure (VM, Storage, App Services) via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "bitbucket",
-      "name": "Bitbucket",
-      "description": "Access Bitbucket repositories, pull requests, and pipelines through the MCP server",
-      "category": "devtools",
-      "icon": "lucide:package",
-      "tags": [
-        "git",
-        "vcs",
-        "code",
-        "pull-requests",
-        "ci",
-        "atlassian"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Bitbucket",
-          "description": "通过 MCP 服务器访问 Bitbucket 仓库、Pull Request 与流水线。"
-        },
-        "zh-TW": {
-          "name": "Bitbucket",
-          "description": "透過 MCP 伺服器存取 Bitbucket 儲存庫、Pull Request 與 Pipeline。"
-        },
-        "ja": {
-          "name": "Bitbucket",
-          "description": "MCP サーバー経由で Bitbucket のリポジトリ、プルリクエスト、パイプラインにアクセス。"
-        },
-        "ko": {
-          "name": "Bitbucket",
-          "description": "MCP 서버를 통해 Bitbucket 저장소, PR, 파이프라인에 접근."
-        },
-        "de": {
-          "name": "Bitbucket",
-          "description": "Zugriff auf Bitbucket-Repositories, Pull-Requests und Pipelines über den MCP-Server."
-        },
-        "es": {
-          "name": "Bitbucket",
-          "description": "Accede a repositorios, pull requests y pipelines de Bitbucket mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Bitbucket",
-          "description": "Accès aux dépôts, pull requests et pipelines Bitbucket via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "brave-search",
-      "name": "Brave Search",
-      "description": "Perform web searches using the Brave Search API through the MCP server",
-      "category": "ai",
-      "icon": "lucide:shield",
-      "tags": [
-        "search",
-        "web",
-        "brave",
-        "api",
-        "information-retrieval"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Brave Search",
-          "description": "通过 MCP 服务器使用 Brave Search API 进行网页搜索。"
-        },
-        "zh-TW": {
-          "name": "Brave Search",
-          "description": "透過 MCP 伺服器使用 Brave Search API 進行網頁搜尋。"
-        },
-        "ja": {
-          "name": "Brave Search",
-          "description": "MCP サーバー経由で Brave Search API を使ってウェブ検索を実行。"
-        },
-        "ko": {
-          "name": "Brave Search",
-          "description": "MCP 서버를 통해 Brave Search API로 웹 검색을 수행."
-        },
-        "de": {
-          "name": "Brave Search",
-          "description": "Websuche über die Brave-Search-API per MCP-Server."
-        },
-        "es": {
-          "name": "Brave Search",
-          "description": "Realiza búsquedas web usando la API de Brave Search a través del servidor MCP."
-        },
-        "fr": {
-          "name": "Brave Search",
-          "description": "Recherches web via l'API Brave Search et le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "discord-mcp",
-      "name": "Discord",
-      "description": "Access Discord servers, channels, and messages through the MCP server",
-      "category": "communication",
-      "icon": "lucide:gamepad-2",
-      "tags": [
-        "chat",
-        "messaging",
-        "community",
-        "gaming",
-        "voice"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Discord",
-          "description": "通过 MCP 服务器访问 Discord 服务器、频道与消息。"
-        },
-        "zh-TW": {
-          "name": "Discord",
-          "description": "透過 MCP 伺服器存取 Discord 伺服器、頻道與訊息。"
-        },
-        "ja": {
-          "name": "Discord",
-          "description": "MCP サーバー経由で Discord のサーバー、チャンネル、メッセージにアクセス。"
-        },
-        "ko": {
-          "name": "Discord",
-          "description": "MCP 서버를 통해 Discord 서버, 채널, 메시지에 접근."
-        },
-        "de": {
-          "name": "Discord",
-          "description": "Zugriff auf Discord-Server, Kanäle und Nachrichten über den MCP-Server."
-        },
-        "es": {
-          "name": "Discord",
-          "description": "Accede a servidores, canales y mensajes de Discord mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Discord",
-          "description": "Accès aux serveurs, salons et messages Discord via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "dropbox",
-      "name": "Dropbox",
-      "description": "Access and manage Dropbox files and folders through the MCP server",
-      "category": "productivity",
-      "icon": "lucide:package",
-      "tags": [
-        "files",
-        "storage",
-        "cloud-storage",
-        "sync",
-        "sharing"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Dropbox",
-          "description": "通过 MCP 服务器访问和管理 Dropbox 的文件与文件夹。"
-        },
-        "zh-TW": {
-          "name": "Dropbox",
-          "description": "透過 MCP 伺服器存取並管理 Dropbox 的檔案與資料夾。"
-        },
-        "ja": {
-          "name": "Dropbox",
-          "description": "MCP サーバー経由で Dropbox のファイルとフォルダを操作。"
-        },
-        "ko": {
-          "name": "Dropbox",
-          "description": "MCP 서버를 통해 Dropbox 파일과 폴더를 관리."
-        },
-        "de": {
-          "name": "Dropbox",
-          "description": "Zugriff und Verwaltung von Dropbox-Dateien und -Ordnern über den MCP-Server."
-        },
-        "es": {
-          "name": "Dropbox",
-          "description": "Accede y gestiona archivos y carpetas de Dropbox mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Dropbox",
-          "description": "Accès et gestion des fichiers et dossiers Dropbox via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "elasticsearch",
-      "name": "Elasticsearch",
-      "description": "Search and manage Elasticsearch indices and documents through the MCP server",
-      "category": "data",
-      "icon": "lucide:search",
-      "tags": [
-        "search",
-        "database",
-        "indexing",
-        "analytics",
-        "full-text"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Elasticsearch",
-          "description": "通过 MCP 服务器搜索与管理 Elasticsearch 索引和文档。"
-        },
-        "zh-TW": {
-          "name": "Elasticsearch",
-          "description": "透過 MCP 伺服器搜尋與管理 Elasticsearch 索引與文件。"
-        },
-        "ja": {
-          "name": "Elasticsearch",
-          "description": "MCP サーバー経由で Elasticsearch のインデックスとドキュメントを検索・管理。"
-        },
-        "ko": {
-          "name": "Elasticsearch",
-          "description": "MCP 서버를 통해 Elasticsearch 인덱스와 문서를 검색 및 관리."
-        },
-        "de": {
-          "name": "Elasticsearch",
-          "description": "Suchen und Verwalten von Elasticsearch-Indizes und -Dokumenten über den MCP-Server."
-        },
-        "es": {
-          "name": "Elasticsearch",
-          "description": "Busca y gestiona índices y documentos de Elasticsearch mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Elasticsearch",
-          "description": "Recherche et gestion des index et documents Elasticsearch via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "exa-search",
-      "name": "Exa Search",
-      "description": "Perform AI-powered neural searches and retrieve web content through the Exa MCP server",
-      "category": "ai",
-      "icon": "lucide:search",
-      "tags": [
-        "search",
-        "web",
-        "ai",
-        "neural",
-        "semantic",
-        "information-retrieval"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Exa Search",
-          "description": "通过 Exa MCP 服务器执行 AI 神经搜索并获取网页内容。"
-        },
-        "zh-TW": {
-          "name": "Exa Search",
-          "description": "透過 Exa MCP 伺服器執行 AI 神經搜尋並擷取網頁內容。"
-        },
-        "ja": {
-          "name": "Exa Search",
-          "description": "Exa MCP サーバー経由で AI ニューラル検索とウェブコンテンツ取得を実行。"
-        },
-        "ko": {
-          "name": "Exa Search",
-          "description": "Exa MCP 서버를 통해 AI 뉴럴 검색과 웹 콘텐츠 조회를 수행."
-        },
-        "de": {
-          "name": "Exa Search",
-          "description": "KI-gestützte neuronale Suche und Webinhalts-Abruf über den Exa-MCP-Server."
-        },
-        "es": {
-          "name": "Exa Search",
-          "description": "Realiza búsquedas neuronales con IA y recupera contenido web mediante el servidor MCP de Exa."
-        },
-        "fr": {
-          "name": "Exa Search",
-          "description": "Recherches neuronales IA et récupération de contenu web via le serveur MCP Exa."
-        }
-      }
-    },
-    {
-      "id": "fetch",
-      "name": "Web Fetch",
-      "description": "Fetch any web URL and receive its content as clean Markdown — ideal for reading docs, articles, and APIs",
-      "category": "devtools",
-      "icon": "🌐",
-      "tags": [
-        "web",
-        "fetch",
-        "scraping",
-        "markdown",
-        "http"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Web Fetch",
-          "description": "抓取任意网页并以干净的 Markdown 返回内容 —— 适合阅读文档、文章与 API。"
-        },
-        "zh-TW": {
-          "name": "Web Fetch",
-          "description": "擷取任意網頁並以乾淨的 Markdown 回傳 —— 適合閱讀文件、文章與 API。"
-        },
-        "ja": {
-          "name": "Web Fetch",
-          "description": "任意の URL を取得しクリーンな Markdown に整形 —— ドキュメント、記事、API の読み取りに最適。"
-        },
-        "ko": {
-          "name": "Web Fetch",
-          "description": "임의의 웹 URL을 가져와 깔끔한 Markdown으로 반환 —— 문서, 기사, API 읽기에 적합."
-        },
-        "de": {
-          "name": "Web Fetch",
-          "description": "Ruft beliebige Web-URLs ab und liefert sauberes Markdown — ideal für Dokumentationen, Artikel und APIs."
-        },
-        "es": {
-          "name": "Web Fetch",
-          "description": "Obtiene cualquier URL web y devuelve su contenido en Markdown limpio — ideal para docs, artículos y APIs."
-        },
-        "fr": {
-          "name": "Web Fetch",
-          "description": "Récupère n'importe quelle URL et retourne son contenu en Markdown propre — idéal pour docs, articles et API."
-        }
-      }
-    },
-    {
-      "id": "filesystem",
-      "name": "Filesystem",
-      "description": "Read, write, search, and manage local files through the official MCP filesystem server",
-      "category": "devtools",
-      "icon": "📁",
-      "tags": [
-        "files",
-        "local",
-        "read",
-        "write",
-        "search"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Filesystem",
-          "description": "通过官方 MCP Filesystem 服务器读、写、搜索和管理本地文件。"
-        },
-        "zh-TW": {
-          "name": "Filesystem",
-          "description": "透過官方 MCP Filesystem 伺服器讀、寫、搜尋與管理本地檔案。"
-        },
-        "ja": {
-          "name": "Filesystem",
-          "description": "公式 MCP Filesystem サーバー経由でローカルファイルを読み書き・検索・管理。"
-        },
-        "ko": {
-          "name": "Filesystem",
-          "description": "공식 MCP Filesystem 서버를 통해 로컬 파일을 읽기/쓰기/검색/관리."
-        },
-        "de": {
-          "name": "Filesystem",
-          "description": "Lokale Dateien über den offiziellen MCP-Filesystem-Server lesen, schreiben, suchen und verwalten."
-        },
-        "es": {
-          "name": "Filesystem",
-          "description": "Lee, escribe, busca y gestiona archivos locales mediante el servidor MCP oficial de sistema de archivos."
-        },
-        "fr": {
-          "name": "Filesystem",
-          "description": "Lire, écrire, rechercher et gérer les fichiers locaux via le serveur MCP Filesystem officiel."
-        }
-      }
-    },
-    {
-      "id": "gcp-mcp",
-      "name": "Google Cloud Platform",
-      "description": "Manage GCP resources including Compute Engine, Cloud Storage, and BigQuery through the MCP server",
-      "category": "cloud",
-      "icon": "lucide:globe",
-      "tags": [
-        "cloud",
-        "google",
-        "infrastructure",
-        "gce",
-        "gcs",
-        "bigquery",
-        "devops"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Google Cloud Platform",
-          "description": "通过 MCP 服务器管理 GCP 资源（Compute Engine、Cloud Storage、BigQuery 等）。"
-        },
-        "zh-TW": {
-          "name": "Google Cloud Platform",
-          "description": "透過 MCP 伺服器管理 GCP 資源（Compute Engine、Cloud Storage、BigQuery 等）。"
-        },
-        "ja": {
-          "name": "Google Cloud Platform",
-          "description": "MCP サーバー経由で GCP リソース（Compute Engine、Cloud Storage、BigQuery）を管理。"
-        },
-        "ko": {
-          "name": "Google Cloud Platform",
-          "description": "MCP 서버를 통해 GCP 리소스(Compute Engine, Cloud Storage, BigQuery)를 관리."
-        },
-        "de": {
-          "name": "Google Cloud Platform",
-          "description": "Verwaltet GCP-Ressourcen (Compute Engine, Cloud Storage, BigQuery) über den MCP-Server."
-        },
-        "es": {
-          "name": "Google Cloud Platform",
-          "description": "Gestiona recursos de GCP (Compute Engine, Cloud Storage, BigQuery) mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Google Cloud Platform",
-          "description": "Gère les ressources GCP (Compute Engine, Cloud Storage, BigQuery) via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "git",
-      "name": "Git",
-      "description": "Inspect local Git repositories — read commits, diffs, branches, file history, and blame without shell access",
-      "category": "devtools",
-      "icon": "🌿",
-      "tags": [
-        "git",
-        "version-control",
-        "commits",
-        "diff",
-        "history",
-        "blame"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Git",
-          "description": "检视本地 Git 仓库 —— 读取提交、diff、分支、文件历史与 blame，无需 shell 访问。"
-        },
-        "zh-TW": {
-          "name": "Git",
-          "description": "檢視本地 Git 儲存庫 —— 讀取 Commit、Diff、分支、檔案歷史與 blame，無需 Shell 存取。"
-        },
-        "ja": {
-          "name": "Git",
-          "description": "シェルなしでローカル Git リポジトリを検査 —— コミット、diff、ブランチ、ファイル履歴、blame を取得。"
-        },
-        "ko": {
-          "name": "Git",
-          "description": "셸 접근 없이 로컬 Git 저장소를 조사 —— 커밋, diff, 브랜치, 파일 이력, blame을 확인."
-        },
-        "de": {
-          "name": "Git",
-          "description": "Lokale Git-Repositories inspizieren — Commits, Diffs, Branches, Datei-Historie und Blame ohne Shell-Zugriff."
-        },
-        "es": {
-          "name": "Git",
-          "description": "Inspecciona repositorios Git locales: commits, diffs, ramas, historial y blame sin acceso a shell."
-        },
-        "fr": {
-          "name": "Git",
-          "description": "Inspecte les dépôts Git locaux — commits, diffs, branches, historique et blame sans accès shell."
-        }
-      }
-    },
-    {
-      "id": "github",
-      "name": "GitHub",
-      "description": "Access GitHub repositories, issues, pull requests, and organizations through the official MCP server",
-      "category": "devtools",
-      "icon": "lucide:github",
-      "tags": [
-        "git",
-        "vcs",
-        "code",
-        "issues",
-        "pull-requests",
-        "ci"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "GitHub",
-          "description": "通过官方 MCP 服务器访问 GitHub 仓库、Issue、Pull Request 与组织。"
-        },
-        "zh-TW": {
-          "name": "GitHub",
-          "description": "透過官方 MCP 伺服器存取 GitHub 儲存庫、Issue、Pull Request 與組織。"
-        },
-        "ja": {
-          "name": "GitHub",
-          "description": "公式 MCP サーバー経由で GitHub のリポジトリ、Issue、Pull Request、Organization にアクセス。"
-        },
-        "ko": {
-          "name": "GitHub",
-          "description": "공식 MCP 서버를 통해 GitHub 저장소, 이슈, PR, 조직에 접근."
-        },
-        "de": {
-          "name": "GitHub",
-          "description": "Zugriff auf GitHub-Repositories, Issues, Pull-Requests und Organisationen über den offiziellen MCP-Server."
-        },
-        "es": {
-          "name": "GitHub",
-          "description": "Accede a repositorios, issues, pull requests y organizaciones de GitHub mediante el servidor MCP oficial."
-        },
-        "fr": {
-          "name": "GitHub",
-          "description": "Accès aux dépôts, issues, pull requests et organisations GitHub via le serveur MCP officiel."
-        }
-      }
-    },
-    {
-      "id": "gitlab",
-      "name": "GitLab",
-      "description": "Access GitLab projects, merge requests, issues, and CI/CD pipelines through the MCP server",
-      "category": "devtools",
-      "icon": "lucide:flame",
-      "tags": [
-        "git",
-        "vcs",
-        "code",
-        "merge-requests",
-        "ci",
-        "devops"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "GitLab",
-          "description": "通过 MCP 服务器访问 GitLab 项目、Merge Request、Issue 与 CI/CD 流水线。"
-        },
-        "zh-TW": {
-          "name": "GitLab",
-          "description": "透過 MCP 伺服器存取 GitLab 專案、Merge Request、Issue 與 CI/CD Pipeline。"
-        },
-        "ja": {
-          "name": "GitLab",
-          "description": "MCP サーバー経由で GitLab のプロジェクト、マージリクエスト、Issue、CI/CD パイプラインを操作。"
-        },
-        "ko": {
-          "name": "GitLab",
-          "description": "MCP 서버를 통해 GitLab 프로젝트, 머지 요청, 이슈, CI/CD 파이프라인에 접근."
-        },
-        "de": {
-          "name": "GitLab",
-          "description": "Zugriff auf GitLab-Projekte, Merge Requests, Issues und CI/CD-Pipelines über den MCP-Server."
-        },
-        "es": {
-          "name": "GitLab",
-          "description": "Accede a proyectos, merge requests, issues y pipelines de CI/CD de GitLab mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "GitLab",
-          "description": "Accès aux projets, merge requests, issues et pipelines CI/CD GitLab via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "gmail",
-      "name": "Gmail",
-      "description": "Read, send, and manage Gmail messages and drafts through the Anthropic MCP server",
-      "category": "productivity",
-      "icon": "lucide:mail",
-      "tags": [
-        "email",
-        "google",
-        "messaging",
-        "inbox",
-        "communication"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Gmail",
-          "description": "通过 Anthropic MCP 服务器读取、发送和管理 Gmail 邮件与草稿。"
-        },
-        "zh-TW": {
-          "name": "Gmail",
-          "description": "透過 Anthropic MCP 伺服器讀取、傳送與管理 Gmail 郵件與草稿。"
-        },
-        "ja": {
-          "name": "Gmail",
-          "description": "Anthropic MCP サーバー経由で Gmail のメッセージと下書きを読み書き。"
-        },
-        "ko": {
-          "name": "Gmail",
-          "description": "Anthropic MCP 서버를 통해 Gmail 메시지와 초안을 읽고, 보내고, 관리."
-        },
-        "de": {
-          "name": "Gmail",
-          "description": "Gmail-Nachrichten und Entwürfe über den Anthropic-MCP-Server lesen, senden und verwalten."
-        },
-        "es": {
-          "name": "Gmail",
-          "description": "Lee, envía y gestiona mensajes y borradores de Gmail mediante el servidor MCP de Anthropic."
-        },
-        "fr": {
-          "name": "Gmail",
-          "description": "Lire, envoyer et gérer les messages et brouillons Gmail via le serveur MCP Anthropic."
-        }
-      }
-    },
-    {
-      "id": "google-calendar",
-      "name": "Google Calendar",
-      "description": "Manage Google Calendar events, schedules, and availability through the Anthropic MCP server",
-      "category": "productivity",
-      "icon": "lucide:calendar",
-      "tags": [
-        "calendar",
-        "scheduling",
-        "google",
-        "events",
-        "meetings"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Google Calendar",
-          "description": "通过 Anthropic MCP 服务器管理 Google 日历的活动、日程与可用时段。"
-        },
-        "zh-TW": {
-          "name": "Google Calendar",
-          "description": "透過 Anthropic MCP 伺服器管理 Google 日曆的活動、行程與空檔。"
-        },
-        "ja": {
-          "name": "Google Calendar",
-          "description": "Anthropic MCP サーバー経由で Google カレンダーのイベント、スケジュール、空き時間を管理。"
-        },
-        "ko": {
-          "name": "Google Calendar",
-          "description": "Anthropic MCP 서버를 통해 Google 캘린더 이벤트, 일정, 가용 시간을 관리."
-        },
-        "de": {
-          "name": "Google Calendar",
-          "description": "Verwaltet Google-Kalender-Ereignisse, Zeitpläne und Verfügbarkeiten über den Anthropic-MCP-Server."
-        },
-        "es": {
-          "name": "Google Calendar",
-          "description": "Gestiona eventos, horarios y disponibilidad de Google Calendar mediante el servidor MCP de Anthropic."
-        },
-        "fr": {
-          "name": "Google Calendar",
-          "description": "Gère les événements, horaires et disponibilités Google Calendar via le serveur MCP Anthropic."
-        }
-      }
-    },
-    {
-      "id": "google-drive",
-      "name": "Google Drive",
-      "description": "Browse, search, and read files from Google Drive through the Anthropic MCP server",
-      "category": "productivity",
-      "icon": "lucide:folder",
-      "tags": [
-        "files",
-        "storage",
-        "google",
-        "documents",
-        "cloud-storage"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Google Drive",
-          "description": "通过 Anthropic MCP 服务器浏览、搜索并读取 Google Drive 中的文件。"
-        },
-        "zh-TW": {
-          "name": "Google Drive",
-          "description": "透過 Anthropic MCP 伺服器瀏覽、搜尋並讀取 Google Drive 中的檔案。"
-        },
-        "ja": {
-          "name": "Google Drive",
-          "description": "Anthropic MCP サーバー経由で Google Drive のファイルを閲覧・検索・読み取り。"
-        },
-        "ko": {
-          "name": "Google Drive",
-          "description": "Anthropic MCP 서버를 통해 Google Drive의 파일을 탐색, 검색, 읽기."
-        },
-        "de": {
-          "name": "Google Drive",
-          "description": "Dateien aus Google Drive über den Anthropic-MCP-Server durchsuchen und lesen."
-        },
-        "es": {
-          "name": "Google Drive",
-          "description": "Navega, busca y lee archivos de Google Drive mediante el servidor MCP de Anthropic."
-        },
-        "fr": {
-          "name": "Google Drive",
-          "description": "Parcours, recherche et lecture de fichiers Google Drive via le serveur MCP Anthropic."
-        }
-      }
-    },
-    {
-      "id": "google-maps",
-      "name": "Google Maps",
-      "description": "Geocoding, reverse geocoding, directions, distance matrix, and place search via Google Maps Platform",
-      "category": "data",
-      "icon": "🗺️",
-      "tags": [
-        "maps",
-        "geocoding",
-        "directions",
-        "places",
-        "google",
-        "location"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Google Maps",
-          "description": "通过 Google Maps 平台进行地理编码、反向地理编码、路线规划、距离矩阵与地点搜索。"
-        },
-        "zh-TW": {
-          "name": "Google Maps",
-          "description": "透過 Google Maps 平台進行地理編碼、反向地理編碼、路線規劃、距離矩陣與地點搜尋。"
-        },
-        "ja": {
-          "name": "Google Maps",
-          "description": "Google Maps プラットフォームによるジオコーディング、逆ジオコーディング、経路、距離行列、場所検索。"
-        },
-        "ko": {
-          "name": "Google Maps",
-          "description": "Google Maps 플랫폼을 통한 지오코딩, 역지오코딩, 길찾기, 거리 매트릭스, 장소 검색."
-        },
-        "de": {
-          "name": "Google Maps",
-          "description": "Geocoding, Reverse-Geocoding, Routing, Distanzmatrix und Ortssuche über die Google-Maps-Plattform."
-        },
-        "es": {
-          "name": "Google Maps",
-          "description": "Geocodificación, geocodificación inversa, rutas, matriz de distancias y búsqueda de lugares en Google Maps."
-        },
-        "fr": {
-          "name": "Google Maps",
-          "description": "Géocodage, géocodage inverse, itinéraires, matrice de distances et recherche de lieux via Google Maps Platform."
-        }
-      }
-    },
-    {
-      "id": "jira",
-      "name": "Jira",
-      "description": "Access Jira issues, projects, boards, and sprints through the Atlassian MCP server",
-      "category": "devtools",
-      "icon": "lucide:clipboard-list",
-      "tags": [
-        "project-management",
-        "issues",
-        "agile",
-        "atlassian",
-        "tracking"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Jira",
-          "description": "通过 Atlassian MCP 服务器访问 Jira 的工单、项目、看板与 Sprint。"
-        },
-        "zh-TW": {
-          "name": "Jira",
-          "description": "透過 Atlassian MCP 伺服器存取 Jira 的工單、專案、看板與 Sprint。"
-        },
-        "ja": {
-          "name": "Jira",
-          "description": "Atlassian MCP サーバー経由で Jira の課題、プロジェクト、ボード、スプリントにアクセス。"
-        },
-        "ko": {
-          "name": "Jira",
-          "description": "Atlassian MCP 서버를 통해 Jira 이슈, 프로젝트, 보드, 스프린트에 접근."
-        },
-        "de": {
-          "name": "Jira",
-          "description": "Zugriff auf Jira-Vorgänge, -Projekte, -Boards und -Sprints über den Atlassian-MCP-Server."
-        },
-        "es": {
-          "name": "Jira",
-          "description": "Accede a issues, proyectos, tableros y sprints de Jira mediante el servidor MCP de Atlassian."
-        },
-        "fr": {
-          "name": "Jira",
-          "description": "Accès aux tickets, projets, tableaux et sprints Jira via le serveur MCP Atlassian."
-        }
-      }
-    },
-    {
-      "id": "linear",
-      "name": "Linear",
-      "description": "Manage Linear issues, projects, cycles, and teams through the MCP server",
-      "category": "devtools",
-      "icon": "lucide:ruler",
-      "tags": [
-        "project-management",
-        "issues",
-        "agile",
-        "tracking",
-        "sprint"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Linear",
-          "description": "通过 MCP 服务器管理 Linear 的 Issue、项目、Cycle 与团队。"
-        },
-        "zh-TW": {
-          "name": "Linear",
-          "description": "透過 MCP 伺服器管理 Linear 的 Issue、專案、Cycle 與團隊。"
-        },
-        "ja": {
-          "name": "Linear",
-          "description": "MCP サーバー経由で Linear の Issue、プロジェクト、サイクル、チームを管理。"
-        },
-        "ko": {
-          "name": "Linear",
-          "description": "MCP 서버를 통해 Linear 이슈, 프로젝트, 사이클, 팀을 관리."
-        },
-        "de": {
-          "name": "Linear",
-          "description": "Verwaltet Linear-Issues, -Projekte, -Zyklen und -Teams über den MCP-Server."
-        },
-        "es": {
-          "name": "Linear",
-          "description": "Gestiona issues, proyectos, ciclos y equipos de Linear mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Linear",
-          "description": "Gère les issues, projets, cycles et équipes Linear via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "memory",
-      "name": "Memory (Knowledge Graph)",
-      "description": "Persistent knowledge graph that lets agents store and retrieve facts, entities, and relationships across sessions",
-      "category": "ai",
-      "icon": "🧠",
-      "tags": [
-        "memory",
-        "knowledge-graph",
-        "persistence",
-        "facts",
-        "entities"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Memory (知识图谱)",
-          "description": "持久化知识图谱，让 Agent 跨会话存取事实、实体与关系。"
-        },
-        "zh-TW": {
-          "name": "Memory (知識圖譜)",
-          "description": "持久化知識圖譜，讓 Agent 跨會話存取事實、實體與關係。"
-        },
-        "ja": {
-          "name": "Memory (ナレッジグラフ)",
-          "description": "セッションを跨いで事実・エンティティ・関係を保存・参照できる永続ナレッジグラフ。"
-        },
-        "ko": {
-          "name": "Memory (지식 그래프)",
-          "description": "세션 간에 사실, 엔티티, 관계를 저장 및 조회할 수 있는 영구 지식 그래프."
-        },
-        "de": {
-          "name": "Memory (Wissensgraph)",
-          "description": "Persistenter Wissensgraph, in dem Agenten Fakten, Entitäten und Beziehungen über Sitzungen hinweg speichern."
-        },
-        "es": {
-          "name": "Memory (grafo de conocimiento)",
-          "description": "Grafo de conocimiento persistente para almacenar hechos, entidades y relaciones entre sesiones."
-        },
-        "fr": {
-          "name": "Memory (graphe de connaissances)",
-          "description": "Graphe de connaissances persistant pour stocker faits, entités et relations entre sessions."
-        }
-      }
-    },
-    {
-      "id": "mongodb",
-      "name": "MongoDB",
-      "description": "Query and manage MongoDB databases and collections through the MCP server",
-      "category": "data",
-      "icon": "lucide:leaf",
-      "tags": [
-        "database",
-        "nosql",
-        "document",
-        "mongo",
-        "queries"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "MongoDB",
-          "description": "通过 MCP 服务器查询与管理 MongoDB 数据库和集合。"
-        },
-        "zh-TW": {
-          "name": "MongoDB",
-          "description": "透過 MCP 伺服器查詢與管理 MongoDB 資料庫和集合。"
-        },
-        "ja": {
-          "name": "MongoDB",
-          "description": "MCP サーバー経由で MongoDB のデータベースとコレクションを問い合わせ・管理。"
-        },
-        "ko": {
-          "name": "MongoDB",
-          "description": "MCP 서버를 통해 MongoDB 데이터베이스와 컬렉션을 조회 및 관리."
-        },
-        "de": {
-          "name": "MongoDB",
-          "description": "MongoDB-Datenbanken und Collections über den MCP-Server abfragen und verwalten."
-        },
-        "es": {
-          "name": "MongoDB",
-          "description": "Consulta y gestiona bases de datos y colecciones de MongoDB mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "MongoDB",
-          "description": "Interroge et gère les bases et collections MongoDB via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "notion",
-      "name": "Notion",
-      "description": "Access and manage Notion pages, databases, and blocks through the MCP server",
-      "category": "productivity",
-      "icon": "lucide:file-text",
-      "tags": [
-        "notes",
-        "wiki",
-        "knowledge-base",
-        "documentation",
-        "databases"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Notion",
-          "description": "通过 MCP 服务器访问和管理 Notion 的页面、数据库与区块。"
-        },
-        "zh-TW": {
-          "name": "Notion",
-          "description": "透過 MCP 伺服器存取並管理 Notion 的頁面、資料庫與區塊。"
-        },
-        "ja": {
-          "name": "Notion",
-          "description": "MCP サーバー経由で Notion のページ、データベース、ブロックにアクセス・管理。"
-        },
-        "ko": {
-          "name": "Notion",
-          "description": "MCP 서버를 통해 Notion 페이지, 데이터베이스, 블록에 접근 및 관리."
-        },
-        "de": {
-          "name": "Notion",
-          "description": "Zugriff und Verwaltung von Notion-Seiten, -Datenbanken und -Blöcken über den MCP-Server."
-        },
-        "es": {
-          "name": "Notion",
-          "description": "Accede y gestiona páginas, bases de datos y bloques de Notion mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Notion",
-          "description": "Accès et gestion des pages, bases et blocs Notion via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "postgresql",
-      "name": "PostgreSQL",
-      "description": "Query and manage PostgreSQL databases through the MCP server",
-      "category": "data",
-      "icon": "lucide:database",
-      "tags": [
-        "database",
-        "sql",
-        "relational",
-        "postgres",
-        "queries"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "PostgreSQL",
-          "description": "通过 MCP 服务器查询与管理 PostgreSQL 数据库。"
-        },
-        "zh-TW": {
-          "name": "PostgreSQL",
-          "description": "透過 MCP 伺服器查詢與管理 PostgreSQL 資料庫。"
-        },
-        "ja": {
-          "name": "PostgreSQL",
-          "description": "MCP サーバー経由で PostgreSQL データベースを問い合わせ・管理。"
-        },
-        "ko": {
-          "name": "PostgreSQL",
-          "description": "MCP 서버를 통해 PostgreSQL 데이터베이스를 조회 및 관리."
-        },
-        "de": {
-          "name": "PostgreSQL",
-          "description": "PostgreSQL-Datenbanken über den MCP-Server abfragen und verwalten."
-        },
-        "es": {
-          "name": "PostgreSQL",
-          "description": "Consulta y gestiona bases de datos PostgreSQL mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "PostgreSQL",
-          "description": "Interroge et gère les bases PostgreSQL via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "puppeteer",
-      "name": "Puppeteer",
-      "description": "Control a headless Chrome browser — navigate pages, take screenshots, fill forms, and scrape JavaScript-rendered content",
-      "category": "devtools",
-      "icon": "🤖",
-      "tags": [
-        "browser",
-        "puppeteer",
-        "headless",
-        "screenshot",
-        "scraping",
-        "automation",
-        "chrome"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Puppeteer",
-          "description": "驱动无头 Chrome —— 导航页面、截图、填表并抓取 JavaScript 渲染后的内容。"
-        },
-        "zh-TW": {
-          "name": "Puppeteer",
-          "description": "驅動無頭 Chrome —— 導航頁面、截圖、填表並擷取 JavaScript 渲染後的內容。"
-        },
-        "ja": {
-          "name": "Puppeteer",
-          "description": "ヘッドレス Chrome を操作 —— ページ遷移、スクリーンショット、フォーム入力、JS レンダリング済みコンテンツのスクレイピング。"
-        },
-        "ko": {
-          "name": "Puppeteer",
-          "description": "헤드리스 Chrome 제어 —— 페이지 이동, 스크린샷, 폼 입력, JS 렌더링 콘텐츠 스크래핑."
-        },
-        "de": {
-          "name": "Puppeteer",
-          "description": "Steuert Headless-Chrome — Seiten navigieren, Screenshots, Formulare ausfüllen, JS-gerenderte Inhalte scrapen."
-        },
-        "es": {
-          "name": "Puppeteer",
-          "description": "Controla Chrome headless: navegación, capturas, formularios y scraping de contenido renderizado por JavaScript."
-        },
-        "fr": {
-          "name": "Puppeteer",
-          "description": "Pilote un Chrome headless — navigation, captures, remplissage de formulaires, scraping de contenu rendu par JS."
-        }
-      }
-    },
-    {
-      "id": "redis",
-      "name": "Redis",
-      "description": "Access and manage Redis key-value stores through the MCP server",
-      "category": "data",
-      "icon": "lucide:circle",
-      "tags": [
-        "database",
-        "cache",
-        "key-value",
-        "in-memory",
-        "nosql"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Redis",
-          "description": "通过 MCP 服务器访问和管理 Redis 键值存储。"
-        },
-        "zh-TW": {
-          "name": "Redis",
-          "description": "透過 MCP 伺服器存取並管理 Redis 鍵值儲存。"
-        },
-        "ja": {
-          "name": "Redis",
-          "description": "MCP サーバー経由で Redis のキーバリューストアにアクセス・管理。"
-        },
-        "ko": {
-          "name": "Redis",
-          "description": "MCP 서버를 통해 Redis 키-값 저장소에 접근 및 관리."
-        },
-        "de": {
-          "name": "Redis",
-          "description": "Zugriff und Verwaltung von Redis-Key-Value-Stores über den MCP-Server."
-        },
-        "es": {
-          "name": "Redis",
-          "description": "Accede y gestiona almacenes clave-valor de Redis mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Redis",
-          "description": "Accès et gestion des magasins clé-valeur Redis via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "sentry",
-      "name": "Sentry",
-      "description": "Monitor and manage Sentry error tracking, issues, and releases through the MCP server",
-      "category": "devtools",
-      "icon": "lucide:bug",
-      "tags": [
-        "monitoring",
-        "errors",
-        "debugging",
-        "observability",
-        "apm"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Sentry",
-          "description": "通过 MCP 服务器监控与管理 Sentry 的错误追踪、Issue 与发布。"
-        },
-        "zh-TW": {
-          "name": "Sentry",
-          "description": "透過 MCP 伺服器監控與管理 Sentry 的錯誤追蹤、Issue 與發佈。"
-        },
-        "ja": {
-          "name": "Sentry",
-          "description": "MCP サーバー経由で Sentry のエラートラッキング、Issue、リリースを監視・管理。"
-        },
-        "ko": {
-          "name": "Sentry",
-          "description": "MCP 서버를 통해 Sentry의 오류 추적, 이슈, 릴리스를 모니터링 및 관리."
-        },
-        "de": {
-          "name": "Sentry",
-          "description": "Sentry-Fehlertracking, -Issues und -Releases über den MCP-Server überwachen und verwalten."
-        },
-        "es": {
-          "name": "Sentry",
-          "description": "Monitoriza y gestiona errores, issues y releases de Sentry mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Sentry",
-          "description": "Supervise et gère le tracking d’erreurs, issues et releases Sentry via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "sequential-thinking",
-      "name": "Sequential Thinking",
-      "description": "Structured multi-step reasoning tool — breaks complex problems into revisable thought chains before answering",
-      "category": "ai",
-      "icon": "🔗",
-      "tags": [
-        "reasoning",
-        "thinking",
-        "chain-of-thought",
-        "planning",
-        "logic"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Sequential Thinking",
-          "description": "结构化的多步推理工具 —— 在回答前把复杂问题拆成可修订的思维链。"
-        },
-        "zh-TW": {
-          "name": "Sequential Thinking",
-          "description": "結構化多步推理工具 —— 回答前將複雜問題拆成可修訂的思維鏈。"
-        },
-        "ja": {
-          "name": "Sequential Thinking",
-          "description": "構造化された多段推論ツール —— 回答前に複雑な問題を修正可能な思考チェーンに分解。"
-        },
-        "ko": {
-          "name": "Sequential Thinking",
-          "description": "구조화된 다단계 추론 도구 —— 답변 전에 복잡한 문제를 수정 가능한 사고 체인으로 분해."
-        },
-        "de": {
-          "name": "Sequential Thinking",
-          "description": "Strukturiertes mehrstufiges Reasoning — komplexe Probleme in überarbeitbare Gedankenketten zerlegen."
-        },
-        "es": {
-          "name": "Sequential Thinking",
-          "description": "Razonamiento estructurado multi-paso: descompone problemas complejos en cadenas de pensamiento revisables antes de responder."
-        },
-        "fr": {
-          "name": "Sequential Thinking",
-          "description": "Raisonnement multi-étapes structuré : décompose les problèmes complexes en chaînes de pensée révisables avant de répondre."
-        }
-      }
-    },
-    {
-      "id": "slack",
-      "name": "Slack",
-      "description": "Access Slack channels, messages, and users through the MCP server",
-      "category": "communication",
-      "icon": "lucide:message-circle",
-      "tags": [
-        "chat",
-        "messaging",
-        "team",
-        "channels",
-        "collaboration"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Slack",
-          "description": "通过 MCP 服务器访问 Slack 频道、消息与用户。"
-        },
-        "zh-TW": {
-          "name": "Slack",
-          "description": "透過 MCP 伺服器存取 Slack 頻道、訊息與使用者。"
-        },
-        "ja": {
-          "name": "Slack",
-          "description": "MCP サーバー経由で Slack のチャンネル、メッセージ、ユーザーにアクセス。"
-        },
-        "ko": {
-          "name": "Slack",
-          "description": "MCP 서버를 통해 Slack 채널, 메시지, 사용자에 접근."
-        },
-        "de": {
-          "name": "Slack",
-          "description": "Zugriff auf Slack-Kanäle, -Nachrichten und -Nutzer über den MCP-Server."
-        },
-        "es": {
-          "name": "Slack",
-          "description": "Accede a canales, mensajes y usuarios de Slack mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Slack",
-          "description": "Accès aux salons, messages et utilisateurs Slack via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "sqlite-mcp",
-      "name": "SQLite",
-      "description": "Query and manage local SQLite databases through the MCP server",
-      "category": "data",
-      "icon": "lucide:save",
-      "tags": [
-        "database",
-        "sql",
-        "relational",
-        "sqlite",
-        "local",
-        "embedded"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "SQLite",
-          "description": "通过 MCP 服务器查询与管理本地 SQLite 数据库。"
-        },
-        "zh-TW": {
-          "name": "SQLite",
-          "description": "透過 MCP 伺服器查詢與管理本地 SQLite 資料庫。"
-        },
-        "ja": {
-          "name": "SQLite",
-          "description": "MCP サーバー経由でローカルの SQLite データベースを問い合わせ・管理。"
-        },
-        "ko": {
-          "name": "SQLite",
-          "description": "MCP 서버를 통해 로컬 SQLite 데이터베이스를 조회 및 관리."
-        },
-        "de": {
-          "name": "SQLite",
-          "description": "Lokale SQLite-Datenbanken über den MCP-Server abfragen und verwalten."
-        },
-        "es": {
-          "name": "SQLite",
-          "description": "Consulta y gestiona bases de datos SQLite locales mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "SQLite",
-          "description": "Interroge et gère les bases SQLite locales via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "teams-mcp",
-      "name": "Microsoft Teams",
-      "description": "Access Microsoft Teams channels, chats, and messages through the MCP server",
-      "category": "communication",
-      "icon": "lucide:users",
-      "tags": [
-        "chat",
-        "messaging",
-        "microsoft",
-        "enterprise",
-        "collaboration"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Microsoft Teams",
-          "description": "通过 MCP 服务器访问 Microsoft Teams 的频道、聊天与消息。"
-        },
-        "zh-TW": {
-          "name": "Microsoft Teams",
-          "description": "透過 MCP 伺服器存取 Microsoft Teams 的頻道、聊天與訊息。"
-        },
-        "ja": {
-          "name": "Microsoft Teams",
-          "description": "MCP サーバー経由で Microsoft Teams のチャンネル、チャット、メッセージにアクセス。"
-        },
-        "ko": {
-          "name": "Microsoft Teams",
-          "description": "MCP 서버를 통해 Microsoft Teams 채널, 채팅, 메시지에 접근."
-        },
-        "de": {
-          "name": "Microsoft Teams",
-          "description": "Zugriff auf Microsoft-Teams-Kanäle, -Chats und -Nachrichten über den MCP-Server."
-        },
-        "es": {
-          "name": "Microsoft Teams",
-          "description": "Accede a canales, chats y mensajes de Microsoft Teams mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Microsoft Teams",
-          "description": "Accès aux canaux, discussions et messages Microsoft Teams via le serveur MCP."
-        }
-      }
-    },
-    {
-      "id": "time",
-      "name": "Time & Timezone",
-      "description": "Get current time in any timezone, convert between timezones, and calculate time differences",
-      "category": "productivity",
-      "icon": "🕐",
-      "tags": [
-        "time",
-        "timezone",
-        "clock",
-        "datetime",
-        "conversion"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "时间 & 时区",
-          "description": "获取任意时区的当前时间、时区换算与时差计算。"
-        },
-        "zh-TW": {
-          "name": "時間 & 時區",
-          "description": "取得任意時區的目前時間、時區轉換與時差計算。"
-        },
-        "ja": {
-          "name": "時刻 & タイムゾーン",
-          "description": "任意のタイムゾーンの現在時刻取得、タイムゾーン変換、時差計算。"
-        },
-        "ko": {
-          "name": "시간 & 타임존",
-          "description": "임의 타임존의 현재 시간 조회, 타임존 변환, 시차 계산."
-        },
-        "de": {
-          "name": "Zeit & Zeitzone",
-          "description": "Aktuelle Uhrzeit in beliebigen Zeitzonen, Zeitzonenumrechnung und Zeitdifferenzberechnung."
-        },
-        "es": {
-          "name": "Hora y zona horaria",
-          "description": "Hora actual en cualquier zona horaria, conversión entre zonas y cálculo de diferencias."
-        },
-        "fr": {
-          "name": "Heure & Fuseau",
-          "description": "Heure actuelle dans n'importe quel fuseau, conversion entre fuseaux et calcul des différences."
-        }
-      }
-    },
-    {
-      "id": "todoist",
-      "name": "Todoist",
-      "description": "Manage Todoist tasks, projects, and labels through the MCP server",
-      "category": "productivity",
-      "icon": "lucide:check-circle",
-      "tags": [
-        "tasks",
-        "todo",
-        "project-management",
-        "productivity",
-        "gtd"
-      ],
-      "i18n": {
-        "zh": {
-          "name": "Todoist",
-          "description": "通过 MCP 服务器管理 Todoist 的任务、项目与标签。"
-        },
-        "zh-TW": {
-          "name": "Todoist",
-          "description": "透過 MCP 伺服器管理 Todoist 的任務、專案與標籤。"
-        },
-        "ja": {
-          "name": "Todoist",
-          "description": "MCP サーバー経由で Todoist のタスク、プロジェクト、ラベルを管理。"
-        },
-        "ko": {
-          "name": "Todoist",
-          "description": "MCP 서버를 통해 Todoist 작업, 프로젝트, 라벨을 관리."
-        },
-        "de": {
-          "name": "Todoist",
-          "description": "Todoist-Aufgaben, -Projekte und -Labels über den MCP-Server verwalten."
-        },
-        "es": {
-          "name": "Todoist",
-          "description": "Gestiona tareas, proyectos y etiquetas de Todoist mediante el servidor MCP."
-        },
-        "fr": {
-          "name": "Todoist",
-          "description": "Gère les tâches, projets et étiquettes Todoist via le serveur MCP."
-        }
-      }
-    }
-  ],
   "workflows": [
     {
       "id": "api-design",
@@ -7412,15 +5944,1481 @@
       "icon": ""
     }
   ],
-  "mcp": [],
+  "mcp": [
+    {
+      "id": "aws",
+      "name": "AWS",
+      "description": "Manage Amazon Web Services resources including S3, EC2, Lambda, and more through the MCP server",
+      "category": "cloud",
+      "icon": "lucide:cloud",
+      "tags": [
+        "cloud",
+        "amazon",
+        "infrastructure",
+        "s3",
+        "ec2",
+        "lambda",
+        "devops"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "AWS",
+          "description": "通过 MCP 服务器管理 Amazon Web Services 资源（S3、EC2、Lambda 等）。"
+        },
+        "zh-TW": {
+          "name": "AWS",
+          "description": "透過 MCP 伺服器管理 Amazon Web Services 資源（S3、EC2、Lambda 等）。"
+        },
+        "ja": {
+          "name": "AWS",
+          "description": "MCP サーバー経由で AWS リソース（S3、EC2、Lambda 等）を管理。"
+        },
+        "ko": {
+          "name": "AWS",
+          "description": "MCP 서버를 통해 AWS 리소스(S3, EC2, Lambda 등)를 관리."
+        },
+        "de": {
+          "name": "AWS",
+          "description": "Verwaltet AWS-Ressourcen (S3, EC2, Lambda u. a.) über den MCP-Server."
+        },
+        "es": {
+          "name": "AWS",
+          "description": "Gestiona recursos de AWS (S3, EC2, Lambda, etc.) a través del servidor MCP."
+        },
+        "fr": {
+          "name": "AWS",
+          "description": "Gère les ressources AWS (S3, EC2, Lambda, etc.) via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "azure-mcp",
+      "name": "Microsoft Azure",
+      "description": "Manage Azure resources including VMs, Storage, and App Services through the MCP server",
+      "category": "cloud",
+      "icon": "lucide:diamond",
+      "tags": [
+        "cloud",
+        "microsoft",
+        "infrastructure",
+        "azure",
+        "devops",
+        "enterprise"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Microsoft Azure",
+          "description": "通过 MCP 服务器管理 Azure 资源（虚拟机、存储、App Services 等）。"
+        },
+        "zh-TW": {
+          "name": "Microsoft Azure",
+          "description": "透過 MCP 伺服器管理 Azure 資源（虛擬機、儲存體、App Services 等）。"
+        },
+        "ja": {
+          "name": "Microsoft Azure",
+          "description": "MCP サーバー経由で Azure リソース（VM、ストレージ、App Services）を管理。"
+        },
+        "ko": {
+          "name": "Microsoft Azure",
+          "description": "MCP 서버를 통해 Azure 리소스(VM, 스토리지, App Services)를 관리."
+        },
+        "de": {
+          "name": "Microsoft Azure",
+          "description": "Verwaltet Azure-Ressourcen (VMs, Storage, App Services) über den MCP-Server."
+        },
+        "es": {
+          "name": "Microsoft Azure",
+          "description": "Gestiona recursos de Azure (VMs, Storage, App Services) a través del servidor MCP."
+        },
+        "fr": {
+          "name": "Microsoft Azure",
+          "description": "Gère les ressources Azure (VM, Storage, App Services) via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "bitbucket",
+      "name": "Bitbucket",
+      "description": "Access Bitbucket repositories, pull requests, and pipelines through the MCP server",
+      "category": "devtools",
+      "icon": "lucide:package",
+      "tags": [
+        "git",
+        "vcs",
+        "code",
+        "pull-requests",
+        "ci",
+        "atlassian"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Bitbucket",
+          "description": "通过 MCP 服务器访问 Bitbucket 仓库、Pull Request 与流水线。"
+        },
+        "zh-TW": {
+          "name": "Bitbucket",
+          "description": "透過 MCP 伺服器存取 Bitbucket 儲存庫、Pull Request 與 Pipeline。"
+        },
+        "ja": {
+          "name": "Bitbucket",
+          "description": "MCP サーバー経由で Bitbucket のリポジトリ、プルリクエスト、パイプラインにアクセス。"
+        },
+        "ko": {
+          "name": "Bitbucket",
+          "description": "MCP 서버를 통해 Bitbucket 저장소, PR, 파이프라인에 접근."
+        },
+        "de": {
+          "name": "Bitbucket",
+          "description": "Zugriff auf Bitbucket-Repositories, Pull-Requests und Pipelines über den MCP-Server."
+        },
+        "es": {
+          "name": "Bitbucket",
+          "description": "Accede a repositorios, pull requests y pipelines de Bitbucket mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Bitbucket",
+          "description": "Accès aux dépôts, pull requests et pipelines Bitbucket via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "brave-search",
+      "name": "Brave Search",
+      "description": "Perform web searches using the Brave Search API through the MCP server",
+      "category": "ai",
+      "icon": "lucide:shield",
+      "tags": [
+        "search",
+        "web",
+        "brave",
+        "api",
+        "information-retrieval"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Brave Search",
+          "description": "通过 MCP 服务器使用 Brave Search API 进行网页搜索。"
+        },
+        "zh-TW": {
+          "name": "Brave Search",
+          "description": "透過 MCP 伺服器使用 Brave Search API 進行網頁搜尋。"
+        },
+        "ja": {
+          "name": "Brave Search",
+          "description": "MCP サーバー経由で Brave Search API を使ってウェブ検索を実行。"
+        },
+        "ko": {
+          "name": "Brave Search",
+          "description": "MCP 서버를 통해 Brave Search API로 웹 검색을 수행."
+        },
+        "de": {
+          "name": "Brave Search",
+          "description": "Websuche über die Brave-Search-API per MCP-Server."
+        },
+        "es": {
+          "name": "Brave Search",
+          "description": "Realiza búsquedas web usando la API de Brave Search a través del servidor MCP."
+        },
+        "fr": {
+          "name": "Brave Search",
+          "description": "Recherches web via l'API Brave Search et le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "discord-mcp",
+      "name": "Discord",
+      "description": "Access Discord servers, channels, and messages through the MCP server",
+      "category": "communication",
+      "icon": "lucide:gamepad-2",
+      "tags": [
+        "chat",
+        "messaging",
+        "community",
+        "gaming",
+        "voice"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Discord",
+          "description": "通过 MCP 服务器访问 Discord 服务器、频道与消息。"
+        },
+        "zh-TW": {
+          "name": "Discord",
+          "description": "透過 MCP 伺服器存取 Discord 伺服器、頻道與訊息。"
+        },
+        "ja": {
+          "name": "Discord",
+          "description": "MCP サーバー経由で Discord のサーバー、チャンネル、メッセージにアクセス。"
+        },
+        "ko": {
+          "name": "Discord",
+          "description": "MCP 서버를 통해 Discord 서버, 채널, 메시지에 접근."
+        },
+        "de": {
+          "name": "Discord",
+          "description": "Zugriff auf Discord-Server, Kanäle und Nachrichten über den MCP-Server."
+        },
+        "es": {
+          "name": "Discord",
+          "description": "Accede a servidores, canales y mensajes de Discord mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Discord",
+          "description": "Accès aux serveurs, salons et messages Discord via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "dropbox",
+      "name": "Dropbox",
+      "description": "Access and manage Dropbox files and folders through the MCP server",
+      "category": "productivity",
+      "icon": "lucide:package",
+      "tags": [
+        "files",
+        "storage",
+        "cloud-storage",
+        "sync",
+        "sharing"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Dropbox",
+          "description": "通过 MCP 服务器访问和管理 Dropbox 的文件与文件夹。"
+        },
+        "zh-TW": {
+          "name": "Dropbox",
+          "description": "透過 MCP 伺服器存取並管理 Dropbox 的檔案與資料夾。"
+        },
+        "ja": {
+          "name": "Dropbox",
+          "description": "MCP サーバー経由で Dropbox のファイルとフォルダを操作。"
+        },
+        "ko": {
+          "name": "Dropbox",
+          "description": "MCP 서버를 통해 Dropbox 파일과 폴더를 관리."
+        },
+        "de": {
+          "name": "Dropbox",
+          "description": "Zugriff und Verwaltung von Dropbox-Dateien und -Ordnern über den MCP-Server."
+        },
+        "es": {
+          "name": "Dropbox",
+          "description": "Accede y gestiona archivos y carpetas de Dropbox mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Dropbox",
+          "description": "Accès et gestion des fichiers et dossiers Dropbox via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "elasticsearch",
+      "name": "Elasticsearch",
+      "description": "Search and manage Elasticsearch indices and documents through the MCP server",
+      "category": "data",
+      "icon": "lucide:search",
+      "tags": [
+        "search",
+        "database",
+        "indexing",
+        "analytics",
+        "full-text"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Elasticsearch",
+          "description": "通过 MCP 服务器搜索与管理 Elasticsearch 索引和文档。"
+        },
+        "zh-TW": {
+          "name": "Elasticsearch",
+          "description": "透過 MCP 伺服器搜尋與管理 Elasticsearch 索引與文件。"
+        },
+        "ja": {
+          "name": "Elasticsearch",
+          "description": "MCP サーバー経由で Elasticsearch のインデックスとドキュメントを検索・管理。"
+        },
+        "ko": {
+          "name": "Elasticsearch",
+          "description": "MCP 서버를 통해 Elasticsearch 인덱스와 문서를 검색 및 관리."
+        },
+        "de": {
+          "name": "Elasticsearch",
+          "description": "Suchen und Verwalten von Elasticsearch-Indizes und -Dokumenten über den MCP-Server."
+        },
+        "es": {
+          "name": "Elasticsearch",
+          "description": "Busca y gestiona índices y documentos de Elasticsearch mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Elasticsearch",
+          "description": "Recherche et gestion des index et documents Elasticsearch via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "exa-search",
+      "name": "Exa Search",
+      "description": "Perform AI-powered neural searches and retrieve web content through the Exa MCP server",
+      "category": "ai",
+      "icon": "lucide:search",
+      "tags": [
+        "search",
+        "web",
+        "ai",
+        "neural",
+        "semantic",
+        "information-retrieval"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Exa Search",
+          "description": "通过 Exa MCP 服务器执行 AI 神经搜索并获取网页内容。"
+        },
+        "zh-TW": {
+          "name": "Exa Search",
+          "description": "透過 Exa MCP 伺服器執行 AI 神經搜尋並擷取網頁內容。"
+        },
+        "ja": {
+          "name": "Exa Search",
+          "description": "Exa MCP サーバー経由で AI ニューラル検索とウェブコンテンツ取得を実行。"
+        },
+        "ko": {
+          "name": "Exa Search",
+          "description": "Exa MCP 서버를 통해 AI 뉴럴 검색과 웹 콘텐츠 조회를 수행."
+        },
+        "de": {
+          "name": "Exa Search",
+          "description": "KI-gestützte neuronale Suche und Webinhalts-Abruf über den Exa-MCP-Server."
+        },
+        "es": {
+          "name": "Exa Search",
+          "description": "Realiza búsquedas neuronales con IA y recupera contenido web mediante el servidor MCP de Exa."
+        },
+        "fr": {
+          "name": "Exa Search",
+          "description": "Recherches neuronales IA et récupération de contenu web via le serveur MCP Exa."
+        }
+      }
+    },
+    {
+      "id": "fetch",
+      "name": "Web Fetch",
+      "description": "Fetch any web URL and receive its content as clean Markdown — ideal for reading docs, articles, and APIs",
+      "category": "devtools",
+      "icon": "🌐",
+      "tags": [
+        "web",
+        "fetch",
+        "scraping",
+        "markdown",
+        "http"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Web Fetch",
+          "description": "抓取任意网页并以干净的 Markdown 返回内容 —— 适合阅读文档、文章与 API。"
+        },
+        "zh-TW": {
+          "name": "Web Fetch",
+          "description": "擷取任意網頁並以乾淨的 Markdown 回傳 —— 適合閱讀文件、文章與 API。"
+        },
+        "ja": {
+          "name": "Web Fetch",
+          "description": "任意の URL を取得しクリーンな Markdown に整形 —— ドキュメント、記事、API の読み取りに最適。"
+        },
+        "ko": {
+          "name": "Web Fetch",
+          "description": "임의의 웹 URL을 가져와 깔끔한 Markdown으로 반환 —— 문서, 기사, API 읽기에 적합."
+        },
+        "de": {
+          "name": "Web Fetch",
+          "description": "Ruft beliebige Web-URLs ab und liefert sauberes Markdown — ideal für Dokumentationen, Artikel und APIs."
+        },
+        "es": {
+          "name": "Web Fetch",
+          "description": "Obtiene cualquier URL web y devuelve su contenido en Markdown limpio — ideal para docs, artículos y APIs."
+        },
+        "fr": {
+          "name": "Web Fetch",
+          "description": "Récupère n'importe quelle URL et retourne son contenu en Markdown propre — idéal pour docs, articles et API."
+        }
+      }
+    },
+    {
+      "id": "filesystem",
+      "name": "Filesystem",
+      "description": "Read, write, search, and manage local files through the official MCP filesystem server",
+      "category": "devtools",
+      "icon": "📁",
+      "tags": [
+        "files",
+        "local",
+        "read",
+        "write",
+        "search"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Filesystem",
+          "description": "通过官方 MCP Filesystem 服务器读、写、搜索和管理本地文件。"
+        },
+        "zh-TW": {
+          "name": "Filesystem",
+          "description": "透過官方 MCP Filesystem 伺服器讀、寫、搜尋與管理本地檔案。"
+        },
+        "ja": {
+          "name": "Filesystem",
+          "description": "公式 MCP Filesystem サーバー経由でローカルファイルを読み書き・検索・管理。"
+        },
+        "ko": {
+          "name": "Filesystem",
+          "description": "공식 MCP Filesystem 서버를 통해 로컬 파일을 읽기/쓰기/검색/관리."
+        },
+        "de": {
+          "name": "Filesystem",
+          "description": "Lokale Dateien über den offiziellen MCP-Filesystem-Server lesen, schreiben, suchen und verwalten."
+        },
+        "es": {
+          "name": "Filesystem",
+          "description": "Lee, escribe, busca y gestiona archivos locales mediante el servidor MCP oficial de sistema de archivos."
+        },
+        "fr": {
+          "name": "Filesystem",
+          "description": "Lire, écrire, rechercher et gérer les fichiers locaux via le serveur MCP Filesystem officiel."
+        }
+      }
+    },
+    {
+      "id": "gcp-mcp",
+      "name": "Google Cloud Platform",
+      "description": "Manage GCP resources including Compute Engine, Cloud Storage, and BigQuery through the MCP server",
+      "category": "cloud",
+      "icon": "lucide:globe",
+      "tags": [
+        "cloud",
+        "google",
+        "infrastructure",
+        "gce",
+        "gcs",
+        "bigquery",
+        "devops"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Google Cloud Platform",
+          "description": "通过 MCP 服务器管理 GCP 资源（Compute Engine、Cloud Storage、BigQuery 等）。"
+        },
+        "zh-TW": {
+          "name": "Google Cloud Platform",
+          "description": "透過 MCP 伺服器管理 GCP 資源（Compute Engine、Cloud Storage、BigQuery 等）。"
+        },
+        "ja": {
+          "name": "Google Cloud Platform",
+          "description": "MCP サーバー経由で GCP リソース（Compute Engine、Cloud Storage、BigQuery）を管理。"
+        },
+        "ko": {
+          "name": "Google Cloud Platform",
+          "description": "MCP 서버를 통해 GCP 리소스(Compute Engine, Cloud Storage, BigQuery)를 관리."
+        },
+        "de": {
+          "name": "Google Cloud Platform",
+          "description": "Verwaltet GCP-Ressourcen (Compute Engine, Cloud Storage, BigQuery) über den MCP-Server."
+        },
+        "es": {
+          "name": "Google Cloud Platform",
+          "description": "Gestiona recursos de GCP (Compute Engine, Cloud Storage, BigQuery) mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Google Cloud Platform",
+          "description": "Gère les ressources GCP (Compute Engine, Cloud Storage, BigQuery) via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "git",
+      "name": "Git",
+      "description": "Inspect local Git repositories — read commits, diffs, branches, file history, and blame without shell access",
+      "category": "devtools",
+      "icon": "🌿",
+      "tags": [
+        "git",
+        "version-control",
+        "commits",
+        "diff",
+        "history",
+        "blame"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Git",
+          "description": "检视本地 Git 仓库 —— 读取提交、diff、分支、文件历史与 blame，无需 shell 访问。"
+        },
+        "zh-TW": {
+          "name": "Git",
+          "description": "檢視本地 Git 儲存庫 —— 讀取 Commit、Diff、分支、檔案歷史與 blame，無需 Shell 存取。"
+        },
+        "ja": {
+          "name": "Git",
+          "description": "シェルなしでローカル Git リポジトリを検査 —— コミット、diff、ブランチ、ファイル履歴、blame を取得。"
+        },
+        "ko": {
+          "name": "Git",
+          "description": "셸 접근 없이 로컬 Git 저장소를 조사 —— 커밋, diff, 브랜치, 파일 이력, blame을 확인."
+        },
+        "de": {
+          "name": "Git",
+          "description": "Lokale Git-Repositories inspizieren — Commits, Diffs, Branches, Datei-Historie und Blame ohne Shell-Zugriff."
+        },
+        "es": {
+          "name": "Git",
+          "description": "Inspecciona repositorios Git locales: commits, diffs, ramas, historial y blame sin acceso a shell."
+        },
+        "fr": {
+          "name": "Git",
+          "description": "Inspecte les dépôts Git locaux — commits, diffs, branches, historique et blame sans accès shell."
+        }
+      }
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "description": "Access GitHub repositories, issues, pull requests, and organizations through the official MCP server",
+      "category": "devtools",
+      "icon": "lucide:github",
+      "tags": [
+        "git",
+        "vcs",
+        "code",
+        "issues",
+        "pull-requests",
+        "ci"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "GitHub",
+          "description": "通过官方 MCP 服务器访问 GitHub 仓库、Issue、Pull Request 与组织。"
+        },
+        "zh-TW": {
+          "name": "GitHub",
+          "description": "透過官方 MCP 伺服器存取 GitHub 儲存庫、Issue、Pull Request 與組織。"
+        },
+        "ja": {
+          "name": "GitHub",
+          "description": "公式 MCP サーバー経由で GitHub のリポジトリ、Issue、Pull Request、Organization にアクセス。"
+        },
+        "ko": {
+          "name": "GitHub",
+          "description": "공식 MCP 서버를 통해 GitHub 저장소, 이슈, PR, 조직에 접근."
+        },
+        "de": {
+          "name": "GitHub",
+          "description": "Zugriff auf GitHub-Repositories, Issues, Pull-Requests und Organisationen über den offiziellen MCP-Server."
+        },
+        "es": {
+          "name": "GitHub",
+          "description": "Accede a repositorios, issues, pull requests y organizaciones de GitHub mediante el servidor MCP oficial."
+        },
+        "fr": {
+          "name": "GitHub",
+          "description": "Accès aux dépôts, issues, pull requests et organisations GitHub via le serveur MCP officiel."
+        }
+      }
+    },
+    {
+      "id": "gitlab",
+      "name": "GitLab",
+      "description": "Access GitLab projects, merge requests, issues, and CI/CD pipelines through the MCP server",
+      "category": "devtools",
+      "icon": "lucide:flame",
+      "tags": [
+        "git",
+        "vcs",
+        "code",
+        "merge-requests",
+        "ci",
+        "devops"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "GitLab",
+          "description": "通过 MCP 服务器访问 GitLab 项目、Merge Request、Issue 与 CI/CD 流水线。"
+        },
+        "zh-TW": {
+          "name": "GitLab",
+          "description": "透過 MCP 伺服器存取 GitLab 專案、Merge Request、Issue 與 CI/CD Pipeline。"
+        },
+        "ja": {
+          "name": "GitLab",
+          "description": "MCP サーバー経由で GitLab のプロジェクト、マージリクエスト、Issue、CI/CD パイプラインを操作。"
+        },
+        "ko": {
+          "name": "GitLab",
+          "description": "MCP 서버를 통해 GitLab 프로젝트, 머지 요청, 이슈, CI/CD 파이프라인에 접근."
+        },
+        "de": {
+          "name": "GitLab",
+          "description": "Zugriff auf GitLab-Projekte, Merge Requests, Issues und CI/CD-Pipelines über den MCP-Server."
+        },
+        "es": {
+          "name": "GitLab",
+          "description": "Accede a proyectos, merge requests, issues y pipelines de CI/CD de GitLab mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "GitLab",
+          "description": "Accès aux projets, merge requests, issues et pipelines CI/CD GitLab via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "gmail",
+      "name": "Gmail",
+      "description": "Read, send, and manage Gmail messages and drafts through the Anthropic MCP server",
+      "category": "productivity",
+      "icon": "lucide:mail",
+      "tags": [
+        "email",
+        "google",
+        "messaging",
+        "inbox",
+        "communication"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Gmail",
+          "description": "通过 Anthropic MCP 服务器读取、发送和管理 Gmail 邮件与草稿。"
+        },
+        "zh-TW": {
+          "name": "Gmail",
+          "description": "透過 Anthropic MCP 伺服器讀取、傳送與管理 Gmail 郵件與草稿。"
+        },
+        "ja": {
+          "name": "Gmail",
+          "description": "Anthropic MCP サーバー経由で Gmail のメッセージと下書きを読み書き。"
+        },
+        "ko": {
+          "name": "Gmail",
+          "description": "Anthropic MCP 서버를 통해 Gmail 메시지와 초안을 읽고, 보내고, 관리."
+        },
+        "de": {
+          "name": "Gmail",
+          "description": "Gmail-Nachrichten und Entwürfe über den Anthropic-MCP-Server lesen, senden und verwalten."
+        },
+        "es": {
+          "name": "Gmail",
+          "description": "Lee, envía y gestiona mensajes y borradores de Gmail mediante el servidor MCP de Anthropic."
+        },
+        "fr": {
+          "name": "Gmail",
+          "description": "Lire, envoyer et gérer les messages et brouillons Gmail via le serveur MCP Anthropic."
+        }
+      }
+    },
+    {
+      "id": "google-calendar",
+      "name": "Google Calendar",
+      "description": "Manage Google Calendar events, schedules, and availability through the Anthropic MCP server",
+      "category": "productivity",
+      "icon": "lucide:calendar",
+      "tags": [
+        "calendar",
+        "scheduling",
+        "google",
+        "events",
+        "meetings"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Google Calendar",
+          "description": "通过 Anthropic MCP 服务器管理 Google 日历的活动、日程与可用时段。"
+        },
+        "zh-TW": {
+          "name": "Google Calendar",
+          "description": "透過 Anthropic MCP 伺服器管理 Google 日曆的活動、行程與空檔。"
+        },
+        "ja": {
+          "name": "Google Calendar",
+          "description": "Anthropic MCP サーバー経由で Google カレンダーのイベント、スケジュール、空き時間を管理。"
+        },
+        "ko": {
+          "name": "Google Calendar",
+          "description": "Anthropic MCP 서버를 통해 Google 캘린더 이벤트, 일정, 가용 시간을 관리."
+        },
+        "de": {
+          "name": "Google Calendar",
+          "description": "Verwaltet Google-Kalender-Ereignisse, Zeitpläne und Verfügbarkeiten über den Anthropic-MCP-Server."
+        },
+        "es": {
+          "name": "Google Calendar",
+          "description": "Gestiona eventos, horarios y disponibilidad de Google Calendar mediante el servidor MCP de Anthropic."
+        },
+        "fr": {
+          "name": "Google Calendar",
+          "description": "Gère les événements, horaires et disponibilités Google Calendar via le serveur MCP Anthropic."
+        }
+      }
+    },
+    {
+      "id": "google-drive",
+      "name": "Google Drive",
+      "description": "Browse, search, and read files from Google Drive through the Anthropic MCP server",
+      "category": "productivity",
+      "icon": "lucide:folder",
+      "tags": [
+        "files",
+        "storage",
+        "google",
+        "documents",
+        "cloud-storage"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Google Drive",
+          "description": "通过 Anthropic MCP 服务器浏览、搜索并读取 Google Drive 中的文件。"
+        },
+        "zh-TW": {
+          "name": "Google Drive",
+          "description": "透過 Anthropic MCP 伺服器瀏覽、搜尋並讀取 Google Drive 中的檔案。"
+        },
+        "ja": {
+          "name": "Google Drive",
+          "description": "Anthropic MCP サーバー経由で Google Drive のファイルを閲覧・検索・読み取り。"
+        },
+        "ko": {
+          "name": "Google Drive",
+          "description": "Anthropic MCP 서버를 통해 Google Drive의 파일을 탐색, 검색, 읽기."
+        },
+        "de": {
+          "name": "Google Drive",
+          "description": "Dateien aus Google Drive über den Anthropic-MCP-Server durchsuchen und lesen."
+        },
+        "es": {
+          "name": "Google Drive",
+          "description": "Navega, busca y lee archivos de Google Drive mediante el servidor MCP de Anthropic."
+        },
+        "fr": {
+          "name": "Google Drive",
+          "description": "Parcours, recherche et lecture de fichiers Google Drive via le serveur MCP Anthropic."
+        }
+      }
+    },
+    {
+      "id": "google-maps",
+      "name": "Google Maps",
+      "description": "Geocoding, reverse geocoding, directions, distance matrix, and place search via Google Maps Platform",
+      "category": "data",
+      "icon": "🗺️",
+      "tags": [
+        "maps",
+        "geocoding",
+        "directions",
+        "places",
+        "google",
+        "location"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Google Maps",
+          "description": "通过 Google Maps 平台进行地理编码、反向地理编码、路线规划、距离矩阵与地点搜索。"
+        },
+        "zh-TW": {
+          "name": "Google Maps",
+          "description": "透過 Google Maps 平台進行地理編碼、反向地理編碼、路線規劃、距離矩陣與地點搜尋。"
+        },
+        "ja": {
+          "name": "Google Maps",
+          "description": "Google Maps プラットフォームによるジオコーディング、逆ジオコーディング、経路、距離行列、場所検索。"
+        },
+        "ko": {
+          "name": "Google Maps",
+          "description": "Google Maps 플랫폼을 통한 지오코딩, 역지오코딩, 길찾기, 거리 매트릭스, 장소 검색."
+        },
+        "de": {
+          "name": "Google Maps",
+          "description": "Geocoding, Reverse-Geocoding, Routing, Distanzmatrix und Ortssuche über die Google-Maps-Plattform."
+        },
+        "es": {
+          "name": "Google Maps",
+          "description": "Geocodificación, geocodificación inversa, rutas, matriz de distancias y búsqueda de lugares en Google Maps."
+        },
+        "fr": {
+          "name": "Google Maps",
+          "description": "Géocodage, géocodage inverse, itinéraires, matrice de distances et recherche de lieux via Google Maps Platform."
+        }
+      }
+    },
+    {
+      "id": "jira",
+      "name": "Jira",
+      "description": "Access Jira issues, projects, boards, and sprints through the Atlassian MCP server",
+      "category": "devtools",
+      "icon": "lucide:clipboard-list",
+      "tags": [
+        "project-management",
+        "issues",
+        "agile",
+        "atlassian",
+        "tracking"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Jira",
+          "description": "通过 Atlassian MCP 服务器访问 Jira 的工单、项目、看板与 Sprint。"
+        },
+        "zh-TW": {
+          "name": "Jira",
+          "description": "透過 Atlassian MCP 伺服器存取 Jira 的工單、專案、看板與 Sprint。"
+        },
+        "ja": {
+          "name": "Jira",
+          "description": "Atlassian MCP サーバー経由で Jira の課題、プロジェクト、ボード、スプリントにアクセス。"
+        },
+        "ko": {
+          "name": "Jira",
+          "description": "Atlassian MCP 서버를 통해 Jira 이슈, 프로젝트, 보드, 스프린트에 접근."
+        },
+        "de": {
+          "name": "Jira",
+          "description": "Zugriff auf Jira-Vorgänge, -Projekte, -Boards und -Sprints über den Atlassian-MCP-Server."
+        },
+        "es": {
+          "name": "Jira",
+          "description": "Accede a issues, proyectos, tableros y sprints de Jira mediante el servidor MCP de Atlassian."
+        },
+        "fr": {
+          "name": "Jira",
+          "description": "Accès aux tickets, projets, tableaux et sprints Jira via le serveur MCP Atlassian."
+        }
+      }
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "description": "Manage Linear issues, projects, cycles, and teams through the MCP server",
+      "category": "devtools",
+      "icon": "lucide:ruler",
+      "tags": [
+        "project-management",
+        "issues",
+        "agile",
+        "tracking",
+        "sprint"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Linear",
+          "description": "通过 MCP 服务器管理 Linear 的 Issue、项目、Cycle 与团队。"
+        },
+        "zh-TW": {
+          "name": "Linear",
+          "description": "透過 MCP 伺服器管理 Linear 的 Issue、專案、Cycle 與團隊。"
+        },
+        "ja": {
+          "name": "Linear",
+          "description": "MCP サーバー経由で Linear の Issue、プロジェクト、サイクル、チームを管理。"
+        },
+        "ko": {
+          "name": "Linear",
+          "description": "MCP 서버를 통해 Linear 이슈, 프로젝트, 사이클, 팀을 관리."
+        },
+        "de": {
+          "name": "Linear",
+          "description": "Verwaltet Linear-Issues, -Projekte, -Zyklen und -Teams über den MCP-Server."
+        },
+        "es": {
+          "name": "Linear",
+          "description": "Gestiona issues, proyectos, ciclos y equipos de Linear mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Linear",
+          "description": "Gère les issues, projets, cycles et équipes Linear via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "memory",
+      "name": "Memory (Knowledge Graph)",
+      "description": "Persistent knowledge graph that lets agents store and retrieve facts, entities, and relationships across sessions",
+      "category": "ai",
+      "icon": "🧠",
+      "tags": [
+        "memory",
+        "knowledge-graph",
+        "persistence",
+        "facts",
+        "entities"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Memory (知识图谱)",
+          "description": "持久化知识图谱，让 Agent 跨会话存取事实、实体与关系。"
+        },
+        "zh-TW": {
+          "name": "Memory (知識圖譜)",
+          "description": "持久化知識圖譜，讓 Agent 跨會話存取事實、實體與關係。"
+        },
+        "ja": {
+          "name": "Memory (ナレッジグラフ)",
+          "description": "セッションを跨いで事実・エンティティ・関係を保存・参照できる永続ナレッジグラフ。"
+        },
+        "ko": {
+          "name": "Memory (지식 그래프)",
+          "description": "세션 간에 사실, 엔티티, 관계를 저장 및 조회할 수 있는 영구 지식 그래프."
+        },
+        "de": {
+          "name": "Memory (Wissensgraph)",
+          "description": "Persistenter Wissensgraph, in dem Agenten Fakten, Entitäten und Beziehungen über Sitzungen hinweg speichern."
+        },
+        "es": {
+          "name": "Memory (grafo de conocimiento)",
+          "description": "Grafo de conocimiento persistente para almacenar hechos, entidades y relaciones entre sesiones."
+        },
+        "fr": {
+          "name": "Memory (graphe de connaissances)",
+          "description": "Graphe de connaissances persistant pour stocker faits, entités et relations entre sessions."
+        }
+      }
+    },
+    {
+      "id": "mongodb",
+      "name": "MongoDB",
+      "description": "Query and manage MongoDB databases and collections through the MCP server",
+      "category": "data",
+      "icon": "lucide:leaf",
+      "tags": [
+        "database",
+        "nosql",
+        "document",
+        "mongo",
+        "queries"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "MongoDB",
+          "description": "通过 MCP 服务器查询与管理 MongoDB 数据库和集合。"
+        },
+        "zh-TW": {
+          "name": "MongoDB",
+          "description": "透過 MCP 伺服器查詢與管理 MongoDB 資料庫和集合。"
+        },
+        "ja": {
+          "name": "MongoDB",
+          "description": "MCP サーバー経由で MongoDB のデータベースとコレクションを問い合わせ・管理。"
+        },
+        "ko": {
+          "name": "MongoDB",
+          "description": "MCP 서버를 통해 MongoDB 데이터베이스와 컬렉션을 조회 및 관리."
+        },
+        "de": {
+          "name": "MongoDB",
+          "description": "MongoDB-Datenbanken und Collections über den MCP-Server abfragen und verwalten."
+        },
+        "es": {
+          "name": "MongoDB",
+          "description": "Consulta y gestiona bases de datos y colecciones de MongoDB mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "MongoDB",
+          "description": "Interroge et gère les bases et collections MongoDB via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "description": "Access and manage Notion pages, databases, and blocks through the MCP server",
+      "category": "productivity",
+      "icon": "lucide:file-text",
+      "tags": [
+        "notes",
+        "wiki",
+        "knowledge-base",
+        "documentation",
+        "databases"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Notion",
+          "description": "通过 MCP 服务器访问和管理 Notion 的页面、数据库与区块。"
+        },
+        "zh-TW": {
+          "name": "Notion",
+          "description": "透過 MCP 伺服器存取並管理 Notion 的頁面、資料庫與區塊。"
+        },
+        "ja": {
+          "name": "Notion",
+          "description": "MCP サーバー経由で Notion のページ、データベース、ブロックにアクセス・管理。"
+        },
+        "ko": {
+          "name": "Notion",
+          "description": "MCP 서버를 통해 Notion 페이지, 데이터베이스, 블록에 접근 및 관리."
+        },
+        "de": {
+          "name": "Notion",
+          "description": "Zugriff und Verwaltung von Notion-Seiten, -Datenbanken und -Blöcken über den MCP-Server."
+        },
+        "es": {
+          "name": "Notion",
+          "description": "Accede y gestiona páginas, bases de datos y bloques de Notion mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Notion",
+          "description": "Accès et gestion des pages, bases et blocs Notion via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "postgresql",
+      "name": "PostgreSQL",
+      "description": "Query and manage PostgreSQL databases through the MCP server",
+      "category": "data",
+      "icon": "lucide:database",
+      "tags": [
+        "database",
+        "sql",
+        "relational",
+        "postgres",
+        "queries"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "PostgreSQL",
+          "description": "通过 MCP 服务器查询与管理 PostgreSQL 数据库。"
+        },
+        "zh-TW": {
+          "name": "PostgreSQL",
+          "description": "透過 MCP 伺服器查詢與管理 PostgreSQL 資料庫。"
+        },
+        "ja": {
+          "name": "PostgreSQL",
+          "description": "MCP サーバー経由で PostgreSQL データベースを問い合わせ・管理。"
+        },
+        "ko": {
+          "name": "PostgreSQL",
+          "description": "MCP 서버를 통해 PostgreSQL 데이터베이스를 조회 및 관리."
+        },
+        "de": {
+          "name": "PostgreSQL",
+          "description": "PostgreSQL-Datenbanken über den MCP-Server abfragen und verwalten."
+        },
+        "es": {
+          "name": "PostgreSQL",
+          "description": "Consulta y gestiona bases de datos PostgreSQL mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "PostgreSQL",
+          "description": "Interroge et gère les bases PostgreSQL via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "puppeteer",
+      "name": "Puppeteer",
+      "description": "Control a headless Chrome browser — navigate pages, take screenshots, fill forms, and scrape JavaScript-rendered content",
+      "category": "devtools",
+      "icon": "🤖",
+      "tags": [
+        "browser",
+        "puppeteer",
+        "headless",
+        "screenshot",
+        "scraping",
+        "automation",
+        "chrome"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Puppeteer",
+          "description": "驱动无头 Chrome —— 导航页面、截图、填表并抓取 JavaScript 渲染后的内容。"
+        },
+        "zh-TW": {
+          "name": "Puppeteer",
+          "description": "驅動無頭 Chrome —— 導航頁面、截圖、填表並擷取 JavaScript 渲染後的內容。"
+        },
+        "ja": {
+          "name": "Puppeteer",
+          "description": "ヘッドレス Chrome を操作 —— ページ遷移、スクリーンショット、フォーム入力、JS レンダリング済みコンテンツのスクレイピング。"
+        },
+        "ko": {
+          "name": "Puppeteer",
+          "description": "헤드리스 Chrome 제어 —— 페이지 이동, 스크린샷, 폼 입력, JS 렌더링 콘텐츠 스크래핑."
+        },
+        "de": {
+          "name": "Puppeteer",
+          "description": "Steuert Headless-Chrome — Seiten navigieren, Screenshots, Formulare ausfüllen, JS-gerenderte Inhalte scrapen."
+        },
+        "es": {
+          "name": "Puppeteer",
+          "description": "Controla Chrome headless: navegación, capturas, formularios y scraping de contenido renderizado por JavaScript."
+        },
+        "fr": {
+          "name": "Puppeteer",
+          "description": "Pilote un Chrome headless — navigation, captures, remplissage de formulaires, scraping de contenu rendu par JS."
+        }
+      }
+    },
+    {
+      "id": "redis",
+      "name": "Redis",
+      "description": "Access and manage Redis key-value stores through the MCP server",
+      "category": "data",
+      "icon": "lucide:circle",
+      "tags": [
+        "database",
+        "cache",
+        "key-value",
+        "in-memory",
+        "nosql"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Redis",
+          "description": "通过 MCP 服务器访问和管理 Redis 键值存储。"
+        },
+        "zh-TW": {
+          "name": "Redis",
+          "description": "透過 MCP 伺服器存取並管理 Redis 鍵值儲存。"
+        },
+        "ja": {
+          "name": "Redis",
+          "description": "MCP サーバー経由で Redis のキーバリューストアにアクセス・管理。"
+        },
+        "ko": {
+          "name": "Redis",
+          "description": "MCP 서버를 통해 Redis 키-값 저장소에 접근 및 관리."
+        },
+        "de": {
+          "name": "Redis",
+          "description": "Zugriff und Verwaltung von Redis-Key-Value-Stores über den MCP-Server."
+        },
+        "es": {
+          "name": "Redis",
+          "description": "Accede y gestiona almacenes clave-valor de Redis mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Redis",
+          "description": "Accès et gestion des magasins clé-valeur Redis via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "sentry",
+      "name": "Sentry",
+      "description": "Monitor and manage Sentry error tracking, issues, and releases through the MCP server",
+      "category": "devtools",
+      "icon": "lucide:bug",
+      "tags": [
+        "monitoring",
+        "errors",
+        "debugging",
+        "observability",
+        "apm"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Sentry",
+          "description": "通过 MCP 服务器监控与管理 Sentry 的错误追踪、Issue 与发布。"
+        },
+        "zh-TW": {
+          "name": "Sentry",
+          "description": "透過 MCP 伺服器監控與管理 Sentry 的錯誤追蹤、Issue 與發佈。"
+        },
+        "ja": {
+          "name": "Sentry",
+          "description": "MCP サーバー経由で Sentry のエラートラッキング、Issue、リリースを監視・管理。"
+        },
+        "ko": {
+          "name": "Sentry",
+          "description": "MCP 서버를 통해 Sentry의 오류 추적, 이슈, 릴리스를 모니터링 및 관리."
+        },
+        "de": {
+          "name": "Sentry",
+          "description": "Sentry-Fehlertracking, -Issues und -Releases über den MCP-Server überwachen und verwalten."
+        },
+        "es": {
+          "name": "Sentry",
+          "description": "Monitoriza y gestiona errores, issues y releases de Sentry mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Sentry",
+          "description": "Supervise et gère le tracking d’erreurs, issues et releases Sentry via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "sequential-thinking",
+      "name": "Sequential Thinking",
+      "description": "Structured multi-step reasoning tool — breaks complex problems into revisable thought chains before answering",
+      "category": "ai",
+      "icon": "🔗",
+      "tags": [
+        "reasoning",
+        "thinking",
+        "chain-of-thought",
+        "planning",
+        "logic"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Sequential Thinking",
+          "description": "结构化的多步推理工具 —— 在回答前把复杂问题拆成可修订的思维链。"
+        },
+        "zh-TW": {
+          "name": "Sequential Thinking",
+          "description": "結構化多步推理工具 —— 回答前將複雜問題拆成可修訂的思維鏈。"
+        },
+        "ja": {
+          "name": "Sequential Thinking",
+          "description": "構造化された多段推論ツール —— 回答前に複雑な問題を修正可能な思考チェーンに分解。"
+        },
+        "ko": {
+          "name": "Sequential Thinking",
+          "description": "구조화된 다단계 추론 도구 —— 답변 전에 복잡한 문제를 수정 가능한 사고 체인으로 분해."
+        },
+        "de": {
+          "name": "Sequential Thinking",
+          "description": "Strukturiertes mehrstufiges Reasoning — komplexe Probleme in überarbeitbare Gedankenketten zerlegen."
+        },
+        "es": {
+          "name": "Sequential Thinking",
+          "description": "Razonamiento estructurado multi-paso: descompone problemas complejos en cadenas de pensamiento revisables antes de responder."
+        },
+        "fr": {
+          "name": "Sequential Thinking",
+          "description": "Raisonnement multi-étapes structuré : décompose les problèmes complexes en chaînes de pensée révisables avant de répondre."
+        }
+      }
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "description": "Access Slack channels, messages, and users through the MCP server",
+      "category": "communication",
+      "icon": "lucide:message-circle",
+      "tags": [
+        "chat",
+        "messaging",
+        "team",
+        "channels",
+        "collaboration"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Slack",
+          "description": "通过 MCP 服务器访问 Slack 频道、消息与用户。"
+        },
+        "zh-TW": {
+          "name": "Slack",
+          "description": "透過 MCP 伺服器存取 Slack 頻道、訊息與使用者。"
+        },
+        "ja": {
+          "name": "Slack",
+          "description": "MCP サーバー経由で Slack のチャンネル、メッセージ、ユーザーにアクセス。"
+        },
+        "ko": {
+          "name": "Slack",
+          "description": "MCP 서버를 통해 Slack 채널, 메시지, 사용자에 접근."
+        },
+        "de": {
+          "name": "Slack",
+          "description": "Zugriff auf Slack-Kanäle, -Nachrichten und -Nutzer über den MCP-Server."
+        },
+        "es": {
+          "name": "Slack",
+          "description": "Accede a canales, mensajes y usuarios de Slack mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Slack",
+          "description": "Accès aux salons, messages et utilisateurs Slack via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "sqlite-mcp",
+      "name": "SQLite",
+      "description": "Query and manage local SQLite databases through the MCP server",
+      "category": "data",
+      "icon": "lucide:save",
+      "tags": [
+        "database",
+        "sql",
+        "relational",
+        "sqlite",
+        "local",
+        "embedded"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "SQLite",
+          "description": "通过 MCP 服务器查询与管理本地 SQLite 数据库。"
+        },
+        "zh-TW": {
+          "name": "SQLite",
+          "description": "透過 MCP 伺服器查詢與管理本地 SQLite 資料庫。"
+        },
+        "ja": {
+          "name": "SQLite",
+          "description": "MCP サーバー経由でローカルの SQLite データベースを問い合わせ・管理。"
+        },
+        "ko": {
+          "name": "SQLite",
+          "description": "MCP 서버를 통해 로컬 SQLite 데이터베이스를 조회 및 관리."
+        },
+        "de": {
+          "name": "SQLite",
+          "description": "Lokale SQLite-Datenbanken über den MCP-Server abfragen und verwalten."
+        },
+        "es": {
+          "name": "SQLite",
+          "description": "Consulta y gestiona bases de datos SQLite locales mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "SQLite",
+          "description": "Interroge et gère les bases SQLite locales via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "teams-mcp",
+      "name": "Microsoft Teams",
+      "description": "Access Microsoft Teams channels, chats, and messages through the MCP server",
+      "category": "communication",
+      "icon": "lucide:users",
+      "tags": [
+        "chat",
+        "messaging",
+        "microsoft",
+        "enterprise",
+        "collaboration"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Microsoft Teams",
+          "description": "通过 MCP 服务器访问 Microsoft Teams 的频道、聊天与消息。"
+        },
+        "zh-TW": {
+          "name": "Microsoft Teams",
+          "description": "透過 MCP 伺服器存取 Microsoft Teams 的頻道、聊天與訊息。"
+        },
+        "ja": {
+          "name": "Microsoft Teams",
+          "description": "MCP サーバー経由で Microsoft Teams のチャンネル、チャット、メッセージにアクセス。"
+        },
+        "ko": {
+          "name": "Microsoft Teams",
+          "description": "MCP 서버를 통해 Microsoft Teams 채널, 채팅, 메시지에 접근."
+        },
+        "de": {
+          "name": "Microsoft Teams",
+          "description": "Zugriff auf Microsoft-Teams-Kanäle, -Chats und -Nachrichten über den MCP-Server."
+        },
+        "es": {
+          "name": "Microsoft Teams",
+          "description": "Accede a canales, chats y mensajes de Microsoft Teams mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Microsoft Teams",
+          "description": "Accès aux canaux, discussions et messages Microsoft Teams via le serveur MCP."
+        }
+      }
+    },
+    {
+      "id": "time",
+      "name": "Time & Timezone",
+      "description": "Get current time in any timezone, convert between timezones, and calculate time differences",
+      "category": "productivity",
+      "icon": "🕐",
+      "tags": [
+        "time",
+        "timezone",
+        "clock",
+        "datetime",
+        "conversion"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "时间 & 时区",
+          "description": "获取任意时区的当前时间、时区换算与时差计算。"
+        },
+        "zh-TW": {
+          "name": "時間 & 時區",
+          "description": "取得任意時區的目前時間、時區轉換與時差計算。"
+        },
+        "ja": {
+          "name": "時刻 & タイムゾーン",
+          "description": "任意のタイムゾーンの現在時刻取得、タイムゾーン変換、時差計算。"
+        },
+        "ko": {
+          "name": "시간 & 타임존",
+          "description": "임의 타임존의 현재 시간 조회, 타임존 변환, 시차 계산."
+        },
+        "de": {
+          "name": "Zeit & Zeitzone",
+          "description": "Aktuelle Uhrzeit in beliebigen Zeitzonen, Zeitzonenumrechnung und Zeitdifferenzberechnung."
+        },
+        "es": {
+          "name": "Hora y zona horaria",
+          "description": "Hora actual en cualquier zona horaria, conversión entre zonas y cálculo de diferencias."
+        },
+        "fr": {
+          "name": "Heure & Fuseau",
+          "description": "Heure actuelle dans n'importe quel fuseau, conversion entre fuseaux et calcul des différences."
+        }
+      }
+    },
+    {
+      "id": "todoist",
+      "name": "Todoist",
+      "description": "Manage Todoist tasks, projects, and labels through the MCP server",
+      "category": "productivity",
+      "icon": "lucide:check-circle",
+      "tags": [
+        "tasks",
+        "todo",
+        "project-management",
+        "productivity",
+        "gtd"
+      ],
+      "i18n": {
+        "zh": {
+          "name": "Todoist",
+          "description": "通过 MCP 服务器管理 Todoist 的任务、项目与标签。"
+        },
+        "zh-TW": {
+          "name": "Todoist",
+          "description": "透過 MCP 伺服器管理 Todoist 的任務、專案與標籤。"
+        },
+        "ja": {
+          "name": "Todoist",
+          "description": "MCP サーバー経由で Todoist のタスク、プロジェクト、ラベルを管理。"
+        },
+        "ko": {
+          "name": "Todoist",
+          "description": "MCP 서버를 통해 Todoist 작업, 프로젝트, 라벨을 관리."
+        },
+        "de": {
+          "name": "Todoist",
+          "description": "Todoist-Aufgaben, -Projekte und -Labels über den MCP-Server verwalten."
+        },
+        "es": {
+          "name": "Todoist",
+          "description": "Gestiona tareas, proyectos y etiquetas de Todoist mediante el servidor MCP."
+        },
+        "fr": {
+          "name": "Todoist",
+          "description": "Gère les tâches, projets et étiquettes Todoist via le serveur MCP."
+        }
+      }
+    }
+  ],
   "handsCount": 17,
   "channelsCount": 44,
   "providersCount": 72,
-  "integrationsCount": 33,
   "workflowsCount": 22,
   "agentsCount": 32,
   "pluginsCount": 11,
   "skillsCount": 60,
-  "mcpCount": 0,
-  "fetchedAt": "2026-04-17T13:24:00.739Z"
+  "mcpCount": 33,
+  "fetchedAt": "2026-04-17T13:49:23.769Z"
 }

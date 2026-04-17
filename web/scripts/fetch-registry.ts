@@ -125,23 +125,33 @@ async function fetchBatch(
 async function main() {
   console.log('Fetching registry data...')
 
-  const [handDirs, channelFiles, providerFiles, integrationFiles, workflowFiles, agentDirs, pluginFiles, skillDirs, mcpFiles] = await Promise.all([
+  // The upstream registry is migrating `integrations/` → `mcp/`. Prefer
+  // the new name and fall back to the legacy path while the rename rolls
+  // out. Track which path we read from so file fetches below use it.
+  let mcpFiles = await fetchDir('mcp')
+  let mcpDir = 'mcp'
+  if (mcpFiles.length === 0) {
+    const legacy = await fetchDir('integrations')
+    if (legacy.length > 0) {
+      console.log(`Using legacy 'integrations/' path (${legacy.length} files) — upstream rename to 'mcp/' not yet merged`)
+      mcpFiles = legacy
+      mcpDir = 'integrations'
+    }
+  }
+  const [handDirs, channelFiles, providerFiles, workflowFiles, agentDirs, pluginFiles, skillDirs] = await Promise.all([
     fetchDir('hands'),
     fetchDir('channels'),
     fetchDir('providers'),
-    fetchDir('integrations'),
     fetchDir('workflows'),
     fetchDir('agents'),
     fetchDir('plugins'),
     fetchDir('skills'),
-    fetchDir('mcp'),
   ])
 
   const filter = (items: GHItem[]) => items.filter(f => f.name !== 'README.md')
   const hands = filter(handDirs)
   const channels = filter(channelFiles)
   const providers = filter(providerFiles)
-  const integrations = filter(integrationFiles)
   const workflows = filter(workflowFiles)
   const agents = filter(agentDirs)
   const plugins = filter(pluginFiles)
@@ -150,19 +160,12 @@ async function main() {
 
   console.log(
     `Found: ${hands.length} hands, ${channels.length} channels, ${providers.length} providers, ` +
-    `${integrations.length} integrations, ${workflows.length} workflows, ${agents.length} agents, ` +
-    `${plugins.length} plugins, ${skills.length} skills, ${mcp.length} mcp`
+    `${workflows.length} workflows, ${agents.length} agents, ` +
+    `${plugins.length} plugins, ${skills.length} skills, ${mcp.length} mcp (from ${mcpDir}/)`
   )
 
   // Fetch manifest details for all categories in parallel.
-  // Directory-based: manifest at <dir>/<NAME>.{toml,md}; naming varies per category.
-  // File-based: item name already is <id>.toml.
-  //   hands    → HAND.toml   (uppercase)
-  //   agents   → agent.toml  (lowercase)
-  //   skills   → SKILL.md    (YAML frontmatter, not TOML)
-  //   plugins  → plugin.toml (directory-based, lowercase)
-  //   mcp      → MCP.toml    or bare file
-  const [handDetails, agentDetails, skillDetails, channelDetails, providerDetails, workflowDetails, pluginDetails, integrationDetails, mcpDetails] = await Promise.all([
+  const [handDetails, agentDetails, skillDetails, channelDetails, providerDetails, workflowDetails, pluginDetails, mcpDetails] = await Promise.all([
     fetchBatch(hands, h => `hands/${h.name}/HAND.toml`),
     fetchBatch(agents, a => `agents/${a.name}/agent.toml`),
     fetchBatch(skills, s => `skills/${s.name}/SKILL.md`, fetchSkillMd),
@@ -170,15 +173,13 @@ async function main() {
     fetchBatch(providers, p => `providers/${p.name}`),
     fetchBatch(workflows, w => `workflows/${w.name}`),
     fetchBatch(plugins, p => `plugins/${p.name}/plugin.toml`),
-    fetchBatch(integrations, i => `integrations/${i.name}`),
-    fetchBatch(mcp, m => m.name.endsWith('.toml') ? `mcp/${m.name}` : `mcp/${m.name}/MCP.toml`),
+    fetchBatch(mcp, m => m.name.endsWith('.toml') ? `${mcpDir}/${m.name}` : `${mcpDir}/${m.name}/MCP.toml`),
   ])
 
   const data = {
     hands: handDetails,
     channels: channelDetails,
     providers: providerDetails,
-    integrations: integrationDetails,
     workflows: workflowDetails,
     agents: agentDetails,
     plugins: pluginDetails,
@@ -187,7 +188,6 @@ async function main() {
     handsCount: hands.length,
     channelsCount: channels.length,
     providersCount: providers.length,
-    integrationsCount: integrations.length,
     workflowsCount: workflows.length,
     agentsCount: agents.length,
     pluginsCount: plugins.length,

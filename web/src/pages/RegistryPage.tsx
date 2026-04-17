@@ -27,7 +27,7 @@ interface CategoryMeta {
 
 const CATEGORY_META: Record<RegistryCategory, CategoryMeta> = {
   skills:       { docsPath: '/agent/skills',            registryPath: '/tree/main/skills',       fileNameFor: id => `skills/${id}/SKILL.md` },
-  mcp:          { docsPath: '/integrations/mcp-a2a',    registryPath: '/tree/main/integrations', fileNameFor: id => `integrations/${id}.toml` },
+  mcp:          { docsPath: '/integrations/mcp-a2a',    registryPath: '/tree/main/mcp',          fileNameFor: id => `mcp/${id}.toml` },
   plugins:      { docsPath: '/agent/plugins',           registryPath: '/tree/main/plugins',      fileNameFor: id => `plugins/${id}/plugin.toml` },
   hands:        { docsPath: '/agent/hands',             registryPath: '/tree/main/hands',        fileNameFor: id => `hands/${id}/HAND.toml` },
   agents:       { docsPath: '/agent/templates',         registryPath: '/tree/main/agents',       fileNameFor: id => `agents/${id}/agent.toml` },
