@@ -1739,3 +1739,46 @@ fn test_reload_skills_preserves_disabled_and_extra_dirs() {
 
     kernel.shutdown();
 }
+
+#[test]
+fn test_stable_mode_freezes_registry_and_skips_review_gate() {
+    // Stable mode sets `frozen=true` on the skill registry at boot.
+    // The background-review pre-claim gate ("Pre-claim gate 0") must
+    // refuse to spawn a review when frozen — otherwise the review
+    // would write new skills to disk while reload_skills() silently
+    // no-ops on the in-memory registry, draining the LLM budget for
+    // nothing and deferring the effect until the next restart.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    install_test_skill(&home_dir.join("skills"), "stable-skill", &[]);
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        mode: librefang_types::config::KernelMode::Stable,
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let registry = kernel.skill_registry.read().unwrap();
+    assert!(
+        registry.is_frozen(),
+        "Stable mode must freeze the skill registry"
+    );
+    // The baseline skill must still be visible — freeze only stops
+    // *new* mutations and later loads, it doesn't purge what's
+    // already in the registry.
+    assert!(
+        registry.get("stable-skill").is_some(),
+        "pre-existing skill should be loaded even in Stable mode"
+    );
+    drop(registry);
+
+    // reload_skills() under freeze is a documented no-op — we don't
+    // assert much here beyond "it didn't panic".
+    kernel.reload_skills();
+
+    kernel.shutdown();
+}

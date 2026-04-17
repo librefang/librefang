@@ -3559,10 +3559,23 @@ system_prompt = "You are a helpful assistant."
                 // Cooldown: per-agent, at most one review every SKILL_REVIEW_COOLDOWN_SECS.
                 let now_epoch = chrono::Utc::now().timestamp();
                 let agent_id_str = agent_id.to_string();
+                // Pre-claim gate 0: Stable mode / frozen registry. Skip
+                // spawning a review task entirely when the operator
+                // chose a no-skill-mutations posture — the review would
+                // write to disk and the reload_skills() call afterwards
+                // would silently no-op, so all we'd accomplish is to
+                // bill the default driver for nothing.
+                let registry_frozen = self
+                    .skill_registry
+                    .read()
+                    .map(|r| r.is_frozen())
+                    .unwrap_or(false);
                 // Pre-claim gate 1: eligibility. Only consider claiming
                 // the cooldown slot if this loop actually suggested a
-                // review AND the agent didn't already evolve a skill.
-                let eligible = result.skill_evolution_suggested && !used_evolution_tool;
+                // review AND the agent didn't already evolve a skill
+                // AND the registry isn't frozen.
+                let eligible =
+                    result.skill_evolution_suggested && !used_evolution_tool && !registry_frozen;
                 // Pre-claim gate 2: budget. Background reviews are
                 // optional work — if the global budget is exhausted we
                 // want to skip WITHOUT burning the 5-minute cooldown

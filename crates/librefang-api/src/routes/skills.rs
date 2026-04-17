@@ -3420,6 +3420,9 @@ pub async fn create_skill(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
     let name = match body["name"].as_str() {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ => {
@@ -3577,6 +3580,30 @@ fn clone_installed_skill(
     registry.get(name).cloned().ok_or_else(|| {
         ApiErrorResponse::not_found(format!("Skill '{name}' not found")).into_json_tuple()
     })
+}
+
+/// Reject dashboard/CLI evolve calls when the kernel is in Stable mode
+/// (registry frozen). Mirrors the agent-tool gate in `tool_runner.rs`
+/// — evolution writes to disk directly, so the frozen check on its
+/// own only stops the in-memory reload. Without this guard the
+/// dashboard would happily mutate skills that the operator pinned via
+/// Stable mode.
+fn reject_if_frozen(state: &Arc<AppState>) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let registry = state
+        .kernel
+        .skill_registry_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    if registry.is_frozen() {
+        Some(
+            ApiErrorResponse::bad_request(
+                "Skill evolution is disabled in Stable mode (registry frozen)",
+            )
+            .into_json_tuple(),
+        )
+    } else {
+        None
+    }
 }
 
 fn evolution_err_to_response(
@@ -3739,6 +3766,9 @@ pub async fn evolve_update_skill(
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
     let Some(prompt_context) = body["prompt_context"].as_str() else {
         return ApiErrorResponse::bad_request("Missing 'prompt_context' field").into_json_tuple();
     };
@@ -3783,6 +3813,9 @@ pub async fn evolve_patch_skill(
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
     let Some(old_string) = body["old_string"].as_str() else {
         return ApiErrorResponse::bad_request("Missing 'old_string' field").into_json_tuple();
     };
@@ -3830,6 +3863,9 @@ pub async fn evolve_rollback_skill(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
     let skill = match clone_installed_skill(&state, &name) {
         Ok(s) => s,
         Err(e) => return e,
@@ -3865,6 +3901,9 @@ pub async fn evolve_delete_skill(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
     let skills_dir = state.kernel.home_dir().join("skills");
     match librefang_skills::evolution::delete_skill(&skills_dir, &name) {
         Ok(r) => {
@@ -3894,6 +3933,9 @@ pub async fn evolve_write_file(
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
     let Some(path) = body["path"].as_str() else {
         return ApiErrorResponse::bad_request("Missing 'path' field").into_json_tuple();
     };
@@ -3936,6 +3978,9 @@ pub async fn evolve_remove_file(
     Path(name): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
     let Some(path) = params.get("path") else {
         return ApiErrorResponse::bad_request("Missing 'path' query parameter").into_json_tuple();
     };

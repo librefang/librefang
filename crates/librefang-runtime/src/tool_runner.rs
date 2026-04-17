@@ -4834,12 +4834,29 @@ fn agent_author_tag(caller: Option<&str>) -> String {
         .unwrap_or_else(|| "agent".to_string())
 }
 
+/// Reject evolution ops when the registry is frozen (Stable mode).
+///
+/// The registry's frozen flag is meant to express "no skill changes in
+/// this kernel", but the evolution module writes to disk directly and
+/// then triggers `reload_skills`, which no-ops under freeze. Without
+/// this gate, an agent running under Stable mode would silently
+/// persist skill mutations that'd be picked up at the next unfreeze
+/// or restart — defeating the whole point of the mode.
+fn ensure_not_frozen(registry: &SkillRegistry) -> Result<(), String> {
+    if registry.is_frozen() {
+        Err("Skill registry is frozen (Stable mode) — skill evolution is disabled".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 async fn tool_skill_evolve_create(
     input: &serde_json::Value,
     skill_registry: Option<&SkillRegistry>,
     caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
     let description = input["description"]
         .as_str()
@@ -4877,6 +4894,7 @@ async fn tool_skill_evolve_update(
     caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
     let prompt_context = input["prompt_context"]
         .as_str()
@@ -4903,6 +4921,7 @@ async fn tool_skill_evolve_patch(
     caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
     let old_string = input["old_string"]
         .as_str()
@@ -4938,6 +4957,7 @@ async fn tool_skill_evolve_delete(
     skill_registry: Option<&SkillRegistry>,
 ) -> Result<String, String> {
     let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
 
     let skills_dir = registry.skills_dir();
@@ -4953,6 +4973,7 @@ async fn tool_skill_evolve_rollback(
     caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
 
     let skill = registry
@@ -4971,6 +4992,7 @@ async fn tool_skill_evolve_write_file(
     skill_registry: Option<&SkillRegistry>,
 ) -> Result<String, String> {
     let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
     let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     let content = input["content"]
@@ -4992,6 +5014,7 @@ async fn tool_skill_evolve_remove_file(
     skill_registry: Option<&SkillRegistry>,
 ) -> Result<String, String> {
     let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
     let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
 
@@ -7482,4 +7505,49 @@ description = "test"
         assert!(result.contains("truncated"));
         // Must not panic — the point of this test
     }
+}
+
+// ── skill evolve frozen-registry gating ───────────────────────────
+
+#[tokio::test]
+async fn test_evolve_tools_rejected_when_registry_frozen() {
+    // In Stable mode (registry frozen) every evolution tool must
+    // refuse at the handler boundary, BEFORE touching disk. The
+    // `evolution` module underneath would happily write files that
+    // the frozen registry never loads — burning reviewer tokens
+    // and leaving disk state the operator explicitly didn't want.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut registry = SkillRegistry::new(tmp.path().to_path_buf());
+    registry.freeze();
+
+    let input = serde_json::json!({
+        "name": "gated",
+        "description": "x",
+        "prompt_context": "# x",
+        "tags": [],
+    });
+    let err = tool_skill_evolve_create(&input, Some(&registry), None)
+        .await
+        .expect_err("must reject under freeze");
+    assert!(
+        err.contains("frozen") || err.contains("Stable"),
+        "error must mention Stable/frozen, got: {err}"
+    );
+
+    let err = tool_skill_evolve_delete(&serde_json::json!({ "name": "gated" }), Some(&registry))
+        .await
+        .expect_err("delete must reject under freeze");
+    assert!(err.contains("frozen") || err.contains("Stable"));
+
+    let err = tool_skill_evolve_write_file(
+        &serde_json::json!({
+            "name": "gated",
+            "path": "references/x.md",
+            "content": "hi",
+        }),
+        Some(&registry),
+    )
+    .await
+    .expect_err("write_file must reject under freeze");
+    assert!(err.contains("frozen") || err.contains("Stable"));
 }
