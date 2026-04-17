@@ -171,7 +171,10 @@ export interface SkillVersionEntry {
 export interface SkillEvolutionMeta {
   versions: SkillVersionEntry[];
   use_count: number;
+  /** Total version entries written, incl. initial creation. */
   evolution_count: number;
+  /** Mutations after creation (update/patch/rollback). 0 on fresh skill. */
+  mutation_count: number;
 }
 
 export interface SkillToolInfo {

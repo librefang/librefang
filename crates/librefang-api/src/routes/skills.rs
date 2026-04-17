@@ -3558,6 +3558,7 @@ pub async fn get_skill_detail(
                 "versions": evolution_meta.versions,
                 "use_count": evolution_meta.use_count,
                 "evolution_count": evolution_meta.evolution_count,
+                "mutation_count": evolution_meta.mutation_count,
             },
             // Full prompt_context text so the dashboard Update modal
             // can pre-fill the editor. Capped at MAX_PROMPT_CONTEXT_CHARS
