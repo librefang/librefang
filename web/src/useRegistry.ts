@@ -19,21 +19,38 @@ const DetailSchema = z.object({
   i18n: z.record(z.string(), I18nEntrySchema).optional(),
 })
 
+// All 8 category arrays are optional on the wire — a stale worker response
+// (or the older registry.json shape) may be missing newer ones like skills/mcp.
+// The hook normalizes missing arrays to [].
 const RegistryDataSchema = z.object({
-  hands: z.array(DetailSchema),
-  channels: z.array(DetailSchema),
-  handsCount: z.number(),
-  channelsCount: z.number(),
-  providersCount: z.number(),
-  integrationsCount: z.number(),
-  workflowsCount: z.number(),
-  agentsCount: z.number(),
-  pluginsCount: z.number(),
+  hands: z.array(DetailSchema).optional().default([]),
+  channels: z.array(DetailSchema).optional().default([]),
+  providers: z.array(DetailSchema).optional().default([]),
+  integrations: z.array(DetailSchema).optional().default([]),
+  workflows: z.array(DetailSchema).optional().default([]),
+  agents: z.array(DetailSchema).optional().default([]),
+  plugins: z.array(DetailSchema).optional().default([]),
+  skills: z.array(DetailSchema).optional().default([]),
+  mcp: z.array(DetailSchema).optional().default([]),
+  handsCount: z.number().optional().default(0),
+  channelsCount: z.number().optional().default(0),
+  providersCount: z.number().optional().default(0),
+  integrationsCount: z.number().optional().default(0),
+  workflowsCount: z.number().optional().default(0),
+  agentsCount: z.number().optional().default(0),
+  pluginsCount: z.number().optional().default(0),
+  skillsCount: z.number().optional().default(0),
+  mcpCount: z.number().optional().default(0),
 })
 
 export type Detail = z.infer<typeof DetailSchema>
 export type HandDetail = Detail
 export type ChannelDetail = Detail
+export type RegistryData = z.infer<typeof RegistryDataSchema>
+
+export type RegistryCategory =
+  | 'hands' | 'channels' | 'providers' | 'integrations'
+  | 'workflows' | 'agents' | 'plugins' | 'skills' | 'mcp'
 
 /** Get localized description for a Detail item */
 export function getLocalizedDesc(item: Detail, lang: string): string {
@@ -42,7 +59,6 @@ export function getLocalizedDesc(item: Detail, lang: string): string {
   const desc = item.i18n?.[lang]?.description ?? item.i18n?.[lang.split('-')[0]!]?.description
   return desc || item.description
 }
-export type RegistryData = z.infer<typeof RegistryDataSchema>
 
 async function fetchRegistryData(): Promise<RegistryData> {
   // 1. Load local registry.json (has full descriptions from build time)
@@ -60,20 +76,28 @@ async function fetchRegistryData(): Promise<RegistryData> {
     }
   } catch { /* API unavailable, use local only */ }
 
-  // 3. Merge: use local details + API counts (API has latest numbers)
+  // 3. Merge: prefer local details (have descriptions), append new items from API
   if (localData && apiData) {
     return {
-      // Use local details (have descriptions), but if API has more items, append them
       hands: mergeDetails(localData.hands, apiData.hands),
       channels: mergeDetails(localData.channels, apiData.channels),
+      providers: mergeDetails(localData.providers, apiData.providers),
+      integrations: mergeDetails(localData.integrations, apiData.integrations),
+      workflows: mergeDetails(localData.workflows, apiData.workflows),
+      agents: mergeDetails(localData.agents, apiData.agents),
+      plugins: mergeDetails(localData.plugins, apiData.plugins),
+      skills: mergeDetails(localData.skills, apiData.skills),
+      mcp: mergeDetails(localData.mcp, apiData.mcp),
       // Use API counts (most up to date)
-      handsCount: apiData.handsCount,
-      channelsCount: apiData.channelsCount,
-      providersCount: apiData.providersCount,
-      integrationsCount: apiData.integrationsCount,
-      workflowsCount: apiData.workflowsCount,
-      agentsCount: apiData.agentsCount,
-      pluginsCount: apiData.pluginsCount,
+      handsCount: apiData.handsCount || localData.handsCount,
+      channelsCount: apiData.channelsCount || localData.channelsCount,
+      providersCount: apiData.providersCount || localData.providersCount,
+      integrationsCount: apiData.integrationsCount || localData.integrationsCount,
+      workflowsCount: apiData.workflowsCount || localData.workflowsCount,
+      agentsCount: apiData.agentsCount || localData.agentsCount,
+      pluginsCount: apiData.pluginsCount || localData.pluginsCount,
+      skillsCount: apiData.skillsCount || localData.skillsCount,
+      mcpCount: apiData.mcpCount || localData.mcpCount,
     }
   }
 
@@ -100,4 +124,12 @@ export function useRegistry() {
     staleTime: 1000 * 60 * 60,
     retry: 2,
   })
+}
+
+/** Return the items array and count for a given category. */
+export function getCategoryItems(data: RegistryData | undefined, category: RegistryCategory): { items: Detail[]; count: number } {
+  if (!data) return { items: [], count: 0 }
+  const items = data[category] ?? []
+  const count = (data[`${category}Count` as keyof RegistryData] as number | undefined) ?? items.length
+  return { items, count }
 }

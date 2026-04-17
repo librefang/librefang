@@ -1602,6 +1602,1391 @@
       }
     }
   ],
+  "providers": [
+    {
+      "id": "ai21",
+      "name": "ai21",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "aider",
+      "name": "aider",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "aion-labs",
+      "name": "aion-labs",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "alibaba-coding-plan",
+      "name": "alibaba-coding-plan",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "allenai",
+      "name": "allenai",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "anthropic",
+      "name": "anthropic",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "arcee-ai",
+      "name": "arcee-ai",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "baichuan",
+      "name": "baichuan",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "bedrock",
+      "name": "bedrock",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "cerebras",
+      "name": "cerebras",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "chatgpt",
+      "name": "chatgpt",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "chutes",
+      "name": "chutes",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "claude-code",
+      "name": "claude-code",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "codex-cli",
+      "name": "codex-cli",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "cohere",
+      "name": "cohere",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "deepcogito",
+      "name": "deepcogito",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "deepseek",
+      "name": "deepseek",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "elevenlabs",
+      "name": "elevenlabs",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "essentialai",
+      "name": "essentialai",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "fireworks",
+      "name": "fireworks",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "gemini-cli",
+      "name": "gemini-cli",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "gemini",
+      "name": "gemini",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "github-copilot",
+      "name": "github-copilot",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "groq",
+      "name": "groq",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "huggingface",
+      "name": "huggingface",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "ibm-granite",
+      "name": "ibm-granite",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "inception",
+      "name": "inception",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "inflection",
+      "name": "inflection",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "kimi_coding",
+      "name": "kimi-coding",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "kwaipilot",
+      "name": "kwaipilot",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "liquid",
+      "name": "liquid",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "lmstudio",
+      "name": "lmstudio",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "meituan",
+      "name": "meituan",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "meta-llama",
+      "name": "meta-llama",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "microsoft",
+      "name": "microsoft",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "minimax",
+      "name": "minimax",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "mistral",
+      "name": "mistral",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "moonshot",
+      "name": "moonshot",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "morph",
+      "name": "morph",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "nex-agi",
+      "name": "nex-agi",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "nousresearch",
+      "name": "nousresearch",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "nvidia-nim",
+      "name": "nvidia-nim",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "ollama",
+      "name": "ollama",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "openai",
+      "name": "openai",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "openrouter",
+      "name": "openrouter",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "perplexity",
+      "name": "perplexity",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "prime-intellect",
+      "name": "prime-intellect",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "qianfan",
+      "name": "qianfan",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "qwen-code",
+      "name": "qwen-code",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "qwen",
+      "name": "qwen",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "relace",
+      "name": "relace",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "replicate",
+      "name": "replicate",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "sambanova",
+      "name": "sambanova",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "siliconflow",
+      "name": "siliconflow",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "stepfun",
+      "name": "stepfun",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "switchpoint",
+      "name": "switchpoint",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "tencent",
+      "name": "tencent",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "tngtech",
+      "name": "tngtech",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "together",
+      "name": "together",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "upstage",
+      "name": "upstage",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "venice",
+      "name": "venice",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "vertex-ai",
+      "name": "vertex-ai",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "vllm",
+      "name": "vllm",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "volcengine_coding",
+      "name": "volcengine-coding",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "volcengine",
+      "name": "volcengine",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "writer",
+      "name": "writer",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "xai",
+      "name": "xai",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "xiaomi",
+      "name": "xiaomi",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "zai_coding",
+      "name": "zai-coding",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "zai",
+      "name": "zai",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "zhipu_coding",
+      "name": "zhipu-coding",
+      "description": "",
+      "category": "",
+      "icon": ""
+    },
+    {
+      "id": "zhipu",
+      "name": "zhipu",
+      "description": "",
+      "category": "",
+      "icon": ""
+    }
+  ],
+  "integrations": [
+    {
+      "id": "aws",
+      "name": "AWS",
+      "description": "Manage Amazon Web Services resources including S3, EC2, Lambda, and more through the MCP server",
+      "category": "cloud",
+      "icon": "☁️",
+      "tags": [
+        "cloud",
+        "amazon",
+        "infrastructure",
+        "s3",
+        "ec2",
+        "lambda",
+        "devops"
+      ]
+    },
+    {
+      "id": "azure-mcp",
+      "name": "Microsoft Azure",
+      "description": "Manage Azure resources including VMs, Storage, and App Services through the MCP server",
+      "category": "cloud",
+      "icon": "🔷",
+      "tags": [
+        "cloud",
+        "microsoft",
+        "infrastructure",
+        "azure",
+        "devops",
+        "enterprise"
+      ]
+    },
+    {
+      "id": "bitbucket",
+      "name": "Bitbucket",
+      "description": "Access Bitbucket repositories, pull requests, and pipelines through the MCP server",
+      "category": "devtools",
+      "icon": "🪣",
+      "tags": [
+        "git",
+        "vcs",
+        "code",
+        "pull-requests",
+        "ci",
+        "atlassian"
+      ]
+    },
+    {
+      "id": "brave-search",
+      "name": "Brave Search",
+      "description": "Perform web searches using the Brave Search API through the MCP server",
+      "category": "ai",
+      "icon": "🦁",
+      "tags": [
+        "search",
+        "web",
+        "brave",
+        "api",
+        "information-retrieval"
+      ]
+    },
+    {
+      "id": "discord-mcp",
+      "name": "Discord",
+      "description": "Access Discord servers, channels, and messages through the MCP server",
+      "category": "communication",
+      "icon": "🎮",
+      "tags": [
+        "chat",
+        "messaging",
+        "community",
+        "gaming",
+        "voice"
+      ]
+    },
+    {
+      "id": "dropbox",
+      "name": "Dropbox",
+      "description": "Access and manage Dropbox files and folders through the MCP server",
+      "category": "productivity",
+      "icon": "📦",
+      "tags": [
+        "files",
+        "storage",
+        "cloud-storage",
+        "sync",
+        "sharing"
+      ]
+    },
+    {
+      "id": "elasticsearch",
+      "name": "Elasticsearch",
+      "description": "Search and manage Elasticsearch indices and documents through the MCP server",
+      "category": "data",
+      "icon": "🔍",
+      "tags": [
+        "search",
+        "database",
+        "indexing",
+        "analytics",
+        "full-text"
+      ]
+    },
+    {
+      "id": "exa-search",
+      "name": "Exa Search",
+      "description": "Perform AI-powered neural searches and retrieve web content through the Exa MCP server",
+      "category": "ai",
+      "icon": "🔎",
+      "tags": [
+        "search",
+        "web",
+        "ai",
+        "neural",
+        "semantic",
+        "information-retrieval"
+      ]
+    },
+    {
+      "id": "fetch",
+      "name": "Web Fetch",
+      "description": "Fetch any web URL and receive its content as clean Markdown — ideal for reading docs, articles, and APIs",
+      "category": "devtools",
+      "icon": "🌐",
+      "tags": [
+        "web",
+        "fetch",
+        "scraping",
+        "markdown",
+        "http"
+      ]
+    },
+    {
+      "id": "filesystem",
+      "name": "Filesystem",
+      "description": "Read, write, search, and manage local files through the official MCP filesystem server",
+      "category": "devtools",
+      "icon": "📁",
+      "tags": [
+        "files",
+        "local",
+        "read",
+        "write",
+        "search"
+      ]
+    },
+    {
+      "id": "gcp-mcp",
+      "name": "Google Cloud Platform",
+      "description": "Manage GCP resources including Compute Engine, Cloud Storage, and BigQuery through the MCP server",
+      "category": "cloud",
+      "icon": "🌐",
+      "tags": [
+        "cloud",
+        "google",
+        "infrastructure",
+        "gce",
+        "gcs",
+        "bigquery",
+        "devops"
+      ]
+    },
+    {
+      "id": "git",
+      "name": "Git",
+      "description": "Inspect local Git repositories — read commits, diffs, branches, file history, and blame without shell access",
+      "category": "devtools",
+      "icon": "🌿",
+      "tags": [
+        "git",
+        "version-control",
+        "commits",
+        "diff",
+        "history",
+        "blame"
+      ]
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "description": "Access GitHub repositories, issues, pull requests, and organizations through the official MCP server",
+      "category": "devtools",
+      "icon": "🐙",
+      "tags": [
+        "git",
+        "vcs",
+        "code",
+        "issues",
+        "pull-requests",
+        "ci"
+      ]
+    },
+    {
+      "id": "gitlab",
+      "name": "GitLab",
+      "description": "Access GitLab projects, merge requests, issues, and CI/CD pipelines through the MCP server",
+      "category": "devtools",
+      "icon": "🦊",
+      "tags": [
+        "git",
+        "vcs",
+        "code",
+        "merge-requests",
+        "ci",
+        "devops"
+      ]
+    },
+    {
+      "id": "gmail",
+      "name": "Gmail",
+      "description": "Read, send, and manage Gmail messages and drafts through the Anthropic MCP server",
+      "category": "productivity",
+      "icon": "📧",
+      "tags": [
+        "email",
+        "google",
+        "messaging",
+        "inbox",
+        "communication"
+      ]
+    },
+    {
+      "id": "google-calendar",
+      "name": "Google Calendar",
+      "description": "Manage Google Calendar events, schedules, and availability through the Anthropic MCP server",
+      "category": "productivity",
+      "icon": "📅",
+      "tags": [
+        "calendar",
+        "scheduling",
+        "google",
+        "events",
+        "meetings"
+      ]
+    },
+    {
+      "id": "google-drive",
+      "name": "Google Drive",
+      "description": "Browse, search, and read files from Google Drive through the Anthropic MCP server",
+      "category": "productivity",
+      "icon": "📁",
+      "tags": [
+        "files",
+        "storage",
+        "google",
+        "documents",
+        "cloud-storage"
+      ]
+    },
+    {
+      "id": "google-maps",
+      "name": "Google Maps",
+      "description": "Geocoding, reverse geocoding, directions, distance matrix, and place search via Google Maps Platform",
+      "category": "data",
+      "icon": "🗺️",
+      "tags": [
+        "maps",
+        "geocoding",
+        "directions",
+        "places",
+        "google",
+        "location"
+      ]
+    },
+    {
+      "id": "jira",
+      "name": "Jira",
+      "description": "Access Jira issues, projects, boards, and sprints through the Atlassian MCP server",
+      "category": "devtools",
+      "icon": "📋",
+      "tags": [
+        "project-management",
+        "issues",
+        "agile",
+        "atlassian",
+        "tracking"
+      ]
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "description": "Manage Linear issues, projects, cycles, and teams through the MCP server",
+      "category": "devtools",
+      "icon": "📐",
+      "tags": [
+        "project-management",
+        "issues",
+        "agile",
+        "tracking",
+        "sprint"
+      ]
+    },
+    {
+      "id": "memory",
+      "name": "Memory (Knowledge Graph)",
+      "description": "Persistent knowledge graph that lets agents store and retrieve facts, entities, and relationships across sessions",
+      "category": "ai",
+      "icon": "🧠",
+      "tags": [
+        "memory",
+        "knowledge-graph",
+        "persistence",
+        "facts",
+        "entities"
+      ]
+    },
+    {
+      "id": "mongodb",
+      "name": "MongoDB",
+      "description": "Query and manage MongoDB databases and collections through the MCP server",
+      "category": "data",
+      "icon": "🍃",
+      "tags": [
+        "database",
+        "nosql",
+        "document",
+        "mongo",
+        "queries"
+      ]
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "description": "Access and manage Notion pages, databases, and blocks through the MCP server",
+      "category": "productivity",
+      "icon": "📝",
+      "tags": [
+        "notes",
+        "wiki",
+        "knowledge-base",
+        "documentation",
+        "databases"
+      ]
+    },
+    {
+      "id": "postgresql",
+      "name": "PostgreSQL",
+      "description": "Query and manage PostgreSQL databases through the MCP server",
+      "category": "data",
+      "icon": "🐘",
+      "tags": [
+        "database",
+        "sql",
+        "relational",
+        "postgres",
+        "queries"
+      ]
+    },
+    {
+      "id": "puppeteer",
+      "name": "Puppeteer",
+      "description": "Control a headless Chrome browser — navigate pages, take screenshots, fill forms, and scrape JavaScript-rendered content",
+      "category": "devtools",
+      "icon": "🤖",
+      "tags": [
+        "browser",
+        "puppeteer",
+        "headless",
+        "screenshot",
+        "scraping",
+        "automation",
+        "chrome"
+      ]
+    },
+    {
+      "id": "redis",
+      "name": "Redis",
+      "description": "Access and manage Redis key-value stores through the MCP server",
+      "category": "data",
+      "icon": "🔴",
+      "tags": [
+        "database",
+        "cache",
+        "key-value",
+        "in-memory",
+        "nosql"
+      ]
+    },
+    {
+      "id": "sentry",
+      "name": "Sentry",
+      "description": "Monitor and manage Sentry error tracking, issues, and releases through the MCP server",
+      "category": "devtools",
+      "icon": "🐛",
+      "tags": [
+        "monitoring",
+        "errors",
+        "debugging",
+        "observability",
+        "apm"
+      ]
+    },
+    {
+      "id": "sequential-thinking",
+      "name": "Sequential Thinking",
+      "description": "Structured multi-step reasoning tool — breaks complex problems into revisable thought chains before answering",
+      "category": "ai",
+      "icon": "🔗",
+      "tags": [
+        "reasoning",
+        "thinking",
+        "chain-of-thought",
+        "planning",
+        "logic"
+      ]
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "description": "Access Slack channels, messages, and users through the MCP server",
+      "category": "communication",
+      "icon": "💬",
+      "tags": [
+        "chat",
+        "messaging",
+        "team",
+        "channels",
+        "collaboration"
+      ]
+    },
+    {
+      "id": "sqlite-mcp",
+      "name": "SQLite",
+      "description": "Query and manage local SQLite databases through the MCP server",
+      "category": "data",
+      "icon": "💾",
+      "tags": [
+        "database",
+        "sql",
+        "relational",
+        "sqlite",
+        "local",
+        "embedded"
+      ]
+    },
+    {
+      "id": "teams-mcp",
+      "name": "Microsoft Teams",
+      "description": "Access Microsoft Teams channels, chats, and messages through the MCP server",
+      "category": "communication",
+      "icon": "👥",
+      "tags": [
+        "chat",
+        "messaging",
+        "microsoft",
+        "enterprise",
+        "collaboration"
+      ]
+    },
+    {
+      "id": "time",
+      "name": "Time & Timezone",
+      "description": "Get current time in any timezone, convert between timezones, and calculate time differences",
+      "category": "productivity",
+      "icon": "🕐",
+      "tags": [
+        "time",
+        "timezone",
+        "clock",
+        "datetime",
+        "conversion"
+      ]
+    },
+    {
+      "id": "todoist",
+      "name": "Todoist",
+      "description": "Manage Todoist tasks, projects, and labels through the MCP server",
+      "category": "productivity",
+      "icon": "✅",
+      "tags": [
+        "tasks",
+        "todo",
+        "project-management",
+        "productivity",
+        "gtd"
+      ]
+    }
+  ],
+  "workflows": [
+    {
+      "id": "api-design",
+      "name": "API Design & Specification",
+      "description": "Design a REST API from requirements: endpoints, request/response schemas, auth, error handling, and OpenAPI spec.",
+      "category": "engineering",
+      "icon": "",
+      "tags": [
+        "api",
+        "design",
+        "openapi",
+        "engineering"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "从需求出发设计 REST API：端点、请求/响应结构、认证、错误处理，输出 OpenAPI 规范。"
+        }
+      }
+    },
+    {
+      "id": "blog-post",
+      "name": "Blog Post Writer",
+      "description": "Research a topic, build a structured outline, write a full-length blog post, then optimise for SEO.",
+      "category": "creation",
+      "icon": "",
+      "tags": [
+        "writing",
+        "blog",
+        "seo",
+        "content"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "调研主题，构建结构化提纲，撰写完整博客文章，并进行 SEO 优化。"
+        }
+      }
+    },
+    {
+      "id": "brainstorm",
+      "name": "Brainstorm & Action Plan",
+      "description": "Generate ideas, evaluate them, and create an action plan for the best one",
+      "category": "thinking",
+      "icon": "",
+      "tags": [
+        "brainstorm",
+        "ideation",
+        "planning"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "生成创意、评估方案，并为最佳方案制定行动计划"
+        }
+      }
+    },
+    {
+      "id": "bug-triage",
+      "name": "Bug Triage & Fix Plan",
+      "description": "Analyse a bug report, reproduce the failure path, identify root cause, and produce a prioritised fix plan with test cases.",
+      "category": "engineering",
+      "icon": "",
+      "tags": [
+        "bug",
+        "debugging",
+        "triage",
+        "engineering"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "分析 Bug 报告，还原失败路径，定位根因，输出优先级排序的修复计划与测试用例。"
+        }
+      }
+    },
+    {
+      "id": "code-review",
+      "name": "Code Review",
+      "description": "Parallel code analysis pipeline that evaluates correctness, security, and style independently, then synthesises findings into a unified review summary.",
+      "category": "engineering",
+      "icon": "",
+      "tags": [
+        "code",
+        "review",
+        "security",
+        "quality"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "并行代码分析流水线，独立评估正确性、安全性和代码风格，然后将发现汇总为统一的审查报告。"
+        }
+      }
+    },
+    {
+      "id": "competitor-analysis",
+      "name": "Competitor Analysis",
+      "description": "Research competitors, map their strengths and weaknesses, and produce a strategic positioning report.",
+      "category": "business",
+      "icon": "",
+      "tags": [
+        "strategy",
+        "market",
+        "competitive",
+        "business"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "调研竞争对手，梳理其优劣势，输出战略定位报告。"
+        }
+      }
+    },
+    {
+      "id": "content-pipeline",
+      "name": "Content Creation Pipeline",
+      "description": "Research a topic, build a structured outline, write a full article, then edit for clarity, flow, and factual consistency.",
+      "category": "creation",
+      "icon": "",
+      "tags": [
+        "content",
+        "writing",
+        "article",
+        "research"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "调研主题，构建结构化提纲，撰写完整文章，再编辑润色以提升清晰度、流畅性和事实准确性。"
+        }
+      }
+    },
+    {
+      "id": "content-review",
+      "name": "Content Review",
+      "description": "Multi-agent content review pipeline that drafts, reviews for quality and accuracy, then produces a final edited version incorporating feedback.",
+      "category": "creation",
+      "icon": "",
+      "tags": [
+        "content",
+        "review",
+        "writing",
+        "editing"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "多智能体内容审校流水线，先起草内容，再分别审查质量和准确性，最后综合反馈生成终稿。"
+        }
+      }
+    },
+    {
+      "id": "customer-support",
+      "name": "Customer Support Triage",
+      "description": "Tiered customer support pipeline that classifies incoming requests by urgency and category, drafts an appropriate response, and escalates complex issues to a specialist.",
+      "category": "business",
+      "icon": "",
+      "tags": [
+        "support",
+        "triage",
+        "customer-service",
+        "escalation"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "分级客户支持流水线，按紧急程度和类别对请求进行分类，起草相应回复，并将复杂问题升级给专家处理。"
+        }
+      }
+    },
+    {
+      "id": "data-pipeline",
+      "name": "Data Analysis & Transform",
+      "description": "Clean, transform, analyse, and summarise raw data. Handles messy inputs: CSV, JSON, tables, or free-form text.",
+      "category": "engineering",
+      "icon": "",
+      "tags": [
+        "data",
+        "analysis",
+        "transform",
+        "etl"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "清洗、转换、分析并摘要原始数据，支持 CSV、JSON、表格或自由文本等杂乱输入。"
+        }
+      }
+    },
+    {
+      "id": "decision-matrix",
+      "name": "Decision Matrix",
+      "description": "Evaluate competing options against weighted criteria to produce a clear, defensible recommendation.",
+      "category": "thinking",
+      "icon": "",
+      "tags": [
+        "decision",
+        "analysis",
+        "strategy",
+        "thinking"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "对竞争方案按加权标准进行评估，输出清晰、有据可查的推荐结论。"
+        }
+      }
+    },
+    {
+      "id": "incident-postmortem",
+      "name": "Incident Postmortem",
+      "description": "Turn raw incident notes into a structured postmortem: timeline, root cause, impact assessment, and action items.",
+      "category": "engineering",
+      "icon": "",
+      "tags": [
+        "incident",
+        "postmortem",
+        "devops",
+        "reliability"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "将原始故障记录整理为结构化复盘报告：时间线、根因分析、影响评估和行动项。"
+        }
+      }
+    },
+    {
+      "id": "job-application",
+      "name": "Job Application Package",
+      "description": "Tailor a resume and cover letter to a specific job posting, then prepare targeted interview talking points.",
+      "category": "productivity",
+      "icon": "",
+      "tags": [
+        "career",
+        "resume",
+        "job",
+        "interview"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "针对特定职位定制简历和求职信，并准备有针对性的面试谈话要点。"
+        }
+      }
+    },
+    {
+      "id": "learning-plan",
+      "name": "Personalised Learning Plan",
+      "description": "Assess current knowledge, identify gaps, and build a structured learning roadmap with resources and milestones.",
+      "category": "productivity",
+      "icon": "",
+      "tags": [
+        "learning",
+        "education",
+        "planning",
+        "productivity"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "评估当前知识水平，识别差距，构建带资源和里程碑的结构化学习路线图。"
+        }
+      }
+    },
+    {
+      "id": "market-research",
+      "name": "Market Research Report",
+      "description": "Analyse a market opportunity: size, trends, customer segments, key players, and go-to-market entry points.",
+      "category": "business",
+      "icon": "",
+      "tags": [
+        "market",
+        "research",
+        "strategy",
+        "business"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "分析市场机会：市场规模、趋势、客户细分、主要参与者和进入市场的切入点。"
+        }
+      }
+    },
+    {
+      "id": "meeting-summary",
+      "name": "Meeting Summary & Action Items",
+      "description": "Transform raw meeting notes or transcript into a structured summary, decisions log, and follow-up email.",
+      "category": "productivity",
+      "icon": "",
+      "tags": [
+        "meeting",
+        "notes",
+        "productivity",
+        "collaboration"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "将原始会议记录或转录文本整理为结构化摘要、决策日志和跟进邮件。"
+        }
+      }
+    },
+    {
+      "id": "product-spec",
+      "name": "Product Spec Writer",
+      "description": "Turn a product idea or feature request into a complete PRD: user stories, acceptance criteria, technical notes, and open questions.",
+      "category": "business",
+      "icon": "",
+      "tags": [
+        "product",
+        "prd",
+        "planning",
+        "engineering"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "将产品想法或功能需求转化为完整 PRD：用户故事、验收标准、技术备注和待确认事项。"
+        }
+      }
+    },
+    {
+      "id": "refactor-plan",
+      "name": "Refactor Plan",
+      "description": "Analyse code for quality issues, prioritise refactoring opportunities, and produce a safe incremental migration plan.",
+      "category": "engineering",
+      "icon": "",
+      "tags": [
+        "refactoring",
+        "code-quality",
+        "engineering",
+        "architecture"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "分析代码质量问题，优先排序重构机会，制定安全的增量迁移计划。"
+        }
+      }
+    },
+    {
+      "id": "research",
+      "name": "Research & Summarise",
+      "description": "Research pipeline that investigates a topic from multiple angles, cross-checks findings for accuracy, and produces a concise executive summary with citations.",
+      "category": "research",
+      "icon": "",
+      "tags": [
+        "research",
+        "fact-check",
+        "summarise",
+        "analysis"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "调研流水线，从多个角度研究主题，交叉验证结果的准确性，并生成带引用的精炼摘要。"
+        }
+      }
+    },
+    {
+      "id": "test-generation",
+      "name": "Test Suite Generation",
+      "description": "Analyse code to generate comprehensive unit tests, integration tests, and edge case coverage.",
+      "category": "engineering",
+      "icon": "",
+      "tags": [
+        "testing",
+        "quality",
+        "engineering",
+        "tdd"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "分析代码，生成完整的单元测试、集成测试和边界情况覆盖。"
+        }
+      }
+    },
+    {
+      "id": "translate-polish",
+      "name": "Translation & Polish",
+      "description": "Translate text into a target language, then review for accuracy, naturalness, and cultural fit.",
+      "category": "language",
+      "icon": "",
+      "tags": [
+        "translation",
+        "language",
+        "localization",
+        "writing"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "将文本翻译为目标语言，再审校准确性、自然度和文化适配性。"
+        }
+      }
+    },
+    {
+      "id": "weekly-report",
+      "name": "Weekly Report Generator",
+      "description": "Turn raw work notes into a polished weekly report with highlights, metrics, blockers, and next week's priorities.",
+      "category": "productivity",
+      "icon": "",
+      "tags": [
+        "report",
+        "weekly",
+        "productivity",
+        "management"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "将零散工作笔记整理为规范周报，包含亮点、指标、阻塞项和下周计划。"
+        }
+      }
+    }
+  ],
+  "agents": [],
+  "plugins": [],
+  "skills": [],
+  "mcp": [],
   "handsCount": 17,
   "channelsCount": 44,
   "providersCount": 72,
@@ -1609,5 +2994,7 @@
   "workflowsCount": 22,
   "agentsCount": 32,
   "pluginsCount": 11,
-  "fetchedAt": "2026-04-17T03:44:19.585Z"
+  "skillsCount": 60,
+  "mcpCount": 0,
+  "fetchedAt": "2026-04-17T03:57:44.410Z"
 }

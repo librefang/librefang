@@ -16,6 +16,8 @@ import { useAppStore } from './store'
 import { cn } from './lib/utils'
 import DeployPage from './pages/DeployPage'
 import ChangelogPage from './pages/ChangelogPage'
+import RegistryPage from './pages/RegistryPage'
+import type { RegistryCategory } from './useRegistry'
 
 
 // ─── Language detection ───
@@ -147,14 +149,28 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
     label: string
     href: string
     external?: boolean
+    highlight?: boolean
   }
 
+  // Registry page entries route to dedicated /<category> pages that render
+  // the registry contents via the CF worker proxy.
+  const langPrefix = lang === 'en' ? '' : `/${lang}`
+  const registryLink = (cat: string, label: string, highlight?: boolean): NavLink => ({
+    label,
+    href: `${langPrefix}/${cat}`,
+    highlight,
+  })
+
+  const rc = t.registry?.categories
   const featureLinks: NavLink[] = [
-    { label: t.nav.architecture, href: '#architecture' },
-    { label: t.nav.hands, href: '#hands' },
-    { label: t.nav.workflows || t.workflows?.label || 'Workflows', href: '#workflows' },
-    { label: t.nav.performance, href: '#performance' },
-    { label: t.nav.evolution || 'Skills Self-Evolution', href: '#evolution' },
+    registryLink('hands',      rc?.hands.title     || 'Hands'),
+    registryLink('agents',     rc?.agents.title    || 'Agents'),
+    registryLink('skills',     rc?.skills.title    || 'Skills', true),
+    registryLink('mcp',        rc?.mcp.title       || 'MCP Servers'),
+    registryLink('plugins',    rc?.plugins.title   || 'Plugins'),
+    registryLink('providers',  rc?.providers.title || 'Providers'),
+    registryLink('workflows',  rc?.workflows.title || 'Workflows'),
+    registryLink('channels',   rc?.channels.title  || 'Channels'),
   ]
   const links: NavLink[] = [
     { label: t.nav.install, href: '#install' },
@@ -189,30 +205,20 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
             </button>
             {featuresOpen && (
               <div className="absolute left-0 mt-2 w-64 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50 py-1">
-                {featureLinks.map(link => {
-                  const id = link.href.replace('#', '')
-                  const isActive = activeSection === id
-                  const isEvolution = id === 'evolution'
-                  return (
-                    <a
-                      key={link.label}
-                      href={link.href}
-                      onClick={(e) => {
-                        e.preventDefault()
-                        const el = document.querySelector(link.href)
-                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                        setFeaturesOpen(false)
-                      }}
-                      className={cn(
-                        'flex items-center justify-between px-4 py-2.5 text-sm transition-colors',
-                        isActive ? 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/5' : 'text-gray-700 dark:text-gray-300 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-black/5 dark:hover:bg-white/5'
-                      )}
-                    >
-                      <span>{link.label}</span>
-                      {isEvolution && <Sparkles className="w-3.5 h-3.5 text-amber-400" />}
-                    </a>
-                  )
-                })}
+                {featureLinks.map(link => (
+                  <a
+                    key={link.label}
+                    href={link.href}
+                    onClick={() => { setFeaturesOpen(false); trackEvent('click', `nav_feature_${link.href}`) }}
+                    className={cn(
+                      'flex items-center justify-between px-4 py-2.5 text-sm transition-colors',
+                      link.highlight ? 'text-amber-600 dark:text-amber-300 hover:bg-amber-500/10' : 'text-gray-700 dark:text-gray-300 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-black/5 dark:hover:bg-white/5'
+                    )}
+                  >
+                    <span>{link.label}</span>
+                    {link.highlight && <Sparkles className="w-3.5 h-3.5" />}
+                  </a>
+                ))}
               </div>
             )}
           </div>
@@ -314,27 +320,22 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
             <div className="text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest py-1.5">
               {t.nav.features || 'Features'}
             </div>
-            {featureLinks.map(link => {
-              const id = link.href.replace('#', '')
-              const isEvolution = id === 'evolution'
-              return (
-                <a
-                  key={link.label}
-                  href={link.href}
-                  onClick={(e) => {
-                    e.preventDefault()
-                    const el = document.querySelector(link.href)
-                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                    setOpen(false)
-                  }}
-                  aria-current={activeSection === id ? 'page' : undefined}
-                  className="flex items-center justify-between py-2 pl-3 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium"
-                >
-                  <span>{link.label}</span>
-                  {isEvolution && <Sparkles className="w-3.5 h-3.5 text-amber-400" />}
-                </a>
-              )
-            })}
+            {featureLinks.map(link => (
+              <a
+                key={link.label}
+                href={link.href}
+                onClick={() => setOpen(false)}
+                className={cn(
+                  'flex items-center justify-between py-2 pl-3 text-sm transition-colors font-medium',
+                  link.highlight
+                    ? 'text-amber-600 dark:text-amber-300'
+                    : 'text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400'
+                )}
+              >
+                <span>{link.label}</span>
+                {link.highlight && <Sparkles className="w-3.5 h-3.5" />}
+              </a>
+            ))}
           </div>
           {links.map(link => (
             <a
@@ -1487,12 +1488,31 @@ function BackToTop() {
   )
 }
 
+// ─── Registry page route detection ───
+const REGISTRY_ROUTES: RegistryCategory[] = [
+  'skills', 'mcp', 'plugins', 'hands', 'agents', 'providers', 'workflows', 'channels', 'integrations'
+]
+
+function detectRegistryCategory(pathname: string): RegistryCategory | null {
+  // Strip locale prefix (e.g. /zh/skills -> /skills)
+  let path = pathname
+  const parts = path.split('/').filter(Boolean)
+  if (parts.length >= 1 && ['zh', 'zh-TW', 'ja', 'ko', 'de', 'es'].includes(parts[0]!)) {
+    path = '/' + parts.slice(1).join('/')
+  }
+  for (const cat of REGISTRY_ROUTES) {
+    if (path === `/${cat}` || path === `/${cat}/`) return cat
+  }
+  return null
+}
+
 // ─── App ───
 export default function App() {
   const lang = useAppStore((s) => s.lang)
   const switchLang = useAppStore((s) => s.switchLang)
   const [isDeployPage] = useState(() => window.location.pathname.startsWith('/deploy'))
   const [isChangelogPage] = useState(() => window.location.pathname.startsWith('/changelog'))
+  const [registryCategory] = useState<RegistryCategory | null>(() => detectRegistryCategory(window.location.pathname))
 
   useEffect(() => {
     document.documentElement.lang = lang
@@ -1517,6 +1537,11 @@ export default function App() {
       document.title = 'Changelog | LibreFang'
       return
     }
+    if (registryCategory) {
+      const label = t.registry?.categories[registryCategory]?.title || registryCategory
+      document.title = `${label} — LibreFang Registry`
+      return
+    }
     if (t.meta) {
       document.title = t.meta.title
       const descMeta = document.querySelector('meta[name="description"]')
@@ -1526,7 +1551,7 @@ export default function App() {
       const ogDesc = document.querySelector('meta[property="og:description"]')
       if (ogDesc) ogDesc.setAttribute('content', t.meta.description)
     }
-  }, [lang, t, isDeployPage, isChangelogPage])
+  }, [lang, t, isDeployPage, isChangelogPage, registryCategory])
 
   if (isDeployPage) {
     return <DeployPage />
@@ -1534,6 +1559,10 @@ export default function App() {
 
   if (isChangelogPage) {
     return <ChangelogPage />
+  }
+
+  if (registryCategory) {
+    return <RegistryPage category={registryCategory} />
   }
 
   return (

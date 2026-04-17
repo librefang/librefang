@@ -118,6 +118,34 @@ export interface Translation {
     toolsHeading: string
     cta: string
   }
+  registry?: {
+    label: string
+    total: string
+    matching: string
+    all: string
+    searchPlaceholder: string
+    loading: string
+    errorTitle: string
+    errorDesc: string
+    emptyTitle: string
+    emptyDesc: string
+    contribute: string
+    noMatches: string
+    backHome: string
+    sourceHint: string
+    readDocs: string
+    categories: {
+      skills: { title: string; desc: string }
+      mcp: { title: string; desc: string }
+      plugins: { title: string; desc: string }
+      hands: { title: string; desc: string }
+      agents: { title: string; desc: string }
+      providers: { title: string; desc: string }
+      workflows: { title: string; desc: string }
+      channels: { title: string; desc: string }
+      integrations: { title: string; desc: string }
+    }
+  }
   footer: { docs: string; license: string; privacy: string; changelog: string }
 }
 
@@ -322,6 +350,34 @@ export const translations: Record<string, Translation> = {
       ],
       cta: 'Read Skill Evolution Docs',
     },
+    registry: {
+      label: 'Registry',
+      total: 'total',
+      matching: 'matching',
+      all: 'All',
+      searchPlaceholder: 'Search by name, id, or tag...',
+      loading: 'Loading registry…',
+      errorTitle: 'Could not load registry',
+      errorDesc: 'GitHub rate limit hit or the proxy is down. Retry in a few seconds.',
+      emptyTitle: 'Nothing here yet',
+      emptyDesc: 'This section of the registry is not populated yet. Check back soon or contribute one.',
+      contribute: 'Contribute on GitHub',
+      noMatches: 'No matches for',
+      backHome: 'Home',
+      sourceHint: 'Data proxied from the librefang-registry repo on GitHub.',
+      readDocs: 'Read the docs',
+      categories: {
+        skills: { title: 'Skills', desc: 'Pluggable tool bundles — Python, WASM, Node, or prompt-only skills that extend what an agent can do.' },
+        mcp:    { title: 'MCP Servers', desc: 'Model Context Protocol servers that plug external tools and data sources directly into any agent.' },
+        plugins:{ title: 'Plugins', desc: 'Runtime extensions that add custom commands, channels, or behaviors to the LibreFang daemon.' },
+        hands:  { title: 'Hands', desc: 'Autonomous capability units. Each Hand ships with its own model, tools, and workflow — activate, don\'t assemble.' },
+        agents: { title: 'Agents', desc: 'Pre-built agent templates. Model, system prompt, capabilities and scheduling — all in one manifest.' },
+        providers: { title: 'Providers', desc: 'LLM provider adapters. Anthropic, OpenAI, Gemini, Groq, local — and the 40+ in between.' },
+        workflows: { title: 'Workflows', desc: 'Multi-step agent orchestrations expressed as TOML. Chain agents, branch on conditions, persist state.' },
+        channels:  { title: 'Channels', desc: 'Messaging adapters. Telegram, Slack, Discord, WhatsApp, LINE and 40+ other platforms.' },
+        integrations: { title: 'Integrations', desc: 'First-party integrations that expose agents to common SaaS tools and protocols.' },
+      },
+    },
     footer: { docs: 'Docs', license: 'License', privacy: 'Privacy', changelog: 'Changelog' },
   },
 
@@ -488,6 +544,34 @@ export const translations: Record<string, Translation> = {
         { name: 'skill_evolve_delete', desc: '删除本地创建的技能。' },
       ],
       cta: '查看技能进化文档',
+    },
+    registry: {
+      label: '注册表',
+      total: '个条目',
+      matching: '个匹配',
+      all: '全部',
+      searchPlaceholder: '按名称、ID 或标签搜索...',
+      loading: '正在加载注册表…',
+      errorTitle: '加载注册表失败',
+      errorDesc: 'GitHub 限流或代理暂不可用，稍等几秒重试即可。',
+      emptyTitle: '此分类暂无内容',
+      emptyDesc: '注册表里的这个分类还没有内容，欢迎贡献。',
+      contribute: '到 GitHub 提交贡献',
+      noMatches: '没有匹配结果：',
+      backHome: '首页',
+      sourceHint: '数据通过 Cloudflare Worker 从 librefang-registry 仓库代理获取。',
+      readDocs: '查看文档',
+      categories: {
+        skills:   { title: '技能', desc: '可插拔的工具包 —— Python、WASM、Node 或 prompt-only 技能，扩展 Agent 的能力边界。' },
+        mcp:      { title: 'MCP 服务器', desc: 'Model Context Protocol 服务器，把外部工具与数据直接挂接到任何 Agent。' },
+        plugins:  { title: '插件', desc: '运行时扩展 —— 为守护进程添加自定义命令、通道或行为。' },
+        hands:    { title: '能力单元', desc: '自主能力单元。每个 Hand 自带模型、工具与工作流 —— 直接启用，不必自己拼装。' },
+        agents:   { title: 'Agent 模板', desc: '预置 Agent 模板。模型、系统提示词、能力与调度都写在同一份清单里。' },
+        providers:{ title: '模型供应商', desc: 'LLM 供应商适配器：Anthropic、OpenAI、Gemini、Groq、本地模型，以及另外 40 多家。' },
+        workflows:{ title: '工作流', desc: '以 TOML 描述的多步 Agent 编排：串联 Agent、条件分支、状态持久化。' },
+        channels: { title: '通道', desc: '消息平台适配器：Telegram、Slack、Discord、WhatsApp、LINE 等 44 个。' },
+        integrations: { title: '集成', desc: '把 Agent 暴露给主流 SaaS 工具与协议的一方集成。' },
+      },
     },
     footer: { docs: '文档', license: '许可证', privacy: '隐私', changelog: '更新日志' },
   },
@@ -656,6 +740,34 @@ export const translations: Record<string, Translation> = {
       ],
       cta: '查看技能進化文件',
     },
+    registry: {
+      label: '註冊表',
+      total: '個項目',
+      matching: '個匹配',
+      all: '全部',
+      searchPlaceholder: '依名稱、ID 或標籤搜尋...',
+      loading: '正在載入註冊表…',
+      errorTitle: '載入註冊表失敗',
+      errorDesc: 'GitHub 限流或代理暫時無法使用，稍後重試即可。',
+      emptyTitle: '此分類尚無內容',
+      emptyDesc: '此分類目前為空，歡迎貢獻。',
+      contribute: '到 GitHub 貢獻',
+      noMatches: '沒有匹配結果：',
+      backHome: '首頁',
+      sourceHint: '資料透過 Cloudflare Worker 從 librefang-registry 儲存庫代理取得。',
+      readDocs: '閱讀文件',
+      categories: {
+        skills:   { title: '技能', desc: '可插拔的工具組 —— Python、WASM、Node 或 prompt-only 技能，擴展 Agent 的能力邊界。' },
+        mcp:      { title: 'MCP 伺服器', desc: 'Model Context Protocol 伺服器，把外部工具與資料直接接入任何 Agent。' },
+        plugins:  { title: '外掛', desc: '執行階段擴充 —— 為守護程序新增自訂命令、通道或行為。' },
+        hands:    { title: '能力單元', desc: '自主能力單元。每個 Hand 自帶模型、工具與工作流 —— 直接啟用，不需自己組裝。' },
+        agents:   { title: 'Agent 模板', desc: '預置 Agent 模板。模型、系統提示詞、能力與排程都寫在同一份清單裡。' },
+        providers:{ title: '模型供應商', desc: 'LLM 供應商介面卡：Anthropic、OpenAI、Gemini、Groq、本地模型，以及另外 40 多家。' },
+        workflows:{ title: '工作流', desc: '以 TOML 描述的多步 Agent 編排：串聯 Agent、條件分支、狀態持久化。' },
+        channels: { title: '頻道', desc: '訊息平台介面卡：Telegram、Slack、Discord、WhatsApp、LINE 等 44 個。' },
+        integrations: { title: '整合', desc: '把 Agent 暴露給主流 SaaS 工具與協定的一方整合。' },
+      },
+    },
     footer: { docs: '文件', license: '授權', privacy: '隱私', changelog: '更新日誌' },
   },
 
@@ -822,6 +934,34 @@ export const translations: Record<string, Translation> = {
         { name: 'skill_evolve_delete', desc: 'ローカルで作成したスキルを削除。' },
       ],
       cta: 'スキル進化ドキュメントを読む',
+    },
+    registry: {
+      label: 'レジストリ',
+      total: '件',
+      matching: '件一致',
+      all: 'すべて',
+      searchPlaceholder: '名前、ID、タグで検索...',
+      loading: 'レジストリを読み込み中…',
+      errorTitle: 'レジストリを読み込めません',
+      errorDesc: 'GitHub のレート制限、またはプロキシが停止中です。数秒後に再試行してください。',
+      emptyTitle: 'まだ何もありません',
+      emptyDesc: 'レジストリのこのセクションはまだ空です。コントリビュート歓迎。',
+      contribute: 'GitHub で貢献',
+      noMatches: 'マッチなし:',
+      backHome: 'ホーム',
+      sourceHint: 'データは Cloudflare Worker を経由して librefang-registry リポジトリから取得しています。',
+      readDocs: 'ドキュメントを読む',
+      categories: {
+        skills:   { title: 'スキル', desc: 'プラグ可能なツールバンドル —— Python、WASM、Node、または prompt-only スキルで Agent の能力を拡張。' },
+        mcp:      { title: 'MCP サーバー', desc: 'Model Context Protocol サーバーで、外部ツールとデータソースを任意の Agent に直接接続。' },
+        plugins:  { title: 'プラグイン', desc: 'LibreFang デーモンにカスタムコマンド・チャネル・挙動を追加するランタイム拡張。' },
+        hands:    { title: 'Hands', desc: '自律的な能力ユニット。各 Hand はモデル、ツール、ワークフローを同梱 —— 組み立てずに有効化。' },
+        agents:   { title: 'Agent', desc: 'プリビルトの Agent テンプレート。モデル・システムプロンプト・権限・スケジュールを1つのマニフェストに。' },
+        providers:{ title: 'プロバイダー', desc: 'LLM プロバイダーアダプター：Anthropic、OpenAI、Gemini、Groq、ローカル、その他 40+。' },
+        workflows:{ title: 'ワークフロー', desc: 'TOML で書かれた多段 Agent オーケストレーション。Agent の連結、条件分岐、状態の永続化。' },
+        channels: { title: 'チャネル', desc: 'メッセージングアダプター：Telegram、Slack、Discord、WhatsApp、LINE など 44 プラットフォーム。' },
+        integrations: { title: '統合', desc: 'Agent を主要な SaaS ツールとプロトコルに公開するファーストパーティ統合。' },
+      },
     },
     footer: { docs: 'ドキュメント', license: 'ライセンス', privacy: 'プライバシー', changelog: '変更履歴' },
   },
@@ -990,6 +1130,34 @@ export const translations: Record<string, Translation> = {
       ],
       cta: '스킬 진화 문서 읽기',
     },
+    registry: {
+      label: '레지스트리',
+      total: '항목',
+      matching: '개 일치',
+      all: '전체',
+      searchPlaceholder: '이름, ID 또는 태그로 검색...',
+      loading: '레지스트리 로드 중…',
+      errorTitle: '레지스트리를 불러올 수 없습니다',
+      errorDesc: 'GitHub 레이트 리밋에 걸렸거나 프록시가 다운되었습니다. 잠시 후 다시 시도하세요.',
+      emptyTitle: '아직 비어 있습니다',
+      emptyDesc: '레지스트리의 이 섹션은 아직 내용이 없습니다. 기여를 환영합니다.',
+      contribute: 'GitHub에서 기여하기',
+      noMatches: '검색 결과 없음:',
+      backHome: '홈',
+      sourceHint: 'Cloudflare Worker를 통해 librefang-registry 저장소에서 데이터를 프록시합니다.',
+      readDocs: '문서 읽기',
+      categories: {
+        skills:   { title: '스킬', desc: '플러그 가능한 도구 번들 —— Python, WASM, Node 또는 prompt-only 스킬로 Agent의 능력 확장.' },
+        mcp:      { title: 'MCP 서버', desc: 'Model Context Protocol 서버로 외부 도구와 데이터 소스를 모든 Agent에 직접 연결.' },
+        plugins:  { title: '플러그인', desc: 'LibreFang 데몬에 커스텀 명령어, 채널, 동작을 추가하는 런타임 확장.' },
+        hands:    { title: 'Hands', desc: '자율 능력 유닛. 각 Hand는 자체 모델, 도구, 워크플로를 포함 —— 조립 없이 활성화.' },
+        agents:   { title: 'Agent 템플릿', desc: '사전 구축된 Agent 템플릿. 모델, 시스템 프롬프트, 권한, 스케줄을 하나의 매니페스트에.' },
+        providers:{ title: '프로바이더', desc: 'LLM 프로바이더 어댑터: Anthropic, OpenAI, Gemini, Groq, 로컬 등 40개 이상.' },
+        workflows:{ title: '워크플로', desc: 'TOML로 작성된 다단계 Agent 오케스트레이션. Agent 연결, 조건 분기, 상태 지속성.' },
+        channels: { title: '채널', desc: '메시징 어댑터: Telegram, Slack, Discord, WhatsApp, LINE 등 44개 플랫폼.' },
+        integrations: { title: '통합', desc: 'Agent를 주요 SaaS 도구와 프로토콜에 노출하는 퍼스트파티 통합.' },
+      },
+    },
     footer: { docs: '문서', license: '라이선스', privacy: '개인정보', changelog: '변경 이력' },
   },
 
@@ -1157,6 +1325,34 @@ export const translations: Record<string, Translation> = {
       ],
       cta: 'Skill-Evolution-Dokumentation lesen',
     },
+    registry: {
+      label: 'Registry',
+      total: 'Einträge',
+      matching: 'Treffer',
+      all: 'Alle',
+      searchPlaceholder: 'Nach Name, ID oder Tag suchen...',
+      loading: 'Registry wird geladen…',
+      errorTitle: 'Registry konnte nicht geladen werden',
+      errorDesc: 'GitHub-Rate-Limit erreicht oder Proxy nicht erreichbar. In ein paar Sekunden erneut versuchen.',
+      emptyTitle: 'Noch leer',
+      emptyDesc: 'Dieser Abschnitt der Registry ist noch nicht gefüllt. Beiträge willkommen.',
+      contribute: 'Auf GitHub beitragen',
+      noMatches: 'Keine Treffer für',
+      backHome: 'Startseite',
+      sourceHint: 'Daten werden via Cloudflare Worker aus dem librefang-registry Repository geproxyt.',
+      readDocs: 'Docs lesen',
+      categories: {
+        skills:   { title: 'Skills', desc: 'Austauschbare Tool-Bundles — Python-, WASM-, Node- oder Prompt-Only-Skills, die die Fähigkeiten eines Agenten erweitern.' },
+        mcp:      { title: 'MCP-Server', desc: 'Model-Context-Protocol-Server, die externe Tools und Datenquellen direkt in jeden Agenten einbinden.' },
+        plugins:  { title: 'Plugins', desc: 'Runtime-Erweiterungen, die dem LibreFang-Daemon benutzerdefinierte Befehle, Kanäle oder Verhalten hinzufügen.' },
+        hands:    { title: 'Hands', desc: 'Autonome Fähigkeitseinheiten. Jede Hand bringt ihr eigenes Modell, Tools und Workflow mit — aktivieren statt zusammenbauen.' },
+        agents:   { title: 'Agenten', desc: 'Vorgefertigte Agent-Vorlagen. Modell, System-Prompt, Berechtigungen und Zeitplan in einem Manifest.' },
+        providers:{ title: 'Provider', desc: 'LLM-Provider-Adapter: Anthropic, OpenAI, Gemini, Groq, lokal — und 40+ weitere.' },
+        workflows:{ title: 'Workflows', desc: 'Mehrstufige Agent-Orchestrierungen in TOML. Agenten verketten, auf Bedingungen verzweigen, Zustand persistieren.' },
+        channels: { title: 'Kanäle', desc: 'Messaging-Adapter: Telegram, Slack, Discord, WhatsApp, LINE und 40+ weitere Plattformen.' },
+        integrations: { title: 'Integrationen', desc: 'First-Party-Integrationen, die Agenten gängigen SaaS-Tools und -Protokollen aussetzen.' },
+      },
+    },
     footer: { docs: 'Dokumentation', license: 'Lizenz', privacy: 'Datenschutz', changelog: 'Changelog' },
   },
 
@@ -1323,6 +1519,34 @@ export const translations: Record<string, Translation> = {
         { name: 'skill_evolve_delete', desc: 'Eliminar una skill creada localmente.' },
       ],
       cta: 'Leer Docs de Evolución de Skills',
+    },
+    registry: {
+      label: 'Registry',
+      total: 'elementos',
+      matching: 'coincidencias',
+      all: 'Todos',
+      searchPlaceholder: 'Buscar por nombre, ID o etiqueta...',
+      loading: 'Cargando registry…',
+      errorTitle: 'No se pudo cargar el registry',
+      errorDesc: 'Límite de GitHub alcanzado o proxy inactivo. Reintenta en unos segundos.',
+      emptyTitle: 'Todavía vacío',
+      emptyDesc: 'Esta sección del registry aún no está poblada. Contribuciones bienvenidas.',
+      contribute: 'Contribuir en GitHub',
+      noMatches: 'Sin resultados para',
+      backHome: 'Inicio',
+      sourceHint: 'Datos servidos vía Cloudflare Worker desde el repositorio librefang-registry.',
+      readDocs: 'Leer la documentación',
+      categories: {
+        skills:   { title: 'Skills', desc: 'Paquetes de herramientas conectables — skills Python, WASM, Node o prompt-only que amplían las capacidades del agente.' },
+        mcp:      { title: 'Servidores MCP', desc: 'Servidores Model Context Protocol que conectan herramientas y fuentes de datos externas directamente a cualquier agente.' },
+        plugins:  { title: 'Plugins', desc: 'Extensiones en runtime que añaden comandos, canales o comportamientos al daemon LibreFang.' },
+        hands:    { title: 'Hands', desc: 'Unidades autónomas de capacidad. Cada Hand trae su propio modelo, herramientas y workflow — actívalo, no lo montes.' },
+        agents:   { title: 'Agentes', desc: 'Plantillas de agente listas. Modelo, prompt del sistema, capacidades y schedule en un solo manifiesto.' },
+        providers:{ title: 'Proveedores', desc: 'Adaptadores de proveedores LLM: Anthropic, OpenAI, Gemini, Groq, local — y 40+ más.' },
+        workflows:{ title: 'Workflows', desc: 'Orquestaciones multi-paso de agentes en TOML. Encadena agentes, bifurca por condiciones, persiste estado.' },
+        channels: { title: 'Canales', desc: 'Adaptadores de mensajería: Telegram, Slack, Discord, WhatsApp, LINE y 40+ plataformas más.' },
+        integrations: { title: 'Integraciones', desc: 'Integraciones first-party que exponen agentes a herramientas SaaS y protocolos populares.' },
+      },
     },
     footer: { docs: 'Documentación', license: 'Licencia', privacy: 'Privacidad', changelog: 'Cambios' },
   },

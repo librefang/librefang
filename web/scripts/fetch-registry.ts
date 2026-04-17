@@ -16,12 +16,16 @@ interface Detail { id: string; name: string; description: string; category: stri
 
 async function fetchDir(path: string): Promise<GHItem[]> {
   const res = await fetch(`${API}/${path}`, { headers: HEADERS })
-  if (!res.ok) { console.error(`Failed to fetch ${path}: ${res.status}`); return [] }
+  if (!res.ok) {
+    // 404 is expected for optional categories (skills, mcp may not exist yet).
+    if (res.status !== 404) console.error(`Failed to fetch ${path}: ${res.status}`)
+    return []
+  }
   const items: GHItem[] = await res.json()
   return items.filter(f => (f.type === 'dir' || f.name.endsWith('.toml')) && f.name !== 'README.md')
 }
 
-function parseToml(text: string): Detail {
+function parseToml(text: string, fallbackId: string): Detail {
   const get = (key: string) => {
     const m = text.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, 'm'))
     return m ? m[1]! : ''
@@ -42,22 +46,41 @@ function parseToml(text: string): Detail {
   const tagsMatch = text.match(/^tags\s*=\s*\[([^\]]*)\]/m)
   const tags = tagsMatch ? tagsMatch[1]!.match(/"([^"]*)"/g)?.map(s => s.replace(/"/g, '')) : undefined
 
-  const result: Detail = { id: get('id'), name: get('name'), description: get('description'), category: get('category'), icon: get('icon') }
+  const result: Detail = {
+    id: get('id') || fallbackId,
+    name: get('name') || fallbackId,
+    description: get('description'),
+    category: get('category'),
+    icon: get('icon'),
+  }
   if (tags && tags.length > 0) result.tags = tags
   if (Object.keys(i18n).length > 0) result.i18n = i18n
   return result
 }
 
-async function fetchToml(path: string): Promise<Detail | null> {
+async function fetchToml(path: string, fallbackId: string): Promise<Detail | null> {
   const res = await fetch(`${RAW}/${path}`)
   if (!res.ok) return null
-  return parseToml(await res.text())
+  return parseToml(await res.text(), fallbackId)
+}
+
+async function fetchBatch(items: GHItem[], resolvePath: (item: GHItem) => string): Promise<Detail[]> {
+  const out: Detail[] = []
+  for (let i = 0; i < items.length; i += 10) {
+    const slice = items.slice(i, i + 10)
+    const details = await Promise.all(slice.map(item => {
+      const id = item.name.endsWith('.toml') ? item.name.replace(/\.toml$/, '') : item.name
+      return fetchToml(resolvePath(item), id)
+    }))
+    for (const d of details) if (d) out.push(d)
+  }
+  return out
 }
 
 async function main() {
   console.log('Fetching registry data...')
 
-  const [handDirs, channelFiles, providerFiles, integrationFiles, workflowFiles, agentDirs, pluginFiles] = await Promise.all([
+  const [handDirs, channelFiles, providerFiles, integrationFiles, workflowFiles, agentDirs, pluginFiles, skillDirs, mcpFiles] = await Promise.all([
     fetchDir('hands'),
     fetchDir('channels'),
     fetchDir('providers'),
@@ -65,6 +88,8 @@ async function main() {
     fetchDir('workflows'),
     fetchDir('agents'),
     fetchDir('plugins'),
+    fetchDir('skills'),
+    fetchDir('mcp'),
   ])
 
   const filter = (items: GHItem[]) => items.filter(f => f.name !== 'README.md')
@@ -75,18 +100,40 @@ async function main() {
   const workflows = filter(workflowFiles)
   const agents = filter(agentDirs)
   const plugins = filter(pluginFiles)
+  const skills = filter(skillDirs)
+  const mcp = filter(mcpFiles)
 
-  console.log(`Found: ${hands.length} hands, ${channels.length} channels, ${providers.length} providers, ${integrations.length} integrations, ${workflows.length} workflows, ${agents.length} agents, ${plugins.length} plugins`)
+  console.log(
+    `Found: ${hands.length} hands, ${channels.length} channels, ${providers.length} providers, ` +
+    `${integrations.length} integrations, ${workflows.length} workflows, ${agents.length} agents, ` +
+    `${plugins.length} plugins, ${skills.length} skills, ${mcp.length} mcp`
+  )
 
-  // Fetch details
-  const [handDetails, channelDetails] = await Promise.all([
-    Promise.all(hands.map(h => fetchToml(`hands/${h.name}/HAND.toml`))),
-    Promise.all(channels.map(c => fetchToml(`channels/${c.name}`))),
+  // Fetch full TOML details for all categories in parallel.
+  // Directory-based: manifest at <dir>/<UPPER>.toml
+  // File-based: item name already is <id>.toml
+  const [handDetails, agentDetails, skillDetails, channelDetails, providerDetails, workflowDetails, pluginDetails, integrationDetails, mcpDetails] = await Promise.all([
+    fetchBatch(hands, h => `hands/${h.name}/HAND.toml`),
+    fetchBatch(agents, a => `agents/${a.name}/AGENT.toml`),
+    fetchBatch(skills, s => `skills/${s.name}/SKILL.toml`),
+    fetchBatch(channels, c => `channels/${c.name}`),
+    fetchBatch(providers, p => `providers/${p.name}`),
+    fetchBatch(workflows, w => `workflows/${w.name}`),
+    fetchBatch(plugins, p => `plugins/${p.name}`),
+    fetchBatch(integrations, i => `integrations/${i.name}`),
+    fetchBatch(mcp, m => m.name.endsWith('.toml') ? `mcp/${m.name}` : `mcp/${m.name}/MCP.toml`),
   ])
 
   const data = {
-    hands: handDetails.filter(Boolean),
-    channels: channelDetails.filter(Boolean),
+    hands: handDetails,
+    channels: channelDetails,
+    providers: providerDetails,
+    integrations: integrationDetails,
+    workflows: workflowDetails,
+    agents: agentDetails,
+    plugins: pluginDetails,
+    skills: skillDetails,
+    mcp: mcpDetails,
     handsCount: hands.length,
     channelsCount: channels.length,
     providersCount: providers.length,
@@ -94,6 +141,8 @@ async function main() {
     workflowsCount: workflows.length,
     agentsCount: agents.length,
     pluginsCount: plugins.length,
+    skillsCount: skills.length,
+    mcpCount: mcp.length,
     fetchedAt: new Date().toISOString(),
   }
 

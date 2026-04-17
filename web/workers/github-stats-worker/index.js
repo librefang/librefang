@@ -368,7 +368,7 @@ async function handleRegistry(env, cors, forceRefresh = false) {
       return items.filter(f => (f.type === 'dir' || f.name.endsWith('.toml')) && f.name !== 'README.md')
     }
 
-    const [handDirs, channelFiles, providerFiles, integrationFiles, workflowFiles, agentDirs, pluginFiles] = await Promise.all([
+    const [handDirs, channelFiles, providerFiles, integrationFiles, workflowFiles, agentDirs, pluginFiles, skillDirs, mcpFiles] = await Promise.all([
       fetchDir('hands'),
       fetchDir('channels'),
       fetchDir('providers'),
@@ -376,31 +376,49 @@ async function handleRegistry(env, cors, forceRefresh = false) {
       fetchDir('workflows'),
       fetchDir('agents'),
       fetchDir('plugins'),
+      fetchDir('skills'),
+      fetchDir('mcp'),
     ])
 
     const filter = (items) => items.filter(f => f.name !== 'README.md')
     const hands = filter(handDirs)
     const channels = filter(channelFiles)
+    const providers = filter(providerFiles)
+    const integrations = filter(integrationFiles)
+    const workflows = filter(workflowFiles)
+    const agents = filter(agentDirs)
+    const plugins = filter(pluginFiles)
+    const skills = filter(skillDirs)
+    const mcp = filter(mcpFiles)
 
-    // Only fetch names from directory listings (avoid subrequest limit)
-    // TOML details are served from build-time registry.json fallback
-    const handNames = hands.map(h => ({ id: h.name, name: h.name, description: '', category: '', icon: '' }))
-    const channelNames = channels.map(c => {
-      const id = c.name.replace('.toml', '')
+    // Names-only fallback (cheap, no TOML fetches). Full details come from
+    // build-time registry.json merge on the client side, or from the
+    // scheduled refreshRegistryCache which runs once a day.
+    const bareNames = (items, isDir) => items.map(item => {
+      const id = isDir ? item.name : item.name.replace('.toml', '')
       const name = id.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
       return { id, name, description: '', category: '', icon: '' }
     })
 
     const result = {
-      hands: handNames,
-      channels: channelNames,
+      hands: bareNames(hands, true),
+      channels: bareNames(channels, false),
+      providers: bareNames(providers, false),
+      integrations: bareNames(integrations, false),
+      workflows: bareNames(workflows, false),
+      agents: bareNames(agents, true),
+      plugins: bareNames(plugins, false),
+      skills: bareNames(skills, true),
+      mcp: bareNames(mcp, false),
       handsCount: hands.length,
       channelsCount: channels.length,
-      providersCount: filter(providerFiles).length,
-      integrationsCount: filter(integrationFiles).length,
-      workflowsCount: filter(workflowFiles).length,
-      agentsCount: filter(agentDirs).length,
-      pluginsCount: filter(pluginFiles).length,
+      providersCount: providers.length,
+      integrationsCount: integrations.length,
+      workflowsCount: workflows.length,
+      agentsCount: agents.length,
+      pluginsCount: plugins.length,
+      skillsCount: skills.length,
+      mcpCount: mcp.length,
       fetchedAt: new Date().toISOString(),
     }
 
@@ -477,7 +495,7 @@ async function refreshRegistryCache(env) {
   }
 
   try {
-    const [handDirs, channelFiles, providerFiles, integrationFiles, workflowFiles, agentDirs, pluginFiles] = await Promise.all([
+    const [handDirs, channelFiles, providerFiles, integrationFiles, workflowFiles, agentDirs, pluginFiles, skillDirs, mcpFiles] = await Promise.all([
       fetchDir('hands'),
       fetchDir('channels'),
       fetchDir('providers'),
@@ -485,11 +503,20 @@ async function refreshRegistryCache(env) {
       fetchDir('workflows'),
       fetchDir('agents'),
       fetchDir('plugins'),
+      fetchDir('skills'),
+      fetchDir('mcp'),
     ])
 
     const filter = (items) => items.filter(f => f.name !== 'README.md')
     const hands = filter(handDirs)
     const channels = filter(channelFiles)
+    const providers = filter(providerFiles)
+    const integrations = filter(integrationFiles)
+    const workflows = filter(workflowFiles)
+    const agents = filter(agentDirs)
+    const plugins = filter(pluginFiles)
+    const skills = filter(skillDirs)
+    const mcp = filter(mcpFiles)
 
     // Compare counts with cached data — skip full TOML fetch if unchanged
     const cached = await env.KV.get('registry_data')
@@ -498,11 +525,13 @@ async function refreshRegistryCache(env) {
         const old = JSON.parse(cached)
         if (old.handsCount === hands.length &&
             old.channelsCount === channels.length &&
-            old.providersCount === filter(providerFiles).length &&
-            old.integrationsCount === filter(integrationFiles).length &&
-            old.workflowsCount === filter(workflowFiles).length &&
-            old.agentsCount === filter(agentDirs).length &&
-            old.pluginsCount === filter(pluginFiles).length) {
+            old.providersCount === providers.length &&
+            old.integrationsCount === integrations.length &&
+            old.workflowsCount === workflows.length &&
+            old.agentsCount === agents.length &&
+            old.pluginsCount === plugins.length &&
+            old.skillsCount === skills.length &&
+            old.mcpCount === mcp.length) {
           console.log('Registry unchanged, skipping TOML fetch')
           await env.KV.put('registry_data_time', String(Date.now()))
           return
@@ -521,21 +550,39 @@ async function refreshRegistryCache(env) {
       return results.filter(Boolean)
     }
 
-    const [handDetails, channelDetails] = await Promise.all([
+    // Directory-based: manifest lives inside <dir>/<UPPER>.toml
+    // File-based: item name already ends in .toml
+    const [handDetails, agentDetails, skillDetails, channelDetails, providerDetails, workflowDetails, pluginDetails, integrationDetails, mcpDetails] = await Promise.all([
       fetchBatch(hands, h => `hands/${h.name}/HAND.toml`),
+      fetchBatch(agents, a => `agents/${a.name}/AGENT.toml`),
+      fetchBatch(skills, s => `skills/${s.name}/SKILL.toml`),
       fetchBatch(channels, c => `channels/${c.name}`),
+      fetchBatch(providers, p => `providers/${p.name}`),
+      fetchBatch(workflows, w => `workflows/${w.name}`),
+      fetchBatch(plugins, p => `plugins/${p.name}`),
+      fetchBatch(integrations, i => `integrations/${i.name}`),
+      fetchBatch(mcp, m => m.name.endsWith('.toml') ? `mcp/${m.name}` : `mcp/${m.name}/MCP.toml`),
     ])
 
     const result = {
       hands: handDetails,
       channels: channelDetails,
+      providers: providerDetails,
+      integrations: integrationDetails,
+      workflows: workflowDetails,
+      agents: agentDetails,
+      plugins: pluginDetails,
+      skills: skillDetails,
+      mcp: mcpDetails,
       handsCount: hands.length,
       channelsCount: channels.length,
-      providersCount: filter(providerFiles).length,
-      integrationsCount: filter(integrationFiles).length,
-      workflowsCount: filter(workflowFiles).length,
-      agentsCount: filter(agentDirs).length,
-      pluginsCount: filter(pluginFiles).length,
+      providersCount: providers.length,
+      integrationsCount: integrations.length,
+      workflowsCount: workflows.length,
+      agentsCount: agents.length,
+      pluginsCount: plugins.length,
+      skillsCount: skills.length,
+      mcpCount: mcp.length,
       fetchedAt: new Date().toISOString(),
     }
 
@@ -544,7 +591,15 @@ async function refreshRegistryCache(env) {
       env.KV.put('registry_data', json),
       env.KV.put('registry_data_time', String(Date.now())),
     ])
-    console.log('Registry refreshed:', hands.length, 'hands,', channels.length, 'channels')
+    console.log('Registry refreshed:',
+      hands.length, 'hands,',
+      channels.length, 'channels,',
+      agents.length, 'agents,',
+      providers.length, 'providers,',
+      workflows.length, 'workflows,',
+      plugins.length, 'plugins,',
+      skills.length, 'skills,',
+      mcp.length, 'mcp')
   } catch (e) {
     console.error('Registry refresh failed:', e.message)
   }
