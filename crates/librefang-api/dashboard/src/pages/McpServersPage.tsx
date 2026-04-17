@@ -55,7 +55,7 @@ function formToPayload(form: ServerFormState): McpServerConfigured {
     transport = {
       type: "stdio",
       command: form.command,
-      args: form.args.filter(Boolean),
+      args: form.args.map(s => s.trim()).filter(Boolean),
     };
   } else {
     transport = { type: form.transportType, url: form.url };
@@ -66,7 +66,7 @@ function formToPayload(form: ServerFormState): McpServerConfigured {
     name: form.name,
     transport,
     timeout_secs: form.timeout || 30,
-    env: form.env.filter(Boolean),
+    env: form.env.map(s => s.trim()).filter(Boolean),
   };
   // Only include headers if user explicitly entered values, to avoid
   // overwriting server-side headers that the list API may not return.
@@ -105,6 +105,7 @@ function getTransportDetail(server: McpServerConfigured): string {
 // ── ArgsEditor ──────────────────────────────────────────────────────
 
 function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: string[]) => void }) {
+  const { t } = useTranslation();
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   function addItem() {
@@ -141,7 +142,7 @@ function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: st
             type="button"
             onClick={() => removeItem(idx)}
             className="shrink-0 flex items-center justify-center w-6 h-6 rounded-md text-text-dim hover:text-error hover:bg-error/8 transition-colors"
-            aria-label="Remove argument"
+            aria-label={t("mcp.remove_argument")}
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -153,7 +154,7 @@ function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: st
         className="flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-brand transition-colors py-0.5"
       >
         <Plus className="h-3 w-3" />
-        Add argument
+        {t("mcp.add_argument")}
       </button>
     </div>
   );
@@ -162,6 +163,7 @@ function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: st
 // ── EnvEditor ───────────────────────────────────────────────────────
 
 function EnvEditor({ items, onChange }: { items: string[]; onChange: (items: string[]) => void }) {
+  const { t } = useTranslation();
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   function addItem() {
@@ -191,14 +193,14 @@ function EnvEditor({ items, onChange }: { items: string[]; onChange: (items: str
             type="text"
             value={item}
             onChange={(e) => updateItem(idx, e.target.value)}
-            placeholder="KEY=VALUE"
+            placeholder={t("mcp.env_placeholder")}
             className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
           />
           <button
             type="button"
             onClick={() => removeItem(idx)}
             className="shrink-0 flex items-center justify-center w-6 h-6 rounded-md text-text-dim hover:text-error hover:bg-error/8 transition-colors"
-            aria-label="Remove variable"
+            aria-label={t("mcp.remove_variable")}
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -210,7 +212,7 @@ function EnvEditor({ items, onChange }: { items: string[]; onChange: (items: str
         className="flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-brand transition-colors py-0.5"
       >
         <Plus className="h-3 w-3" />
-        Add variable
+        {t("mcp.add_variable")}
       </button>
     </div>
   );

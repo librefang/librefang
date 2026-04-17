@@ -798,6 +798,25 @@ export async function patchAgentConfig(agentId: string, config: { max_tokens?: n
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 
+export interface AgentToolsResponse {
+  tool_allowlist?: string[] | null;
+  tool_blocklist?: string[] | null;
+  disabled?: boolean;
+}
+
+export interface ToolDefinition {
+  name: string;
+  description?: string;
+}
+
+export async function getAgentTools(agentId: string): Promise<AgentToolsResponse> {
+  return get<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`);
+}
+
+export async function updateAgentTools(agentId: string, payload: { tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
+}
+
 export async function listAgents(
   opts: { includeHands?: boolean } = {},
 ): Promise<AgentItem[]> {
@@ -1074,9 +1093,10 @@ export async function listSkills(): Promise<SkillItem[]> {
   return data.skills ?? [];
 }
 
-export async function listTools(): Promise<any[]> {
-  const data = await get<any>("/api/tools");
-  return data.tools ?? data ?? [];
+export async function listTools(): Promise<ToolDefinition[]> {
+  const data = await get<{ tools?: ToolDefinition[] } | ToolDefinition[]>("/api/tools");
+  if (Array.isArray(data)) return data;
+  return data.tools ?? [];
 }
 
 export async function installSkill(name: string, hand?: string): Promise<ApiActionResponse> {
