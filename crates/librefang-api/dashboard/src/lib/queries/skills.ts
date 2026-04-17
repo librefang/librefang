@@ -6,6 +6,7 @@ import {
   clawhubGetSkill,
   skillhubBrowse,
   skillhubSearch,
+  skillhubGetSkill,
   fanghubListSkills,
 } from "../http/client";
 import { skillKeys, clawhubKeys, skillhubKeys, fanghubKeys } from "./keys";
@@ -54,6 +55,12 @@ export const skillQueries = {
       enabled: !!query,
       staleTime: STALE_MS,
     }),
+  skillhubSkill: (slug: string) =>
+    queryOptions({
+      queryKey: skillhubKeys.detail(slug),
+      queryFn: () => skillhubGetSkill(slug),
+      enabled: !!slug,
+    }),
   fanghubList: () =>
     queryOptions({
       queryKey: fanghubKeys.list(),
@@ -84,6 +91,10 @@ export function useSkillHubBrowse(sort?: string) {
 
 export function useSkillHubSearch(query: string) {
   return useQuery(skillQueries.skillhubSearch(query));
+}
+
+export function useSkillHubSkill(slug: string) {
+  return useQuery(skillQueries.skillhubSkill(slug));
 }
 
 export function useFangHubSkills() {

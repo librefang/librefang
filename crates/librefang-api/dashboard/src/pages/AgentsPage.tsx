@@ -3,15 +3,14 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
-  getAgentDetail,
   type AgentDetail,
   type PromptVersion,
   type PromptExperiment,
   type ExperimentVariantMetrics,
   getAgentTemplateToml,
-  deleteAgent,
   resetAgentSession,
 } from "../api";
+import { useQueryClient } from "@tanstack/react-query";
 import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -33,6 +32,7 @@ import { useDashboardSnapshot } from "../lib/queries/runtime";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import {
+  agentQueries,
   useAgentTemplates,
   useExperimentMetrics,
   useExperiments,
@@ -44,6 +44,7 @@ import {
   useCompleteExperiment,
   useCreateExperiment,
   useCreatePromptVersion,
+  useDeleteAgent,
   useDeletePromptVersion,
   usePatchAgentConfig,
   usePauseExperiment,
@@ -102,17 +103,22 @@ export function AgentsPage() {
   const resumeMutation = useResumeAgent();
   const patchAgentConfigMutation = usePatchAgentConfig();
   const cloneMutation = useCloneAgent();
+  const qc = useQueryClient();
 
+  const rawDeleteMutation = useDeleteAgent();
   const deleteMutation = {
-    mutate: async (agentId: string) => {
-      try {
-        await deleteAgent(agentId);
-        setDetailAgent(null);
-        addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
-      } catch (e: any) {
-        addToast(e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }), "error");
-      }
-    },
+    mutate: (agentId: string) =>
+      rawDeleteMutation.mutate(agentId, {
+        onSuccess: () => {
+          setDetailAgent(null);
+          addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
+        },
+        onError: (e: Error) =>
+          addToast(
+            e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }),
+            "error",
+          ),
+      }),
   };
 
   function mergeHandFlag(agent: AgentDetail, fallback?: boolean) {
@@ -140,7 +146,8 @@ export function AgentsPage() {
 
   async function refreshDetailAgent(agentId: string, fallback?: boolean) {
     try {
-      const d = await getAgentDetail(agentId);
+      await qc.invalidateQueries({ queryKey: agentQueries.detail(agentId).queryKey });
+      const d = await qc.fetchQuery(agentQueries.detail(agentId));
       setDetailAgent(mergeHandFlag(d, fallback));
     } catch {
       // keep current state when refresh fails
@@ -262,7 +269,7 @@ export function AgentsPage() {
     return (
       <Card key={agent.id} hover padding="lg" className={`cursor-pointer ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
         setDetailLoading(true);
-        try { const d = await getAgentDetail(agent.id); setDetailAgent(mergeHandFlag(d, agent.is_hand)); } catch { setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail); }
+        try { const d = await qc.fetchQuery(agentQueries.detail(agent.id)); setDetailAgent(mergeHandFlag(d, agent.is_hand)); } catch { setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail); }
         setDetailLoading(false);
       }}>
         <div className="flex items-start justify-between gap-4 mb-5">

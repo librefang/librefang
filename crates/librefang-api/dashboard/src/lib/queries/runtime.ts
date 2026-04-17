@@ -11,16 +11,9 @@ import {
   listTaskQueue,
   listCronJobs,
 } from "../../api";
-import { dashboardSnapshotQueryOptions, versionInfoQueryOptions } from "./overview";
 import { runtimeKeys, auditKeys, cronKeys } from "./keys";
 
-export function useDashboardSnapshot() {
-  return useQuery(dashboardSnapshotQueryOptions());
-}
-
-export function useVersionInfo() {
-  return useQuery(versionInfoQueryOptions());
-}
+export { useDashboardSnapshot, useVersionInfo } from "./overview";
 
 export const systemStatusQueryOptions = () =>
   queryOptions({

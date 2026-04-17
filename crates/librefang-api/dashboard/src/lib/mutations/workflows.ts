@@ -45,8 +45,13 @@ export function useCreateWorkflow() {
 export function useUpdateWorkflow() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ workflowId, payload }: { workflowId: string; payload: any }) =>
-      updateWorkflow(workflowId, payload),
+    mutationFn: ({
+      workflowId,
+      payload,
+    }: {
+      workflowId: string;
+      payload: Parameters<typeof updateWorkflow>[1];
+    }) => updateWorkflow(workflowId, payload),
     onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.all }),
   });
 }

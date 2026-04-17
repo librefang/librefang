@@ -20,7 +20,7 @@ export function useCreateSchedule() {
 export function useUpdateSchedule() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: any }) =>
+    mutationFn: ({ id, data }: { id: string; data: Parameters<typeof updateSchedule>[1] }) =>
       updateSchedule(id, data),
     onSuccess: () => qc.invalidateQueries({ queryKey: scheduleKeys.all }),
   });

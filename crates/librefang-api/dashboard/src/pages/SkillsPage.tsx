@@ -2,8 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { clawhubGetSkill, skillhubGetSkill, listHands, type ClawHubBrowseItem, type FangHubSkill, type HandDefinitionItem } from "../api";
+import { type ClawHubBrowseItem, type FangHubSkill, type HandDefinitionItem } from "../api";
 import { useSkills, skillQueries } from "../lib/queries/skills";
+import { useHands } from "../lib/queries/hands";
 import { useUninstallSkill, useClawHubInstall, useSkillHubInstall, useInstallSkill } from "../lib/mutations/skills";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -355,8 +356,7 @@ export function SkillsPage() {
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [targetHand, setTargetHand] = useState<string>("");
 
-  // Hands query for install target selector (hands domain — kept inline)
-  const handsQuery = useQuery({ queryKey: ["hands", "list"], queryFn: listHands });
+  const handsQuery = useHands();
   const hands = handsQuery.data ?? [];
 
   // Get search keyword from category or use search input
@@ -395,17 +395,16 @@ export function SkillsPage() {
     enabled: viewMode === "fanghub",
   });
 
-  // Detail query — conditionally fetches from skillhub or clawhub
-  const detailQuery = useQuery({
-    queryKey: [detailsSource, "skill", detailsSkill?.slug],
-    queryFn: () => {
-      if (!detailsSkill?.slug) return Promise.resolve(null);
-      return detailsSource === "skillhub"
-        ? skillhubGetSkill(detailsSkill.slug)
-        : clawhubGetSkill(detailsSkill.slug);
-    },
-    enabled: !!detailsSkill?.slug,
+  // Detail query — conditionally fetches from skillhub or clawhub via factory keys
+  const clawhubDetailQuery = useQuery({
+    ...skillQueries.clawhubSkill(detailsSkill?.slug ?? ""),
+    enabled: !!detailsSkill?.slug && detailsSource === "clawhub",
   });
+  const skillhubDetailQuery = useQuery({
+    ...skillQueries.skillhubSkill(detailsSkill?.slug ?? ""),
+    enabled: !!detailsSkill?.slug && detailsSource === "skillhub",
+  });
+  const detailQuery = detailsSource === "skillhub" ? skillhubDetailQuery : clawhubDetailQuery;
 
   const skillWithDetails = detailQuery.data && detailsSkill
     ? {

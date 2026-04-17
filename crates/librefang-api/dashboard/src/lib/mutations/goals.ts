@@ -13,7 +13,8 @@ export function useCreateGoal() {
 export function useUpdateGoal() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: any }) => updateGoal(id, data),
+    mutationFn: ({ id, data }: { id: string; data: Parameters<typeof updateGoal>[1] }) =>
+      updateGoal(id, data),
     onSuccess: () => qc.invalidateQueries({ queryKey: goalKeys.all }),
   });
 }

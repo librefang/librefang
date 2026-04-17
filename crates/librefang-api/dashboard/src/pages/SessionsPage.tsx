@@ -1,8 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
 import { formatRelativeTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listAgents } from "../api";
+import { useAgents } from "../lib/queries/agents";
 import { useSessions } from "../lib/queries/sessions";
 import { useSwitchSession, useDeleteSession, useSetSessionLabel } from "../lib/mutations/sessions";
 import { Button } from "../components/ui/Button";
@@ -25,7 +24,7 @@ export function SessionsPage() {
   const addToast = useUIStore((s) => s.addToast);
 
   const sessionsQuery = useSessions();
-  const agentsQuery = useQuery({ queryKey: ["agents", "list", "sessions"], queryFn: () => listAgents() });
+  const agentsQuery = useAgents();
 
   const switchMutation = useSwitchSession();
   const deleteMutation = useDeleteSession();

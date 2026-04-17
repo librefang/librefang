@@ -1,9 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
 import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { loadDashboardSnapshot, type CommsEventItem } from "../api";
+import { type CommsEventItem } from "../api";
 import { useChannels, useCommsTopology, useCommsEvents } from "../lib/queries/channels";
+import { useDashboardSnapshot } from "../lib/queries/overview";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton, ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -100,11 +100,7 @@ export function CommsPage() {
 
   const channelsQuery = useChannels();
 
-  const snapshotQuery = useQuery({
-    queryKey: ["dashboard", "snapshot", "comms"],
-    queryFn: loadDashboardSnapshot,
-    refetchInterval: 30000,
-  });
+  const snapshotQuery = useDashboardSnapshot();
 
   const topologyQuery = useCommsTopology();
 

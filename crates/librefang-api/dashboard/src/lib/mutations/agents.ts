@@ -4,6 +4,7 @@ import {
   cloneAgent,
   suspendAgent,
   resumeAgent,
+  deleteAgent,
   patchAgentConfig,
   createAgentSession,
   switchAgentSession,
@@ -45,6 +46,17 @@ export function useSuspendAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: suspendAgent,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: agentKeys.all });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+export function useDeleteAgent() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: deleteAgent,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: agentKeys.all });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });

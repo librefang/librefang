@@ -1,11 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
 import { formatDateTime } from "../lib/datetime";
 import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { searchMemories, listMemories, getHealthDetail, type MemoryStatsResponse, type MemoryItem } from "../api";
-import { useMemoryStats, useMemoryConfig } from "../lib/queries/memory";
+import { type MemoryStatsResponse } from "../api";
+import { useMemoryStats, useMemoryConfig, useMemorySearchOrList } from "../lib/queries/memory";
+import { useHealthDetail } from "../lib/queries/runtime";
 import { useAddMemory, useUpdateMemory, useDeleteMemory, useCleanupMemories, useUpdateMemoryConfig } from "../lib/mutations/memory";
-import { runtimeKeys } from "../lib/queries/keys";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -18,8 +17,6 @@ import { Modal } from "../components/ui/Modal";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, Edit2, Loader2, Settings } from "lucide-react";
-
-const REFRESH_MS = 30000;
 
 // Add Memory Dialog
 function AddMemoryDialog({ onClose }: { onClose: () => void }) {
@@ -308,25 +305,16 @@ export function MemoryPage() {
   const [editingMemory, setEditingMemory] = useState<{ id: string; content?: string } | null>(null);
 
 
-  const healthQuery = useQuery<{ memory?: { embedding_available: boolean; embedding_provider: string; embedding_model: string; extraction_model: string; proactive_memory_enabled: boolean } }>({
-    queryKey: runtimeKeys.healthDetail(),
-    queryFn: () => getHealthDetail() as any,
-    staleTime: 60000,
-  });
-  const memoryConfig = healthQuery.data?.memory;
+  const healthQuery = useHealthDetail();
+  const memoryConfig = (healthQuery.data as { memory?: {
+    embedding_available: boolean;
+    embedding_provider: string;
+    embedding_model: string;
+    extraction_model: string;
+    proactive_memory_enabled: boolean;
+  } } | undefined)?.memory;
 
-  const memoryQuery = useQuery<{ memories: MemoryItem[]; total: number }>({
-    queryKey: ["memory", "list", search],
-    queryFn: async () => {
-      if (search.trim()) {
-        const items = await searchMemories({ query: search.trim(), limit: 50 });
-        return { memories: items, total: items.length };
-      }
-      const res = await listMemories({ offset: 0, limit: 10000 });
-      return { memories: res.memories ?? [], total: res.total ?? 0 };
-    },
-    refetchInterval: REFRESH_MS,
-  });
+  const memoryQuery = useMemorySearchOrList(search);
 
   const statsQuery = useMemoryStats();
   const deleteMutation = useDeleteMemory();

@@ -1,7 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
 import { FormEvent, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listAgents, listWorkflows } from "../api";
+import { useAgents } from "../lib/queries/agents";
+import { useWorkflows } from "../lib/queries/workflows";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -38,10 +38,10 @@ export function SchedulerPage() {
   const [message, setMessage] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<{ type: "schedule" | "trigger"; id: string } | null>(null);
 
-  const agentsQuery = useQuery({ queryKey: ["agents", "list", "scheduler"], queryFn: () => listAgents() });
+  const agentsQuery = useAgents();
   const schedulesQuery = useSchedules();
   const triggersQuery = useTriggers();
-  const workflowsQuery = useQuery({ queryKey: ["workflows", "list", "scheduler"], queryFn: listWorkflows });
+  const workflowsQuery = useWorkflows();
 
   const createMut = useCreateSchedule();
   const runMut = useRunSchedule();
