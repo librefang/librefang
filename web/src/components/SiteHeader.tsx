@@ -97,15 +97,20 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
     { label: rc?.workflows.title || 'Workflows',    href: `${langPrefix}/workflows` },
     { label: rc?.channels.title  || 'Channels',     href: `${langPrefix}/channels` },
   ]
-  // "Learn More" dropdown: homepage sections + install/downloads. On a
-  // subpage these become cross-page navs (homeHref#hash); on the homepage
-  // we smooth-scroll to the anchor.
+  // Features dropdown: one anchor per homepage module, in scroll order.
+  // Cross-page nav when viewed from a subpage; smooth-scroll on the
+  // homepage itself. Skips categories that already live in the
+  // Marketplace dropdown (hands, browse) and the external Docs link.
+  const anchor = (id: string) => (isSubpage ? `${homeHref}#${id}` : `#${id}`)
   const anchorLinks: NavLink[] = [
-    { label: t.nav.architecture, href: isSubpage ? `${homeHref}#architecture` : '#architecture' },
-    { label: t.nav.workflows || t.workflows?.label || 'Workflows', href: isSubpage ? `${homeHref}#workflows` : '#workflows' },
-    { label: t.nav.performance, href: isSubpage ? `${homeHref}#performance` : '#performance' },
-    { label: t.nav.install, href: isSubpage ? `${homeHref}#install` : '#install' },
-    { label: t.nav.downloads || 'Downloads', href: isSubpage ? `${homeHref}#downloads` : '#downloads' },
+    { label: t.nav.architecture,                                   href: anchor('architecture') },
+    { label: t.nav.evolution || t.evolution?.label || 'Evolution', href: anchor('evolution') },
+    { label: t.nav.workflows || t.workflows?.label || 'Workflows', href: anchor('workflows') },
+    { label: t.nav.performance,                                    href: anchor('performance') },
+    { label: t.nav.downloads  || 'Downloads',                      href: anchor('downloads') },
+    { label: t.nav.install,                                        href: anchor('install') },
+    { label: t.faq?.label     || 'FAQ',                            href: anchor('faq') },
+    { label: t.githubStats?.label || 'Community',                  href: anchor('github-stats') },
   ]
   // Only external "flat" link that remains.
   const flatLinks: NavLink[] = [
@@ -113,7 +118,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
   ]
   const featureActiveIds = ['hands', 'agents', 'skills', 'mcp', 'plugins', 'providers', 'workflows', 'channels']
   const isFeatureActive = featureActiveIds.includes(activeSection)
-  const learnActiveIds = ['architecture', 'performance', 'install', 'downloads']
+  const learnActiveIds = ['architecture', 'evolution', 'workflows', 'performance', 'downloads', 'install', 'faq', 'github-stats']
   const isLearnActive = learnActiveIds.includes(activeSection)
 
   const headerClass = cn(
