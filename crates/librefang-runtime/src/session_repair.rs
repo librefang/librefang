@@ -37,9 +37,6 @@ pub struct RepairStats {
     /// Number of synthetic error results inserted by the positional
     /// Phase 2a1 pair-aware check (distinct from Phase 2c `synthetic_results_inserted`).
     pub positional_synthetic_inserted: usize,
-    /// Number of ToolResult blocks found inside assistant-role messages
-    /// and ignored (they are not honored as satisfying tool_call_ids).
-    pub misplaced_results_ignored: usize,
 }
 
 /// Validate and repair a message history for LLM consumption.
@@ -138,10 +135,7 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
     // strict Moonshot/OpenAI wire contract and MUST run before Phases
     // 2b/2c/2d/2e so it sees the raw pre-repair shape. The later phases
     // become safety nets that usually find nothing to do.
-    let (positional_synthetic, misplaced_ignored) =
-        enforce_adjacent_tool_result_pairs(&mut cleaned);
-    stats.positional_synthetic_inserted = positional_synthetic;
-    stats.misplaced_results_ignored = misplaced_ignored;
+    stats.positional_synthetic_inserted = enforce_adjacent_tool_result_pairs(&mut cleaned);
 
     // Phase 2b: Reorder misplaced ToolResults
     let reordered_count = reorder_tool_results(&mut cleaned);
@@ -221,7 +215,6 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
             duplicates = stats.duplicates_removed,
             rescued = stats.misplaced_results_rescued,
             positional_synthetic = stats.positional_synthetic_inserted,
-            misplaced_ignored = stats.misplaced_results_ignored,
             "Session repair applied fixes"
         );
     }
@@ -316,25 +309,9 @@ fn rescue_misplaced_tool_results(messages: &mut Vec<Message>) -> usize {
 
 /// Phase 2a1: Pair-aware positional validation of assistant tool_calls.
 ///
-/// Returns `(positional_synthetic_inserted, misplaced_results_ignored)`.
-fn enforce_adjacent_tool_result_pairs(messages: &mut Vec<Message>) -> (usize, usize) {
-    // First pass (read-only): tally misplaced ToolResults living inside
-    // assistant-role blocks. They are noise.
-    let mut misplaced_ignored: usize = 0;
-    for msg in messages.iter() {
-        if msg.role != Role::Assistant {
-            continue;
-        }
-        if let MessageContent::Blocks(bs) = &msg.content {
-            for block in bs {
-                if matches!(block, ContentBlock::ToolResult { .. }) {
-                    misplaced_ignored += 1;
-                }
-            }
-        }
-    }
-
-    // Second pass: for each assistant with ToolUse blocks, check the
+/// Returns the number of synthetic ToolResult blocks inserted.
+fn enforce_adjacent_tool_result_pairs(messages: &mut Vec<Message>) -> usize {
+    // For each assistant with ToolUse blocks, check the
     // IMMEDIATELY FOLLOWING message for satisfaction. Missing ids get
     // a synthetic inserted in the adjacent user (or a new user is inserted
     // / appended as needed).
@@ -445,7 +422,7 @@ fn enforce_adjacent_tool_result_pairs(messages: &mut Vec<Message>) -> (usize, us
         i += 2;
     }
 
-    (positional_synthetic, misplaced_ignored)
+    positional_synthetic
 }
 
 /// Phase 2b: Reorder misplaced ToolResults -- ensure each result follows its use.

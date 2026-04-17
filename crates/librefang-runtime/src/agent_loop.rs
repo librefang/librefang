@@ -1872,7 +1872,6 @@ fn log_repair_stats(
         duplicates = stats.duplicates_removed,
         rescued = stats.misplaced_results_rescued,
         positional_synthetic = stats.positional_synthetic_inserted,
-        misplaced_ignored = stats.misplaced_results_ignored,
         "Session repair applied fixes before LLM call"
     );
 }
