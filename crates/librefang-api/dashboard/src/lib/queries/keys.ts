@@ -60,6 +60,8 @@ export const commsKeys = {
 export const skillKeys = {
   all: ["skills"] as const,
   lists: () => [...skillKeys.all, "list"] as const,
+  details: () => [...skillKeys.all, "detail"] as const,
+  detail: (name: string) => [...skillKeys.details(), name] as const,
 };
 
 export const clawhubKeys = {

@@ -18,6 +18,7 @@ import {
   type HandDefinitionItem,
 } from "../api";
 import { useSkills, skillQueries } from "../lib/queries/skills";
+import { skillKeys } from "../lib/queries/keys";
 import { useHands } from "../lib/queries/hands";
 import { useUninstallSkill, useClawHubInstall, useSkillHubInstall, useInstallSkill } from "../lib/mutations/skills";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -544,7 +545,11 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
   const queryClient = useQueryClient();
   const { addToast } = useUIStore();
   const { data: detail, isLoading, refetch } = useQuery({
-    queryKey: ["skill-detail", skillName],
+    // Use the shared factory so mutations' `invalidateQueries(skillKeys.all)`
+    // also refresh open detail modals. The old `['skill-detail', name]`
+    // namespace lived outside `skillKeys.all` and was never invalidated, so
+    // users would see stale metadata after install/update/delete.
+    queryKey: skillKeys.detail(skillName ?? ""),
     queryFn: () => getSkillDetail(skillName!),
     enabled: isOpen && !!skillName,
   });

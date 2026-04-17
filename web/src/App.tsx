@@ -1330,8 +1330,14 @@ function isHomepagePath(pathname: string): boolean {
 // ─── App ───
 export default function App() {
   const lang = useAppStore((s) => s.lang)
-  const [isDeployPage] = useState(() => window.location.pathname.startsWith('/deploy'))
-  const [isChangelogPage] = useState(() => window.location.pathname.startsWith('/changelog'))
+  // Match both `/deploy` and locale-prefixed `/zh/deploy`, `/de/deploy`, etc.
+  // The site generates hreflang alternates at localized URLs, so without the
+  // prefix these pages 404 through the homepage fallback for every non-English
+  // visitor who hits the deploy/changelog route.
+  const localeRouteRe = (slug: string) =>
+    new RegExp(`^\\/(?:[a-z]{2}(?:-[A-Z]{2})?\\/)?${slug}(?:\\/.*)?$`)
+  const [isDeployPage] = useState(() => localeRouteRe('deploy').test(window.location.pathname))
+  const [isChangelogPage] = useState(() => localeRouteRe('changelog').test(window.location.pathname))
   const [isMetricsPage] = useState(() => /^\/(?:[a-z]{2}(?:-[A-Z]{2})?\/)?metrics\/?$/.test(window.location.pathname))
   const [registryRoute] = useState<RegistryMatch | null>(() => detectRegistryRoute(window.location.pathname))
   const [isHomepage] = useState(() => isHomepagePath(window.location.pathname))

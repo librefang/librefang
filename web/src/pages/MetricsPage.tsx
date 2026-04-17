@@ -7,6 +7,14 @@ import Breadcrumbs from '../components/Breadcrumbs'
 
 const METRICS_API = 'https://stats.librefang.ai/api/registry/metrics'
 
+// Categories the SPA actually routes. The worker still emits legacy
+// entries (e.g. `integrations` from before the MCP rename) whose detail
+// pages were removed, so any anchor to them leads to a 404.
+const ROUTED_CATEGORIES = new Set([
+  'skills', 'mcp', 'plugins', 'hands', 'agents',
+  'providers', 'workflows', 'channels',
+])
+
 interface Metrics {
   generatedAt: string
   perCategory: Record<string, { total: number; items: number }>
@@ -101,21 +109,36 @@ export default function MetricsPage({ onOpenSearch }: MetricsPageProps) {
               <div className="border border-black/10 dark:border-white/5 divide-y divide-black/10 dark:divide-white/5">
                 {Object.entries(data.perCategory)
                   .sort(([, a], [, b]) => b.total - a.total)
-                  .map(([cat, stats]) => (
-                    <a
-                      key={cat}
-                      href={`${langPrefix}/${cat}`}
-                      className="flex items-center justify-between px-5 py-3 bg-surface-100 hover:bg-surface-200 transition-colors group"
-                    >
-                      <span className="font-mono text-sm font-semibold text-slate-900 dark:text-white group-hover:text-cyan-600 dark:group-hover:text-cyan-400">
-                        {cat}
-                      </span>
+                  .map(([cat, stats]) => {
+                    // Only render as a link when the SPA has a route for
+                    // this category. Unrouted categories (legacy entries
+                    // the worker still emits) fall back to plain text so
+                    // users don't click into a 404.
+                    const routed = ROUTED_CATEGORIES.has(cat)
+                    const rowClass = 'flex items-center justify-between px-5 py-3 bg-surface-100 transition-colors'
+                    const nameClass = 'font-mono text-sm font-semibold text-slate-900 dark:text-white'
+                    const statsNode = (
                       <div className="flex items-center gap-4 text-xs font-mono text-gray-500">
                         <span>{stats.items} items</span>
                         <span className="text-amber-500">{stats.total} clicks</span>
                       </div>
-                    </a>
-                  ))}
+                    )
+                    return routed ? (
+                      <a
+                        key={cat}
+                        href={`${langPrefix}/${cat}`}
+                        className={`${rowClass} hover:bg-surface-200 group`}
+                      >
+                        <span className={`${nameClass} group-hover:text-cyan-600 dark:group-hover:text-cyan-400`}>{cat}</span>
+                        {statsNode}
+                      </a>
+                    ) : (
+                      <div key={cat} className={rowClass}>
+                        <span className={`${nameClass} opacity-60`}>{cat}</span>
+                        {statsNode}
+                      </div>
+                    )
+                  })}
               </div>
             </div>
 
