@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronDown, Plus, Trash2, X } from "lucide-react";
-import type { ManifestFormState } from "../lib/agentManifest";
+import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
+import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 
 interface AgentManifestFormProps {
   value: ManifestFormState;
@@ -9,6 +9,11 @@ interface AgentManifestFormProps {
   providers: { name: string }[];
   models: { provider: string; id: string }[];
   invalidFields: Set<string>;
+  // Read-only view of preserved-but-not-form-renderable extras. We show
+  // a hint next to dropdowns whose form widget can't represent the
+  // contents (e.g. a full `[exec_policy]` table) so the user isn't
+  // misled by a default-looking dropdown that hides serialized state.
+  extras: ManifestExtras;
 }
 
 export function AgentManifestForm({
@@ -17,6 +22,7 @@ export function AgentManifestForm({
   providers,
   models,
   invalidFields,
+  extras,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -787,6 +793,9 @@ export function AgentManifestForm({
       </CollapsibleSection>
 
       <CollapsibleSection title={t("agents.form.response_format")} defaultOpen={false}>
+        {value.response_format.mode === "text" && extras.topLevel.response_format !== undefined && (
+          <ExtrasOverrideHint message={t("agents.form.response_format_extras_hint")} />
+        )}
         <Field label={t("agents.form.response_format_mode")}>
           <select
             value={value.response_format.mode}
@@ -873,7 +882,14 @@ export function AgentManifestForm({
               <option value="always">{t("agents.form.web_search_always")}</option>
             </select>
           </Field>
-          <Field label={t("agents.form.exec_policy")}>
+          <Field
+            label={t("agents.form.exec_policy")}
+            hint={
+              !value.exec_policy_shorthand && extras.topLevel.exec_policy !== undefined
+                ? t("agents.form.exec_policy_extras_hint")
+                : undefined
+            }
+          >
             <select
               value={value.exec_policy_shorthand}
               onChange={(e) =>
@@ -1016,6 +1032,15 @@ function Field({
       <span className={label ? "mt-1 block" : "block"}>{children}</span>
       {hint && <span className="mt-1 text-[10px] text-text-dim/70 block">{hint}</span>}
     </label>
+  );
+}
+
+function ExtrasOverrideHint({ message }: { message: string }) {
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/5 px-2.5 py-1.5 text-[11px] text-warning">
+      <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+      <span>{message}</span>
+    </div>
   );
 }
 

@@ -312,6 +312,8 @@
       "web_search_always": "Always",
       "exec_policy": "Exec Policy",
       "exec_policy_global": "(use global policy)",
+      "exec_policy_extras_hint": "TOML carries a custom [exec_policy] table that this dropdown can't represent. The table will still be sent on submit. Pick a shorthand to override it.",
+      "response_format_extras_hint": "TOML carries a [response_format] table with an unrecognised type. It will still be sent on submit. Pick json or json_schema to override.",
       "pinned_model": "Pinned Model",
       "workspace": "Workspace Path",
       "allowed_plugins": "Allowed Plugins",

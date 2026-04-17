@@ -312,6 +312,8 @@
       "web_search_always": "始终启用",
       "exec_policy": "Exec 策略",
       "exec_policy_global": "(使用全局策略)",
+      "exec_policy_extras_hint": "TOML 中已存在自定义 [exec_policy] 表,此下拉框无法显示其内容。提交时该表仍会随 manifest 一起下发。选一个简写来覆盖。",
+      "response_format_extras_hint": "TOML 中存在 type 未识别的 [response_format] 表,提交时仍会下发。选 json 或 json_schema 进行覆盖。",
       "pinned_model": "固定模型",
       "workspace": "工作区路径",
       "allowed_plugins": "允许的插件",

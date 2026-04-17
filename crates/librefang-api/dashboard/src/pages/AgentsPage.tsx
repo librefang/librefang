@@ -330,6 +330,16 @@ export function AgentsPage() {
   );
   const [previewTab, setPreviewTab] = useState<"toml" | "markdown">("toml");
 
+  // Single close path for the create modal so the X button, the
+  // Cancel button, and any future "close on success" all clear the
+  // same transient state (validation errors, TOML parse error). Form
+  // and TOML drafts themselves persist by design.
+  const closeCreateModal = () => {
+    setShowCreate(false);
+    setFormErrors(new Set());
+    setTomlParseError(null);
+  };
+
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
   // serialized output into the textarea so advanced users can keep editing.
   // Going TOML→Form parses what's in the textarea, populating the form
@@ -1095,7 +1105,12 @@ export function AgentsPage() {
       )}
 
       {/* Create Agent Modal */}
-      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("agents.create_agent")} size="lg">
+      <Modal
+        isOpen={showCreate}
+        onClose={closeCreateModal}
+        title={t("agents.create_agent")}
+        size="lg"
+      >
         <div className="p-5 space-y-4">
           {/* Mode tabs — switching between Form and TOML round-trips the
               manifest in both directions. We only re-parse when content
@@ -1131,6 +1146,7 @@ export function AgentsPage() {
                 providers={formProviderOptions}
                 models={formModelOptions}
                 invalidFields={formErrors}
+                extras={formExtras}
               />
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
@@ -1281,7 +1297,7 @@ export function AgentsPage() {
               {spawnMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
               {t("agents.create_agent")}
             </Button>
-            <Button variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
+            <Button variant="secondary" onClick={closeCreateModal}>{t("common.cancel")}</Button>
           </div>
         </div>
       </Modal>
