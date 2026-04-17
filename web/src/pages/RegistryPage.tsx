@@ -10,6 +10,7 @@ import { cn } from '../lib/utils'
 import { fetchRegistryRaw } from '../lib/registry-raw'
 import SiteHeader from '../components/SiteHeader'
 import Breadcrumbs from '../components/Breadcrumbs'
+import RegistryIcon from '../components/RegistryIcon'
 import { useFavorites } from '../lib/useFavorites'
 // Fixed top header needs content to start below its 64px band.
 
@@ -402,8 +403,8 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                   <div className="flex items-start justify-between gap-2 mb-3 pr-6">
                     <div className="flex items-center gap-2 min-w-0">
                       {item.icon && (
-                        <span className="text-xl leading-none shrink-0" aria-hidden>
-                          {item.icon}
+                        <span className="shrink-0 text-cyan-600 dark:text-cyan-400">
+                          <RegistryIcon icon={item.icon} className="w-5 h-5" fallbackClassName="text-xl leading-none" />
                         </span>
                       )}
                       <h3 className="text-base font-bold text-slate-900 dark:text-white truncate">

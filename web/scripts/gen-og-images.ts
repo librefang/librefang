@@ -95,7 +95,10 @@ function esc(s: string): string {
 function renderItem(def: CategoryDef, item: RegistryItem): string {
   const name = esc((item.name || item.id).slice(0, 48))
   const desc = esc((item.description || def.subtitle).slice(0, 120))
-  const icon = esc(item.icon || def.icon)
+  // Registry icons are now "lucide:<name>" tokens — can't render a React
+  // component into a static SVG, so fall back to the category glyph.
+  const rawIcon = item.icon && !item.icon.startsWith('lucide:') ? item.icon : def.icon
+  const icon = esc(rawIcon)
   const id = esc(item.id)
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
   <rect width="1200" height="630" fill="#070b14"/>

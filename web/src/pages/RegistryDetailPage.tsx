@@ -11,6 +11,7 @@ import { highlightToml } from '../lib/toml-highlight'
 import { renderMarkdown } from '../lib/minimal-markdown'
 import SiteHeader from '../components/SiteHeader'
 import Breadcrumbs from '../components/Breadcrumbs'
+import RegistryIcon from '../components/RegistryIcon'
 import { fetchRegistryRaw } from '../lib/registry-raw'
 
 interface RegistryDetailPageProps {
@@ -255,7 +256,9 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
         )}>
           <div className="flex items-start gap-4 mb-4">
             {item?.icon && (
-              <div className="text-4xl leading-none shrink-0" aria-hidden>{item.icon}</div>
+              <div className="shrink-0 text-cyan-600 dark:text-cyan-400">
+                <RegistryIcon icon={item.icon} className="w-10 h-10" fallbackClassName="text-4xl leading-none" />
+              </div>
             )}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-2">
@@ -434,7 +437,11 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
                     )}
                   >
                     <div className="flex items-center gap-2 mb-1.5 min-w-0">
-                      {rel.icon && <span className="text-lg leading-none shrink-0" aria-hidden>{rel.icon}</span>}
+                      {rel.icon && (
+                        <span className="shrink-0 text-cyan-600 dark:text-cyan-400">
+                          <RegistryIcon icon={rel.icon} className="w-4 h-4" fallbackClassName="text-lg leading-none" />
+                        </span>
+                      )}
                       <h3 className="text-sm font-bold text-slate-900 dark:text-white truncate">{rel.name}</h3>
                       {relPopular && <Sparkles className="w-3 h-3 text-amber-500 shrink-0" />}
                     </div>

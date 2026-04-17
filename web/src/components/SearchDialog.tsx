@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEventHandler } from 'react'
 import { Search, X, Sparkles, Hash } from 'lucide-react'
 import { useRegistry, getLocalizedDesc } from '../useRegistry'
+import RegistryIcon from './RegistryIcon'
 import type { RegistryCategory, Detail } from '../useRegistry'
 import { translations, type Translation } from '../i18n'
 import { useAppStore } from '../store'
@@ -322,7 +323,9 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
                 )}
               >
                 {hit.item.icon && (
-                  <span className="text-xl leading-none shrink-0" aria-hidden>{hit.item.icon}</span>
+                  <span className="shrink-0 text-cyan-600 dark:text-cyan-400">
+                    <RegistryIcon icon={hit.item.icon} className="w-5 h-5" fallbackClassName="text-xl leading-none" />
+                  </span>
                 )}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-0.5">
