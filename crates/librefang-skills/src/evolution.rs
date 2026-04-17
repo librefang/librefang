@@ -858,12 +858,33 @@ pub fn update_skill(
     // Acquire exclusive lock to prevent concurrent updates
     let _lock = acquire_skill_lock(skill_dir)?;
 
-    // Save rollback snapshot of current content
-    if let Some(old_content) = &skill.manifest.prompt_context {
+    // RE-READ skill.toml under the lock to get the current on-disk
+    // version. The caller passed a snapshot taken before the lock was
+    // acquired, which is stale under concurrent writers — without this,
+    // 10 parallel updates computed `0.1.0 -> 0.1.1` independently and
+    // produced duplicate versions. Lock-first + read-after-lock gives
+    // each writer a serial view of the latest version on disk.
+    //
+    // If the re-read fails (disk error, torn write) fall back to the
+    // snapshot so the update still proceeds — the worst case is a
+    // duplicate version, same as before this fix.
+    let live_version = std::fs::read_to_string(skill_dir.join("skill.toml"))
+        .ok()
+        .and_then(|toml_str| toml::from_str::<SkillManifest>(&toml_str).ok())
+        .map(|m| m.skill.version)
+        .unwrap_or_else(|| skill.manifest.skill.version.clone());
+
+    // Save rollback snapshot of current content. Read the file directly
+    // so the snapshot captures what's actually on disk, not the
+    // caller's cached copy (which could be several updates stale).
+    let current_on_disk = std::fs::read_to_string(skill_dir.join("prompt_context.md"))
+        .ok()
+        .or_else(|| skill.manifest.prompt_context.clone());
+    if let Some(old_content) = &current_on_disk {
         save_rollback_snapshot(skill_dir, old_content)?;
     }
 
-    let new_version = bump_patch_version(&skill.manifest.skill.version);
+    let new_version = bump_patch_version(&live_version);
 
     // Update skill.toml version field
     let mut manifest = skill.manifest.clone();
@@ -910,25 +931,21 @@ pub fn patch_skill(
     // Acquire exclusive lock to prevent concurrent patches
     let _lock = acquire_skill_lock(skill_dir)?;
 
-    // Read current prompt_context: try in-memory manifest first, then file
-    let current_content = match skill.manifest.prompt_context.as_deref() {
-        Some(ctx) if !ctx.is_empty() => ctx.to_string(),
-        _ => {
-            let prompt_path = skill_dir.join("prompt_context.md");
-            if prompt_path.exists() {
-                let content = std::fs::read_to_string(&prompt_path)?;
-                if content.is_empty() {
-                    return Err(SkillError::InvalidManifest(format!(
-                        "Skill '{name}' has no prompt_context to patch"
-                    )));
-                }
-                content
-            } else {
+    // Read current prompt_context FROM DISK first (under the lock) —
+    // the caller's cached snapshot could be multiple patches stale if
+    // another writer landed between their read and ours. Falling back
+    // to the manifest copy only when disk read fails outright.
+    let prompt_path = skill_dir.join("prompt_context.md");
+    let current_content = match std::fs::read_to_string(&prompt_path) {
+        Ok(s) if !s.is_empty() => s,
+        _ => match skill.manifest.prompt_context.as_deref() {
+            Some(ctx) if !ctx.is_empty() => ctx.to_string(),
+            _ => {
                 return Err(SkillError::InvalidManifest(format!(
                     "Skill '{name}' has no prompt_context to patch"
                 )));
             }
-        }
+        },
     };
 
     // Save rollback snapshot
@@ -940,7 +957,14 @@ pub fn patch_skill(
     // Validate new content
     validate_prompt_content(&result.new_content)?;
 
-    let new_version = bump_patch_version(&skill.manifest.skill.version);
+    // Re-read live version under the lock so concurrent patches don't
+    // duplicate-bump off the same cached version.
+    let live_version = std::fs::read_to_string(skill_dir.join("skill.toml"))
+        .ok()
+        .and_then(|toml_str| toml::from_str::<SkillManifest>(&toml_str).ok())
+        .map(|m| m.skill.version)
+        .unwrap_or_else(|| skill.manifest.skill.version.clone());
+    let new_version = bump_patch_version(&live_version);
 
     // Update version in manifest
     let mut manifest = skill.manifest.clone();
@@ -1411,7 +1435,14 @@ pub fn rollback_skill(
     let old_content = std::fs::read_to_string(latest.path())?;
     validate_prompt_content(&old_content)?;
 
-    let new_version = bump_patch_version(&skill.manifest.skill.version);
+    // Re-read live version under the lock so rollback doesn't collide
+    // with concurrent updates on the same skill.
+    let live_version = std::fs::read_to_string(skill_dir.join("skill.toml"))
+        .ok()
+        .and_then(|toml_str| toml::from_str::<SkillManifest>(&toml_str).ok())
+        .map(|m| m.skill.version)
+        .unwrap_or_else(|| skill.manifest.skill.version.clone());
+    let new_version = bump_patch_version(&live_version);
 
     // Save the current (about-to-be-overwritten) content as a snapshot
     // first so the rollback itself is reversible — otherwise rollback
@@ -2541,5 +2572,73 @@ mod tests {
         assert!(!skill.path.join("references/a").exists());
         assert!(!skill.path.join("references").exists());
         assert!(skill.path.exists(), "skill root itself must remain");
+    }
+}
+
+#[cfg(test)]
+mod race_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_concurrent_updates_produce_unique_versions() {
+        // 10 threads hit update_skill on the same skill in parallel.
+        // Before the lock-then-re-read fix they all bumped off the
+        // same cached version (skill.manifest.skill.version) and
+        // produced duplicate version strings. With the fix, each
+        // writer re-reads skill.toml under the flock, so patch-bumping
+        // is serialized and every outcome is unique.
+        let dir = TempDir::new().unwrap();
+        create_skill(dir.path(), "race-test", "race", "# V0", vec![], None).unwrap();
+
+        let skill_path = dir.path().join("race-test");
+        let skill = InstalledSkill {
+            manifest: SkillManifest {
+                skill: SkillMeta {
+                    name: "race-test".to_string(),
+                    version: "0.1.0".to_string(),
+                    description: "race".to_string(),
+                    author: "t".to_string(),
+                    license: String::new(),
+                    tags: vec![],
+                },
+                runtime: SkillRuntimeConfig::default(),
+                tools: SkillTools::default(),
+                requirements: Default::default(),
+                prompt_context: Some("# V0".to_string()),
+                source: Some(SkillSource::Local),
+                config: HashMap::new(),
+            },
+            path: skill_path.clone(),
+            enabled: true,
+        };
+
+        let shared = Arc::new(skill);
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let s = shared.clone();
+            handles.push(std::thread::spawn(move || {
+                let content = format!("# V from worker {i}");
+                update_skill(&s, &content, &format!("worker {i}"), None)
+                    .map(|r| r.version.unwrap_or_default())
+            }));
+        }
+
+        let mut versions = Vec::new();
+        for h in handles {
+            versions.push(h.join().unwrap().unwrap());
+        }
+        versions.sort();
+        let unique_count = versions
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert_eq!(
+            unique_count,
+            versions.len(),
+            "concurrent updates produced duplicate versions: {versions:?}"
+        );
     }
 }

@@ -10298,8 +10298,14 @@ system_prompt = "You are a helpful assistant."
              ## Existing Skills\n<data>\n{existing_skills_block}\n</data>"
         );
 
+        // Strip provider prefix so drivers that require a plain model
+        // id (MiniMax, OpenAI-compatible) accept the request. The empty-
+        // string default worked for Gemini (driver fell back to its
+        // configured default) but broke MiniMax with
+        // `unknown model '' (2013)` at the 400 boundary.
+        let model_for_review = strip_provider_prefix(&default_model.model, &default_model.provider);
         let request = CompletionRequest {
-            model: String::new(),
+            model: model_for_review,
             messages: vec![Message::user(user_msg)],
             tools: vec![],
             max_tokens: 2000,
@@ -10616,6 +10622,30 @@ system_prompt = "You are a helpful assistant."
     /// prompt and wastes tokens to retry.
     fn is_transient_review_error(err: &str) -> bool {
         let lower = err.to_ascii_lowercase();
+        // Permanent markers take precedence — these indicate a config
+        // or payload problem (bad model id, missing auth, invalid body)
+        // that retrying would reproduce identically and just burn tokens.
+        // Real observed case: MiniMax returns 400 with "unknown model ''"
+        // when `CompletionRequest.model` was left empty. Without this
+        // guard the "llm call failed" marker below matched 3× and
+        // triggered a full retry cycle.
+        const PERMANENT_MARKERS: &[&str] = &[
+            "400",
+            "401",
+            "403",
+            "404",
+            "bad_request",
+            "bad request",
+            "invalid params",
+            "invalid_request",
+            "unknown model",
+            "authentication",
+            "unauthorized",
+            "forbidden",
+        ];
+        if PERMANENT_MARKERS.iter().any(|m| lower.contains(m)) {
+            return false;
+        }
         // Transient markers emitted by our own code …
         if lower.contains("timed out") || lower.contains("llm call failed") {
             return true;
