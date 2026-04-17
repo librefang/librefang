@@ -1,13 +1,20 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatTime } from "../lib/datetime";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { loadDashboardSnapshot, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
-  listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
-  createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics,
-  listModels, listProviders, listAgentTemplates, getAgentTemplateToml, deleteAgent, cloneAgent, resetAgentSession,
-  getAgentTools, updateAgentTools, listTools, type ToolDefinition } from "../api";
+import {
+  type AgentDetail,
+  type PromptVersion,
+  type PromptExperiment,
+  type ExperimentVariantMetrics,
+  type ToolDefinition,
+  getAgentTemplateToml,
+  resetAgentSession,
+  getAgentTools,
+  listTools,
+  updateAgentTools,
+} from "../api";
+import { useQueryClient } from "@tanstack/react-query";
 import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -26,8 +33,31 @@ import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
-
-const REFRESH_MS = 5000;
+import { useDashboardSnapshot } from "../lib/queries/runtime";
+import { useProviders } from "../lib/queries/providers";
+import { useModels } from "../lib/queries/models";
+import {
+  agentQueries,
+  useAgentTemplates,
+  useExperimentMetrics,
+  useExperiments,
+  usePromptVersions,
+} from "../lib/queries/agents";
+import {
+  useActivatePromptVersion,
+  useCloneAgent,
+  useCompleteExperiment,
+  useCreateExperiment,
+  useCreatePromptVersion,
+  useDeleteAgent,
+  useDeletePromptVersion,
+  usePatchAgentConfig,
+  usePauseExperiment,
+  useResumeAgent,
+  useSpawnAgent,
+  useStartExperiment,
+  useSuspendAgent,
+} from "../lib/mutations/agents";
 
 export function AgentsPage() {
   const { t } = useTranslation();
@@ -65,8 +95,9 @@ export function AgentsPage() {
   const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
   const addToast = useUIStore((s) => s.addToast);
   useCreateShortcut(() => setShowCreate(true));
-  const queryClient = useQueryClient();
-  const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
+  const templatesQuery = useAgentTemplates({
+    enabled: showCreate && createMode === "template",
+  });
   const localizedTemplates = useMemo(
     () =>
       (templatesQuery.data ?? []).map((template) => ({
@@ -82,41 +113,28 @@ export function AgentsPage() {
     () => localizedTemplates.find((template) => template.name === templateName) ?? null,
     [localizedTemplates, templateName],
   );
-  const spawnMutation = useMutation({
-    mutationFn: spawnAgent,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-      setShowCreate(false);
-      setTemplateName("");
-      setManifestToml("");
-      addToast(t("agents.spawn_success", { defaultValue: "Agent created" }), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("agents.spawn_failed", { defaultValue: "Failed to create agent" }), "error"),
-  });
-  const deleteMutation = useMutation({
-    mutationFn: deleteAgent,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-      setDetailAgent(null);
-      addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }), "error"),
-  });
+  const spawnMutation = useSpawnAgent();
+  const suspendMutation = useSuspendAgent();
+  const resumeMutation = useResumeAgent();
+  const patchAgentConfigMutation = usePatchAgentConfig();
+  const cloneMutation = useCloneAgent();
+  const qc = useQueryClient();
 
-  const patchAgentConfigMutation = useMutation({
-    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number; model?: string; provider?: string; temperature?: number; web_search_augmentation?: "off" | "auto" | "always" } }) =>
-      patchAgentConfig(agentId, config),
-    onSuccess: (_, { agentId }) => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-      queryClient.invalidateQueries({ queryKey: ["agent-detail", agentId] });
-      setEditingModel(false);
-      if (detailAgent?.id === agentId) {
-        getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
-      }
-      addToast(t("agents.model_saved", { defaultValue: "Model updated" }), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("agents.model_save_failed", { defaultValue: "Failed to update model" }), "error"),
-  });
+  const rawDeleteMutation = useDeleteAgent();
+  const deleteMutation = {
+    mutate: (agentId: string) =>
+      rawDeleteMutation.mutate(agentId, {
+        onSuccess: () => {
+          setDetailAgent(null);
+          addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
+        },
+        onError: (e: Error) =>
+          addToast(
+            e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }),
+            "error",
+          ),
+      }),
+  };
 
   function mergeHandFlag(agent: AgentDetail, fallback?: boolean) {
     return { ...agent, is_hand: agent.is_hand ?? fallback };
@@ -140,6 +158,16 @@ export function AgentsPage() {
     setDetailAgent(null);
     setEditingModel(false);
     closeToolsEditor();
+  }
+
+  async function refreshDetailAgent(agentId: string, fallback?: boolean) {
+    try {
+      await qc.invalidateQueries({ queryKey: agentQueries.detail(agentId).queryKey });
+      const d = await qc.fetchQuery(agentQueries.detail(agentId));
+      setDetailAgent(mergeHandFlag(d, fallback));
+    } catch {
+      // keep current state when refresh fails
+    }
   }
 
   function closeToolsEditor() {
@@ -221,30 +249,35 @@ export function AgentsPage() {
       return;
     }
 
-    patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: patch });
+    patchAgentConfigMutation.mutate(
+      { agentId: detailAgent.id, config: patch },
+      {
+        onSuccess: async () => {
+          setEditingModel(false);
+          await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
+          addToast(t("agents.model_saved", { defaultValue: "Model updated" }), "success");
+        },
+        onError: (e: any) => {
+          addToast(
+            e?.message || t("agents.model_save_failed", { defaultValue: "Failed to update model" }),
+            "error",
+          );
+        },
+      },
+    );
   }
 
   // Share the snapshot query with OverviewPage — same cache key means React Query
   // deduplicates the poll when both pages are mounted, and agent counts on the
   // Overview tab stay in sync with this list automatically.
-  const agentsQuery = useQuery({
-    queryKey: ["dashboard", "snapshot"],
-    queryFn: loadDashboardSnapshot,
-    refetchInterval: REFRESH_MS,
-  });
+  const agentsQuery = useDashboardSnapshot();
 
-  const modelsQuery = useQuery({
-    queryKey: ["models", "list", modelDraft.provider],
-    queryFn: () => listModels({ provider: modelDraft.provider }),
-    enabled: !!modelDraft.provider.trim(),
-    staleTime: 60_000,
-  });
+  const modelsQuery = useModels(
+    { provider: modelDraft.provider },
+    { enabled: !!modelDraft.provider.trim() },
+  );
 
-  const providersQuery = useQuery({
-    queryKey: ["providers", "list"],
-    queryFn: listProviders,
-    staleTime: 60_000,
-  });
+  const providersQuery = useProviders();
 
   const configuredProviders = useMemo(
     () => (providersQuery.data ?? []).filter(p => isProviderAvailable(p.auth_status)),
@@ -309,7 +342,7 @@ export function AgentsPage() {
     return (
       <Card key={agent.id} hover padding="lg" className={`cursor-pointer overflow-hidden min-w-0 ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
         setDetailLoading(true);
-        try { const d = await getAgentDetail(agent.id); setDetailAgent(mergeHandFlag(d, agent.is_hand)); } catch { setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand }); }
+        try { const d = await qc.fetchQuery(agentQueries.detail(agent.id)); setDetailAgent(mergeHandFlag(d, agent.is_hand)); } catch { setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail); }
         setDetailLoading(false);
       }}>
         <div className="flex flex-col gap-3 mb-5">
@@ -351,11 +384,11 @@ export function AgentsPage() {
         </div>
         <div className="pt-4 border-t border-border-subtle/30 flex flex-wrap gap-2">
           {isSuspended ? (
-            <Button variant="secondary" size="sm" className="flex-1 min-w-[100px]" onClick={async (e) => { e.stopPropagation(); try { await resumeAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
+            <Button variant="secondary" size="sm" className="flex-1 min-w-[100px]" onClick={async (e) => { e.stopPropagation(); try { await resumeMutation.mutateAsync(agent.id); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
               <Play className="h-3.5 w-3.5 mr-1 shrink-0" /> <span className="truncate">{t("agents.resume")}</span>
             </Button>
           ) : (
-            <Button variant="secondary" size="sm" className="flex-1 min-w-[100px]" onClick={async (e) => { e.stopPropagation(); try { await suspendAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
+            <Button variant="secondary" size="sm" className="flex-1 min-w-[100px]" onClick={async (e) => { e.stopPropagation(); try { await suspendMutation.mutateAsync(agent.id); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
               <Pause className="h-3.5 w-3.5 mr-1 shrink-0" /> <span className="truncate">{t("agents.suspend")}</span>
             </Button>
           )}
@@ -661,7 +694,14 @@ export function AgentsPage() {
                       value={detailAgent.web_search_augmentation || "off"}
                       onChange={e => {
                         const mode = e.target.value as "off" | "auto" | "always";
-                        patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { web_search_augmentation: mode } });
+                        patchAgentConfigMutation.mutate(
+                          { agentId: detailAgent.id, config: { web_search_augmentation: mode } },
+                          {
+                            onSuccess: async () => {
+                              await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
+                            },
+                          },
+                        );
                       }}
                       className="w-28 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
                     >
@@ -786,17 +826,17 @@ export function AgentsPage() {
                 {/* Management actions */}
                 <div className="grid grid-cols-4 gap-2">
                   {isDetailSuspended ? (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await resumeAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(mergeHandFlag(d, detailAgent.is_hand)); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await resumeMutation.mutateAsync(detailAgent.id); await refreshDetailAgent(detailAgent.id, detailAgent.is_hand); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
                       <Play className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.resume")}</span>
                     </Button>
                   ) : (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await suspendAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(mergeHandFlag(d, detailAgent.is_hand)); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await suspendMutation.mutateAsync(detailAgent.id); await refreshDetailAgent(detailAgent.id, detailAgent.is_hand); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
                       <Pause className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.suspend")}</span>
                     </Button>
                   )}
-                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await cloneAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.clone_failed", { defaultValue: "Failed to clone agent" }), "error"); } }}>
+                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await cloneMutation.mutateAsync(detailAgent.id); } catch (err: any) { addToast(err?.message || t("agents.clone_failed", { defaultValue: "Failed to clone agent" }), "error"); } }}>
                     <Copy className="w-4 h-4" />
                     <span className="text-[9px]">{t("agents.clone")}</span>
                   </Button>
@@ -810,8 +850,7 @@ export function AgentsPage() {
                         message: t("agents.reset_confirm"),
                         onConfirm: async () => {
                           await resetAgentSession(detailAgent.id);
-                          const d = await getAgentDetail(detailAgent.id);
-                          setDetailAgent(mergeHandFlag(d, detailAgent.is_hand));
+                          await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
                         },
                       })
                     }
@@ -958,9 +997,9 @@ export function AgentsPage() {
                       : t("agents.tools_saved", { defaultValue: "Tools updated" }),
                     "success",
                   );
-                  queryClient.invalidateQueries({ queryKey: ["agent-detail", toolsEditorAgentId] });
+                  qc.invalidateQueries({ queryKey: agentQueries.detail(toolsEditorAgentId).queryKey });
                   if (detailAgent?.id === toolsEditorAgentId) {
-                    getAgentDetail(toolsEditorAgentId).then(setDetailAgent).catch(() => {});
+                    void refreshDetailAgent(toolsEditorAgentId);
                   }
                   closeToolsEditor();
                 } catch (err: any) {
@@ -1086,7 +1125,6 @@ export function AgentsPage() {
 
 function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: string; agentName: string; onClose: () => void }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<"versions" | "experiments">("versions");
   const [showCreateVersion, setShowCreateVersion] = useState(false);
   const [showCreateExperiment, setShowCreateExperiment] = useState(false);
@@ -1096,75 +1134,17 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
   const [selectedMetrics, setSelectedMetrics] = useState<string | null>(null);
   const [selectedVariantIds, setSelectedVariantIds] = useState<string[]>([]);
 
-  const versionsQuery = useQuery({
-    queryKey: ["prompt-versions", agentId],
-    queryFn: () => listPromptVersions(agentId),
-  });
+  const versionsQuery = usePromptVersions(agentId);
+  const experimentsQuery = useExperiments(activeTab === "experiments" ? agentId : "");
+  const metricsQuery = useExperimentMetrics(selectedMetrics ?? "");
 
-  const experimentsQuery = useQuery({
-    queryKey: ["experiments", agentId],
-    queryFn: () => listExperiments(agentId),
-    enabled: activeTab === "experiments"
-  });
-
-  const metricsQuery = useQuery({
-    queryKey: ["experiment-metrics", selectedMetrics],
-    queryFn: () => selectedMetrics ? getExperimentMetrics(selectedMetrics) : Promise.resolve([]),
-    enabled: !!selectedMetrics
-  });
-
-  const createVersionMutation = useMutation({
-    mutationFn: (data: { system_prompt: string; description?: string }) => 
-      createPromptVersion(agentId, { ...data, version: (versionsQuery.data?.length || 0) + 1, content_hash: "", tools: [], variables: [], created_by: "dashboard" }),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["prompt-versions", agentId] }); setShowCreateVersion(false); setNewPromptSystemPrompt(""); setNewPromptDescription(""); }
-  });
-
-  const createExperimentMutation = useMutation({
-    mutationFn: (data: { name: string }) => {
-      const variants = selectedVariantIds.map((vId, i) => {
-        const ver = versions.find(v => v.id === vId);
-        return {
-          name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`,
-          prompt_version_id: vId,
-          description: ver ? `v${ver.version}` : undefined,
-        };
-      });
-      const split = Math.floor(100 / selectedVariantIds.length);
-      return createExperiment(agentId, {
-        ...data,
-        status: "draft" as const,
-        traffic_split: selectedVariantIds.map(() => split),
-        success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true },
-        variants,
-      });
-    },
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["experiments", agentId] }); setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); }
-  });
-
-  const activateMutation = useMutation({
-    mutationFn: (versionId: string) => activatePromptVersion(versionId, agentId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["prompt-versions", agentId] })
-  });
-
-  const startExpMutation = useMutation({
-    mutationFn: (expId: string) => startExperiment(expId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments", agentId] })
-  });
-
-  const pauseExpMutation = useMutation({
-    mutationFn: (expId: string) => pauseExperiment(expId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments", agentId] })
-  });
-
-  const completeExpMutation = useMutation({
-    mutationFn: (expId: string) => completeExperiment(expId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments", agentId] })
-  });
-
-  const deleteVersionMutation = useMutation({
-    mutationFn: (versionId: string) => deletePromptVersion(versionId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["prompt-versions", agentId] })
-  });
+  const createVersionMutation = useCreatePromptVersion();
+  const createExperimentMutation = useCreateExperiment();
+  const activateMutation = useActivatePromptVersion();
+  const startExpMutation = useStartExperiment();
+  const pauseExpMutation = usePauseExperiment();
+  const completeExpMutation = useCompleteExperiment();
+  const deleteVersionMutation = useDeletePromptVersion();
 
   const versions = versionsQuery.data ?? [];
   const experiments = experimentsQuery.data ?? [];
@@ -1213,12 +1193,12 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                         </div>
                         <div className="flex gap-2">
                           {!v.is_active && (
-                            <Button variant="secondary" size="sm" onClick={() => activateMutation.mutate(v.id)}>
+                            <Button variant="secondary" size="sm" onClick={() => activateMutation.mutate({ versionId: v.id, agentId })}>
                               <Check className="w-3 h-3 mr-1" /> Activate
                             </Button>
                           )}
                           {!v.is_active && (
-                            <Button variant="secondary" size="sm" onClick={() => deleteVersionMutation.mutate(v.id)}>
+                            <Button variant="secondary" size="sm" onClick={() => deleteVersionMutation.mutate({ versionId: v.id, agentId })}>
                               <Trash2 className="w-3 h-3" />
                             </Button>
                           )}
@@ -1248,7 +1228,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                       </div>
                     </div>
                     <div className="flex gap-2 mt-4">
-                      <Button variant="primary" className="flex-1" onClick={() => createVersionMutation.mutate({ system_prompt: newPromptSystemPrompt, description: newPromptDescription })} disabled={!newPromptSystemPrompt.trim()}>
+                      <Button variant="primary" className="flex-1" onClick={() => createVersionMutation.mutate({ agentId, version: { system_prompt: newPromptSystemPrompt, description: newPromptDescription, version: (versionsQuery.data?.length || 0) + 1, content_hash: "", tools: [], variables: [], created_by: "dashboard" } }, { onSuccess: () => { setShowCreateVersion(false); setNewPromptSystemPrompt(""); setNewPromptDescription(""); } })} disabled={!newPromptSystemPrompt.trim()}>
                         Create
                       </Button>
                       <Button variant="secondary" onClick={() => setShowCreateVersion(false)}>Cancel</Button>
@@ -1279,10 +1259,10 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                           <Badge variant={exp.status === "running" ? "success" : exp.status === "completed" ? "default" : "warning"}>{exp.status}</Badge>
                         </div>
                         <div className="flex gap-2">
-                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate(exp.id)}><Play className="w-3 h-3 mr-1" />Start</Button>}
-                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate(exp.id)}><Pause className="w-3 h-3 mr-1" />Pause</Button>}
+                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate({ experimentId: exp.id, agentId })}><Play className="w-3 h-3 mr-1" />Start</Button>}
+                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate({ experimentId: exp.id, agentId })}><Pause className="w-3 h-3 mr-1" />Pause</Button>}
                           {(exp.status === "running" || exp.status === "paused") && (
-                            <Button variant="secondary" size="sm" onClick={() => completeExpMutation.mutate(exp.id)}>
+                            <Button variant="secondary" size="sm" onClick={() => completeExpMutation.mutate({ experimentId: exp.id, agentId })}>
                               <Check className="w-3 h-3 mr-1" />Complete
                             </Button>
                           )}
@@ -1365,7 +1345,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                       </div>
                     </div>
                     <div className="flex gap-2 mt-4">
-                      <Button variant="primary" className="flex-1" onClick={() => createExperimentMutation.mutate({ name: newExperimentName })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2}>
+                      <Button variant="primary" className="flex-1" onClick={() => createExperimentMutation.mutate({ agentId, experiment: { name: newExperimentName, status: "draft", traffic_split: selectedVariantIds.map(() => Math.floor(100 / selectedVariantIds.length)), success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true }, variants: selectedVariantIds.map((vId, i) => { const ver = versions.find(v => v.id === vId); return { name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`, prompt_version_id: vId, description: ver ? `v${ver.version}` : undefined }; }) } }, { onSuccess: () => { setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); } })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2}>
                         Create ({selectedVariantIds.length} variants)
                       </Button>
                       <Button variant="secondary" onClick={() => { setShowCreateExperiment(false); setSelectedVariantIds([]); }}>Cancel</Button>

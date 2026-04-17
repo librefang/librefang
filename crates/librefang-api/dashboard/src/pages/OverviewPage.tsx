@@ -1,9 +1,7 @@
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
-import type { DashboardSnapshot, HealthCheck, VersionResponse } from "../api";
-import { loadDashboardSnapshot, getVersionInfo, postQuickInit } from "../api";
+import type { HealthCheck } from "../api";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -12,37 +10,27 @@ import { truncateId } from "../lib/string";
 import { isProviderAvailable } from "../lib/status";
 import { getStatusVariant } from "../lib/status";
 import { formatRelativeTime } from "../lib/datetime";
-
-const REFRESH_MS = 5000;
+import { useDashboardSnapshot, useVersionInfo } from "../lib/queries/overview";
+import { useQuickInit } from "../lib/mutations/overview";
 
 export function OverviewPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const snapshotQuery = useQuery<DashboardSnapshot>({
-    queryKey: ["dashboard", "snapshot"],
-    queryFn: loadDashboardSnapshot,
-    refetchInterval: REFRESH_MS
-  });
-
-  const versionQuery = useQuery<VersionResponse>({
-    queryKey: ["version"],
-    queryFn: getVersionInfo,
-    staleTime: Infinity,
-  });
+  const snapshotQuery = useDashboardSnapshot();
+  const versionQuery = useVersionInfo();
+  const quickInitMutation = useQuickInit();
 
   const snapshot = snapshotQuery.data ?? null;
   const versionInfo = versionQuery.data;
   const isLoading = snapshotQuery.isLoading;
 
-  const queryClient = useQueryClient();
   const [initLoading, setInitLoading] = useState(false);
   const needsInit = snapshot?.status?.config_exists === false;
 
   const handleInit = async () => {
     setInitLoading(true);
     try {
-      await postQuickInit();
-      await queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] });
+      await quickInitMutation.mutateAsync();
     } catch {
       // ignore — banner will remain if init failed
     } finally {

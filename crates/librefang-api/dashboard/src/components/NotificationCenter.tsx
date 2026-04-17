@@ -1,36 +1,23 @@
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Check, X, ExternalLink } from "lucide-react";
-import { fetchApprovalCount, listApprovals, approveApproval, rejectApproval, totpStatus } from "../api";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
 import { useNavigate } from "@tanstack/react-router";
+import { useApprovalCount, useApprovals, useTotpStatus } from "../lib/queries/approvals";
+import { useApproveApproval, useRejectApproval } from "../lib/mutations/approvals";
 
 export function NotificationCenter() {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const navigate = useNavigate();
 
-  const countQuery = useQuery({
-    queryKey: ["approvals", "count"],
-    queryFn: fetchApprovalCount,
-    refetchInterval: 5000,
-  });
+  const countQuery = useApprovalCount({ refetchInterval: 5_000 });
+  const listQuery = useApprovals({ enabled: open });
+  const totpQuery = useTotpStatus();
+  const approveMutation = useApproveApproval();
+  const rejectMutation = useRejectApproval();
 
-  const listQuery = useQuery({
-    queryKey: ["approvals", "list-bell"],
-    queryFn: () => listApprovals(),
-    enabled: open,
-    refetchInterval: open ? 5000 : false,
-  });
-
-  const totpQuery = useQuery({
-    queryKey: ["totp", "status"],
-    queryFn: totpStatus,
-    staleTime: 60_000,
-  });
   const totpEnforced = totpQuery.data?.enforced ?? false;
 
   const pendingCount = countQuery.data ?? 0;
@@ -47,13 +34,12 @@ export function NotificationCenter() {
       return;
     }
     try {
-      if (action === "approve") await approveApproval(id);
-      else await rejectApproval(id);
+      if (action === "approve") await approveMutation.mutateAsync({ id });
+      else await rejectMutation.mutateAsync(id);
       addToast(
         t(`approvals.${action === "approve" ? "approvedToast" : "rejectedToast"}`),
         "success"
       );
-      queryClient.invalidateQueries({ queryKey: ["approvals"] });
     } catch {
       addToast(t("common.error", "Action failed"), "error");
     }

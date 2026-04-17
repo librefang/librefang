@@ -1,32 +1,17 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatCost } from "../lib/format";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { router } from "../router";
 import {
-  activateHand,
-  deactivateHand,
-  listActiveHands,
-  listHands,
-  pauseHand,
-  resumeHand,
-  uninstallHand,
-  getHandStats,
-  getHandDetail,
-  getHandSettings,
-  setHandSecret,
-  updateHandSettings,
-  getHandSession,
   sendHandMessage,
-  listCronJobs,
   type HandDefinitionItem,
   type HandInstanceItem,
   type HandStatsResponse,
   type HandSettingsResponse,
   type HandSessionMessage,
   type CronJobItem,
-} from "../api";
+} from "../lib/http/client";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Input } from "../components/ui/Input";
@@ -53,8 +38,26 @@ import { Skeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { truncateId } from "../lib/string";
-
-const REFRESH_MS = 15000;
+import {
+  useHands,
+  useActiveHands,
+  useHandDetail,
+  useHandSettings as useHandSettingsQuery,
+  useHandStats,
+  useHandStatsBatch,
+  useHandSession,
+} from "../lib/queries/hands";
+import {
+  useActivateHand,
+  useDeactivateHand,
+  usePauseHand,
+  useResumeHand,
+  useUninstallHand,
+  useSetHandSecret,
+  useUpdateHandSettings,
+} from "../lib/mutations/hands";
+import { useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
+import { useCronJobs } from "../lib/queries/runtime";
 
 /* ── Inject slideInRight keyframes once at module level ──── */
 if (typeof document !== "undefined" && !document.getElementById("hands-keyframes")) {
@@ -125,22 +128,22 @@ function HandChatPanel({
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  const { data: sessionData } = useHandSession(instanceId);
+
   useEffect(() => {
-    getHandSession(instanceId)
-      .then((data) => {
-        if (data.messages?.length) {
-          const hist: ChatMsg[] = data.messages.map((m: HandSessionMessage, i: number) => ({
-            id: `hist-${i}`,
-            role: m.role === "user" ? "user" as const : "assistant" as const,
-            content: m.content || "",
-            timestamp: m.timestamp ? new Date(m.timestamp) : new Date(),
-            blocks: m.blocks,
-          }));
-          setMessages(hist);
-        }
-      })
-      .catch(() => {});
-  }, [instanceId]);
+    if (sessionData?.messages?.length) {
+      const hist: ChatMsg[] = sessionData.messages.map(
+        (m: HandSessionMessage, i: number) => ({
+          id: `hist-${i}`,
+          role: m.role === "user" ? ("user" as const) : ("assistant" as const),
+          content: m.content || "",
+          timestamp: m.timestamp ? new Date(m.timestamp) : new Date(),
+          blocks: m.blocks,
+        }),
+      );
+      setMessages(hist);
+    }
+  }, [sessionData]);
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -419,18 +422,9 @@ function HandDetailPanel({
   const { t } = useTranslation();
   const isPaused = instance?.status === "paused";
 
-  const settingsQuery = useQuery({
-    queryKey: ["hands", "settings", hand.id],
-    queryFn: () => getHandSettings(hand.id),
-    enabled: !!hand.id,
-  });
+  const settingsQuery = useHandSettingsQuery(hand.id);
 
-  const statsQuery = useQuery({
-    queryKey: ["hands", "stats", instance?.instance_id],
-    queryFn: () => getHandStats(instance!.instance_id),
-    refetchInterval: REFRESH_MS,
-    enabled: !!instance?.instance_id,
-  });
+  const statsQuery = useHandStats(instance?.instance_id ?? "");
 
   const settings: HandSettingsResponse = settingsQuery.data ?? {};
   const stats: HandStatsResponse = statsQuery.data ?? {};
@@ -614,8 +608,8 @@ function HandDetailPanel({
 
 function RequirementsForm({ handId, requirements }: { handId: string; requirements: HandDefinitionItem["requirements"] }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
+  const setSecret = useSetHandSecret();
   const [values, setValues] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {};
     for (const r of requirements ?? []) {
@@ -632,9 +626,8 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
     if (!val) return;
     setSaving(key);
     try {
-      await setHandSecret(handId, key, val);
+      await setSecret.mutateAsync({ handId, key, value: val });
       addToast(t("common.success"), "success");
-      queryClient.invalidateQueries({ queryKey: ["hands"] });
     } catch (e: unknown) {
       addToast(e instanceof Error ? e.message : t("common.error"), "error");
     } finally {
@@ -693,22 +686,13 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
     Object.entries(stats.metrics).some(([, m]) => m.value != null && String(m.value) !== "-" && String(m.value) !== "");
 
   // Fetch hand detail with agents list
-  const detailQuery = useQuery({
-    queryKey: ["hands", "detail", hand.id],
-    queryFn: () => getHandDetail(hand.id),
-    enabled: !!hand.id,
-  });
+  const detailQuery = useHandDetail(hand.id);
   const detail = detailQuery.data as Record<string, unknown> | undefined;
   const workspaceAgents = (detail?.agents as { role: string; name: string; description?: string; coordinator?: boolean; provider: string; model: string; steps?: string[] }[] | undefined) ?? [];
 
   // Fetch cron jobs for this hand's agent
   const agentId = instance?.agent_id;
-  const cronJobsQuery = useQuery({
-    queryKey: ["cron-jobs", "hand", agentId],
-    queryFn: () => listCronJobs(agentId!),
-    enabled: isActive && !!agentId,
-    refetchInterval: 30000,
-  });
+  const cronJobsQuery = useCronJobs(isActive ? agentId : undefined);
   const cronJobs = cronJobsQuery.data ?? [];
 
   type Tab = "agents" | "settings" | "requirements" | "tools" | "schedules";
@@ -833,34 +817,18 @@ function HandSettingsEditor({
   isActive: boolean;
 }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
 
-  // Local draft — seeded from current_values, mutated by inputs, cleared on save.
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
 
-  // Reset draft whenever the underlying settings change (e.g. after a refetch).
   useEffect(() => {
     setDraft({});
     setSaveOk(false);
     setSaveError(null);
   }, [settings]);
 
-  const saveMutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) => updateHandSettings(handId, payload),
-    onSuccess: () => {
-      setSaveOk(true);
-      setSaveError(null);
-      setDraft({});
-      queryClient.invalidateQueries({ queryKey: ["hands", "settings", handId] });
-      setTimeout(() => setSaveOk(false), 2500);
-    },
-    onError: (err: Error) => {
-      setSaveError(err.message || String(err));
-      setSaveOk(false);
-    },
-  });
+  const saveMutation = useUpdateHandSettings();
 
   if (isLoading) {
     return (
@@ -885,12 +853,25 @@ function HandSettingsEditor({
   };
 
   const handleSave = () => {
-    // Only send the keys the user actually changed.
     const payload: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(draft)) {
       payload[k] = v;
     }
-    saveMutation.mutate(payload);
+    saveMutation.mutate(
+      { handId, config: payload },
+      {
+        onSuccess: () => {
+          setSaveOk(true);
+          setSaveError(null);
+          setDraft({});
+          setTimeout(() => setSaveOk(false), 2500);
+        },
+        onError: (err: Error) => {
+          setSaveError(err.message || String(err));
+          setSaveOk(false);
+        },
+      },
+    );
   };
 
   return (
@@ -1004,16 +985,15 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh }: {
   onRefresh: () => void;
 }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const toggleSchedule = useUpdateSchedule();
+  const deleteScheduleMut = useDeleteSchedule();
 
   const handleToggle = async (job: CronJobItem) => {
     if (!job.id) return;
     try {
-      const { updateSchedule } = await import("../api");
-      await updateSchedule(job.id, { enabled: !job.enabled });
-      queryClient.invalidateQueries({ queryKey: ["cron-jobs", "hand"] });
+      await toggleSchedule.mutateAsync({ id: job.id, data: { enabled: !job.enabled } });
       onRefresh();
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
@@ -1022,9 +1002,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh }: {
     if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
     setConfirmDeleteId(null);
     try {
-      const { deleteSchedule } = await import("../api");
-      await deleteSchedule(id);
-      queryClient.invalidateQueries({ queryKey: ["cron-jobs", "hand"] });
+      await deleteScheduleMut.mutateAsync(id);
       onRefresh();
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
@@ -1365,7 +1343,6 @@ function HandCard({
 
 export function HandsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -1373,52 +1350,23 @@ export function HandsPage() {
   const [detailHand, setDetailHand] = useState<HandDefinitionItem | null>(null);
   const navigate = useNavigate();
 
-  // Preload ChatPage chunk so navigate is instant
   useEffect(() => {
     router.preloadRoute({ to: "/chat", search: { agentId: undefined } }).catch(() => {});
   }, []);
 
-  const handsQuery = useQuery({
-    queryKey: ["hands", "list"],
-    queryFn: listHands,
-    refetchInterval: REFRESH_MS,
-  });
-  const activeQuery = useQuery({
-    queryKey: ["hands", "active"],
-    queryFn: listActiveHands,
-    refetchInterval: REFRESH_MS,
-  });
-
-  const activateMutation = useMutation({
-    mutationFn: (id: string) => activateHand(id),
-  });
-  const deactivateMutation = useMutation({
-    mutationFn: (id: string) => deactivateHand(id),
-  });
-  const pauseMutation = useMutation({
-    mutationFn: (id: string) => pauseHand(id),
-  });
-  const resumeMutation = useMutation({
-    mutationFn: (id: string) => resumeHand(id),
-  });
+  const handsQuery = useHands();
+  const activeQuery = useActiveHands();
+  const activateMutation = useActivateHand();
+  const deactivateMutation = useDeactivateHand();
+  const pauseMutation = usePauseHand();
+  const resumeMutation = useResumeHand();
+  const uninstallMutation = useUninstallHand();
 
   const hands = handsQuery.data ?? [];
   const instances = activeQuery.data ?? [];
 
-  // Batch-fetch stats for all active instances (avoids N+1 queries)
   const activeInstanceIds = useMemo(() => instances.map(i => i.instance_id).filter(Boolean), [instances]);
-  const allStatsQuery = useQuery({
-    queryKey: ["hands", "stats", "batch", activeInstanceIds],
-    queryFn: async () => {
-      const results: Record<string, HandStatsResponse> = {};
-      await Promise.all(activeInstanceIds.map(async id => {
-        try { results[id] = await getHandStats(id); } catch { /* skip */ }
-      }));
-      return results;
-    },
-    refetchInterval: REFRESH_MS,
-    enabled: activeInstanceIds.length > 0,
-  });
+  const allStatsQuery = useHandStatsBatch(activeInstanceIds);
   const statsByInstance = allStatsQuery.data ?? {};
 
   const activeHandIds = useMemo(
@@ -1482,7 +1430,6 @@ export function HandsPage() {
     setPendingId(id);
     try {
       await activateMutation.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["hands"] });
       addToast(t("common.success"), "success");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : t("common.error");
@@ -1496,7 +1443,6 @@ export function HandsPage() {
     setPendingId(id);
     try {
       await deactivateMutation.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["hands"] });
       addToast(t("common.success"), "success");
       setDetailHand(null);
     } catch (e: unknown) {
@@ -1514,8 +1460,7 @@ export function HandsPage() {
     if (!window.confirm(confirmMsg)) return;
     setPendingId(handId);
     try {
-      await uninstallHand(handId);
-      await queryClient.invalidateQueries({ queryKey: ["hands"] });
+      await uninstallMutation.mutateAsync(handId);
       addToast(t("common.success"), "success");
       setDetailHand(null);
     } catch (e: unknown) {
@@ -1530,7 +1475,6 @@ export function HandsPage() {
     setPendingId(id);
     try {
       await pauseMutation.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["hands"] });
       addToast(t("common.success"), "success");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : t("common.error");
@@ -1544,7 +1488,6 @@ export function HandsPage() {
     setPendingId(id);
     try {
       await resumeMutation.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["hands"] });
       addToast(t("common.success"), "success");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : t("common.error");

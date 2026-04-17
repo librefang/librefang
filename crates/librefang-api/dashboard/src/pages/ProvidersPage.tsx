@@ -2,9 +2,11 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { listProviders, listModels, testProvider, setProviderKey, deleteProviderKey, setProviderUrl, createRegistryContent, setDefaultProvider, getStatus } from "../api";
+import { listModels, createRegistryContent } from "../api";
 import type { ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
+import { useProviders, useProviderStatus } from "../lib/queries/providers";
+import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useSetProviderUrl, useSetDefaultProvider } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -22,8 +24,6 @@ import {
   Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2,
   Check, ChevronLeft
 } from "lucide-react";
-
-const REFRESH_MS = 30000;
 
 const providerIcons: Record<string, React.ReactNode> = {
   openai: <Sparkles className="w-5 h-5" />,
@@ -163,6 +163,9 @@ interface ProviderConfigState {
 function useProviderConfig(
   refetchProviders: () => void,
   testMutation: ReturnType<typeof useMutation<any, any, string>>,
+  setKeyMutation: ReturnType<typeof useMutation<any, any, { id: string; key: string }>>,
+  deleteKeyMutation: ReturnType<typeof useMutation<any, any, string>>,
+  setUrlMutation: ReturnType<typeof useMutation<any, any, { id: string; baseUrl: string; proxyUrl?: string }>>,
   addToast: (msg: string, type?: "success" | "error" | "info") => void,
   t: (key: string, opts?: any) => string,
   activeTab: string,
@@ -194,10 +197,17 @@ function useProviderConfig(
       const urlChanged = state.urlInput.trim() && state.urlInput !== state.provider.base_url;
       const proxyChanged = state.proxyInput !== (state.provider.proxy_url || "");
       if (urlChanged || proxyChanged) {
-        await setProviderUrl(state.provider.id, state.urlInput.trim() || state.provider.base_url || "", proxyChanged ? state.proxyInput.trim() : undefined);
+        await setUrlMutation.mutateAsync({
+          id: state.provider.id,
+          baseUrl: state.urlInput.trim() || state.provider.base_url || "",
+          proxyUrl: proxyChanged ? state.proxyInput.trim() : undefined,
+        });
       }
       if (state.keyInput.trim()) {
-        await setProviderKey(state.provider.id, state.keyInput.trim());
+        await setKeyMutation.mutateAsync({
+          id: state.provider.id,
+          key: state.keyInput.trim(),
+        });
       }
       refetchProviders();
       setState(s => ({ ...s, provider: null }));
@@ -208,13 +218,13 @@ function useProviderConfig(
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, refetchProviders, addToast, t, activeTab, setActiveTab]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, setKeyMutation, setUrlMutation, refetchProviders, addToast, t, activeTab, setActiveTab]);
 
   const removeKey = useCallback(async () => {
     if (!state.provider) return;
     setState(s => ({ ...s, saving: true }));
     try {
-      await deleteProviderKey(state.provider.id);
+      await deleteKeyMutation.mutateAsync(state.provider.id);
       refetchProviders();
       setState(s => ({ ...s, provider: null, hasStoredKey: false }));
       addToast(t("providers.key_removed"), "success");
@@ -223,20 +233,27 @@ function useProviderConfig(
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
-  }, [state.provider, refetchProviders, addToast, t]);
+  }, [state.provider, deleteKeyMutation, refetchProviders, addToast, t]);
 
   const testKey = useCallback(async () => {
     if (!state.provider) return;
     setState(s => ({ ...s, testing: true, testResult: null }));
     try {
       if (state.keyInput.trim()) {
-        await setProviderKey(state.provider.id, state.keyInput.trim());
+        await setKeyMutation.mutateAsync({
+          id: state.provider.id,
+          key: state.keyInput.trim(),
+        });
         setState(s => ({ ...s, hasStoredKey: true, keyInput: "" }));
       }
       const urlChanged = state.urlInput.trim() && state.urlInput !== state.provider.base_url;
       const proxyChanged = state.proxyInput !== (state.provider.proxy_url || "");
       if (urlChanged || proxyChanged) {
-        await setProviderUrl(state.provider.id, state.urlInput.trim() || state.provider.base_url || "", proxyChanged ? state.proxyInput.trim() : undefined);
+        await setUrlMutation.mutateAsync({
+          id: state.provider.id,
+          baseUrl: state.urlInput.trim() || state.provider.base_url || "",
+          proxyUrl: proxyChanged ? state.proxyInput.trim() : undefined,
+        });
       }
       const result = await testMutation.mutateAsync(state.provider.id);
       if (result.status === "error") {
@@ -250,7 +267,7 @@ function useProviderConfig(
     } finally {
       setState(s => ({ ...s, testing: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, testMutation, refetchProviders, t]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, testMutation, setKeyMutation, setUrlMutation, refetchProviders, t]);
 
   return { ...state, open, close, setKeyInput, setUrlInput, setProxyInput, saveKey, removeKey, testKey };
 }
@@ -1033,14 +1050,20 @@ export function ProvidersPage() {
   const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<ProviderItem | null>(null);
   const addToast = useUIStore((s) => s.addToast);
 
-  const providersQuery = useQuery({ queryKey: ["providers", "list"], queryFn: listProviders, refetchInterval: REFRESH_MS });
-  const statusQuery = useQuery({ queryKey: ["status"], queryFn: getStatus, refetchInterval: REFRESH_MS });
-  const testMutation = useMutation({ mutationFn: testProvider });
-  const defaultProviderMutation = useMutation({ mutationFn: ({ id, model }: { id: string; model?: string }) => setDefaultProvider(id, model) });
+  const providersQuery = useProviders();
+  const statusQuery = useProviderStatus();
+  const testMutation = useTestProvider();
+  const setKeyMutation = useSetProviderKey();
+  const deleteKeyMutation = useDeleteProviderKey();
+  const setUrlMutation = useSetProviderUrl();
+  const defaultProviderMutation = useSetDefaultProvider();
 
   const config = useProviderConfig(
     () => void providersQuery.refetch(),
     testMutation,
+    setKeyMutation,
+    deleteKeyMutation,
+    setUrlMutation,
     addToast,
     t,
     activeTab,
@@ -1137,7 +1160,7 @@ export function ProvidersPage() {
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmProvider) return;
     try {
-      await deleteProviderKey(deleteConfirmProvider.id);
+      await deleteKeyMutation.mutateAsync(deleteConfirmProvider.id);
       await providersQuery.refetch();
       setDeleteConfirmProvider(null);
       addToast(t("providers.key_removed"), "success");

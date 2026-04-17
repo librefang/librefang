@@ -1,12 +1,18 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatCost } from "../lib/format";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders, listActiveHands } from "../api";
+import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession } from "../api";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
+import { useFullConfig } from "../lib/queries/config";
+import { useMediaProviders } from "../lib/queries/media";
+import { useModels, modelQueries } from "../lib/queries/models";
+import { usePendingApprovals } from "../lib/queries/approvals";
+import { useAgents, useAgentSessions } from "../lib/queries/agents";
+import { useActiveHandsWhen } from "../lib/queries/hands";
+import { approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
@@ -19,6 +25,13 @@ import { ToolCallCard } from "../components/ui/ToolCallCard";
 import { filterVisible } from "../lib/hiddenModels";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
+import {
+  useCreateAgentSession,
+  useDeleteAgentSession,
+  usePatchAgentConfig,
+  useResolveApproval,
+  useSwitchAgentSession,
+} from "../lib/mutations/agents";
 import "katex/dist/katex.min.css";
 
 const isAuthUnavailable = (status?: string) =>
@@ -843,12 +856,7 @@ function ChatInput({ onSend, disabled, inputDisabled, placeholder, authMissing, 
     [isSlashPrefix, message],
   );
 
-  const modelQuery = useQuery({
-    queryKey: ["models", "completion"],
-    queryFn: () => listModels(),
-    enabled: isModelArg,
-    staleTime: 60_000,
-  });
+  const modelQuery = useModels({}, { enabled: isModelArg });
 
   const modelArg = isModelArg ? message.slice(message.indexOf(" ") + 1).toLowerCase() : "";
   const filteredModels = useMemo(() => {
@@ -1065,6 +1073,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   webSearchAvailable?: boolean;
 }) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [sessionOpen, setSessionOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -1082,6 +1091,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
+  const patchAgentConfigMutation = usePatchAgentConfig();
 
   // Clear optimistic model once the real modelName catches up
   useEffect(() => {
@@ -1121,11 +1131,11 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     if (!modelOpen || models.length > 0 || modelLoading) return;
     setModelLoading(true);
     setModelFetchError(null);
-    listModels({ available: true })
-      .then(res => setModels(res.models))
+    queryClient.fetchQuery(modelQueries.list({ available: true }))
+      .then((res: { models: ModelItem[] }) => setModels(res.models))
       .catch(() => setModelFetchError(t("chat.unable_to_load_models")))
       .finally(() => setModelLoading(false));
-  }, [modelOpen, models.length, modelLoading]);
+  }, [modelOpen, models.length, modelLoading, queryClient, t]);
 
   const visibleModels = useMemo(() => filterVisible(models, hiddenSet), [models, hiddenSet]);
 
@@ -1166,7 +1176,10 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     setPatchPending(true);
     setPatchError(null);
     try {
-      await patchAgentConfig(agentId, { model: model.id, provider: model.provider });
+      await patchAgentConfigMutation.mutateAsync({
+        agentId,
+        config: { model: model.id, provider: model.provider },
+      });
       setModelOpen(false);
       setSelectedProvider("");
       setModelSearch("");
@@ -1471,17 +1484,12 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
 // ---------------------------------------------------------------------------
 function useApprovalPoller(agentId: string | null) {
   const queryClient = useQueryClient();
-  const approvalsQuery = useQuery({
-    queryKey: ["approvals", "pending", agentId],
-    queryFn: () => listPendingApprovals(agentId!),
-    enabled: !!agentId,
-    refetchInterval: 5000,
-  });
+  const approvalsQuery = usePendingApprovals(agentId ?? undefined);
 
   const remove = useCallback((id: string) => {
     queryClient.setQueryData<ApprovalItem[]>(
-      ["approvals", "pending", agentId],
-      (prev) => prev?.filter((a) => a.id !== id) ?? [],
+      approvalKeys.pending(agentId),
+      (prev) => prev?.filter((a: ApprovalItem) => a.id !== id) ?? [],
     );
   }, [agentId, queryClient]);
 
@@ -1508,11 +1516,12 @@ function riskStyle(level?: string) {
 function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onResolved: (id: string) => void }) {
   const { t } = useTranslation();
   const [resolving, setResolving] = useState<"approve" | "deny" | null>(null);
+  const resolveApprovalMutation = useResolveApproval();
 
   const handleResolve = async (approved: boolean) => {
     setResolving(approved ? "approve" : "deny");
     try {
-      await resolveApproval(approval.id, approved);
+      await resolveApprovalMutation.mutateAsync({ id: approval.id, approved });
       onResolved(approval.id);
     } catch {
       // Approval may have already been resolved or timed out
@@ -1589,7 +1598,6 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
 
 export function ChatPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const navigate = useNavigate();
   const search = useSearch({ from: "/chat" });
   const initialAgentId = search?.agentId || "";
@@ -1597,6 +1605,10 @@ export function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const addToast = useUIStore((s) => s.addToast);
+  const createSessionMutation = useCreateAgentSession();
+  const switchSessionMutation = useSwitchAgentSession();
+  const deleteSessionMutation = useDeleteAgentSession();
+  const patchAgentConfigMutation = usePatchAgentConfig();
 
   // Sync agent selection to URL search params
   const selectAgent = useCallback((id: string) => {
@@ -1605,11 +1617,7 @@ export function ChatPage() {
   }, [navigate]);
 
   // Check TTS provider availability
-  const mediaProvidersQuery = useQuery({
-    queryKey: ["media-providers"],
-    queryFn: listMediaProviders,
-    staleTime: 60000,
-  });
+  const mediaProvidersQuery = useMediaProviders();
   const ttsAvailable = useMemo(
     () => (mediaProvidersQuery.data ?? []).some(p => p.configured && p.capabilities.includes("text_to_speech")),
     [mediaProvidersQuery.data],
@@ -1624,7 +1632,7 @@ export function ChatPage() {
     }
   }, [addToast, t]);
 
-  const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
+  const configQuery = useFullConfig();
   const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "full";
   const mediaConfigRaw = (configQuery.data as Record<string, unknown>)?.media as Record<string, unknown> | undefined;
   const sttAvailable = mediaConfigRaw?.stt_available === true;
@@ -1677,20 +1685,10 @@ export function ChatPage() {
     );
   }, [showHandAgents]);
 
-  const agentsQuery = useQuery({
-    queryKey: ["agents", "list", "chat", showHandAgents],
-    queryFn: () => listAgents({ includeHands: showHandAgents }),
-    staleTime: 30000,
-  });
+  const agentsQuery = useAgents({ includeHands: showHandAgents });
   // Check if web search is available (any search API key configured)
   const webSearchAvailable = ((configQuery.data as any)?.web?.search_available === true);
-  const handsQuery = useQuery({
-    queryKey: ["hands", "active", "chat"],
-    queryFn: listActiveHands,
-    enabled: showHandAgents,
-    staleTime: 30000,
-    refetchInterval: 30000,
-  });
+  const handsQuery = useActiveHandsWhen(showHandAgents);
 
   const sortedAgents = useMemo(
     () =>
@@ -1728,7 +1726,7 @@ export function ChatPage() {
     selectedAgentId || null,
     agents,
     sessionVersion,
-    () => queryClient.invalidateQueries({ queryKey: ["agents", "list"] }),
+      () => void agentsQuery.refetch(),
   );
   // Track LLM text streaming (cleared on `typing:stop`) independently of
   // `isLoading`, which stays true through post-processing until the final
@@ -1780,12 +1778,7 @@ export function ChatPage() {
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
   // Per-agent session list
-  const sessionsQuery = useQuery({
-    queryKey: ["agent-sessions", selectedAgentId],
-    queryFn: () => listAgentSessions(selectedAgentId!),
-    enabled: !!selectedAgentId,
-    staleTime: 10_000,
-  });
+  const sessionsQuery = useAgentSessions(selectedAgentId);
   const activeSessionId = useMemo(() => {
     const active = sessionsQuery.data?.find((s: any) => s.active);
     return active?.session_id;
@@ -1793,25 +1786,20 @@ export function ChatPage() {
 
   const handleSwitchSession = useCallback(async (sessionId: string) => {
     if (!selectedAgentId) return;
-    await switchAgentSession(selectedAgentId, sessionId);
-    queryClient.invalidateQueries({ queryKey: ["agents"] });
-    queryClient.invalidateQueries({ queryKey: ["agent-sessions", selectedAgentId] });
+    await switchSessionMutation.mutateAsync({ agentId: selectedAgentId, sessionId });
     setSessionVersion(v => v + 1);
-  }, [selectedAgentId, queryClient]);
+  }, [selectedAgentId, switchSessionMutation]);
 
   const handleNewSession = useCallback(async () => {
     if (!selectedAgentId) return;
-    const result = await createAgentSession(selectedAgentId);
-    await switchAgentSession(selectedAgentId, result.session_id);
-    queryClient.invalidateQueries({ queryKey: ["agents"] });
-    queryClient.invalidateQueries({ queryKey: ["agent-sessions", selectedAgentId] });
+    const result = await createSessionMutation.mutateAsync({ agentId: selectedAgentId });
+    await switchSessionMutation.mutateAsync({ agentId: selectedAgentId, sessionId: result.session_id });
     setSessionVersion(v => v + 1);
-  }, [selectedAgentId, queryClient]);
+  }, [selectedAgentId, createSessionMutation, switchSessionMutation]);
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
-    await deleteSession(sessionId);
-    queryClient.invalidateQueries({ queryKey: ["agent-sessions", selectedAgentId] });
-  }, [selectedAgentId, queryClient]);
+    await deleteSessionMutation.mutateAsync({ sessionId, agentId: selectedAgentId });
+  }, [deleteSessionMutation, selectedAgentId]);
 
   // If the current selection is no longer visible (e.g. hand agents toggled
   // off while a hand-spawned agent was selected), clear it so the auto-select
@@ -1909,7 +1897,7 @@ export function ChatPage() {
             <h1 className="text-xl sm:text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
           </div>
           <button
-            onClick={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
+            onClick={() => void agentsQuery.refetch()}
             className="p-2 sm:p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-colors"
           >
             <RefreshCw className={`h-4 w-4 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
@@ -2021,14 +2009,16 @@ export function ChatPage() {
               onNewSession={handleNewSession}
               onDeleteSession={handleDeleteSession}
               agentId={selectedAgentId}
-              onModelChange={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
+                onModelChange={() => void agentsQuery.refetch()}
               webSearchAugmentation={selectedAgent?.web_search_augmentation}
               webSearchAvailable={webSearchAvailable}
               onWebSearchChange={async (mode) => {
                 try {
-                  await patchAgentConfig(selectedAgentId, { web_search_augmentation: mode });
-                  queryClient.invalidateQueries({ queryKey: ["agents", "list"] });
-                  queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] });
+                  await patchAgentConfigMutation.mutateAsync({
+                    agentId: selectedAgentId,
+                    config: { web_search_augmentation: mode },
+                  });
+                  await agentsQuery.refetch();
                 } catch {}
               }}
             />
@@ -2101,3 +2091,4 @@ export function ChatPage() {
     </div>
   );
 }
+import { useQueryClient } from "@tanstack/react-query";

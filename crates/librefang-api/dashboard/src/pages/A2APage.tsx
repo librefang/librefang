@@ -1,9 +1,10 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatTime } from "../lib/datetime";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listA2AAgents, discoverA2AAgent, sendA2ATask, getA2ATaskStatus } from "../api";
+import { sendA2ATask, getA2ATaskStatus } from "../api";
 import type { A2AAgentItem, A2ATaskStatus } from "../api";
+import { useA2AAgents } from "../lib/queries/network";
+import { useDiscoverA2AAgent } from "../lib/mutations/network";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -12,11 +13,8 @@ import { CardSkeleton } from "../components/ui/Skeleton";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Globe, Search, Send, ExternalLink, Clock, CheckCircle2, XCircle, Loader2, Plus } from "lucide-react";
 
-const REFRESH_MS = 15000;
-
 export function A2APage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
 
   const [discoverUrl, setDiscoverUrl] = useState("");
   const [isDiscovering, setIsDiscovering] = useState(false);
@@ -29,11 +27,8 @@ export function A2APage() {
   const [isSending, setIsSending] = useState(false);
   const [trackedTasks, setTrackedTasks] = useState<A2ATaskStatus[]>([]);
 
-  const agentsQuery = useQuery({
-    queryKey: ["a2a", "agents"],
-    queryFn: listA2AAgents,
-    refetchInterval: REFRESH_MS,
-  });
+  const agentsQuery = useA2AAgents();
+  const discoverMutation = useDiscoverA2AAgent();
 
   const agents = agentsQuery.data ?? [];
 
@@ -41,10 +36,9 @@ export function A2APage() {
     if (!discoverUrl.trim()) return;
     setIsDiscovering(true);
     try {
-      await discoverA2AAgent(discoverUrl.trim());
+      await discoverMutation.mutateAsync(discoverUrl.trim());
       setDiscoverUrl("");
       setShowDiscover(false);
-      void queryClient.invalidateQueries({ queryKey: ["a2a", "agents"] });
     } catch {
       // error handled by UI
     } finally {

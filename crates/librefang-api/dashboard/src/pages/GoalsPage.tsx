@@ -1,7 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { createGoal, listGoals, listGoalTemplates, updateGoal, deleteGoal, type GoalItem, type GoalTemplate } from "../api";
+import { type GoalItem, type GoalTemplate } from "../api";
+import { useGoals, useGoalTemplates } from "../lib/queries/goals";
+import { useCreateGoal, useUpdateGoal, useDeleteGoal } from "../lib/mutations/goals";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { Card } from "../components/ui/Card";
@@ -9,8 +10,6 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, ChevronDown, ChevronRight } from "lucide-react";
-
-const REFRESH_MS = 30000;
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   rocket: Rocket,
@@ -23,7 +22,6 @@ const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>
 
 export function GoalsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
   const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as string, progress: 0, parent_id: "", agent_id: "" });
@@ -31,13 +29,13 @@ export function GoalsPage() {
   const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as string, progress: 0 });
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  const goalsQuery = useQuery({ queryKey: ["goals", "list"], queryFn: listGoals, refetchInterval: REFRESH_MS });
-  const templatesQuery = useQuery({ queryKey: ["goals", "templates"], queryFn: listGoalTemplates });
+  const goalsQuery = useGoals();
+  const templatesQuery = useGoalTemplates();
   const [applyingTemplate, setApplyingTemplate] = useState<string | null>(null);
 
-  const createMutation = useMutation({ mutationFn: createGoal });
-  const updateMutation = useMutation({ mutationFn: ({ id, data }: { id: string; data: any }) => updateGoal(id, data) });
-  const deleteMutation = useMutation({ mutationFn: deleteGoal });
+  const createMutation = useCreateGoal();
+  const updateMutation = useUpdateGoal();
+  const deleteMutation = useDeleteGoal();
   const goals = goalsQuery.data ?? [];
   const templates = templatesQuery.data ?? [];
 
@@ -48,7 +46,6 @@ export function GoalsPage() {
       await createMutation.mutateAsync(createDraft);
       addToast(t("common.success"), "success");
       setCreateDraft({ title: "", description: "", status: "pending", progress: 0, parent_id: "", agent_id: "" });
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     }
@@ -61,7 +58,6 @@ export function GoalsPage() {
         await createMutation.mutateAsync(g);
       }
       addToast(t("common.success"), "success");
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     } finally {
@@ -85,7 +81,6 @@ export function GoalsPage() {
       await updateMutation.mutateAsync({ id: editingId, data: editDraft });
       addToast(t("common.success"), "success");
       setEditingId(null);
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     }
@@ -96,7 +91,6 @@ export function GoalsPage() {
       await deleteMutation.mutateAsync(id);
       addToast(t("common.success"), "success");
       setConfirmDeleteId(null);
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     }
@@ -112,7 +106,6 @@ export function GoalsPage() {
     const status = nextStatus(current);
     try {
       await updateMutation.mutateAsync({ id, data: { status, progress: status === "completed" ? 100 : status === "in_progress" ? 50 : 0 } });
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     }
@@ -124,7 +117,6 @@ export function GoalsPage() {
         await deleteMutation.mutateAsync(g.id);
       }
       addToast(t("common.success"), "success");
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     }
