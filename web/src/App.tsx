@@ -5,7 +5,7 @@ import {
   Copy, Check, Menu, X, Box, Layers, Radio, Eye,
   Scissors, Users, Globe, ArrowRight, Github, Monitor,
   Star, GitFork, CircleDot, GitPullRequest, MessageSquare,
-  Sun, Moon
+  Sun, Moon, Sparkles, History, RotateCcw, FileEdit, Trash2, FilePlus
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
@@ -98,6 +98,7 @@ interface NavProps {
 function Nav({ t, lang, onSwitchLang }: NavProps) {
   const [open, setOpen] = useState(false)
   const [langOpen, setLangOpen] = useState(false)
+  const [featuresOpen, setFeaturesOpen] = useState(false)
   const [scrolled, setScrolled] = useState(false)
   const [activeSection, setActiveSection] = useState('')
   const theme = useAppStore((s) => s.theme)
@@ -128,10 +129,11 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { setOpen(false); setLangOpen(false) }
+      if (e.key === 'Escape') { setOpen(false); setLangOpen(false); setFeaturesOpen(false) }
     }
     const handleClickOutside = (e: MouseEvent) => {
       if (langOpen && !(e.target as HTMLElement).closest('[data-lang-menu]')) setLangOpen(false)
+      if (featuresOpen && !(e.target as HTMLElement).closest('[data-features-menu]')) setFeaturesOpen(false)
     }
     document.addEventListener('keydown', handleEscape)
     document.addEventListener('click', handleClickOutside)
@@ -139,7 +141,7 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
       document.removeEventListener('keydown', handleEscape)
       document.removeEventListener('click', handleClickOutside)
     }
-  }, [langOpen])
+  }, [langOpen, featuresOpen])
 
   interface NavLink {
     label: string
@@ -147,15 +149,20 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
     external?: boolean
   }
 
-  const links: NavLink[] = [
+  const featureLinks: NavLink[] = [
     { label: t.nav.architecture, href: '#architecture' },
     { label: t.nav.hands, href: '#hands' },
-    { label: t.workflows?.label || 'Workflows', href: '#workflows' },
+    { label: t.nav.workflows || t.workflows?.label || 'Workflows', href: '#workflows' },
     { label: t.nav.performance, href: '#performance' },
+    { label: t.nav.evolution || 'Skills Self-Evolution', href: '#evolution' },
+  ]
+  const links: NavLink[] = [
     { label: t.nav.install, href: '#install' },
     { label: t.nav.downloads || 'Downloads', href: '#downloads' },
     { label: t.nav.docs, href: 'https://docs.librefang.ai', external: true },
   ]
+  const featureActiveIds = ['architecture', 'hands', 'workflows', 'performance', 'evolution']
+  const isFeatureActive = featureActiveIds.includes(activeSection)
 
   return (
     <nav className={cn('fixed top-0 left-0 right-0 z-50 transition-all duration-300', scrolled && 'bg-surface/90 backdrop-blur-md border-b border-black/10 dark:border-white/5')}>
@@ -166,6 +173,50 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
         </a>
 
         <div className="hidden md:flex items-center gap-1">
+          {/* Features dropdown (collapses architecture/hands/workflows/performance/evolution) */}
+          <div className="relative" data-features-menu>
+            <button
+              className={cn(
+                'flex items-center gap-1 px-3 py-1.5 text-sm transition-colors font-medium',
+                isFeatureActive || featuresOpen ? 'text-cyan-600 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400'
+              )}
+              onClick={() => setFeaturesOpen(!featuresOpen)}
+              aria-label={t.nav.features || 'Features'}
+              aria-expanded={featuresOpen}
+            >
+              {t.nav.features || 'Features'}
+              <ChevronDown className={cn('w-3 h-3 transition-transform', featuresOpen && 'rotate-180')} />
+            </button>
+            {featuresOpen && (
+              <div className="absolute left-0 mt-2 w-64 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50 py-1">
+                {featureLinks.map(link => {
+                  const id = link.href.replace('#', '')
+                  const isActive = activeSection === id
+                  const isEvolution = id === 'evolution'
+                  return (
+                    <a
+                      key={link.label}
+                      href={link.href}
+                      onClick={(e) => {
+                        e.preventDefault()
+                        const el = document.querySelector(link.href)
+                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                        setFeaturesOpen(false)
+                      }}
+                      className={cn(
+                        'flex items-center justify-between px-4 py-2.5 text-sm transition-colors',
+                        isActive ? 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/5' : 'text-gray-700 dark:text-gray-300 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-black/5 dark:hover:bg-white/5'
+                      )}
+                    >
+                      <span>{link.label}</span>
+                      {isEvolution && <Sparkles className="w-3.5 h-3.5 text-amber-400" />}
+                    </a>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
           {links.map(link => (
             <a
               key={link.label}
@@ -259,6 +310,32 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
 
       {open && (
         <div className="md:hidden bg-surface-100 border-t border-black/10 dark:border-white/5 px-6 py-4 space-y-1">
+          <div className="pb-1">
+            <div className="text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest py-1.5">
+              {t.nav.features || 'Features'}
+            </div>
+            {featureLinks.map(link => {
+              const id = link.href.replace('#', '')
+              const isEvolution = id === 'evolution'
+              return (
+                <a
+                  key={link.label}
+                  href={link.href}
+                  onClick={(e) => {
+                    e.preventDefault()
+                    const el = document.querySelector(link.href)
+                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                    setOpen(false)
+                  }}
+                  aria-current={activeSection === id ? 'page' : undefined}
+                  className="flex items-center justify-between py-2 pl-3 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium"
+                >
+                  <span>{link.label}</span>
+                  {isEvolution && <Sparkles className="w-3.5 h-3.5 text-amber-400" />}
+                </a>
+              )
+            })}
+          </div>
           {links.map(link => (
             <a
               key={link.label}
@@ -658,6 +735,75 @@ function Performance({ t }: SectionProps) {
               </div>
             ))}
           </div>
+        </FadeIn>
+      </div>
+    </section>
+  )
+}
+
+// ─── Skills Self-Evolution ───
+const evolutionHowIcons: LucideIcon[] = [Sparkles, Zap, Shield, History]
+const evolutionToolIcons: LucideIcon[] = [FilePlus, FileEdit, FileEdit, RotateCcw, FilePlus, Trash2]
+
+function Evolution({ t }: SectionProps) {
+  if (!t.evolution) return null
+  const ev = t.evolution
+  return (
+    <section id="evolution" className="py-28 px-6 scroll-mt-20">
+      <div className="max-w-6xl mx-auto">
+        <FadeIn>
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded border border-amber-500/30 bg-amber-500/5 text-xs font-mono text-amber-600 dark:text-amber-400 mb-4">
+            <Sparkles className="w-3 h-3" />
+            {ev.tagline}
+          </div>
+          <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">{ev.label}</div>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{ev.title}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{ev.desc}</p>
+        </FadeIn>
+
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
+          {ev.howItWorks.map((item, i) => {
+            const Icon = evolutionHowIcons[i] || Sparkles
+            return (
+              <FadeIn key={i} delay={i * 60}>
+                <div className="bg-surface-100 border border-black/10 dark:border-white/5 hover:border-amber-500/30 p-6 transition-all h-full">
+                  <Icon className="w-5 h-5 text-amber-400/70 mb-4" />
+                  <h3 className="text-base font-bold text-slate-900 dark:text-white mb-2">{item.title}</h3>
+                  <p className="text-sm text-gray-500 leading-relaxed">{item.desc}</p>
+                </div>
+              </FadeIn>
+            )
+          })}
+        </div>
+
+        <FadeIn>
+          <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">{ev.toolsHeading}</div>
+          <div className="grid md:grid-cols-2 gap-px bg-black/5 dark:bg-white/5 overflow-hidden mb-8">
+            {ev.tools.map((tool, i) => {
+              const Icon = evolutionToolIcons[i] || FileEdit
+              return (
+                <div key={tool.name} className="bg-surface-100 px-5 py-4 flex items-start gap-3">
+                  <Icon className="w-4 h-4 text-cyan-500/60 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <code className="text-sm font-mono font-bold text-slate-900 dark:text-white block truncate">{tool.name}</code>
+                    <p className="text-xs text-gray-500 mt-1 leading-relaxed">{tool.desc}</p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </FadeIn>
+
+        <FadeIn delay={200}>
+          <a
+            href="https://docs.librefang.ai/agent/skills#skill-self-evolution"
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() => trackEvent('click', 'evolution_docs')}
+            className="inline-flex items-center gap-2 text-sm font-semibold text-cyan-600 dark:text-cyan-400 hover:text-cyan-500 transition-colors"
+          >
+            {ev.cta} <ArrowRight className="w-3.5 h-3.5" />
+          </a>
         </FadeIn>
       </div>
     </section>
@@ -1402,6 +1548,7 @@ export default function App() {
       <div className="glow-line" />
       <Hands t={t} />
       <Workflows t={t} />
+      <Evolution t={t} />
       <Performance t={t} />
       <div className="glow-line" />
       <Install t={t} />

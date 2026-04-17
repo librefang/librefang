@@ -11,7 +11,7 @@ export interface PerformanceRow {
 }
 
 export interface Translation {
-  nav: { architecture: string; hands: string; performance: string; install: string; downloads?: string; docs: string }
+  nav: { architecture: string; hands: string; performance: string; install: string; downloads?: string; docs: string; features?: string; evolution?: string; workflows?: string }
   hero: {
     badge: string
     title1: string
@@ -108,6 +108,16 @@ export interface Translation {
     steps: { title: string; desc: string }[]
     cta: string
   }
+  evolution?: {
+    label: string
+    title: string
+    desc: string
+    tagline: string
+    howItWorks: { title: string; desc: string }[]
+    tools: { name: string; desc: string }[]
+    toolsHeading: string
+    cta: string
+  }
   footer: { docs: string; license: string; privacy: string; changelog: string }
 }
 
@@ -123,7 +133,7 @@ export const languages: Language[] = [
 
 export const translations: Record<string, Translation> = {
   en: {
-    nav: { architecture: 'Architecture', hands: 'Hands', performance: 'Performance', install: 'Install', downloads: 'Downloads', docs: 'Docs' },
+    nav: { architecture: 'Architecture', hands: 'Hands', performance: 'Performance', install: 'Install', downloads: 'Downloads', docs: 'Docs', features: 'Features', evolution: 'Skills Self-Evolution', workflows: 'Workflows' },
     hero: {
       badge: 'Open Source',
       title1: 'The Agent',
@@ -290,11 +300,33 @@ export const translations: Record<string, Translation> = {
       ],
       cta: 'Read Contributing Guide',
     },
+    evolution: {
+      label: 'Skills Self-Evolution',
+      title: 'Agents that teach themselves',
+      desc: 'After a complex task, a background LLM review decides whether the approach is worth saving. New skills hot-reload into the runtime — no restart.',
+      tagline: 'Autonomous. Versioned. Security-scanned.',
+      toolsHeading: 'Evolution tools',
+      howItWorks: [
+        { title: 'Automatic detection', desc: '5+ tool calls trigger a background review of the approach.' },
+        { title: 'Hot-reload', desc: 'New and updated skills are available immediately — no daemon restart.' },
+        { title: 'Security scanning', desc: 'Every mutation passes through prompt injection detection with auto-rollback.' },
+        { title: 'Version history', desc: 'Up to 10 versions per skill with timestamps, changelogs, and rollback snapshots.' },
+      ],
+      tools: [
+        { name: 'skill_evolve_create', desc: 'Save a successful approach as a new prompt-only skill.' },
+        { name: 'skill_evolve_update', desc: 'Rewrite a skill\'s prompt context entirely.' },
+        { name: 'skill_evolve_patch', desc: 'Targeted find-and-replace with 5-strategy fuzzy matching.' },
+        { name: 'skill_evolve_rollback', desc: 'Revert to the previous version instantly.' },
+        { name: 'skill_evolve_write_file', desc: 'Add supporting files: references, templates, scripts, assets.' },
+        { name: 'skill_evolve_delete', desc: 'Remove a locally-created skill.' },
+      ],
+      cta: 'Read Skill Evolution Docs',
+    },
     footer: { docs: 'Docs', license: 'License', privacy: 'Privacy', changelog: 'Changelog' },
   },
 
   zh: {
-    nav: { architecture: '架构', hands: '能力单元', performance: '性能', install: '安装', downloads: '下载', docs: '文档' },
+    nav: { architecture: '架构', hands: '能力单元', performance: '性能', install: '安装', downloads: '下载', docs: '文档', features: '功能', evolution: '技能自我进化', workflows: '工作流' },
     hero: {
       badge: '开源',
       title1: 'Agent',
@@ -435,11 +467,33 @@ export const translations: Record<string, Translation> = {
       ],
       cta: '阅读贡献指南',
     },
+    evolution: {
+      label: '技能自我进化',
+      title: '会自己学习的 Agent',
+      desc: '复杂任务完成后，后台 LLM 会评估本次做法是否值得保存；沉淀下来的技能直接热加载进运行时——无需重启。',
+      tagline: '自主沉淀 · 版本留痕 · 安全扫描',
+      toolsHeading: '进化工具',
+      howItWorks: [
+        { title: '自动识别', desc: '一次任务里 5 次以上工具调用会触发后台评审。' },
+        { title: '热加载', desc: '新增与更新的技能立即可用，不需要重启守护进程。' },
+        { title: '安全扫描', desc: '每次变更都经提示注入检测，命中威胁自动回滚。' },
+        { title: '版本历史', desc: '每项技能最多保留 10 个版本，含时间戳、变更说明和回滚快照。' },
+      ],
+      tools: [
+        { name: 'skill_evolve_create', desc: '把一次成功的方法沉淀为新的 prompt-only 技能。' },
+        { name: 'skill_evolve_update', desc: '整体重写一项技能的提示词内容。' },
+        { name: 'skill_evolve_patch', desc: '5 级模糊匹配的精准查找-替换。' },
+        { name: 'skill_evolve_rollback', desc: '一键回滚到上一版本。' },
+        { name: 'skill_evolve_write_file', desc: '新增 references / templates / scripts / assets 附属文件。' },
+        { name: 'skill_evolve_delete', desc: '删除本地创建的技能。' },
+      ],
+      cta: '查看技能进化文档',
+    },
     footer: { docs: '文档', license: '许可证', privacy: '隐私', changelog: '更新日志' },
   },
 
   'zh-TW': {
-    nav: { architecture: '架構', hands: '能力單元', performance: '效能', install: '安裝', downloads: '下載', docs: '文件' },
+    nav: { architecture: '架構', hands: '能力單元', performance: '效能', install: '安裝', downloads: '下載', docs: '文件', features: '功能', evolution: '技能自我進化', workflows: '工作流' },
     hero: {
       badge: '開源',
       title1: 'Agent',
@@ -580,11 +634,33 @@ export const translations: Record<string, Translation> = {
       ],
       cta: '閱讀貢獻指南',
     },
+    evolution: {
+      label: '技能自我進化',
+      title: '會自己學習的 Agent',
+      desc: '複雜任務結束後，背景 LLM 會評估本次做法是否值得保存；沉澱下來的技能直接熱載入執行階段——不需重啟。',
+      tagline: '自主沉澱 · 版本留痕 · 安全掃描',
+      toolsHeading: '進化工具',
+      howItWorks: [
+        { title: '自動識別', desc: '單次任務 5 次以上工具呼叫會觸發背景評審。' },
+        { title: '熱載入', desc: '新增與更新的技能立即可用，不需重啟守護程序。' },
+        { title: '安全掃描', desc: '每次變更都經提示注入偵測，命中威脅自動回滾。' },
+        { title: '版本歷史', desc: '每項技能最多保留 10 個版本，含時間戳、變更說明與回滾快照。' },
+      ],
+      tools: [
+        { name: 'skill_evolve_create', desc: '把一次成功的方法沉澱為新的 prompt-only 技能。' },
+        { name: 'skill_evolve_update', desc: '整體重寫一項技能的提示詞內容。' },
+        { name: 'skill_evolve_patch', desc: '5 級模糊匹配的精準查找-取代。' },
+        { name: 'skill_evolve_rollback', desc: '一鍵回滾到上一版本。' },
+        { name: 'skill_evolve_write_file', desc: '新增 references / templates / scripts / assets 附屬檔案。' },
+        { name: 'skill_evolve_delete', desc: '刪除本機建立的技能。' },
+      ],
+      cta: '查看技能進化文件',
+    },
     footer: { docs: '文件', license: '授權', privacy: '隱私', changelog: '更新日誌' },
   },
 
   ja: {
-    nav: { architecture: 'アーキテクチャ', hands: 'Hands', performance: 'パフォーマンス', install: 'インストール', downloads: 'ダウンロード', docs: 'ドキュメント' },
+    nav: { architecture: 'アーキテクチャ', hands: 'Hands', performance: 'パフォーマンス', install: 'インストール', downloads: 'ダウンロード', docs: 'ドキュメント', features: '機能', evolution: 'スキル自己進化', workflows: 'ワークフロー' },
     hero: {
       badge: 'オープンソース',
       title1: 'Agent',
@@ -725,11 +801,33 @@ export const translations: Record<string, Translation> = {
       ],
       cta: 'コントリビュートガイドを読む',
     },
+    evolution: {
+      label: 'スキル自己進化',
+      title: '自ら学習する Agent',
+      desc: '複雑なタスクの後、バックグラウンドで LLM がその手法を保存する価値があるか評価します。蓄積されたスキルはランタイムに即時ホットロード—再起動不要です。',
+      tagline: '自律蓄積 · バージョン管理 · セキュリティスキャン',
+      toolsHeading: '進化ツール',
+      howItWorks: [
+        { title: '自動検出', desc: '5回以上のツール呼び出しで背景評価がトリガーされます。' },
+        { title: 'ホットロード', desc: '新規・更新スキルは即座に利用可能。デーモン再起動は不要。' },
+        { title: 'セキュリティスキャン', desc: 'すべての変更がプロンプトインジェクション検査を通過し、脅威検出時は自動ロールバック。' },
+        { title: 'バージョン履歴', desc: 'スキルごとに最大10バージョン。タイムスタンプ、変更ログ、ロールバックスナップショット付き。' },
+      ],
+      tools: [
+        { name: 'skill_evolve_create', desc: '成功した手法を新しい prompt-only スキルとして保存。' },
+        { name: 'skill_evolve_update', desc: 'スキルのプロンプトコンテキストを完全に書き換え。' },
+        { name: 'skill_evolve_patch', desc: '5段階ファジーマッチングによる精密な検索置換。' },
+        { name: 'skill_evolve_rollback', desc: '前バージョンへ即座にロールバック。' },
+        { name: 'skill_evolve_write_file', desc: '補助ファイル（references / templates / scripts / assets）を追加。' },
+        { name: 'skill_evolve_delete', desc: 'ローカルで作成したスキルを削除。' },
+      ],
+      cta: 'スキル進化ドキュメントを読む',
+    },
     footer: { docs: 'ドキュメント', license: 'ライセンス', privacy: 'プライバシー', changelog: '変更履歴' },
   },
 
   ko: {
-    nav: { architecture: '아키텍처', hands: 'Hands', performance: '성능', install: '설치', downloads: '다운로드', docs: '문서' },
+    nav: { architecture: '아키텍처', hands: 'Hands', performance: '성능', install: '설치', downloads: '다운로드', docs: '문서', features: '기능', evolution: '스킬 자가 진화', workflows: '워크플로' },
     hero: {
       badge: '오픈소스',
       title1: 'Agent',
@@ -870,11 +968,33 @@ export const translations: Record<string, Translation> = {
       ],
       cta: '기여 가이드 읽기',
     },
+    evolution: {
+      label: '스킬 자가 진화',
+      title: '스스로 배우는 Agent',
+      desc: '복잡한 작업 후 백그라운드 LLM이 해당 접근 방식을 저장할 가치가 있는지 평가합니다. 축적된 스킬은 런타임에 즉시 핫 리로드—재시작 불필요.',
+      tagline: '자율 축적 · 버전 추적 · 보안 스캔',
+      toolsHeading: '진화 도구',
+      howItWorks: [
+        { title: '자동 감지', desc: '5회 이상 도구 호출 시 백그라운드 리뷰가 트리거됩니다.' },
+        { title: '핫 리로드', desc: '신규 및 업데이트된 스킬이 즉시 사용 가능, 데몬 재시작 불필요.' },
+        { title: '보안 스캔', desc: '모든 변경이 프롬프트 인젝션 검사를 거치며, 위협 감지 시 자동 롤백.' },
+        { title: '버전 기록', desc: '스킬당 최대 10개 버전, 타임스탬프, 변경 로그, 롤백 스냅샷 포함.' },
+      ],
+      tools: [
+        { name: 'skill_evolve_create', desc: '성공한 접근 방식을 새 prompt-only 스킬로 저장.' },
+        { name: 'skill_evolve_update', desc: '스킬의 프롬프트 컨텍스트를 전체 재작성.' },
+        { name: 'skill_evolve_patch', desc: '5단계 퍼지 매칭 기반 정밀 찾기-바꾸기.' },
+        { name: 'skill_evolve_rollback', desc: '이전 버전으로 즉시 롤백.' },
+        { name: 'skill_evolve_write_file', desc: '보조 파일(references / templates / scripts / assets) 추가.' },
+        { name: 'skill_evolve_delete', desc: '로컬에서 생성한 스킬 삭제.' },
+      ],
+      cta: '스킬 진화 문서 읽기',
+    },
     footer: { docs: '문서', license: '라이선스', privacy: '개인정보', changelog: '변경 이력' },
   },
 
   de: {
-    nav: { architecture: 'Architektur', hands: 'Hands', performance: 'Leistung', install: 'Installation', downloads: 'Downloads', docs: 'Dokumentation' },
+    nav: { architecture: 'Architektur', hands: 'Hands', performance: 'Leistung', install: 'Installation', downloads: 'Downloads', docs: 'Dokumentation', features: 'Funktionen', evolution: 'Skill-Selbstentwicklung', workflows: 'Workflows' },
     hero: {
       badge: 'Open Source',
       title1: 'Der Agent',
@@ -1015,11 +1135,33 @@ export const translations: Record<string, Translation> = {
       ],
       cta: 'Beitragsrichtlinien lesen',
     },
+    evolution: {
+      label: 'Skill-Selbstentwicklung',
+      title: 'Agents, die sich selbst beibringen',
+      desc: 'Nach einer komplexen Aufgabe bewertet ein Hintergrund-LLM, ob der Ansatz gespeichert werden sollte. Neue Skills werden sofort in die Runtime geladen — ohne Neustart.',
+      tagline: 'Autonom · Versioniert · Sicherheitsgeprüft',
+      toolsHeading: 'Evolution-Tools',
+      howItWorks: [
+        { title: 'Automatische Erkennung', desc: '5+ Tool-Aufrufe lösen eine Hintergrundüberprüfung aus.' },
+        { title: 'Hot-Reload', desc: 'Neue und aktualisierte Skills sind sofort verfügbar — kein Daemon-Neustart.' },
+        { title: 'Sicherheitsscan', desc: 'Jede Änderung durchläuft Prompt-Injection-Erkennung mit Auto-Rollback.' },
+        { title: 'Versionsverlauf', desc: 'Bis zu 10 Versionen pro Skill mit Zeitstempel, Changelog und Rollback-Snapshots.' },
+      ],
+      tools: [
+        { name: 'skill_evolve_create', desc: 'Einen erfolgreichen Ansatz als neuen Prompt-Only-Skill speichern.' },
+        { name: 'skill_evolve_update', desc: 'Den Prompt-Kontext eines Skills vollständig neu schreiben.' },
+        { name: 'skill_evolve_patch', desc: 'Gezieltes Suchen und Ersetzen mit 5-stufigem Fuzzy-Matching.' },
+        { name: 'skill_evolve_rollback', desc: 'Sofort auf die Vorgängerversion zurücksetzen.' },
+        { name: 'skill_evolve_write_file', desc: 'Zusatzdateien hinzufügen: References, Templates, Skripte, Assets.' },
+        { name: 'skill_evolve_delete', desc: 'Einen lokal erstellten Skill entfernen.' },
+      ],
+      cta: 'Skill-Evolution-Dokumentation lesen',
+    },
     footer: { docs: 'Dokumentation', license: 'Lizenz', privacy: 'Datenschutz', changelog: 'Changelog' },
   },
 
   es: {
-    nav: { architecture: 'Arquitectura', hands: 'Hands', performance: 'Rendimiento', install: 'Instalar', downloads: 'Descargas', docs: 'Documentación' },
+    nav: { architecture: 'Arquitectura', hands: 'Hands', performance: 'Rendimiento', install: 'Instalar', downloads: 'Descargas', docs: 'Documentación', features: 'Funciones', evolution: 'Autoevolución de Skills', workflows: 'Flujos de trabajo' },
     hero: {
       badge: 'Código Abierto',
       title1: 'El Agente',
@@ -1159,6 +1301,28 @@ export const translations: Record<string, Translation> = {
         { title: 'Envía un PR', desc: 'Realiza tus cambios, escribe tests y envía un pull request para revisión.' },
       ],
       cta: 'Leer Guía de Contribución',
+    },
+    evolution: {
+      label: 'Autoevolución de Skills',
+      title: 'Agentes que se enseñan a sí mismos',
+      desc: 'Tras una tarea compleja, una revisión LLM en segundo plano decide si el enfoque merece guardarse. Las nuevas skills se cargan en caliente en el runtime — sin reinicio.',
+      tagline: 'Autónomo · Versionado · Escaneado',
+      toolsHeading: 'Herramientas de evolución',
+      howItWorks: [
+        { title: 'Detección automática', desc: '5+ llamadas a herramientas disparan una revisión en segundo plano.' },
+        { title: 'Recarga en caliente', desc: 'Las skills nuevas o actualizadas están disponibles al instante — sin reiniciar el daemon.' },
+        { title: 'Escaneo de seguridad', desc: 'Toda mutación pasa por la detección de prompt injection con rollback automático.' },
+        { title: 'Historial de versiones', desc: 'Hasta 10 versiones por skill con timestamps, changelog y snapshots de rollback.' },
+      ],
+      tools: [
+        { name: 'skill_evolve_create', desc: 'Guardar un enfoque exitoso como nueva skill prompt-only.' },
+        { name: 'skill_evolve_update', desc: 'Reescribir completamente el contexto del prompt de una skill.' },
+        { name: 'skill_evolve_patch', desc: 'Buscar y reemplazar preciso con fuzzy matching de 5 estrategias.' },
+        { name: 'skill_evolve_rollback', desc: 'Volver a la versión anterior al instante.' },
+        { name: 'skill_evolve_write_file', desc: 'Añadir archivos de soporte: references, templates, scripts, assets.' },
+        { name: 'skill_evolve_delete', desc: 'Eliminar una skill creada localmente.' },
+      ],
+      cta: 'Leer Docs de Evolución de Skills',
     },
     footer: { docs: 'Documentación', license: 'Licencia', privacy: 'Privacidad', changelog: 'Cambios' },
   },

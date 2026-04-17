@@ -166,6 +166,24 @@
       }
     },
     {
+      "id": "devteam",
+      "name": "Dev Team",
+      "description": "Autonomous software development team — PM triages issues, Engineer implements, QA validates",
+      "category": "development",
+      "icon": "🏗",
+      "i18n": {
+        "zh": {
+          "description": "自主软件开发团队 — PM 分拣 Issue，工程师实现，QA 验证"
+        },
+        "ja": {
+          "description": "自律型開発チーム — PMがIssueをトリアージ、エンジニアが実装、QAが検証"
+        },
+        "ko": {
+          "description": "자율 개발팀 — PM이 이슈 분류, 엔지니어가 구현, QA가 검증"
+        }
+      }
+    },
+    {
       "id": "lead",
       "name": "Lead Hand",
       "description": "Autonomous lead generation — discovers, enriches, and delivers qualified leads on a schedule",
@@ -342,6 +360,24 @@
       "i18n": {
         "zh-TW": {
           "description": "自主 Twitter/X 管理——內容創作、排程發布、互動與效果追蹤"
+        }
+      }
+    },
+    {
+      "id": "wiki",
+      "name": "Wiki Hand",
+      "description": "LLM-maintained personal knowledge base. Incrementally builds an Obsidian-compatible wiki from raw sources — extracts entities, concepts, and claims with provenance tracking, cross-references everything, and keeps the wiki healthy over time.",
+      "category": "productivity",
+      "icon": "📚",
+      "tags": [
+        "knowledge-base",
+        "wiki",
+        "obsidian",
+        "documentation"
+      ],
+      "i18n": {
+        "zh-TW": {
+          "description": "由LLM維護的個人知識庫。從原始來源逐步構建兼容Obsidian的Wiki——提取實體、概念和主張並追蹤來源，交叉引用所有內容，並長期保持Wiki的健康狀態。"
         }
       }
     }
@@ -1566,12 +1602,12 @@
       }
     }
   ],
-  "handsCount": 15,
+  "handsCount": 17,
   "channelsCount": 44,
-  "providersCount": 78,
-  "integrationsCount": 25,
-  "workflowsCount": 9,
+  "providersCount": 72,
+  "integrationsCount": 33,
+  "workflowsCount": 22,
   "agentsCount": 32,
-  "pluginsCount": 10,
-  "fetchedAt": "2026-03-30T12:09:46.109Z"
+  "pluginsCount": 11,
+  "fetchedAt": "2026-04-17T03:44:19.585Z"
 }
