@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { CATEGORIES, render } from './gen-og-images'
 
 describe('OG image generator', () => {
-  it('defines exactly nine categories matching the registry', () => {
-    expect(CATEGORIES).toHaveLength(9)
+  it('defines exactly eight categories matching the registry', () => {
+    expect(CATEGORIES).toHaveLength(8)
     const slugs = CATEGORIES.map(c => c.slug).sort()
     expect(slugs).toEqual([
-      'agents', 'channels', 'hands', 'integrations', 'mcp',
+      'agents', 'channels', 'hands', 'mcp',
       'plugins', 'providers', 'skills', 'workflows',
     ])
   })

@@ -26,15 +26,14 @@ interface CategoryMeta {
 }
 
 const CATEGORY_META: Record<RegistryCategory, CategoryMeta> = {
-  skills:       { docsPath: '/agent/skills',            registryPath: '/tree/main/skills',       fileNameFor: id => `skills/${id}/SKILL.md` },
-  mcp:          { docsPath: '/integrations/mcp-a2a',    registryPath: '/tree/main/mcp',          fileNameFor: id => `mcp/${id}.toml` },
-  plugins:      { docsPath: '/agent/plugins',           registryPath: '/tree/main/plugins',      fileNameFor: id => `plugins/${id}/plugin.toml` },
-  hands:        { docsPath: '/agent/hands',             registryPath: '/tree/main/hands',        fileNameFor: id => `hands/${id}/HAND.toml` },
-  agents:       { docsPath: '/agent/templates',         registryPath: '/tree/main/agents',       fileNameFor: id => `agents/${id}/agent.toml` },
-  providers:    { docsPath: '/configuration/providers', registryPath: '/tree/main/providers',    fileNameFor: id => `providers/${id}.toml` },
-  workflows:    { docsPath: '/agent/workflows',         registryPath: '/tree/main/workflows',    fileNameFor: id => `workflows/${id}.toml` },
-  channels:     { docsPath: '/integrations/channels',   registryPath: '/tree/main/channels',     fileNameFor: id => `channels/${id}.toml` },
-  integrations: { docsPath: '/integrations',            registryPath: '/tree/main/integrations', fileNameFor: id => `integrations/${id}.toml` },
+  skills:       { docsPath: '/agent/skills',            registryPath: '/tree/main/skills',    fileNameFor: id => `skills/${id}/SKILL.md` },
+  mcp:          { docsPath: '/mcp',                     registryPath: '/tree/main/mcp',       fileNameFor: id => `mcp/${id}.toml` },
+  plugins:      { docsPath: '/agent/plugins',           registryPath: '/tree/main/plugins',   fileNameFor: id => `plugins/${id}/plugin.toml` },
+  hands:        { docsPath: '/agent/hands',             registryPath: '/tree/main/hands',     fileNameFor: id => `hands/${id}/HAND.toml` },
+  agents:       { docsPath: '/agent/templates',         registryPath: '/tree/main/agents',    fileNameFor: id => `agents/${id}/agent.toml` },
+  providers:    { docsPath: '/configuration/providers', registryPath: '/tree/main/providers', fileNameFor: id => `providers/${id}.toml` },
+  workflows:    { docsPath: '/agent/workflows',         registryPath: '/tree/main/workflows', fileNameFor: id => `workflows/${id}.toml` },
+  channels:     { docsPath: '/channels',                registryPath: '/tree/main/channels',  fileNameFor: id => `channels/${id}.toml` },
 }
 
 function getCategoryLabels(t: Translation, category: RegistryCategory): { title: string; desc: string } {

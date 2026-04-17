@@ -27,7 +27,6 @@ const RegistryDataSchema = z.object({
   hands: z.array(DetailSchema).optional().default([]),
   channels: z.array(DetailSchema).optional().default([]),
   providers: z.array(DetailSchema).optional().default([]),
-  integrations: z.array(DetailSchema).optional().default([]),
   workflows: z.array(DetailSchema).optional().default([]),
   agents: z.array(DetailSchema).optional().default([]),
   plugins: z.array(DetailSchema).optional().default([]),
@@ -36,7 +35,6 @@ const RegistryDataSchema = z.object({
   handsCount: z.number().optional().default(0),
   channelsCount: z.number().optional().default(0),
   providersCount: z.number().optional().default(0),
-  integrationsCount: z.number().optional().default(0),
   workflowsCount: z.number().optional().default(0),
   agentsCount: z.number().optional().default(0),
   pluginsCount: z.number().optional().default(0),
@@ -50,7 +48,7 @@ export type ChannelDetail = Detail
 export type RegistryData = z.infer<typeof RegistryDataSchema>
 
 export type RegistryCategory =
-  | 'hands' | 'channels' | 'providers' | 'integrations'
+  | 'hands' | 'channels' | 'providers'
   | 'workflows' | 'agents' | 'plugins' | 'skills' | 'mcp'
 
 /** Get localized description for a Detail item */
@@ -92,7 +90,6 @@ async function fetchRegistryData(): Promise<RegistryData> {
       hands: mergeDetails(localData.hands, apiData.hands),
       channels: mergeDetails(localData.channels, apiData.channels),
       providers: mergeDetails(localData.providers, apiData.providers),
-      integrations: mergeDetails(localData.integrations, apiData.integrations),
       workflows: mergeDetails(localData.workflows, apiData.workflows),
       agents: mergeDetails(localData.agents, apiData.agents),
       plugins: mergeDetails(localData.plugins, apiData.plugins),
@@ -102,7 +99,6 @@ async function fetchRegistryData(): Promise<RegistryData> {
       handsCount: apiData.handsCount || localData.handsCount,
       channelsCount: apiData.channelsCount || localData.channelsCount,
       providersCount: apiData.providersCount || localData.providersCount,
-      integrationsCount: apiData.integrationsCount || localData.integrationsCount,
       workflowsCount: apiData.workflowsCount || localData.workflowsCount,
       agentsCount: apiData.agentsCount || localData.agentsCount,
       pluginsCount: apiData.pluginsCount || localData.pluginsCount,
@@ -139,11 +135,7 @@ export function useRegistry() {
 /** Return the items array and count for a given category. */
 export function getCategoryItems(data: RegistryData | undefined, category: RegistryCategory): { items: Detail[]; count: number } {
   if (!data) return { items: [], count: 0 }
-  // Legacy: the `integrations` category used to be a separate bucket
-  // but is now the same data as `mcp`. If someone hits /integrations
-  // (bookmark / old link), fall through so they see the real content.
-  const effective = category === 'integrations' ? 'mcp' : category
-  const items = data[effective] ?? []
-  const count = (data[`${effective}Count` as keyof RegistryData] as number | undefined) ?? items.length
+  const items = data[category] ?? []
+  const count = (data[`${category}Count` as keyof RegistryData] as number | undefined) ?? items.length
   return { items, count }
 }

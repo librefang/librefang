@@ -167,7 +167,6 @@ export interface Translation {
       providers: { title: string; desc: string }
       workflows: { title: string; desc: string }
       channels: { title: string; desc: string }
-      integrations: { title: string; desc: string }
     }
   }
   search?: {
@@ -451,7 +450,6 @@ export const translations: Record<string, Translation> = {
         providers: { title: 'Providers', desc: 'LLM provider adapters. Anthropic, OpenAI, Gemini, Groq, local — and the 40+ in between.' },
         workflows: { title: 'Workflows', desc: 'Multi-step agent orchestrations expressed as TOML. Chain agents, branch on conditions, persist state.' },
         channels:  { title: 'Channels', desc: 'Messaging adapters. Telegram, Slack, Discord, WhatsApp, LINE and 40+ other platforms.' },
-        integrations: { title: 'Integrations', desc: 'First-party integrations that expose agents to common SaaS tools and protocols.' },
       },
     },
     search: {
@@ -698,7 +696,6 @@ export const translations: Record<string, Translation> = {
         providers:{ title: '模型供应商', desc: 'LLM 供应商适配器：Anthropic、OpenAI、Gemini、Groq、本地模型，以及另外 40 多家。' },
         workflows:{ title: '工作流', desc: '以 TOML 描述的多步 Agent 编排：串联 Agent、条件分支、状态持久化。' },
         channels: { title: '通道', desc: '消息平台适配器：Telegram、Slack、Discord、WhatsApp、LINE 等 44 个。' },
-        integrations: { title: '集成', desc: '把 Agent 暴露给主流 SaaS 工具与协议的一方集成。' },
       },
     },
     search: {
@@ -945,7 +942,6 @@ export const translations: Record<string, Translation> = {
         providers:{ title: '模型供應商', desc: 'LLM 供應商介面卡：Anthropic、OpenAI、Gemini、Groq、本地模型，以及另外 40 多家。' },
         workflows:{ title: '工作流', desc: '以 TOML 描述的多步 Agent 編排：串聯 Agent、條件分支、狀態持久化。' },
         channels: { title: '頻道', desc: '訊息平台介面卡：Telegram、Slack、Discord、WhatsApp、LINE 等 44 個。' },
-        integrations: { title: '整合', desc: '把 Agent 暴露給主流 SaaS 工具與協定的一方整合。' },
       },
     },
     search: {
@@ -1192,7 +1188,6 @@ export const translations: Record<string, Translation> = {
         providers:{ title: 'プロバイダー', desc: 'LLM プロバイダーアダプター：Anthropic、OpenAI、Gemini、Groq、ローカル、その他 40+。' },
         workflows:{ title: 'ワークフロー', desc: 'TOML で書かれた多段 Agent オーケストレーション。Agent の連結、条件分岐、状態の永続化。' },
         channels: { title: 'チャネル', desc: 'メッセージングアダプター：Telegram、Slack、Discord、WhatsApp、LINE など 44 プラットフォーム。' },
-        integrations: { title: '統合', desc: 'Agent を主要な SaaS ツールとプロトコルに公開するファーストパーティ統合。' },
       },
     },
     search: {
@@ -1439,7 +1434,6 @@ export const translations: Record<string, Translation> = {
         providers:{ title: '프로바이더', desc: 'LLM 프로바이더 어댑터: Anthropic, OpenAI, Gemini, Groq, 로컬 등 40개 이상.' },
         workflows:{ title: '워크플로', desc: 'TOML로 작성된 다단계 Agent 오케스트레이션. Agent 연결, 조건 분기, 상태 지속성.' },
         channels: { title: '채널', desc: '메시징 어댑터: Telegram, Slack, Discord, WhatsApp, LINE 등 44개 플랫폼.' },
-        integrations: { title: '통합', desc: 'Agent를 주요 SaaS 도구와 프로토콜에 노출하는 퍼스트파티 통합.' },
       },
     },
     search: {
@@ -1686,7 +1680,6 @@ export const translations: Record<string, Translation> = {
         providers:{ title: 'Provider', desc: 'LLM-Provider-Adapter: Anthropic, OpenAI, Gemini, Groq, lokal — und 40+ weitere.' },
         workflows:{ title: 'Workflows', desc: 'Mehrstufige Agent-Orchestrierungen in TOML. Agenten verketten, auf Bedingungen verzweigen, Zustand persistieren.' },
         channels: { title: 'Kanäle', desc: 'Messaging-Adapter: Telegram, Slack, Discord, WhatsApp, LINE und 40+ weitere Plattformen.' },
-        integrations: { title: 'Integrationen', desc: 'First-Party-Integrationen, die Agenten gängigen SaaS-Tools und -Protokollen aussetzen.' },
       },
     },
     search: {
@@ -1933,7 +1926,6 @@ export const translations: Record<string, Translation> = {
         providers:{ title: 'Proveedores', desc: 'Adaptadores de proveedores LLM: Anthropic, OpenAI, Gemini, Groq, local — y 40+ más.' },
         workflows:{ title: 'Workflows', desc: 'Orquestaciones multi-paso de agentes en TOML. Encadena agentes, bifurca por condiciones, persiste estado.' },
         channels: { title: 'Canales', desc: 'Adaptadores de mensajería: Telegram, Slack, Discord, WhatsApp, LINE y 40+ plataformas más.' },
-        integrations: { title: 'Integraciones', desc: 'Integraciones first-party que exponen agentes a herramientas SaaS y protocolos populares.' },
       },
     },
     search: {

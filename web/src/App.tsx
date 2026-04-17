@@ -495,7 +495,6 @@ function BrowseRegistry({ t }: SectionProps) {
     { key: 'channels',     count: data?.channelsCount },
     { key: 'plugins',      count: data?.pluginsCount },
     { key: 'mcp',          count: data?.mcpCount },
-    { key: 'integrations', count: data?.integrationsCount },
   ]
   return (
     <section id="browse" className="py-28 px-6 scroll-mt-20">
@@ -1288,7 +1287,7 @@ function BackToTop() {
 
 // ─── Registry page route detection ───
 const REGISTRY_ROUTES: RegistryCategory[] = [
-  'skills', 'mcp', 'plugins', 'hands', 'agents', 'providers', 'workflows', 'channels', 'integrations'
+  'skills', 'mcp', 'plugins', 'hands', 'agents', 'providers', 'workflows', 'channels',
 ]
 const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es']
 

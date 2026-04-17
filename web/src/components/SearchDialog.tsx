@@ -17,7 +17,7 @@ type Hit =
   | { kind: 'anchor'; id: string; label: string; desc: string }
 
 const CATEGORIES: RegistryCategory[] = [
-  'skills', 'hands', 'agents', 'providers', 'workflows', 'channels', 'plugins', 'mcp', 'integrations',
+  'skills', 'hands', 'agents', 'providers', 'workflows', 'channels', 'plugins', 'mcp',
 ]
 
 const PER_CATEGORY_CAP = 5

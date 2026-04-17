@@ -35,7 +35,6 @@ export const CATEGORIES: CategoryDef[] = [
   { slug: 'channels',     title: 'Channels',     subtitle: 'Messaging platform adapters', accent: '#60a5fa', icon: '✉' },
   { slug: 'plugins',      title: 'Plugins',      subtitle: 'Runtime extensions', accent: '#e879f9', icon: '✦' },
   { slug: 'mcp',          title: 'MCP Servers',  subtitle: 'Model Context Protocol', accent: '#fbbf24', icon: '⚙' },
-  { slug: 'integrations', title: 'Integrations', subtitle: 'First-party integrations', accent: '#22d3ee', icon: '⇌' },
 ]
 
 export function render(def: CategoryDef): string {
