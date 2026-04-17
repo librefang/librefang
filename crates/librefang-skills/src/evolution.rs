@@ -179,10 +179,9 @@ fn acquire_skill_lock(skill_dir: &Path) -> Result<std::fs::File, SkillError> {
         .truncate(false)
         .open(&lock_path)?;
     lock_file.lock_exclusive().map_err(|e| {
-        SkillError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to acquire skill lock: {e}"),
-        ))
+        SkillError::Io(std::io::Error::other(format!(
+            "Failed to acquire skill lock: {e}"
+        )))
     })?;
     Ok(lock_file)
 }
@@ -1136,6 +1135,10 @@ pub fn write_supporting_file(
     let name = &skill.manifest.skill.name;
     let target = skill.path.join(rel_path);
 
+    // Serialize against concurrent mutations (delete/patch/update) on
+    // the same skill so the write never races with a directory removal.
+    let _lock = acquire_skill_lock(&skill.path)?;
+
     // Ensure parent directories exist
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1211,6 +1214,10 @@ pub fn remove_supporting_file(
 
     let name = &skill.manifest.skill.name;
     let target = skill.path.join(rel_path);
+
+    // Serialize against concurrent mutations (delete/patch/update) on
+    // the same skill.
+    let _lock = acquire_skill_lock(&skill.path)?;
 
     if !target.exists() {
         // List available files (recursively) as a hint.
@@ -1658,6 +1665,7 @@ mod tests {
             "A test skill",
             "# Test\n\nDo testing things.",
             vec!["test".to_string()],
+            None,
         )
         .unwrap();
         assert!(result.success);
@@ -1672,8 +1680,8 @@ mod tests {
     #[test]
     fn test_create_duplicate_fails() {
         let dir = TempDir::new().unwrap();
-        create_skill(dir.path(), "dupe", "First", "# First", vec![]).unwrap();
-        let result = create_skill(dir.path(), "dupe", "Second", "# Second", vec![]);
+        create_skill(dir.path(), "dupe", "First", "# First", vec![], None).unwrap();
+        let result = create_skill(dir.path(), "dupe", "Second", "# Second", vec![], None);
         assert!(result.is_err());
     }
 
@@ -1686,6 +1694,7 @@ mod tests {
             "Evolving",
             "# V1\n\nOriginal.",
             vec![],
+            None,
         )
         .unwrap();
 
@@ -1711,7 +1720,7 @@ mod tests {
             enabled: true,
         };
 
-        let result = update_skill(&skill, "# V2\n\nImproved!", "Agent improvement").unwrap();
+        let result = update_skill(&skill, "# V2\n\nImproved!", "Agent improvement", None).unwrap();
         assert!(result.success);
         assert_eq!(result.version.as_deref(), Some("0.1.1"));
 
@@ -1728,6 +1737,7 @@ mod tests {
             "Patchable",
             "# Guide\n\nStep 1: Do X\nStep 2: Do Y",
             vec![],
+            None,
         )
         .unwrap();
 
@@ -1758,6 +1768,7 @@ mod tests {
             "Step 1: Do X (with validation)",
             "Added validation step",
             false,
+            None,
         )
         .unwrap();
         assert!(result.success);
@@ -1770,7 +1781,15 @@ mod tests {
     #[test]
     fn test_delete_skill() {
         let dir = TempDir::new().unwrap();
-        create_skill(dir.path(), "deletable", "Delete me", "# Delete", vec![]).unwrap();
+        create_skill(
+            dir.path(),
+            "deletable",
+            "Delete me",
+            "# Delete",
+            vec![],
+            None,
+        )
+        .unwrap();
         assert!(dir.path().join("deletable").exists());
 
         let result = delete_skill(dir.path(), "deletable").unwrap();
@@ -1781,7 +1800,7 @@ mod tests {
     #[test]
     fn test_version_history() {
         let dir = TempDir::new().unwrap();
-        create_skill(dir.path(), "versioned", "Versioned", "# V1", vec![]).unwrap();
+        create_skill(dir.path(), "versioned", "Versioned", "# V1", vec![], None).unwrap();
 
         let meta = load_evolution_meta(&dir.path().join("versioned"));
         assert_eq!(meta.versions.len(), 1);
@@ -1798,6 +1817,7 @@ mod tests {
             "Rollback test",
             "# Original content",
             vec![],
+            None,
         )
         .unwrap();
 
@@ -1823,7 +1843,7 @@ mod tests {
         };
 
         // Update it
-        update_skill(&skill, "# Modified content", "Test change").unwrap();
+        update_skill(&skill, "# Modified content", "Test change", None).unwrap();
 
         // Create updated skill reference
         let updated_skill = InstalledSkill {
@@ -1848,7 +1868,7 @@ mod tests {
         };
 
         // Rollback
-        let result = rollback_skill(&updated_skill).unwrap();
+        let result = rollback_skill(&updated_skill, None).unwrap();
         assert!(result.success);
 
         let content =
@@ -1991,6 +2011,7 @@ mod tests {
             "File test skill",
             "# Test\n\nWith supporting files.",
             vec![],
+            None,
         )
         .unwrap();
 
@@ -2039,7 +2060,15 @@ mod tests {
     #[test]
     fn test_record_skill_usage() {
         let dir = TempDir::new().unwrap();
-        create_skill(dir.path(), "usage-test", "Usage test", "# Test", vec![]).unwrap();
+        create_skill(
+            dir.path(),
+            "usage-test",
+            "Usage test",
+            "# Test",
+            vec![],
+            None,
+        )
+        .unwrap();
 
         let skill_dir = dir.path().join("usage-test");
         record_skill_usage(&skill_dir).unwrap();
@@ -2052,7 +2081,15 @@ mod tests {
     #[test]
     fn test_version_history_limit() {
         let dir = TempDir::new().unwrap();
-        create_skill(dir.path(), "history-test", "History test", "# V1", vec![]).unwrap();
+        create_skill(
+            dir.path(),
+            "history-test",
+            "History test",
+            "# V1",
+            vec![],
+            None,
+        )
+        .unwrap();
 
         let skill_dir = dir.path().join("history-test");
 
@@ -2063,6 +2100,7 @@ mod tests {
                 &format!("0.1.{i}"),
                 &format!("Change {i}"),
                 &format!("# V{i}"),
+                None,
             )
             .unwrap();
         }
@@ -2293,7 +2331,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let dir = TempDir::new().unwrap();
-        create_skill(dir.path(), "block-delete", "x", "# hi", vec![]).unwrap();
+        create_skill(dir.path(), "block-delete", "x", "# hi", vec![], None).unwrap();
 
         let dir_path = dir.path().to_path_buf();
         let (acquired_tx, acquired_rx) = mpsc::channel::<()>();
@@ -2350,7 +2388,7 @@ mod tests {
     #[test]
     fn test_list_supporting_files_recursive() {
         let dir = TempDir::new().unwrap();
-        create_skill(dir.path(), "nested-files", "x", "# hi", vec![]).unwrap();
+        create_skill(dir.path(), "nested-files", "x", "# hi", vec![], None).unwrap();
         let skill_path = dir.path().join("nested-files");
         let skill = InstalledSkill {
             manifest: SkillManifest {
@@ -2394,7 +2432,7 @@ mod tests {
     #[test]
     fn test_remove_supporting_file_prunes_nested_empty_dirs() {
         let dir = TempDir::new().unwrap();
-        create_skill(dir.path(), "prune-test", "x", "# hi", vec![]).unwrap();
+        create_skill(dir.path(), "prune-test", "x", "# hi", vec![], None).unwrap();
         let skill = InstalledSkill {
             manifest: SkillManifest {
                 skill: SkillMeta {

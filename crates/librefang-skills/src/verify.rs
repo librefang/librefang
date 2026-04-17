@@ -420,6 +420,37 @@ impl SkillVerifier {
             }
         }
 
+        // ── Critical: supply chain (downloader piped to shell) ──────
+        // The canonical `curl <url> | bash` / `wget <url> | sh` pattern has
+        // arbitrary bytes between the fetcher and the pipe, so Aho-Corasick
+        // literal matching misses it. Flag any content that pairs a
+        // downloader verb with a pipe-to-shell on the same line.
+        const DOWNLOADERS: &[&str] = &["curl ", "wget ", "curl\t", "wget\t"];
+        const PIPE_TO_SHELL: &[&str] = &[
+            "| bash",
+            "| sh",
+            "|bash",
+            "|sh",
+            "| zsh",
+            "| /bin/bash",
+            "| /bin/sh",
+        ];
+        for line in lower.lines() {
+            let has_dl = DOWNLOADERS.iter().any(|d| line.contains(d));
+            if !has_dl {
+                continue;
+            }
+            if let Some(pipe) = PIPE_TO_SHELL.iter().find(|p| line.contains(**p)) {
+                warnings.push(SkillWarning {
+                    severity: WarningSeverity::Critical,
+                    message: format!(
+                        "Supply chain attack pattern: downloader piped to shell ('{pipe}')"
+                    ),
+                });
+                break; // One warning per content is enough.
+            }
+        }
+
         // ── Warning: invisible unicode characters ───────────────────
         for &(ch, name) in INVISIBLE_CHARS {
             if content.contains(ch) {
