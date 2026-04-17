@@ -1770,8 +1770,8 @@ export function ChatPage() {
   }, [selectedAgentId, createSessionMutation, switchSessionMutation]);
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
-    await deleteSessionMutation.mutateAsync(sessionId);
-  }, [deleteSessionMutation]);
+    await deleteSessionMutation.mutateAsync({ sessionId, agentId: selectedAgentId });
+  }, [deleteSessionMutation, selectedAgentId]);
 
   // If the current selection is no longer visible (e.g. hand agents toggled
   // off while a hand-spawned agent was selected), clear it so the auto-select

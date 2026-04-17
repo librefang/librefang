@@ -3,7 +3,8 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAgents } from "../lib/queries/agents";
 import { useSessions } from "../lib/queries/sessions";
-import { useSwitchSession, useDeleteSession, useSetSessionLabel } from "../lib/mutations/sessions";
+import { useSwitchAgentSession, useDeleteAgentSession } from "../lib/mutations/agents";
+import { useSetSessionLabel } from "../lib/mutations/sessions";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
@@ -26,8 +27,8 @@ export function SessionsPage() {
   const sessionsQuery = useSessions();
   const agentsQuery = useAgents();
 
-  const switchMutation = useSwitchSession();
-  const deleteMutation = useDeleteSession();
+  const switchMutation = useSwitchAgentSession();
+  const deleteMutation = useDeleteAgentSession();
   const labelMutation = useSetSessionLabel();
 
   const agents = agentsQuery.data ?? [];
@@ -63,12 +64,12 @@ export function SessionsPage() {
     } finally { setPendingId(null); }
   }
 
-  async function handleDelete(id: string) {
-    if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
+  async function handleDelete(sessionId: string, agentId?: string) {
+    if (confirmDeleteId !== sessionId) { setConfirmDeleteId(sessionId); return; }
     setConfirmDeleteId(null);
-    setPendingId(id);
+    setPendingId(sessionId);
     try {
-      await deleteMutation.mutateAsync(id);
+      await deleteMutation.mutateAsync({ sessionId, agentId });
     } catch (e: any) {
       addToast(e.message || t("common.error"), "error");
     } finally { setPendingId(null); }
@@ -187,11 +188,11 @@ export function SessionsPage() {
                   )}
                   {confirmDeleteId === s.session_id ? (
                     <div className="flex items-center gap-1">
-                      <button onClick={() => handleDelete(s.session_id)} className="px-2 py-1 rounded-lg bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
+                      <button onClick={() => handleDelete(s.session_id, s.agent_id ?? undefined)} className="px-2 py-1 rounded-lg bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
                       <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
                     </div>
                   ) : (
-                    <button onClick={() => handleDelete(s.session_id)} disabled={pendingId === s.session_id}
+                    <button onClick={() => handleDelete(s.session_id, s.agent_id ?? undefined)} disabled={pendingId === s.session_id}
                       className="p-1.5 sm:p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

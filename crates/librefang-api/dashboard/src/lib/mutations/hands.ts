@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   activateHand,
   deactivateHand,
@@ -8,16 +8,27 @@ import {
   setHandSecret,
   updateHandSettings,
   sendHandMessage,
-  updateSchedule,
-  deleteSchedule,
 } from "../http/client";
-import { handKeys, cronKeys } from "../queries/keys";
+import { agentKeys, handKeys, overviewKeys } from "../queries/keys";
+
+// Schedule toggle/delete hooks that used to live here have been consolidated
+// into mutations/schedules.ts (useUpdateSchedule / useDeleteSchedule) so both
+// HandsPage and SchedulerPage share one invalidation policy that refreshes
+// scheduleKeys AND cronKeys together.
+
+// Hands surface in the agent space (DashboardSnapshot.agents with is_hand: true)
+// so lifecycle mutations must invalidate agent + overview caches too.
+function invalidateHandAndAgentCaches(qc: QueryClient) {
+  qc.invalidateQueries({ queryKey: handKeys.all });
+  qc.invalidateQueries({ queryKey: agentKeys.all });
+  qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+}
 
 export function useActivateHand() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => activateHand(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: handKeys.all }),
+    onSuccess: () => invalidateHandAndAgentCaches(qc),
   });
 }
 
@@ -25,7 +36,7 @@ export function useDeactivateHand() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => deactivateHand(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: handKeys.all }),
+    onSuccess: () => invalidateHandAndAgentCaches(qc),
   });
 }
 
@@ -33,7 +44,7 @@ export function usePauseHand() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => pauseHand(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: handKeys.all }),
+    onSuccess: () => invalidateHandAndAgentCaches(qc),
   });
 }
 
@@ -41,7 +52,7 @@ export function useResumeHand() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => resumeHand(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: handKeys.all }),
+    onSuccess: () => invalidateHandAndAgentCaches(qc),
   });
 }
 
@@ -49,7 +60,7 @@ export function useUninstallHand() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => uninstallHand(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: handKeys.all }),
+    onSuccess: () => invalidateHandAndAgentCaches(qc),
   });
 }
 
@@ -92,27 +103,5 @@ export function useSendHandMessage() {
       instanceId: string;
       message: string;
     }) => sendHandMessage(instanceId, message),
-  });
-}
-
-export function useHandScheduleToggle() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      scheduleId,
-      enabled,
-    }: {
-      scheduleId: string;
-      enabled: boolean;
-    }) => updateSchedule(scheduleId, { enabled }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: cronKeys.all }),
-  });
-}
-
-export function useHandScheduleDelete() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (scheduleId: string) => deleteSchedule(scheduleId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: cronKeys.all }),
   });
 }

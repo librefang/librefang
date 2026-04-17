@@ -1,29 +1,22 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { switchAgentSession, deleteSession, setSessionLabel } from "../http/client";
-import { sessionKeys } from "../queries/keys";
+import { setSessionLabel } from "../http/client";
+import { agentKeys, sessionKeys } from "../queries/keys";
 
-export function useSwitchSession() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ agentId, sessionId }: { agentId: string; sessionId: string }) =>
-      switchAgentSession(agentId, sessionId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sessionKeys.all }),
-  });
-}
-
-export function useDeleteSession() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: deleteSession,
-    onSuccess: () => qc.invalidateQueries({ queryKey: sessionKeys.all }),
-  });
-}
+// Session switch/delete live in mutations/agents.ts as the canonical hooks
+// (useSwitchAgentSession / useDeleteAgentSession) so both ChatPage and
+// SessionsPage share one invalidation policy. Only session-scoped metadata
+// edits remain here.
 
 export function useSetSessionLabel() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ sessionId, label }: { sessionId: string; label: string }) =>
+    mutationFn: ({ sessionId, label, agentId: _agentId }: { sessionId: string; label: string; agentId?: string }) =>
       setSessionLabel(sessionId, label),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sessionKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: sessionKeys.lists() });
+      if (variables.agentId) {
+        qc.invalidateQueries({ queryKey: agentKeys.sessions(variables.agentId) });
+      }
+    },
   });
 }

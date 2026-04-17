@@ -5,7 +5,6 @@ import {
 } from "@tanstack/react-query";
 import {
   shutdownServer,
-  reloadConfig,
   createBackup,
   restoreBackup,
   deleteBackup,
@@ -16,7 +15,6 @@ import {
 import { overviewKeys, runtimeKeys, sessionKeys } from "../queries/keys";
 
 type ShutdownResult = { status: string };
-type ReloadResult = { status: string; restart_required?: boolean; restart_reasons?: string[] };
 
 export function useShutdownServer(
   options?: Partial<UseMutationOptions<ShutdownResult, Error, void>>,
@@ -24,20 +22,6 @@ export function useShutdownServer(
   return useMutation<ShutdownResult, Error, void>({
     ...options,
     mutationFn: shutdownServer,
-  });
-}
-
-export function useReloadConfig(
-  options?: Partial<UseMutationOptions<ReloadResult, Error, void>>,
-) {
-  const queryClient = useQueryClient();
-  return useMutation<ReloadResult, Error, void>({
-    ...options,
-    mutationFn: reloadConfig,
-    onSuccess: (data, vars, ctx, meta) => {
-      queryClient.invalidateQueries({ queryKey: overviewKeys.snapshot() });
-      options?.onSuccess?.(data, vars, ctx, meta);
-    },
   });
 }
 

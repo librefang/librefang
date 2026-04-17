@@ -49,25 +49,31 @@ Domain files today: `agents`, `analytics`, `approvals`, `channels`, `config`, `g
      return useQuery(fooQueryOptions(filters));
    }
    ```
-4. Add mutations in `src/lib/mutations/<domain>.ts`. **Every write MUST invalidate**, and invalidation MUST live inside the hook — never push it to call sites. Pick the **narrowest** key that covers what actually changed:
-   - `fooKeys.detail(id)` — per-id updates (patch, rename, single-item status change).
-   - `fooKeys.lists()` — list-shape changes only (create, delete, reorder, filter-affecting flag).
-   - `fooKeys.all` — everything under the domain is dirty (bulk import, cache reset, cross-cutting schema migration).
+4. Add mutations in `src/lib/mutations/<domain>.ts`. **Every write MUST invalidate**, and invalidation MUST live inside the hook. (Call sites MAY additionally attach per-call `onSuccess` / `onError` for UI feedback — see the Conventions section.) **Prefer the narrowest matching keys. Use `fooKeys.all` only when the mutation truly dirties every sub-key in the domain.**
 
-   Fan-out trade-off: invalidating `fooKeys.all` while N items are cached refetches the list plus every cached sub-key (`detail(id)`, plus any nested keys like `sessions(id)`, `experiments(id)`) for each of the N items. Use it only when that is the desired effect; otherwise prefer `detail(id)` or `lists()`.
+   Pick the narrowest set that covers what actually changed:
+   - `fooKeys.detail(id)` + `fooKeys.lists()` — per-id update where the list projection also changes (patch, rename, status flag surfaced in the list row). This is the **default** template.
+   - `fooKeys.lists()` — list-shape change with no existing detail to refresh (create, delete, reorder).
+   - `fooKeys.detail(id)` or a nested sub-key like `fooKeys.experiments(id)` — change is genuinely scoped to one detail or one nested collection and the list projection is unaffected.
+   - `fooKeys.all` — bulk import / cache reset / cross-cutting schema migration. Not the default.
+
+   Fan-out trade-off: invalidating `fooKeys.all` while N items are cached refetches the list plus every cached sub-key (`detail(id)`, plus any nested keys like `sessions(id)`, `experiments(id)`) for each of the N items. Use it only when that is the desired effect; otherwise prefer the narrower keys.
 
    ```ts
-   // Narrow: per-id patch. Only the one detail + its dependents refetch.
+   // Default: per-id patch where the list projection also changes.
+   // Matches shipped usePatchAgentConfig, experiment mutations, etc.
    export function useUpdateFoo() {
      const qc = useQueryClient();
      return useMutation({
-       mutationFn: (vars: { id: string; patch: FooPatch }) => updateFoo(vars.id, vars.patch),
-       onSuccess: (_data, vars) =>
-         qc.invalidateQueries({ queryKey: fooKeys.detail(vars.id) }),
+       mutationFn: updateFoo,
+       onSuccess: (_data, variables) => {
+         qc.invalidateQueries({ queryKey: fooKeys.lists() });
+         qc.invalidateQueries({ queryKey: fooKeys.detail(variables.id) });
+       },
      });
    }
 
-   // Lists-only: membership changed but no existing detail is stale.
+   // Lists-only: membership changed, no existing detail is stale.
    export function useCreateFoo() {
      const qc = useQueryClient();
      return useMutation({
@@ -76,7 +82,8 @@ Domain files today: `agents`, `analytics`, `approvals`, `channels`, `config`, `g
      });
    }
 
-   // Broad: bulk import — every cached Foo is potentially stale.
+   // Bulk import / cache reset — NOT the default template.
+   // Every cached Foo and its sub-keys are potentially stale.
    export function useImportFoos() {
      const qc = useQueryClient();
      return useMutation({
@@ -119,7 +126,7 @@ Run all three after any change to `src/lib/queries/`, `src/lib/mutations/`, or `
 ## Conventions
 
 - TypeScript strict. No `any` in new hooks; lean on types from `src/api.ts` or `openapi/generated.ts`.
-- The **shared default** `staleTime` / `refetchInterval` lives in the domain's `queryOptions` factory so consumers without special needs inherit one policy. Hooks **MUST accept** `enabled`, `staleTime`, and `refetchInterval` as optional overrides and pass them through to `useQuery`. Call sites only override when they have a legitimate reason — bell-icon polls fast but gated, bulk-management pages poll slowly, tabs gate by `activeTab === "events"` — and every override carries a short inline comment explaining why. See `src/lib/queries/mcp.ts` `useAvailableIntegrations({ enabled })` and the six enabled guards in `src/lib/queries/hands.ts` for reference shapes.
+- Hooks set sensible defaults in `queryOptions` (shared `staleTime` / `refetchInterval` so consumers without special needs inherit one policy). Accept an optional `options: { enabled?; staleTime?; refetchInterval? }` argument and pass it through to `useQuery` so call sites can override per-page needs — bell-icon polls fast but gated, bulk-management pages poll slowly, tabs gate by active-tab. See `useApprovals({ enabled: open })`, `useCommsEvents(50, { refetchInterval: 5_000 })`, `useModels({}, { enabled: isModelArg })`, `useAgentTemplates({ enabled })`, and `useApprovalCount({ refetchInterval: 5_000 })` for reference shapes. Every call-site override carries a short inline comment explaining why.
   ```ts
   type UseFooOptions = {
     enabled?: boolean;
@@ -136,5 +143,5 @@ Run all three after any change to `src/lib/queries/`, `src/lib/mutations/`, or `
     });
   }
   ```
-- Mutation invalidation lives in the hook, never at the call site. Callers should not need to know which keys a mutation touches.
+- Mutation invalidation lives in the hook — callers should never need to know which keys a mutation touches. Call sites MAY attach per-call `onSuccess` / `onError` handlers for UI feedback (toasts, modal dismissal, local state updates); that is orthogonal to invalidation and stays at the call site. See `MemoryPage` delete/cleanup and `ChannelsPage` configure/test for the pattern.
 - Commit convention matches the root repo: `feat(dashboard/<area>): ...`, `refactor(dashboard/queries): ...`, `fix(dashboard/<area>): ...`. Never include a `Co-Authored-By` footer.

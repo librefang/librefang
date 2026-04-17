@@ -29,7 +29,6 @@ import {
 } from "../lib/queries/runtime";
 import {
   useShutdownServer,
-  useReloadConfig,
   useCreateBackup,
   useRestoreBackup,
   useDeleteBackup,
@@ -37,6 +36,7 @@ import {
   useRetryTask,
   useCleanupSessions,
 } from "../lib/mutations/runtime";
+import { useReloadConfig } from "../lib/mutations/config";
 
 function formatUptime(seconds?: number): string {
   if (seconds === undefined || seconds <= 0) return "-";

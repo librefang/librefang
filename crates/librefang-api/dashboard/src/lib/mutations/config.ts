@@ -4,7 +4,7 @@ import {
   type UseMutationOptions,
 } from "@tanstack/react-query";
 import { setConfigValue, reloadConfig } from "../http/client";
-import { configKeys } from "../queries/keys";
+import { configKeys, overviewKeys } from "../queries/keys";
 
 type SetConfigResult = { status: string; restart_required?: boolean };
 type SetConfigVars = { path: string; value: unknown };
@@ -42,6 +42,7 @@ export function useReloadConfig(
     mutationFn: reloadConfig,
     onSuccess: (data, variables, context, meta) => {
       qc.invalidateQueries({ queryKey: configKeys.all });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
       options?.onSuccess?.(data, variables, context, meta);
     },
   });

@@ -55,9 +55,8 @@ import {
   useUninstallHand,
   useSetHandSecret,
   useUpdateHandSettings,
-  useHandScheduleToggle,
-  useHandScheduleDelete,
 } from "../lib/mutations/hands";
+import { useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
 import { useCronJobs } from "../lib/queries/runtime";
 
 /* ── Inject slideInRight keyframes once at module level ──── */
@@ -988,13 +987,13 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh }: {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const toggleSchedule = useHandScheduleToggle();
-  const deleteScheduleMut = useHandScheduleDelete();
+  const toggleSchedule = useUpdateSchedule();
+  const deleteScheduleMut = useDeleteSchedule();
 
   const handleToggle = async (job: CronJobItem) => {
     if (!job.id) return;
     try {
-      await toggleSchedule.mutateAsync({ scheduleId: job.id, enabled: !job.enabled });
+      await toggleSchedule.mutateAsync({ id: job.id, data: { enabled: !job.enabled } });
       onRefresh();
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
