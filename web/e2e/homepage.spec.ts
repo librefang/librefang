@@ -13,9 +13,11 @@ test.describe('homepage', () => {
   test('Features dropdown reveals registry links', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: /features/i }).click()
-    // Registry group has the 8 category links
-    await expect(page.getByRole('link', { name: /^Skills$/ })).toBeVisible()
-    await expect(page.getByRole('link', { name: /^Hands$/ })).toBeVisible()
+    // Scope to <nav> — the homepage Skills Self-Evolution section
+    // (#evolution) also has a /skills link and would trip strict mode.
+    const nav = page.getByRole('navigation')
+    await expect(nav.getByRole('link', { name: /^Skills$/ })).toBeVisible()
+    await expect(nav.getByRole('link', { name: /^Hands$/ })).toBeVisible()
   })
 
   test('language switch preserves path', async ({ page }) => {
