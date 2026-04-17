@@ -1814,8 +1814,7 @@ fn test_skill_evolve_tools_default_available_to_restricted_agent() {
     let filtered: Vec<String> = tools
         .iter()
         .filter(|t| {
-            declared.iter().any(|d| *d == t.name.as_str())
-                || default_available.iter().any(|d| *d == t.name.as_str())
+            declared.contains(&t.name.as_str()) || default_available.contains(&t.name.as_str())
         })
         .map(|t| t.name.clone())
         .collect();
