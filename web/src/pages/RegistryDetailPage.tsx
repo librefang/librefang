@@ -1,6 +1,6 @@
 import { useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Loader2, AlertCircle, ExternalLink, Sparkles, Github, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Loader2, AlertCircle, ExternalLink, Sparkles, Github, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon } from 'lucide-react'
 import { useState } from 'react'
 import { useRegistry, getLocalizedDesc, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
@@ -125,6 +125,22 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
     })
     return rest.slice(0, 6)
   }, [items, id])
+
+  // Prev/next for the bottom-of-page navigation strip. Same sort as the list
+  // page so "next" matches what the visitor would expect from the grid.
+  const sortedCategory = useMemo(() => {
+    const sorted = [...items]
+    sorted.sort((a, b) => {
+      const ap = a.tags?.includes('popular') ? 0 : 1
+      const bp = b.tags?.includes('popular') ? 0 : 1
+      if (ap !== bp) return ap - bp
+      return a.name.localeCompare(b.name)
+    })
+    return sorted
+  }, [items])
+  const currentIdx = sortedCategory.findIndex(x => x.id === id)
+  const prevItem = currentIdx > 0 ? sortedCategory[currentIdx - 1] : undefined
+  const nextItem = currentIdx >= 0 && currentIdx < sortedCategory.length - 1 ? sortedCategory[currentIdx + 1] : undefined
 
   const rawPath = pathFor(category, id)
   const rawQuery = useQuery({
@@ -392,8 +408,41 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
           </div>
         )}
 
+        {/* Prev / next within the current category. Matches the sorted
+            order used by the list page so "next" feels predictable. */}
+        {(prevItem || nextItem) && (
+          <nav className="mt-10 pt-6 border-t border-black/10 dark:border-white/5 grid grid-cols-2 gap-3" aria-label={t.registry?.prevNext || 'Previous / next in category'}>
+            {prevItem ? (
+              <a
+                href={`${lang === 'en' ? '' : `/${lang}`}/${category}/${prevItem.id}`}
+                className="group flex flex-col items-start gap-1 p-3 border border-black/10 dark:border-white/5 hover:border-cyan-500/30 bg-surface-100 transition-colors min-w-0"
+              >
+                <span className="text-[10px] font-mono uppercase tracking-wider text-gray-400 flex items-center gap-1">
+                  <ArrowLeft className="w-3 h-3" /> {t.registry?.previous || 'Previous'}
+                </span>
+                <span className="text-sm font-bold text-slate-900 dark:text-white group-hover:text-cyan-600 dark:group-hover:text-cyan-400 truncate max-w-full">
+                  {prevItem.name}
+                </span>
+              </a>
+            ) : <div />}
+            {nextItem ? (
+              <a
+                href={`${lang === 'en' ? '' : `/${lang}`}/${category}/${nextItem.id}`}
+                className="group flex flex-col items-end gap-1 p-3 border border-black/10 dark:border-white/5 hover:border-cyan-500/30 bg-surface-100 transition-colors text-right min-w-0"
+              >
+                <span className="text-[10px] font-mono uppercase tracking-wider text-gray-400 flex items-center gap-1">
+                  {t.registry?.next || 'Next'} <ArrowRight className="w-3 h-3" />
+                </span>
+                <span className="text-sm font-bold text-slate-900 dark:text-white group-hover:text-cyan-600 dark:group-hover:text-cyan-400 truncate max-w-full">
+                  {nextItem.name}
+                </span>
+              </a>
+            ) : <div />}
+          </nav>
+        )}
+
         {/* Back to category */}
-        <div className="mt-10 pt-6 border-t border-black/10 dark:border-white/5">
+        <div className="mt-6 pt-4">
           <a
             href={catHref}
             className="inline-flex items-center gap-2 text-sm font-semibold text-cyan-600 dark:text-cyan-400 hover:text-cyan-500 transition-colors"

@@ -147,6 +147,9 @@ export interface Translation {
     copyLink: string
     trending: string
     onThisPage: string
+    previous: string
+    next: string
+    prevNext: string
     categories: {
       skills: { title: string; desc: string }
       mcp: { title: string; desc: string }
@@ -176,6 +179,12 @@ export interface Translation {
     title: string
     desc: string
     home: string
+  }
+  pwa?: {
+    title: string
+    desc: string
+    install: string
+    dismiss: string
   }
   footer: { docs: string; license: string; privacy: string; changelog: string }
 }
@@ -410,6 +419,9 @@ export const translations: Record<string, Translation> = {
       copyLink: 'Copy link to this section',
       trending: 'Trending',
       onThisPage: 'On this page',
+      previous: 'Previous',
+      next: 'Next',
+      prevNext: 'Previous / next in category',
       categories: {
         skills: { title: 'Skills', desc: 'Pluggable tool bundles — Python, WASM, Node, or prompt-only skills that extend what an agent can do.' },
         mcp:    { title: 'MCP Servers', desc: 'Model Context Protocol servers that plug external tools and data sources directly into any agent.' },
@@ -439,6 +451,12 @@ export const translations: Record<string, Translation> = {
       title: 'Page not found',
       desc: "We couldn't find what you were looking for.",
       home: 'Back to home',
+    },
+    pwa: {
+      title: 'Install LibreFang',
+      desc: 'Add the site to your home screen or dock.',
+      install: 'Install',
+      dismiss: 'Dismiss',
     },
     footer: { docs: 'Docs', license: 'License', privacy: 'Privacy', changelog: 'Changelog' },
   },
@@ -636,6 +654,9 @@ export const translations: Record<string, Translation> = {
       copyLink: '复制此段链接',
       trending: '热门',
       onThisPage: '本页导航',
+      previous: '上一个',
+      next: '下一个',
+      prevNext: '同分类上一个 / 下一个',
       categories: {
         skills:   { title: '技能', desc: '可插拔的工具包 —— Python、WASM、Node 或 prompt-only 技能，扩展 Agent 的能力边界。' },
         mcp:      { title: 'MCP 服务器', desc: 'Model Context Protocol 服务器，把外部工具与数据直接挂接到任何 Agent。' },
@@ -665,6 +686,12 @@ export const translations: Record<string, Translation> = {
       title: '页面未找到',
       desc: '我们没有找到你要找的内容。',
       home: '返回首页',
+    },
+    pwa: {
+      title: '安装 LibreFang',
+      desc: '把网站添加到主屏幕 / 程序坞。',
+      install: '安装',
+      dismiss: '关闭',
     },
     footer: { docs: '文档', license: '许可证', privacy: '隐私', changelog: '更新日志' },
   },
@@ -862,6 +889,9 @@ export const translations: Record<string, Translation> = {
       copyLink: '複製此段連結',
       trending: '熱門',
       onThisPage: '本頁導覽',
+      previous: '上一個',
+      next: '下一個',
+      prevNext: '同分類上一個 / 下一個',
       categories: {
         skills:   { title: '技能', desc: '可插拔的工具組 —— Python、WASM、Node 或 prompt-only 技能，擴展 Agent 的能力邊界。' },
         mcp:      { title: 'MCP 伺服器', desc: 'Model Context Protocol 伺服器，把外部工具與資料直接接入任何 Agent。' },
@@ -891,6 +921,12 @@ export const translations: Record<string, Translation> = {
       title: '頁面未找到',
       desc: '我們沒有找到你要找的內容。',
       home: '返回首頁',
+    },
+    pwa: {
+      title: '安裝 LibreFang',
+      desc: '把網站加入主畫面 / 程式塢。',
+      install: '安裝',
+      dismiss: '關閉',
     },
     footer: { docs: '文件', license: '授權', privacy: '隱私', changelog: '更新日誌' },
   },
@@ -1088,6 +1124,9 @@ export const translations: Record<string, Translation> = {
       copyLink: 'このセクションのリンクをコピー',
       trending: '人気',
       onThisPage: 'このページ',
+      previous: '前へ',
+      next: '次へ',
+      prevNext: 'カテゴリ内の前後',
       categories: {
         skills:   { title: 'スキル', desc: 'プラグ可能なツールバンドル —— Python、WASM、Node、または prompt-only スキルで Agent の能力を拡張。' },
         mcp:      { title: 'MCP サーバー', desc: 'Model Context Protocol サーバーで、外部ツールとデータソースを任意の Agent に直接接続。' },
@@ -1117,6 +1156,12 @@ export const translations: Record<string, Translation> = {
       title: 'ページが見つかりません',
       desc: 'お探しのページは存在しません。',
       home: 'ホームに戻る',
+    },
+    pwa: {
+      title: 'LibreFang をインストール',
+      desc: 'ホーム画面 / Dock に追加。',
+      install: 'インストール',
+      dismiss: '閉じる',
     },
     footer: { docs: 'ドキュメント', license: 'ライセンス', privacy: 'プライバシー', changelog: '変更履歴' },
   },
@@ -1314,6 +1359,9 @@ export const translations: Record<string, Translation> = {
       copyLink: '이 섹션 링크 복사',
       trending: '인기',
       onThisPage: '이 페이지',
+      previous: '이전',
+      next: '다음',
+      prevNext: '카테고리 내 이전 / 다음',
       categories: {
         skills:   { title: '스킬', desc: '플러그 가능한 도구 번들 —— Python, WASM, Node 또는 prompt-only 스킬로 Agent의 능력 확장.' },
         mcp:      { title: 'MCP 서버', desc: 'Model Context Protocol 서버로 외부 도구와 데이터 소스를 모든 Agent에 직접 연결.' },
@@ -1343,6 +1391,12 @@ export const translations: Record<string, Translation> = {
       title: '페이지를 찾을 수 없습니다',
       desc: '찾으시는 페이지를 찾을 수 없습니다.',
       home: '홈으로',
+    },
+    pwa: {
+      title: 'LibreFang 설치',
+      desc: '홈 화면 / Dock에 추가.',
+      install: '설치',
+      dismiss: '닫기',
     },
     footer: { docs: '문서', license: '라이선스', privacy: '개인정보', changelog: '변경 이력' },
   },
@@ -1540,6 +1594,9 @@ export const translations: Record<string, Translation> = {
       copyLink: 'Link zu diesem Abschnitt kopieren',
       trending: 'Beliebt',
       onThisPage: 'Auf dieser Seite',
+      previous: 'Zurück',
+      next: 'Weiter',
+      prevNext: 'Vorheriges / nächstes in der Kategorie',
       categories: {
         skills:   { title: 'Skills', desc: 'Austauschbare Tool-Bundles — Python-, WASM-, Node- oder Prompt-Only-Skills, die die Fähigkeiten eines Agenten erweitern.' },
         mcp:      { title: 'MCP-Server', desc: 'Model-Context-Protocol-Server, die externe Tools und Datenquellen direkt in jeden Agenten einbinden.' },
@@ -1569,6 +1626,12 @@ export const translations: Record<string, Translation> = {
       title: 'Seite nicht gefunden',
       desc: 'Wir konnten die gesuchte Seite nicht finden.',
       home: 'Zurück zur Startseite',
+    },
+    pwa: {
+      title: 'LibreFang installieren',
+      desc: 'Auf Startbildschirm / Dock hinzufügen.',
+      install: 'Installieren',
+      dismiss: 'Schließen',
     },
     footer: { docs: 'Dokumentation', license: 'Lizenz', privacy: 'Datenschutz', changelog: 'Changelog' },
   },
@@ -1766,6 +1829,9 @@ export const translations: Record<string, Translation> = {
       copyLink: 'Copiar enlace a esta sección',
       trending: 'Tendencia',
       onThisPage: 'En esta página',
+      previous: 'Anterior',
+      next: 'Siguiente',
+      prevNext: 'Anterior / siguiente en la categoría',
       categories: {
         skills:   { title: 'Skills', desc: 'Paquetes de herramientas conectables — skills Python, WASM, Node o prompt-only que amplían las capacidades del agente.' },
         mcp:      { title: 'Servidores MCP', desc: 'Servidores Model Context Protocol que conectan herramientas y fuentes de datos externas directamente a cualquier agente.' },
@@ -1795,6 +1861,12 @@ export const translations: Record<string, Translation> = {
       title: 'Página no encontrada',
       desc: 'No pudimos encontrar lo que buscabas.',
       home: 'Volver al inicio',
+    },
+    pwa: {
+      title: 'Instalar LibreFang',
+      desc: 'Añádelo a tu pantalla de inicio o dock.',
+      install: 'Instalar',
+      dismiss: 'Cerrar',
     },
     footer: { docs: 'Documentación', license: 'Licencia', privacy: 'Privacidad', changelog: 'Cambios' },
   },

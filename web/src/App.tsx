@@ -24,6 +24,7 @@ const RegistryPage = lazy(() => import('./pages/RegistryPage'))
 const RegistryDetailPage = lazy(() => import('./pages/RegistryDetailPage'))
 const MetricsPage = lazy(() => import('./pages/MetricsPage'))
 const SearchDialog = lazy(() => import('./components/SearchDialog'))
+const InstallBanner = lazy(() => import('./components/InstallBanner'))
 import type { RegistryCategory } from './useRegistry'
 
 
@@ -1953,6 +1954,9 @@ export default function App() {
       <Community t={t} />
       <Footer t={t} />
       <BackToTop />
+      <Suspense fallback={null}>
+        <InstallBanner />
+      </Suspense>
     </main>
   )
 }

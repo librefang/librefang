@@ -178,6 +178,14 @@ function handleFetch(request, env, ctx) {
     return handleRegistryMetrics(env, cors)
   }
 
+  if (path === '/api/errors' && request.method === 'POST') {
+    return handleErrorReport(env, cors, request, ctx)
+  }
+
+  if (path === '/api/errors' && request.method === 'GET') {
+    return handleErrorList(env, cors)
+  }
+
   if (path === '/api/releases' && request.method === 'GET') {
     return handleReleases(env, cors)
   }
@@ -658,6 +666,57 @@ async function handleRegistryMetrics(env, cors) {
   }
   return new Response(JSON.stringify(result), {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', ...cors }
+  })
+}
+
+// ─── UI error reports ───
+// The web app's ErrorBoundary POSTs here when a React subtree throws so we
+// can see what's breaking without instrumenting a full error-tracking SaaS.
+// We store the most recent 100 reports as a single JSON blob (cheap KV ops).
+const ERRORS_KEY = 'ui_errors'
+const ERRORS_MAX = 100
+
+async function handleErrorReport(env, cors, request, ctx) {
+  let body
+  try { body = await request.json() }
+  catch { return new Response('invalid json', { status: 400, headers: cors }) }
+  const { message, stack, pathname, lang, ua } = body || {}
+  if (typeof message !== 'string' || message.length === 0 || message.length > 2000) {
+    return new Response('invalid payload', { status: 400, headers: cors })
+  }
+  const entry = {
+    at: new Date().toISOString(),
+    message: String(message).slice(0, 2000),
+    stack: typeof stack === 'string' ? String(stack).slice(0, 4000) : undefined,
+    pathname: typeof pathname === 'string' ? String(pathname).slice(0, 256) : undefined,
+    lang: typeof lang === 'string' ? String(lang).slice(0, 16) : undefined,
+    ua: typeof ua === 'string' ? String(ua).slice(0, 256) : undefined,
+  }
+  const doUpdate = async () => {
+    let errors = []
+    try {
+      const raw = await env.KV.get(ERRORS_KEY)
+      if (raw) errors = JSON.parse(raw)
+    } catch (_) { errors = [] }
+    errors.unshift(entry)
+    if (errors.length > ERRORS_MAX) errors.length = ERRORS_MAX
+    await env.KV.put(ERRORS_KEY, JSON.stringify(errors))
+  }
+  if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(doUpdate())
+  else await doUpdate()
+  return new Response('{"ok":true}', {
+    headers: { 'Content-Type': 'application/json', ...cors }
+  })
+}
+
+async function handleErrorList(env, cors) {
+  let errors = []
+  try {
+    const raw = await env.KV.get(ERRORS_KEY)
+    if (raw) errors = JSON.parse(raw)
+  } catch (_) { errors = [] }
+  return new Response(JSON.stringify({ errors }), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...cors }
   })
 }
 

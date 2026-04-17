@@ -68,7 +68,27 @@ export default function RegistryPage({ category }: RegistryPageProps) {
   const t = translations[lang] || translations['en']!
   const { data, isLoading, error, refetch, isFetching } = useRegistry()
   const queryClient = useQueryClient()
-  const [query, setQuery] = useState('')
+  // Seed from ?category= so bookmarks / shared links preserve the filter.
+  // The grid's filter treats query as a substring against id/name/desc/
+  // category, so a category name in this slot filters to that chip.
+  const [query, setQuery] = useState(() => {
+    if (typeof window === 'undefined') return ''
+    return new URLSearchParams(window.location.search).get('category') || ''
+  })
+  // Keep URL in sync when the filter matches a real category chip; skip
+  // arbitrary search text so the URL bar doesn't fill with keystrokes.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const cats = new Set<string>()
+    for (const i of data ? (data[category] ?? []) : []) if (i.category) cats.add(i.category)
+    const url = new URL(window.location.href)
+    const q = query.trim()
+    if (q && cats.has(q)) url.searchParams.set('category', q)
+    else url.searchParams.delete('category')
+    const next = url.pathname + (url.searchParams.toString() ? '?' + url.searchParams.toString() : '') + url.hash
+    const curr = window.location.pathname + window.location.search + window.location.hash
+    if (next !== curr) window.history.replaceState(null, '', next)
+  }, [query, data, category])
   const [langOpen, setLangOpen] = useState(false)
   const langMenuRef = useRef<HTMLDivElement>(null)
 
