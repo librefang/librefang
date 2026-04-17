@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">Strona WWW</a> &bull;
   <a href="https://docs.librefang.ai">Dokumentacja</a> &bull;
-  <a href="docs/CONTRIBUTING.md">Współtworzenie</a> &bull;
+   <a href="../CONTRIBUTING.md">Współtworzenie</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -37,7 +37,7 @@ LibreFang to **System Operacyjny dla Agentów (Agent Operating System)** — pe�
 
 Tradycyjne frameworki agentowe czekają, aż coś wpiszesz. LibreFang uruchamia **agentów, którzy pracują dla Ciebie** — zgodnie z harmonogramami, 24/7, monitorując cele, generując leady, zarządzając mediami społecznościowymi i raportując do Twojego dashboardu.
 
-> LibreFang to społecznościowy fork projektu [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) charakteryzujący się otwartym zarządzaniem (open governance) oraz polityką PR opartą na zasadzie merge-first. Szczegóły znajdziesz w pliku [GOVERNANCE.md](docs/GOVERNANCE.md).
+> LibreFang to społecznościowy fork projektu [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) charakteryzujący się otwartym zarządzaniem (open governance) oraz polityką PR opartą na zasadzie merge-first. Szczegóły znajdziesz w pliku [GOVERNANCE.md](../GOVERNANCE.md).
 
 <p align="center">
   <img src="../public/assets/dashboard.png" width="800" alt="LibreFang Dashboard" />
@@ -85,7 +85,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 <details>
 <summary><strong>Wdrożenie w Chmurze (Cloud Deploy)</strong></summary>
 
-[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](deploy/gcp/README.md)
+[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)
 
 </details>
 
@@ -116,7 +116,7 @@ librefang hand status researcher     # Sprawdź postęp
 librefang hand list                  # Wyświetl wszystkie Hands
 ```
 
-Zbuduj własnego: zdefiniuj `HAND.toml` + prompt systemowy + `SKILL.md`. [Przewodnik](docs/skill-development.md)
+Zbuduj własnego: zdefiniuj `HAND.toml` + prompt systemowy + `SKILL.md`. [Przewodnik](../docs/src/app/agent/skills/page.mdx)
 
 ## Architektura
 
@@ -141,13 +141,13 @@ xtask                 Automatyzacja budowania
 
 ## Kluczowe Funkcje
 
-**40 Adapterów Kanałów** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky i 26 innych. [Pełna lista](docs/channel-adapters.md)
+**40 Adapterów Kanałów** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky i 26 innych. [Pełna lista](../docs/src/app/integrations/channels/page.mdx)
 
-**27 Dostawców LLM** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama i 20 innych. Inteligentny routing, automatyczny fallback, śledzenie kosztów. [Szczegóły](docs/providers.md)
+**27 Dostawców LLM** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama i 20 innych. Inteligentny routing, automatyczny fallback, śledzenie kosztów. [Szczegóły](../docs/src/app/configuration/providers/page.mdx)
 
-**16 Warstw Zabezpieczeń** — Piaskownica (sandbox) WASM, ścieżka audytu Merkle, śledzenie skażenia (taint tracking), podpisywanie Ed25519, ochrona przed SSRF, zerowanie sekretów (secret zeroization) i wiele więcej. [Szczegóły](docs/comparison.md#16-security-systems--defense-in-depth)
+**16 Warstw Zabezpieczeń** — Piaskownica (sandbox) WASM, ścieżka audytu Merkle, śledzenie skażenia (taint tracking), podpisywanie Ed25519, ochrona przed SSRF, zerowanie sekretów (secret zeroization) i wiele więcej. [Szczegóły](../docs/src/app/getting-started/comparison/page.mdx)
 
-**API Kompatybilne z OpenAI** — Bezpośrednio podmienialny (drop-in) endpoint `/v1/chat/completions`. Ponad 140 endpointów REST/WS/SSE. [Dokumentacja API](docs/api-reference.md)
+**API Kompatybilne z OpenAI** — Bezpośrednio podmienialny (drop-in) endpoint `/v1/chat/completions`. Ponad 140 endpointów REST/WS/SSE. [Dokumentacja API](../docs/src/app/integrations/api/page.mdx)
 
 **Klienckie SDK** — Pełny klient REST ze wsparciem dla streamingu.
 
@@ -185,9 +185,9 @@ client := librefang.New("http://localhost:4545")
 agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
 ```
 
-**Wsparcie dla MCP** — Wbudowany klient i serwer MCP. Połącz z IDE, rozszerzaj za pomocą niestandardowych narzędzi, twórz potoki (pipelines) agentów. [Szczegóły](docs/providers.md)
+**Wsparcie dla MCP** — Wbudowany klient i serwer MCP. Połącz z IDE, rozszerzaj za pomocą niestandardowych narzędzi, twórz potoki (pipelines) agentów. [Szczegóły](../docs/src/app/integrations/mcp-a2a/page.mdx)
 
-**Protokół A2A** — Wsparcie dla protokołu Google Agent-to-Agent. Odkrywaj, komunikuj się i deleguj zadania między systemami agentowymi. [Szczegóły](docs/api-reference.md)
+**Protokół A2A** — Wsparcie dla protokołu Google Agent-to-Agent. Odkrywaj, komunikuj się i deleguj zadania między systemami agentowymi. [Szczegóły](../docs/src/app/integrations/mcp-a2a/page.mdx)
 
 **Aplikacja Desktopowa** — Natywna aplikacja Tauri 2.0 z zasobnikiem systemowym (system tray), powiadomieniami i globalnymi skrótami klawiszowymi.
 
@@ -204,12 +204,12 @@ cargo fmt --all -- --check                               # Sprawdzanie formatowa
 
 ## Porównanie
 
-Zobacz [docs/comparison.md](docs/comparison.md), aby zapoznać się z benchmarkami i szczegółowym porównaniem funkcji w zestawieniu z OpenClaw, ZeroClaw, CrewAI, AutoGen oraz LangGraph.
+Zobacz [docs/comparison.md](../docs/src/app/getting-started/comparison/page.mdx), aby zapoznać się z benchmarkami i szczegółowym porównaniem funkcji w zestawieniu z OpenClaw, ZeroClaw, CrewAI, AutoGen oraz LangGraph.
 
 ## Linki
 
-- [Dokumentacja](https://docs.librefang.ai) &bull; [Dokumentacja API](docs/api-reference.md) &bull; [Wprowadzenie](docs/getting-started.md) &bull; [Rozwiązywanie problemów](docs/troubleshooting.md)
-- [Współtworzenie](docs/CONTRIBUTING.md) &bull; [Zarządzanie](docs/GOVERNANCE.md) &bull; [Bezpieczeństwo](docs/SECURITY.md)
+- [Dokumentacja](https://docs.librefang.ai) &bull; [Dokumentacja API](../docs/src/app/integrations/api/page.mdx) &bull; [Wprowadzenie](../docs/src/app/getting-started/page.mdx) &bull; [Rozwiązywanie problemów](../docs/src/app/operations/troubleshooting/page.mdx)
+- [Współtworzenie](../CONTRIBUTING.md) &bull; [Zarządzanie](../GOVERNANCE.md) &bull; [Bezpieczeństwo](../SECURITY.md)
 - Dyskusje: [Pytania i odpowiedzi (Q&A)](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [Przypadki użycia](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [Głosowanie na funkcje](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [Ogłoszenia](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## Współtwórcy
@@ -220,7 +220,7 @@ Zobacz [docs/comparison.md](docs/comparison.md), aby zapoznać się z benchmarka
 
 <p align="center">
   Mile widziane są wszelkiego rodzaju kontrybucje — kod, dokumentacja, tłumaczenia, zgłoszenia błędów.<br/>
-  Sprawdź <a href="docs/CONTRIBUTING.md">Przewodnik współtworzenia</a> i wybierz <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a>, aby zacząć!
+  Sprawdź <a href="../CONTRIBUTING.md">Przewodnik współtworzenia</a> i wybierz <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a>, aby zacząć!
 </p>
 
 <p align="center">

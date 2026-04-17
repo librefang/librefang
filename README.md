@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">Website</a> &bull;
   <a href="https://docs.librefang.ai">Docs</a> &bull;
-  <a href="docs/CONTRIBUTING.md">Contributing</a> &bull;
+   <a href="CONTRIBUTING.md">Contributing</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -37,7 +37,7 @@ LibreFang is an **Agent Operating System** — a full platform for running auton
 
 Traditional agent frameworks wait for you to type something. LibreFang runs **agents that work for you** — on schedules, 24/7, monitoring targets, generating leads, managing social media, and reporting to your dashboard.
 
-> LibreFang is a community fork of [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) with open governance and a merge-first PR policy. See [GOVERNANCE.md](docs/GOVERNANCE.md) for details.
+> LibreFang is a community fork of [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) with open governance and a merge-first PR policy. See [GOVERNANCE.md](GOVERNANCE.md) for details.
 
 <p align="center">
   <img src="public/assets/dashboard.png" width="800" alt="LibreFang Dashboard" />
@@ -116,7 +116,7 @@ librefang hand status researcher     # Check progress
 librefang hand list                  # See all Hands
 ```
 
-Build your own: define a `HAND.toml` + system prompt + `SKILL.md`. [Guide](docs/skill-development.md)
+Build your own: define a `HAND.toml` + system prompt + `SKILL.md`. [Guide](docs/src/app/agent/skills/page.mdx)
 
 ## Architecture
 
@@ -141,13 +141,13 @@ xtask                 Build automation
 
 ## Key Features
 
-**40 Channel Adapters** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky, and 26 more. [Full list](docs/channel-adapters.md)
+**40 Channel Adapters** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky, and 26 more. [Full list](docs/src/app/integrations/channels/page.mdx)
 
-**28 LLM Providers** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama, Alibaba Coding Plan, and 20 more. Intelligent routing, automatic fallback, cost tracking. [Details](docs/providers.md)
+**28 LLM Providers** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama, Alibaba Coding Plan, and 20 more. Intelligent routing, automatic fallback, cost tracking. [Details](docs/src/app/configuration/providers/page.mdx)
 
-**16 Security Layers** — WASM sandbox, Merkle audit trail, taint tracking, Ed25519 signing, SSRF protection, secret zeroization, and more. [Details](docs/comparison.md#16-security-systems--defense-in-depth)
+**16 Security Layers** — WASM sandbox, Merkle audit trail, taint tracking, Ed25519 signing, SSRF protection, secret zeroization, and more. [Details](docs/src/app/getting-started/comparison/page.mdx)
 
-**OpenAI-Compatible API** — Drop-in `/v1/chat/completions` endpoint. 140+ REST/WS/SSE endpoints. [API Reference](docs/api-reference.md)
+**OpenAI-Compatible API** — Drop-in `/v1/chat/completions` endpoint. 140+ REST/WS/SSE endpoints. [API Reference](docs/src/app/integrations/api/page.mdx)
 
 **Client SDKs** — Full REST client with streaming support.
 
@@ -185,9 +185,9 @@ client := librefang.New("http://localhost:4545")
 agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
 ```
 
-**MCP Support** — Built-in MCP client and server. Connect to IDEs, extend with custom tools, compose agent pipelines. [Details](docs/providers.md)
+**MCP Support** — Built-in MCP client and server. Connect to IDEs, extend with custom tools, compose agent pipelines. [Details](docs/src/app/integrations/mcp-a2a/page.mdx)
 
-**A2A Protocol** — Google Agent-to-Agent protocol support. Discover, communicate, and delegate tasks across agent systems. [Details](docs/api-reference.md)
+**A2A Protocol** — Google Agent-to-Agent protocol support. Discover, communicate, and delegate tasks across agent systems. [Details](docs/src/app/integrations/mcp-a2a/page.mdx)
 
 **Desktop App** — Tauri 2.0 native app with system tray, notifications, and global shortcuts.
 
@@ -204,12 +204,12 @@ cargo fmt --all -- --check                               # Format check
 
 ## Comparison
 
-See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-feature comparison vs OpenClaw, ZeroClaw, CrewAI, AutoGen, and LangGraph.
+See [docs/comparison.md](docs/src/app/getting-started/comparison/page.mdx) for benchmarks and feature-by-feature comparison vs OpenClaw, ZeroClaw, CrewAI, AutoGen, and LangGraph.
 
 ## Links
 
-- [Documentation](https://docs.librefang.ai) &bull; [API Reference](docs/api-reference.md) &bull; [Getting Started](docs/getting-started.md) &bull; [Troubleshooting](docs/troubleshooting.md)
-- [Contributing](docs/CONTRIBUTING.md) &bull; [Governance](docs/GOVERNANCE.md) &bull; [Security](docs/SECURITY.md)
+- [Documentation](https://docs.librefang.ai) &bull; [API Reference](docs/src/app/integrations/api/page.mdx) &bull; [Getting Started](docs/src/app/getting-started/page.mdx) &bull; [Troubleshooting](docs/src/app/operations/troubleshooting/page.mdx)
+- [Contributing](CONTRIBUTING.md) &bull; [Governance](GOVERNANCE.md) &bull; [Security](SECURITY.md)
 - Discussions: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [Use Cases](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [Feature Votes](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [Announcements](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## Contributors
@@ -220,7 +220,7 @@ See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-featu
 
 <p align="center">
   We welcome contributions of all kinds — code, docs, translations, bug reports.<br/>
-  Check the <a href="docs/CONTRIBUTING.md">Contributing Guide</a> and pick a <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> to get started!
+  Check the <a href="CONTRIBUTING.md">Contributing Guide</a> and pick a <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> to get started!
 </p>
 
 <p align="center">

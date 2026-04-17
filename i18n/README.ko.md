@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">웹사이트</a> &bull;
   <a href="https://docs.librefang.ai">문서</a> &bull;
-  <a href="../docs/CONTRIBUTING.md">기여</a> &bull;
+   <a href="../CONTRIBUTING.md">기여</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -37,10 +37,10 @@ LibreFang은 **에이전트 운영체제**입니다 — Rust로 처음부터 구
 
 기존 에이전트 프레임워크는 입력을 기다립니다. LibreFang은 **당신을 위해 일하는 에이전트**를 실행합니다 — 스케줄에 따라 24/7, 타겟 모니터링, 리드 생성, 소셜 미디어 관리, 대시보드 보고를 수행합니다.
 
-> LibreFang은 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang)의 커뮤니티 포크로, 오픈 거버넌스와 머지 우선 PR 정책을 채택합니다. 자세한 내용은 [GOVERNANCE.md](../docs/GOVERNANCE.md)를 참조하세요.
+> LibreFang은 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang)의 커뮤니티 포크로, 오픈 거버넌스와 머지 우선 PR 정책을 채택합니다. 자세한 내용은 [GOVERNANCE.md](../GOVERNANCE.md)를 참조하세요.
 
 <p align="center">
-  <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang 대시보드" />
+  <img src="../public/assets/dashboard.png" width="800" alt="LibreFang 대시보드" />
 </p>
 
 ## 빠른 시작
@@ -116,7 +116,7 @@ librefang hand status researcher     # 진행 상황 확인
 librefang hand list                  # 모든 Hands 보기
 ```
 
-나만의 Hand 만들기: `HAND.toml` + 시스템 프롬프트 + `SKILL.md`를 정의하세요. [가이드](../docs/skill-development.md)
+나만의 Hand 만들기: `HAND.toml` + 시스템 프롬프트 + `SKILL.md`를 정의하세요. [가이드](../docs/src/app/agent/skills/page.mdx)
 
 ## 아키텍처
 
@@ -141,13 +141,13 @@ xtask                 빌드 자동화
 
 ## 주요 기능
 
-**40 채널 어댑터** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky 등. [전체 목록](../docs/channel-adapters.md)
+**40 채널 어댑터** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky 등. [전체 목록](../docs/src/app/integrations/channels/page.mdx)
 
-**27 LLM 프로바이더** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama 등. 지능형 라우팅, 자동 폴백, 비용 추적. [상세](../docs/providers.md)
+**27 LLM 프로바이더** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama 등. 지능형 라우팅, 자동 폴백, 비용 추적. [상세](../docs/src/app/configuration/providers/page.mdx)
 
-**16 보안 레이어** — WASM 샌드박스, Merkle 감사 추적, 테인트 추적, Ed25519 서명, SSRF 보호, 시크릿 제로화 등. [상세](../docs/comparison.md#16-security-systems--defense-in-depth)
+**16 보안 레이어** — WASM 샌드박스, Merkle 감사 추적, 테인트 추적, Ed25519 서명, SSRF 보호, 시크릿 제로화 등. [상세](../docs/src/app/getting-started/comparison/page.mdx)
 
-**OpenAI 호환 API** — 드롭인 `/v1/chat/completions` 엔드포인트. 140+ REST/WS/SSE 엔드포인트. [API 레퍼런스](../docs/api-reference.md)
+**OpenAI 호환 API** — 드롭인 `/v1/chat/completions` 엔드포인트. 140+ REST/WS/SSE 엔드포인트. [API 레퍼런스](../docs/src/app/integrations/api/page.mdx)
 
 **클라이언트 SDK** — 스트리밍 지원 완전한 REST 클라이언트.
 
@@ -185,9 +185,9 @@ client := librefang.New("http://localhost:4545")
 agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
 ```
 
-**MCP 지원** — MCP 클라이언트 및 서버 내장. IDE 연동, 커스텀 도구 확장, 에이전트 파이프라인 구성. [상세](../docs/providers.md)
+**MCP 지원** — MCP 클라이언트 및 서버 내장. IDE 연동, 커스텀 도구 확장, 에이전트 파이프라인 구성. [상세](../docs/src/app/integrations/mcp-a2a/page.mdx)
 
-**A2A 프로토콜** — Google Agent-to-Agent 프로토콜 지원. 에이전트 시스템 간 탐색, 통신, 태스크 위임. [상세](../docs/api-reference.md)
+**A2A 프로토콜** — Google Agent-to-Agent 프로토콜 지원. 에이전트 시스템 간 탐색, 통신, 태스크 위임. [상세](../docs/src/app/integrations/mcp-a2a/page.mdx)
 
 **데스크톱 앱** — Tauri 2.0 네이티브 앱. 시스템 트레이, 알림, 글로벌 단축키.
 
@@ -204,28 +204,28 @@ cargo fmt --all -- --check                               # 포맷 체크
 
 ## 비교
 
-[docs/comparison.md](../docs/comparison.md)에서 OpenClaw, ZeroClaw, CrewAI, AutoGen, LangGraph와의 벤치마크 및 기능 비교를 확인하세요.
+[docs/comparison.md](../docs/src/app/getting-started/comparison/page.mdx)에서 OpenClaw, ZeroClaw, CrewAI, AutoGen, LangGraph와의 벤치마크 및 기능 비교를 확인하세요.
 
 ## 링크
 
-- [문서](https://docs.librefang.ai) &bull; [API 레퍼런스](../docs/api-reference.md) &bull; [시작 가이드](../docs/getting-started.md) &bull; [문제 해결](../docs/troubleshooting.md)
-- [기여](../docs/CONTRIBUTING.md) &bull; [거버넌스](../docs/GOVERNANCE.md) &bull; [보안](../docs/SECURITY.md)
+- [문서](https://docs.librefang.ai) &bull; [API 레퍼런스](../docs/src/app/integrations/api/page.mdx) &bull; [시작 가이드](../docs/src/app/getting-started/page.mdx) &bull; [문제 해결](../docs/src/app/operations/troubleshooting/page.mdx)
+- [기여](../CONTRIBUTING.md) &bull; [거버넌스](../GOVERNANCE.md) &bull; [보안](../SECURITY.md)
 - 토론: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [유스케이스](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [기능 투표](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [공지](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## 기여자
 
 <a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="../public/assets/contributors.svg" alt="Contributors" />
+  <img src="../web/public/assets/contributors.svg" alt="Contributors" />
 </a>
 
 <p align="center">
   코드, 문서, 번역, 버그 리포트 등 모든 형태의 기여를 환영합니다.<br/>
-  <a href="../docs/CONTRIBUTING.md">기여 가이드</a>를 확인하고 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a>부터 시작해 보세요!
+  <a href="../CONTRIBUTING.md">기여 가이드</a>를 확인하고 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a>부터 시작해 보세요!
 </p>
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">
-    <img src="../public/assets/star-history.svg" alt="Star History" />
+    <img src="../web/public/assets/star-history.svg" alt="Star History" />
   </a>
 </p>
 
