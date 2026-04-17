@@ -8,9 +8,12 @@ import {
   RefreshCw, Save, Zap, Settings, Search, RotateCcw,
   AlertTriangle, X, Copy, Check, FileText,
 } from "lucide-react";
-import { type ConfigFieldSchema, getRawConfigToml } from "../api";
-import { useQuery } from "@tanstack/react-query";
-import { useConfigSchema, useFullConfig } from "../lib/queries/config";
+import { type ConfigFieldSchema } from "../api";
+import {
+  useConfigSchema,
+  useFullConfig,
+  useRawConfigToml,
+} from "../lib/queries/config";
 import { useSetConfigValue, useReloadConfig } from "../lib/mutations/config";
 import { configKeys } from "../lib/queries/keys";
 import { setConfigValue } from "../lib/http/client";
@@ -289,15 +292,7 @@ export function ConfigPage({ category }: { category: string }) {
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [showRawToml, setShowRawToml] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
-
-  // Lazy fetch the raw config.toml — only runs when the viewer modal is opened.
-  // Short staleTime so a user re-opening shortly after a save sees their change.
-  const rawTomlQuery = useQuery({
-    queryKey: ["config", "raw-toml"],
-    queryFn: getRawConfigToml,
-    enabled: showRawToml,
-    staleTime: 5_000,
-  });
+  const rawTomlQuery = useRawConfigToml(showRawToml);
 
   const hasPendingChanges = Object.keys(pendingChanges).length > 0;
 

@@ -1,5 +1,10 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { getFullConfig, getConfigSchema, fetchRegistrySchema } from "../http/client";
+import {
+  getFullConfig,
+  getConfigSchema,
+  fetchRegistrySchema,
+  getRawConfigToml,
+} from "../http/client";
 import { configKeys, registryKeys } from "./keys";
 
 export const configQueries = {
@@ -35,4 +40,16 @@ export function useConfigSchema() {
 
 export function useRegistrySchema(contentType: string) {
   return useQuery(configQueries.registrySchema(contentType));
+}
+
+// Raw config.toml as text. Disabled by default — caller passes
+// `enabled: true` only when the viewer modal is open. Short staleTime
+// so re-opening shortly after a save reflects the change.
+export function useRawConfigToml(enabled: boolean) {
+  return useQuery({
+    queryKey: configKeys.rawToml(),
+    queryFn: getRawConfigToml,
+    enabled,
+    staleTime: 5_000,
+  });
 }

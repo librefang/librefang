@@ -7,9 +7,9 @@ import {
   getHandStats,
   getHandSession,
   getHandInstanceStatus,
+  getHandManifestToml,
   type HandStatsResponse,
 } from "../http/client";
-import { getHandManifestToml } from "../../api";
 import { handKeys } from "./keys";
 
 const STALE_MS = 30_000;

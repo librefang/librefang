@@ -1615,7 +1615,23 @@ pub async fn get_hand_manifest(
 ) -> impl IntoResponse {
     use axum::body::Body;
 
+    // Gate the filesystem lookup on registry membership so a crafted
+    // hand_id can't be used to probe for `**/HAND.toml` paths under the
+    // home dir. Mirrors the `get_hand` pattern above.
+    let definition = match state.kernel.hands().get_definition(&hand_id) {
+        Some(def) => def,
+        None => {
+            return ApiErrorResponse::not_found(format!("Hand not found: {hand_id}"))
+                .into_json_tuple()
+                .into_response();
+        }
+    };
+
     let home = state.kernel.home_dir();
+    // Two install layouts that scan_hands_dir actually walks
+    // (librefang-hands/src/registry.rs:165). Anything else is a
+    // codebase inconsistency that wouldn't make it into the registry,
+    // so the gate above would already 404 it before we get here.
     let candidates = [
         home.join("registry")
             .join("hands")
@@ -1627,44 +1643,36 @@ pub async fn get_hand_manifest(
     let mut toml_content: Option<String> = None;
     for path in &candidates {
         if path.exists() {
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    toml_content = Some(content);
-                    break;
-                }
-                Err(_) => continue,
+            if let Ok(content) = std::fs::read_to_string(path) {
+                toml_content = Some(content);
+                break;
             }
         }
     }
 
-    // Fall back to re-serialising the in-memory definition so the endpoint
-    // works for hands installed via API (no on-disk HAND.toml).
+    // Fall back to re-serialising the in-memory definition so hands
+    // installed via API (no on-disk HAND.toml) still get a useful
+    // payload. Loses comments / formatting but preserves structure.
     if toml_content.is_none() {
-        if let Some(def) = state.kernel.hands().get_definition(&hand_id) {
-            match toml::to_string_pretty(&def) {
-                Ok(s) => toml_content = Some(s),
-                Err(e) => {
-                    return ApiErrorResponse::internal(format!(
-                        "Failed to serialize hand definition: {e}"
-                    ))
-                    .into_json_tuple()
-                    .into_response();
-                }
+        match toml::to_string_pretty(&definition) {
+            Ok(s) => toml_content = Some(s),
+            Err(e) => {
+                return ApiErrorResponse::internal(format!(
+                    "Failed to serialize hand definition: {e}"
+                ))
+                .into_json_tuple()
+                .into_response();
             }
         }
     }
 
-    match toml_content {
-        Some(text) => (
-            StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/toml")],
-            Body::from(text),
-        )
-            .into_response(),
-        None => ApiErrorResponse::not_found(format!("Hand not found: {hand_id}"))
-            .into_json_tuple()
-            .into_response(),
-    }
+    let text = toml_content.expect("toml_content set in fallback above");
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/toml")],
+        Body::from(text),
+    )
+        .into_response()
 }
 
 /// POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a hand.

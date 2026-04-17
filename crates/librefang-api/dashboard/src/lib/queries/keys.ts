@@ -264,6 +264,7 @@ export const configKeys = {
   all: ["config"] as const,
   full: () => [...configKeys.all, "full"] as const,
   schema: () => [...configKeys.all, "schema"] as const,
+  rawToml: () => [...configKeys.all, "rawToml"] as const,
 };
 
 export const registryKeys = {
