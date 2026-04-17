@@ -2145,10 +2145,16 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         match cached {
             Some(n) => n,
             None => {
-                let skills_dir = state.kernel.home_dir().join("skills");
-                let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
-                let _ = registry.load_all();
-                let n = registry.list().len();
+                // Use the kernel's LIVE registry so `skills.disabled` and
+                // `skills.extra_dirs` from config are honoured. The old
+                // fresh-registry path showed disabled skills in the count
+                // and missed extra_dirs entries.
+                let n = state
+                    .kernel
+                    .skill_registry_ref()
+                    .read()
+                    .map(|r| r.list().len())
+                    .unwrap_or(0);
                 *SKILL_COUNT_CACHE.lock().unwrap_or_else(|p| p.into_inner()) =
                     Some((n, std::time::Instant::now()));
                 n

@@ -223,11 +223,17 @@ pub async fn list_skills(
     State(state): State<Arc<AppState>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let skills_dir = state.kernel.home_dir().join("skills");
-    let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
-    if let Err(e) = registry.load_all() {
-        tracing::warn!("Failed to reload skill registry: {e}");
-    }
+    // Use the kernel's LIVE registry so `skills.disabled` and
+    // `skills.extra_dirs` from config.toml take effect on this
+    // endpoint. Creating a fresh `SkillRegistry::new + load_all()`
+    // here — as the code did previously — bypassed the operator
+    // policy wired in `reload_skills`, making disabled skills show up
+    // in the UI and extra_dirs invisible.
+    let registry = state
+        .kernel
+        .skill_registry_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
 
     let category_filter = params.get("category").map(|s| s.as_str());
 
