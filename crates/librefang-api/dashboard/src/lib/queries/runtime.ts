@@ -8,9 +8,10 @@ import {
   listBackups,
   getTaskQueueStatus,
   listTaskQueue,
+  listCronJobs,
 } from "../../api";
 import { dashboardSnapshotQueryOptions, versionInfoQueryOptions } from "./overview";
-import { runtimeKeys, auditKeys } from "./keys";
+import { runtimeKeys, auditKeys, cronKeys } from "./keys";
 
 export function useDashboardSnapshot() {
   return useQuery(dashboardSnapshotQueryOptions());
@@ -114,4 +115,14 @@ export const taskQueueQueryOptions = (status?: string) =>
 
 export function useTaskQueue(status?: string) {
   return useQuery(taskQueueQueryOptions(status));
+}
+
+export function useCronJobs(agentId?: string) {
+  return useQuery({
+    queryKey: cronKeys.jobs(agentId),
+    queryFn: () => listCronJobs(agentId),
+    enabled: !!agentId,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  });
 }
