@@ -256,6 +256,59 @@ params = { region = "us" }
     expect(result.message.length).toBeGreaterThan(0);
   });
 
+  it("response_format json_schema with nested schema round-trips cleanly", () => {
+    // Regression: an earlier serializer naively did
+    //   stringify({schema: nested}).split("\n")[0]
+    // which produced "[schema]" for non-trivial schemas and yielded invalid TOML.
+    const toml = `name = "a"
+response_format = { type = "json_schema", name = "user", schema = { type = "object", properties = { id = { type = "integer" } } } }
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+`;
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
+    const reparsed = parseManifestToml(reserialized);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.response_format).toEqual(parsed.form.response_format);
+  });
+
+  it("nested-table extras inside [model] don't break section scoping", () => {
+    // Regression: stringify({key: nested}) can emit "[key]" headers; if
+    // those get appended inside the [model] block, subsequent lines get
+    // scoped to the wrong table. We must NOT emit content that re-anchors
+    // scoping inside form-known sections.
+    const toml = `name = "a"
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+
+[model.exotic_subtable]
+foo = "bar"
+
+[resources]
+max_cost_per_hour_usd = 1
+`;
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
+    const reparsed = parseManifestToml(reserialized);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    // The crucial assertion: max_cost_per_hour_usd must still belong to
+    // [resources], not be silently re-scoped under [model.exotic_subtable].
+    expect(reparsed.form.resources.max_cost_per_hour_usd).toBe("1");
+    // And [model.exotic_subtable] should still be addressable as a model
+    // sub-table after the round-trip, not silently re-scoped to top-level.
+    expect(reparsed.extras.model.exotic_subtable).toEqual({ foo: "bar" });
+  });
+
   it("schedule round-trips through every variant", () => {
     const periodic = parseManifestToml(
       'name = "a"\nschedule = { periodic = { cron = "0 9 * * *" } }\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n',

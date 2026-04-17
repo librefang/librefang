@@ -383,6 +383,19 @@ export const serializeManifestForm = (
   );
   for (const line of renderExtraScalars(topInlineExtras)) lines.push(line);
 
+  // Section-extras that contain nested tables must NOT be inlined inside
+  // the [section] block — a stray `[name]` header would re-anchor TOML
+  // scoping for everything that follows. Defer them and emit later with
+  // their full dotted key path, e.g. `[model.exotic_subtable]`.
+  const deferredSectionExtras: Record<string, TomlTable | TomlTable[]> = {};
+  const safeModelExtras = pluckSafeExtras(extras.model, deferredSectionExtras, "model");
+  const safeResourceExtras = pluckSafeExtras(extras.resources, deferredSectionExtras, "resources");
+  const safeCapabilityExtras = pluckSafeExtras(
+    extras.capabilities,
+    deferredSectionExtras,
+    "capabilities",
+  );
+
   // [model]
   const modelBody: string[] = [];
   writeStringScalar(modelBody, "provider", form.model.provider.trim());
@@ -392,7 +405,7 @@ export const serializeManifestForm = (
   writeNumberScalar(modelBody, "max_tokens", parseInteger(form.model.max_tokens));
   writeStringScalar(modelBody, "api_key_env", form.model.api_key_env.trim());
   writeStringScalar(modelBody, "base_url", form.model.base_url.trim());
-  const modelExtras = renderExtraScalars(extras.model);
+  const modelExtras = renderExtraScalars(safeModelExtras);
   if (modelBody.length || modelExtras.length) {
     lines.push("", "[model]", ...modelBody, ...modelExtras);
   }
@@ -407,7 +420,7 @@ export const serializeManifestForm = (
   writeNumberScalar(resourceBody, "max_memory_bytes", parseInteger(form.resources.max_memory_bytes));
   writeNumberScalar(resourceBody, "max_cpu_time_ms", parseInteger(form.resources.max_cpu_time_ms));
   writeNumberScalar(resourceBody, "max_network_bytes_per_hour", parseInteger(form.resources.max_network_bytes_per_hour));
-  const resourceExtras = renderExtraScalars(extras.resources);
+  const resourceExtras = renderExtraScalars(safeResourceExtras);
   if (resourceBody.length || resourceExtras.length) {
     lines.push("", "[resources]", ...resourceBody, ...resourceExtras);
   }
@@ -423,7 +436,7 @@ export const serializeManifestForm = (
   if (form.capabilities.ofp_connect.length) capabilityBody.push(`ofp_connect = ${tomlArray(form.capabilities.ofp_connect)}`);
   if (form.capabilities.agent_spawn) writeBoolScalar(capabilityBody, "agent_spawn", true);
   if (form.capabilities.ofp_discover) writeBoolScalar(capabilityBody, "ofp_discover", true);
-  const capabilityExtras = renderExtraScalars(extras.capabilities);
+  const capabilityExtras = renderExtraScalars(safeCapabilityExtras);
   if (capabilityBody.length || capabilityExtras.length) {
     lines.push("", "[capabilities]", ...capabilityBody, ...capabilityExtras);
   }
@@ -480,11 +493,55 @@ export const serializeManifestForm = (
     if (body.length) lines.push("", "[[context_injection]]", ...body);
   }
 
+  // Deferred section sub-tables (e.g. [model.exotic_subtable]) — must be
+  // emitted at top-level scope, not inside the [section] block. Build a
+  // nested object so smol-toml uses dotted-key headers like
+  // `[model.exotic_subtable]` rather than quoting the dotted name.
+  const nestedDeferred: TomlTable = {};
+  for (const [dottedKey, value] of Object.entries(deferredSectionExtras)) {
+    const [section, subKey] = dottedKey.split(".", 2);
+    if (!subKey) continue;
+    if (!isTomlTable(nestedDeferred[section])) {
+      nestedDeferred[section] = {};
+    }
+    (nestedDeferred[section] as TomlTable)[subKey] = value;
+  }
+  if (Object.keys(nestedDeferred).length > 0) {
+    try {
+      const block = stringify(nestedDeferred).trimEnd();
+      if (block) lines.push("", block);
+    } catch {
+      // Skip unrenderable values rather than corrupting the document.
+    }
+  }
+
   // Top-level extras' sub-tables come last (TOML scoping requires it).
   const trailer = stringifyExtras(topTableExtras);
   if (trailer) lines.push("", trailer.trimEnd());
 
   return lines.join("\n") + "\n";
+};
+
+// Walk a section's extras: scalar/array values stay (safe to inline);
+// table-typed values (objects, arrays-of-tables) are moved to `deferred`
+// keyed by the full dotted path so they get emitted as proper top-level
+// sub-tables. We defer aggressively because smol-toml's stringify
+// renders any object value as a multi-line `[name]` block, even when the
+// inner content would have fit in inline-table syntax.
+const pluckSafeExtras = (
+  table: TomlTable,
+  deferred: Record<string, TomlTable | TomlTable[]>,
+  sectionName: string,
+): TomlTable => {
+  const safe: TomlTable = {};
+  for (const [key, value] of Object.entries(table)) {
+    if (isTomlTable(value) || isArrayOfTables(value)) {
+      deferred[`${sectionName}.${key}`] = value as TomlTable | TomlTable[];
+    } else {
+      safe[key] = value;
+    }
+  }
+  return safe;
 };
 
 const renderSchedule = (s: ManifestFormState["schedule"]): string => {
@@ -504,20 +561,47 @@ const renderSchedule = (s: ManifestFormState["schedule"]): string => {
 
 const renderResponseFormat = (rf: ManifestFormState["response_format"]): string => {
   if (rf.mode === "text") return "";
-  if (rf.mode === "json") return "response_format = { type = \"json\" }";
-  // json_schema
-  const name = escapeTomlString(rf.name || "response");
-  let schemaJson = "{}";
+  if (rf.mode === "json") return 'response_format = { type = "json" }';
+  // json_schema — schemas can be deeply nested, which makes inline-table
+  // syntax brittle. Build the value once via JSON, then convert to TOML
+  // using a small recursive emitter that always produces inline syntax.
+  let schemaValue: unknown = {};
   try {
-    schemaJson = JSON.stringify(JSON.parse(rf.schema || "{}"));
+    schemaValue = JSON.parse(rf.schema || "{}");
   } catch {
-    schemaJson = "{}";
+    // Bad JSON in the schema field — fall back to {} rather than emit
+    // garbage. The user sees the parse error live in the form anyway.
   }
-  const inlineSchema = stringify({ schema: JSON.parse(schemaJson) }).split("\n")[0];
-  // smol-toml renders { schema = {...} } — extract the inline-table body.
-  const schemaInline = inlineSchema.replace(/^schema = /, "");
-  return `response_format = { type = "json_schema", name = ${name}, schema = ${schemaInline}${rf.strict ? ", strict = true" : ""} }`;
+  const parts: string[] = [`type = "json_schema"`, `name = ${escapeTomlString(rf.name || "response")}`];
+  parts.push(`schema = ${jsonValueToInlineToml(schemaValue)}`);
+  if (rf.strict) parts.push("strict = true");
+  return `response_format = { ${parts.join(", ")} }`;
 };
+
+// Recursively render a JSON value as TOML inline syntax (no [headers],
+// no newlines). Suitable for embedding inside an inline-table key.
+const jsonValueToInlineToml = (value: unknown): string => {
+  if (value === null || value === undefined) return '""'; // TOML has no null
+  if (typeof value === "string") return escapeTomlString(value);
+  if (typeof value === "boolean") return String(value);
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? String(value) : "0";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(jsonValueToInlineToml).join(", ")}]`;
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).map(
+      ([k, v]) => `${tomlBareKeyOrQuoted(k)} = ${jsonValueToInlineToml(v)}`,
+    );
+    return `{ ${entries.join(", ")} }`;
+  }
+  return '""';
+};
+
+// TOML bare keys allow only [A-Za-z0-9_-]. Anything else needs quoting.
+const tomlBareKeyOrQuoted = (key: string): string =>
+  /^[A-Za-z0-9_-]+$/.test(key) ? key : escapeTomlString(key);
 
 const stringifyExtras = (extras: TomlTable): string => {
   if (Object.keys(extras).length === 0) return "";
@@ -529,7 +613,13 @@ const renderExtraScalars = (extras: TomlTable): string[] => {
   for (const [key, value] of Object.entries(extras)) {
     if (value === null || value === undefined) continue;
     try {
-      lines.push(stringify({ [key]: value }).trimEnd());
+      const rendered = stringify({ [key]: value }).trimEnd();
+      // Defensive: refuse multi-line output. Inserted inside a [section]
+      // block, an embedded `[name]` header would re-anchor TOML scoping
+      // for everything below. Callers should have routed these through
+      // pluckSafeExtras already, but belt-and-braces.
+      if (rendered.includes("\n")) continue;
+      lines.push(rendered);
     } catch {
       // Drop unrenderable values rather than crashing the form preview.
     }
