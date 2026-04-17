@@ -1,11 +1,12 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { listModels, createRegistryContent } from "../api";
+import { createRegistryContent } from "../api";
 import type { ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { useProviders, useProviderStatus } from "../lib/queries/providers";
+import { useModels } from "../lib/queries/models";
 import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useSetProviderUrl, useSetDefaultProvider } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -91,11 +92,7 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }:
   const [setting, setSetting] = useState(false);
   const isDefault = currentDefault === providerId;
 
-  const modelsQuery = useQuery({
-    queryKey: ["models", "provider", providerId, { available: true }],
-    queryFn: () => listModels({ provider: providerId, available: true }),
-    staleTime: 60_000,
-  });
+  const modelsQuery = useModels({ provider: providerId, available: true });
 
   const models = modelsQuery.data?.models || [];
 
@@ -569,10 +566,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
   const isConfigured = isProviderAvailable(provider.auth_status);
   const authBadge = getAuthBadge(provider.auth_status);
 
-  const modelsQuery = useQuery({
-    queryKey: ["models", "provider", provider.id],
-    queryFn: () => listModels({ provider: provider.id }),
-  });
+  const modelsQuery = useModels({ provider: provider.id });
   const models = modelsQuery.data?.models ?? [];
 
   return (
