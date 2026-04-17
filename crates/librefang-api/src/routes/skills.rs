@@ -11,6 +11,27 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/skills/reload", axum::routing::post(reload_skills))
         .route("/skills/create", axum::routing::post(create_skill))
         .route("/skills/{name}", axum::routing::get(get_skill_detail))
+        .route(
+            "/skills/{name}/evolve/update",
+            axum::routing::post(evolve_update_skill),
+        )
+        .route(
+            "/skills/{name}/evolve/patch",
+            axum::routing::post(evolve_patch_skill),
+        )
+        .route(
+            "/skills/{name}/evolve/rollback",
+            axum::routing::post(evolve_rollback_skill),
+        )
+        .route(
+            "/skills/{name}/evolve/delete",
+            axum::routing::post(evolve_delete_skill),
+        )
+        .route(
+            "/skills/{name}/evolve/file",
+            axum::routing::post(evolve_write_file).delete(evolve_remove_file),
+        )
+        .route("/skills/{name}/file", axum::routing::get(get_supporting_file))
         // Marketplace / ClawHub
         .route(
             "/marketplace/search",
@@ -210,30 +231,19 @@ pub async fn list_skills(
 
     let category_filter = params.get("category").map(|s| s.as_str());
 
-    // Collect all categories first (unaffected by the filter), then apply filter
+    // Collect all categories first (unaffected by the filter), then apply filter.
+    // Category derivation lives in `librefang_skills::registry::derive_category`
+    // so this list agrees with the kernel's prompt-builder grouping.
     let all_skills = registry.list();
     let mut categories = std::collections::BTreeSet::new();
     for s in &all_skills {
-        let cat = s
-            .manifest
-            .skill
-            .tags
-            .first()
-            .map(|t| t.as_str())
-            .unwrap_or("general");
-        categories.insert(cat.to_string());
+        categories.insert(librefang_skills::registry::derive_category(&s.manifest).to_string());
     }
 
     let skills: Vec<serde_json::Value> = all_skills
         .iter()
         .filter(|s| {
-            let cat = s
-                .manifest
-                .skill
-                .tags
-                .first()
-                .map(|t| t.as_str())
-                .unwrap_or("general");
+            let cat = librefang_skills::registry::derive_category(&s.manifest);
             match category_filter {
                 Some(filter) => cat == filter,
                 None => true,
@@ -370,22 +380,24 @@ pub async fn uninstall_skill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillUninstallRequest>,
 ) -> impl IntoResponse {
+    // Route through the evolution module so user-initiated uninstall
+    // picks up the per-skill lock and path-traversal check. The raw
+    // `registry.remove()` path had neither — a concurrent evolve mid-rm
+    // could see inconsistent state, and "/../" was accepted.
     let skills_dir = state.kernel.home_dir().join("skills");
-    let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
-    if let Err(e) = registry.load_all() {
-        tracing::warn!("Failed to reload skill registry: {e}");
-    }
-
-    match registry.remove(&req.name) {
-        Ok(()) => {
-            // Hot-reload so agents stop seeing the removed skill
+    match librefang_skills::evolution::uninstall_skill(&skills_dir, &req.name) {
+        Ok(result) => {
             state.kernel.reload_skills();
             (
                 StatusCode::OK,
-                Json(serde_json::json!({"status": "uninstalled", "name": req.name})),
+                Json(serde_json::json!({
+                    "status": "uninstalled",
+                    "name": result.skill_name,
+                    "message": result.message,
+                })),
             )
         }
-        Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+        Err(e) => evolution_err_to_response(e),
     }
 }
 
@@ -3442,8 +3454,10 @@ pub async fn create_skill(
         &description,
         &prompt_context,
         tags,
+        Some("dashboard"),
     ) {
         Ok(result) => {
+            audit_evolve(&state, "create", &result.skill_name, &result.message);
             // Hot-reload skills so the new skill is available immediately
             state.kernel.reload_skills();
 
@@ -3465,6 +3479,16 @@ pub async fn create_skill(
 
 /// Get detailed information about a specific skill, including linked files,
 /// tags, evolution history, and readiness status.
+#[utoipa::path(
+    get,
+    path = "/api/skills/{name}",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    responses(
+        (status = 200, description = "Skill detail with evolution history", body = serde_json::Value),
+        (status = 404, description = "Skill not found")
+    )
+)]
 pub async fn get_skill_detail(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -3526,8 +3550,397 @@ pub async fn get_skill_detail(
                 "use_count": evolution_meta.use_count,
                 "evolution_count": evolution_meta.evolution_count,
             },
+            // Full prompt_context text so the dashboard Update modal
+            // can pre-fill the editor. Capped at MAX_PROMPT_CONTEXT_CHARS
+            // by the evolution module on write, so safe to inline here.
+            "prompt_context": manifest.prompt_context,
         })),
     )
+}
+
+// ── Skill evolution handlers ───────────────────────────────────────────
+//
+// Each handler looks the skill up by name, clones the InstalledSkill
+// snapshot so we don't hold the RwLock across the await, delegates to
+// the evolution module, then reloads the registry so the change is
+// immediately visible on subsequent requests.
+
+fn clone_installed_skill(
+    state: &Arc<AppState>,
+    name: &str,
+) -> Result<librefang_skills::InstalledSkill, (StatusCode, Json<serde_json::Value>)> {
+    let registry = state
+        .kernel
+        .skill_registry_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    registry.get(name).cloned().ok_or_else(|| {
+        ApiErrorResponse::not_found(format!("Skill '{name}' not found")).into_json_tuple()
+    })
+}
+
+fn evolution_err_to_response(
+    e: librefang_skills::SkillError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use librefang_skills::SkillError as E;
+    let msg = e.to_string();
+    match e {
+        E::NotFound(_) => ApiErrorResponse::not_found(msg).into_json_tuple(),
+        E::AlreadyInstalled(_) => ApiErrorResponse::conflict(msg).into_json_tuple(),
+        E::InvalidManifest(_) | E::SecurityBlocked(_) | E::YamlParse(_) | E::TomlParse(_) => {
+            ApiErrorResponse::bad_request(msg).into_json_tuple()
+        }
+        _ => ApiErrorResponse::internal(msg).into_json_tuple(),
+    }
+}
+
+fn evolution_ok_response(
+    result: librefang_skills::evolution::EvolutionResult,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": result.success,
+            "message": result.message,
+            "skill_name": result.skill_name,
+            "version": result.version,
+        })),
+    )
+}
+
+/// GET /api/skills/{name}/file?path=... — return the contents of a
+/// supporting file so the dashboard can render it. Share the same
+/// security rules as `skill_read_file` (no absolute paths, no traversal,
+/// must resolve within the skill directory, size-capped).
+#[utoipa::path(
+    get,
+    path = "/api/skills/{name}/file",
+    tag = "skills",
+    params(
+        ("name" = String, Path, description = "Skill name"),
+        ("path" = String, Query, description = "Relative file path inside the skill directory")
+    ),
+    responses(
+        (status = 200, description = "File contents", body = serde_json::Value),
+        (status = 400, description = "Invalid path"),
+        (status = 404, description = "Skill or file not found")
+    )
+)]
+pub async fn get_supporting_file(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(rel_path) = params.get("path") else {
+        return ApiErrorResponse::bad_request("Missing 'path' query parameter").into_json_tuple();
+    };
+    // Reject absolute paths and traversal early — defense in depth even
+    // before canonicalisation runs.
+    if rel_path.is_empty()
+        || std::path::Path::new(rel_path).is_absolute()
+        || rel_path.contains("..")
+    {
+        return ApiErrorResponse::bad_request(format!("Invalid path: {rel_path}"))
+            .into_json_tuple();
+    }
+
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let requested = skill.path.join(rel_path);
+    let Ok(canonical) = requested.canonicalize() else {
+        return ApiErrorResponse::not_found(format!("File not found: {rel_path}"))
+            .into_json_tuple();
+    };
+    let Ok(root) = skill.path.canonicalize() else {
+        return ApiErrorResponse::internal("Skill directory missing").into_json_tuple();
+    };
+    if !canonical.starts_with(&root) {
+        return ApiErrorResponse::bad_request(format!(
+            "'{rel_path}' is outside the skill directory"
+        ))
+        .into_json_tuple();
+    }
+
+    // Size cap: even supporting files up to 1 MiB can exceed response
+    // limits in the browser. Truncate and advertise.
+    const MAX_BYTES: usize = 256 * 1024;
+    let content = match std::fs::read_to_string(&canonical) {
+        Ok(s) => s,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("Failed to read file: {e}"))
+                .into_json_tuple();
+        }
+    };
+    let (truncated, body) = if content.len() > MAX_BYTES {
+        let cut = content
+            .char_indices()
+            .take_while(|(i, _)| *i < MAX_BYTES)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        (true, content[..cut].to_string())
+    } else {
+        (false, content)
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "name": name,
+            "path": rel_path,
+            "content": body,
+            "truncated": truncated,
+        })),
+    )
+}
+
+/// Record a successful skill evolution in the audit trail. All
+/// dashboard-initiated mutations go through this so the audit log has a
+/// tamper-evident record of every `/api/skills/.../evolve/*` action.
+fn audit_evolve(state: &Arc<AppState>, action: &str, skill_name: &str, detail: &str) {
+    state.kernel.audit().record(
+        // Dashboard calls don't have an agent_id — use a distinctive
+        // actor so audit readers can tell user actions from agent ones.
+        "dashboard".to_string(),
+        librefang_runtime::audit::AuditAction::AgentMessage,
+        format!("skill_evolve:{action}:{skill_name}"),
+        detail.to_string(),
+    );
+}
+
+/// POST /api/skills/{name}/evolve/update — full-rewrite prompt_context.
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/evolve/update",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Skill updated", body = serde_json::Value),
+        (status = 400, description = "Invalid request / security-blocked content"),
+        (status = 404, description = "Skill not found")
+    )
+)]
+pub async fn evolve_update_skill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(prompt_context) = body["prompt_context"].as_str() else {
+        return ApiErrorResponse::bad_request("Missing 'prompt_context' field").into_json_tuple();
+    };
+    let changelog = body["changelog"].as_str().unwrap_or("").trim();
+    if changelog.is_empty() {
+        return ApiErrorResponse::bad_request("Missing 'changelog' field").into_json_tuple();
+    }
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match librefang_skills::evolution::update_skill(
+        &skill,
+        prompt_context,
+        changelog,
+        Some("dashboard"),
+    ) {
+        Ok(r) => {
+            audit_evolve(&state, "update", &r.skill_name, changelog);
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
+}
+
+/// POST /api/skills/{name}/evolve/patch — fuzzy find-and-replace.
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/evolve/patch",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Skill patched", body = serde_json::Value),
+        (status = 400, description = "Invalid request / fuzzy match failed"),
+        (status = 404, description = "Skill not found")
+    )
+)]
+pub async fn evolve_patch_skill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(old_string) = body["old_string"].as_str() else {
+        return ApiErrorResponse::bad_request("Missing 'old_string' field").into_json_tuple();
+    };
+    let Some(new_string) = body["new_string"].as_str() else {
+        return ApiErrorResponse::bad_request("Missing 'new_string' field").into_json_tuple();
+    };
+    let changelog = body["changelog"].as_str().unwrap_or("").trim();
+    if changelog.is_empty() {
+        return ApiErrorResponse::bad_request("Missing 'changelog' field").into_json_tuple();
+    }
+    let replace_all = body["replace_all"].as_bool().unwrap_or(false);
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match librefang_skills::evolution::patch_skill(
+        &skill,
+        old_string,
+        new_string,
+        changelog,
+        replace_all,
+        Some("dashboard"),
+    ) {
+        Ok(r) => {
+            audit_evolve(&state, "patch", &r.skill_name, changelog);
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
+}
+
+/// POST /api/skills/{name}/evolve/rollback — roll back to previous version.
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/evolve/rollback",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    responses(
+        (status = 200, description = "Skill rolled back", body = serde_json::Value),
+        (status = 404, description = "Skill or snapshot not found")
+    )
+)]
+pub async fn evolve_rollback_skill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match librefang_skills::evolution::rollback_skill(&skill, Some("dashboard")) {
+        Ok(r) => {
+            audit_evolve(
+                &state,
+                "rollback",
+                &r.skill_name,
+                "rolled back to previous version",
+            );
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
+}
+
+/// POST /api/skills/{name}/evolve/delete — delete a locally-evolved skill.
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/evolve/delete",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    responses(
+        (status = 200, description = "Skill deleted", body = serde_json::Value),
+        (status = 400, description = "Non-local skill — deletion refused"),
+        (status = 404, description = "Skill not found")
+    )
+)]
+pub async fn evolve_delete_skill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let skills_dir = state.kernel.home_dir().join("skills");
+    match librefang_skills::evolution::delete_skill(&skills_dir, &name) {
+        Ok(r) => {
+            audit_evolve(&state, "delete", &r.skill_name, &r.message);
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
+}
+
+/// POST /api/skills/{name}/evolve/file — add a supporting file.
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/evolve/file",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "File written", body = serde_json::Value),
+        (status = 400, description = "Invalid path / over size limit"),
+        (status = 404, description = "Skill not found")
+    )
+)]
+pub async fn evolve_write_file(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(path) = body["path"].as_str() else {
+        return ApiErrorResponse::bad_request("Missing 'path' field").into_json_tuple();
+    };
+    let Some(content) = body["content"].as_str() else {
+        return ApiErrorResponse::bad_request("Missing 'content' field").into_json_tuple();
+    };
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match librefang_skills::evolution::write_supporting_file(&skill, path, content) {
+        Ok(r) => {
+            audit_evolve(&state, "write_file", &r.skill_name, path);
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
+}
+
+/// DELETE /api/skills/{name}/evolve/file — remove a supporting file.
+/// Path is supplied via the `?path=` query string since axum's DELETE
+/// body handling is inconsistent across clients.
+#[utoipa::path(
+    delete,
+    path = "/api/skills/{name}/evolve/file",
+    tag = "skills",
+    params(
+        ("name" = String, Path, description = "Skill name"),
+        ("path" = String, Query, description = "Relative path of the file to remove")
+    ),
+    responses(
+        (status = 200, description = "File removed", body = serde_json::Value),
+        (status = 400, description = "Missing 'path' parameter"),
+        (status = 404, description = "Skill or file not found")
+    )
+)]
+pub async fn evolve_remove_file(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(path) = params.get("path") else {
+        return ApiErrorResponse::bad_request("Missing 'path' query parameter").into_json_tuple();
+    };
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match librefang_skills::evolution::remove_supporting_file(&skill, path) {
+        Ok(r) => {
+            audit_evolve(&state, "remove_file", &r.skill_name, path);
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
 }
 
 // ── Helper functions for secrets.env management ────────────────────────

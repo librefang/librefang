@@ -58,6 +58,12 @@ pub struct SkillVersionEntry {
     pub changelog: String,
     /// SHA256 of the prompt_context at this version.
     pub content_hash: String,
+    /// Origin of the mutation: `"agent:<id>"`, `"cli"`, `"dashboard"`,
+    /// `"reviewer"`, or `"unknown"` for pre-author-tracking entries.
+    /// Optional for backward compatibility with older `.evolution.json`
+    /// files written before this field existed.
+    #[serde(default)]
+    pub author: Option<String>,
 }
 
 /// Version history for a skill, stored as `.evolution.json` alongside `skill.toml`.
@@ -327,9 +333,76 @@ pub fn fuzzy_find_and_replace(
         return Ok(result);
     }
 
-    Err(SkillError::InvalidManifest(
-        "Could not find old_string in content (tried 5 fuzzy strategies)".to_string(),
-    ))
+    // All strategies failed. Build an actionable error that lets the
+    // agent self-correct: show the closest matching line(s) in the
+    // content so the next patch attempt can target real text.
+    let hints = closest_lines(content, old_str, 3);
+    let suggestion = if hints.is_empty() {
+        String::new()
+    } else {
+        let preview = hints
+            .iter()
+            .map(|(line_no, line)| format!("  line {line_no}: {}", truncate_for_preview(line, 120)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n\nClosest existing lines:\n{preview}")
+    };
+    let old_preview = truncate_for_preview(old_str.lines().next().unwrap_or(""), 120);
+    Err(SkillError::InvalidManifest(format!(
+        "Could not find old_string in content (tried 5 fuzzy strategies). \
+         First line of old_string was: \"{old_preview}\".{suggestion}"
+    )))
+}
+
+/// Truncate a string for inclusion in an error message, preserving the
+/// UTF-8 boundary.
+fn truncate_for_preview(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.replace('\n', "⏎");
+    }
+    let truncated: String = s.chars().take(max_chars).collect();
+    format!("{}…", truncated.replace('\n', "⏎"))
+}
+
+/// Return up to `top_k` content lines most similar to the first line of
+/// `needle`, with their 1-based line numbers. Used to surface "did you
+/// mean …?" hints when fuzzy patching fails. Similarity is a simple
+/// character-overlap ratio — cheap and good enough for a hint.
+fn closest_lines(content: &str, needle: &str, top_k: usize) -> Vec<(usize, String)> {
+    let needle_first: String = needle
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if needle_first.is_empty() {
+        return Vec::new();
+    }
+
+    let needle_chars: std::collections::HashSet<char> = needle_first.chars().collect();
+    let mut scored: Vec<(f32, usize, String)> = content
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(i, line)| {
+            let line_chars: std::collections::HashSet<char> = line.chars().collect();
+            let intersection = needle_chars.intersection(&line_chars).count() as f32;
+            let union = needle_chars.union(&line_chars).count() as f32;
+            let score = if union == 0.0 {
+                0.0
+            } else {
+                intersection / union
+            };
+            (score, i + 1, line.to_string())
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored
+        .into_iter()
+        .take(top_k)
+        .filter(|(score, _, _)| *score > 0.3) // only surface genuinely similar lines
+        .map(|(_, line_no, line)| (line_no, line))
+        .collect()
 }
 
 /// Try to replace using normalized content, mapping positions back to original.
@@ -554,12 +627,21 @@ fn bump_patch_version(version: &str) -> String {
     }
 }
 
+/// Author identifier for a mutation. Plain string instead of an enum so
+/// newer origin types (e.g., a future `"scheduled-review"`) can be added
+/// without migrating old `.evolution.json` files. Callers should pass:
+///   - `"agent:<uuid>"` for agent-triggered mutations
+///   - `"cli"` / `"dashboard"` / `"reviewer"` for other origins
+///   - `None` when origin is genuinely unknown (legacy call sites).
+pub type EvolutionAuthor<'a> = Option<&'a str>;
+
 /// Save a version snapshot before mutation. Keeps only the last N versions.
 fn record_version(
     skill_dir: &Path,
     version: &str,
     changelog: &str,
     prompt_content: &str,
+    author: EvolutionAuthor<'_>,
 ) -> Result<(), SkillError> {
     let mut meta = load_evolution_meta(skill_dir);
 
@@ -568,6 +650,7 @@ fn record_version(
         timestamp: Utc::now().to_rfc3339(),
         changelog: changelog.to_string(),
         content_hash: SkillVerifier::sha256_hex(prompt_content.as_bytes()),
+        author: author.map(String::from),
     };
 
     meta.versions.push(entry);
@@ -642,6 +725,7 @@ pub fn create_skill(
     description: &str,
     prompt_context: &str,
     tags: Vec<String>,
+    author: EvolutionAuthor<'_>,
 ) -> Result<EvolutionResult, SkillError> {
     validate_name(name)?;
     validate_prompt_content(prompt_context)?;
@@ -659,14 +743,20 @@ pub fn create_skill(
     }
 
     let skill_dir = skills_dir.join(name);
+
+    // Acquire exclusive lock BEFORE any filesystem work. The lock file
+    // lives beside the skill directory (in `.evolution-locks/`) so the
+    // skill dir doesn't need to exist yet. Two concurrent `create_skill`
+    // calls with the same name serialise here, and the loser will find
+    // the dir already populated under the lock.
+    let _lock = acquire_skill_lock(&skill_dir)?;
+
+    // Re-check under the lock.
     if skill_dir.exists() {
         return Err(SkillError::AlreadyInstalled(name.to_string()));
     }
 
     std::fs::create_dir_all(&skill_dir)?;
-
-    // Acquire exclusive lock to prevent concurrent creation
-    let _lock = acquire_skill_lock(&skill_dir)?;
 
     // Build manifest
     let manifest = SkillManifest {
@@ -711,8 +801,9 @@ pub fn create_skill(
     let _ = record_version(
         &skill_dir,
         "0.1.0",
-        "Initial creation by agent",
+        "Initial creation",
         prompt_context,
+        author,
     );
 
     info!(skill = name, "Created evolved skill");
@@ -730,6 +821,7 @@ pub fn update_skill(
     skill: &InstalledSkill,
     new_prompt_context: &str,
     changelog: &str,
+    author: EvolutionAuthor<'_>,
 ) -> Result<EvolutionResult, SkillError> {
     validate_prompt_content(new_prompt_context)?;
 
@@ -758,7 +850,13 @@ pub fn update_skill(
     atomic_write(&skill_dir.join("prompt_context.md"), new_prompt_context)?;
 
     // Record version
-    record_version(skill_dir, &new_version, changelog, new_prompt_context)?;
+    record_version(
+        skill_dir,
+        &new_version,
+        changelog,
+        new_prompt_context,
+        author,
+    )?;
 
     info!(skill = %name, version = %new_version, "Updated evolved skill");
 
@@ -777,6 +875,7 @@ pub fn patch_skill(
     new_str: &str,
     changelog: &str,
     replace_all: bool,
+    author: EvolutionAuthor<'_>,
 ) -> Result<EvolutionResult, SkillError> {
     let name = &skill.manifest.skill.name;
     let skill_dir = &skill.path;
@@ -831,7 +930,13 @@ pub fn patch_skill(
         "{changelog} [strategy: {:?}, matches: {}]",
         result.strategy, result.match_count
     );
-    record_version(skill_dir, &new_version, &change_desc, &result.new_content)?;
+    record_version(
+        skill_dir,
+        &new_version,
+        &change_desc,
+        &result.new_content,
+        author,
+    )?;
 
     info!(
         skill = %name,
@@ -860,29 +965,88 @@ pub fn patch_skill(
 /// never mid-deletion. The lock file lives outside the skill directory
 /// (see [`acquire_skill_lock`]), so holding it does not block
 /// `remove_dir_all`.
+/// User-initiated uninstall. Unlike [`delete_skill`] (which is the
+/// agent-facing path and refuses to touch marketplace/bundled skills),
+/// `uninstall_skill` removes any installed skill regardless of source.
+///
+/// Still acquires the per-skill lock to serialize against in-flight
+/// patch/update/rollback and re-checks existence under the lock.
+///
+/// Use this for dashboard "Uninstall" and `librefang skill remove` —
+/// these are user-initiated and the operator has decided to remove the
+/// skill even if it came from ClawHub / Skillhub / OpenClaw.
+pub fn uninstall_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult, SkillError> {
+    // Reject path-traversal attempts in the skill name before anything else.
+    // Names are validated on create, but the uninstall path accepts any
+    // existing name, so harden here too.
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(SkillError::InvalidManifest(format!(
+            "Invalid skill name: '{name}'"
+        )));
+    }
+
+    let skill_dir = skills_dir.join(name);
+
+    // Acquire the lock first so concurrent evolve/uninstall on the same
+    // name serialise here instead of racing on `remove_dir_all`.
+    let _lock = acquire_skill_lock(&skill_dir)?;
+
+    if !skill_dir.exists() {
+        return Err(SkillError::NotFound(name.to_string()));
+    }
+
+    std::fs::remove_dir_all(&skill_dir)?;
+    info!(skill = name, "Uninstalled skill");
+
+    Ok(EvolutionResult {
+        success: true,
+        message: format!("Skill '{name}' uninstalled"),
+        skill_name: name.to_string(),
+        version: None,
+    })
+}
+
 pub fn delete_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult, SkillError> {
     let skill_dir = skills_dir.join(name);
     if !skill_dir.exists() {
         return Err(SkillError::NotFound(name.to_string()));
     }
 
-    // Safety check: only delete local/agent-evolved skills. A missing or
-    // unparseable manifest falls through — we still allow deletion so
-    // orphaned scaffolding can be cleaned up.
+    // Safety check: only delete local/agent-evolved skills. A *missing
+    // manifest file* is treated as orphaned scaffolding and allowed —
+    // otherwise a half-created directory would be un-deletable. But a
+    // manifest that parses without a `source` field is rejected: every
+    // supported install path (create_skill, CLI install, marketplace,
+    // OpenClaw conversion) writes a source. Rejecting unclassified
+    // skills protects legacy installs where source was never written.
     let manifest_path = skill_dir.join("skill.toml");
     if manifest_path.exists() {
-        if let Ok(toml_str) = std::fs::read_to_string(&manifest_path) {
-            if let Ok(manifest) = toml::from_str::<SkillManifest>(&toml_str) {
-                if let Some(source) = &manifest.source {
-                    match source {
-                        SkillSource::Local | SkillSource::Native => {}
-                        _ => {
-                            return Err(SkillError::SecurityBlocked(format!(
-                                "Cannot delete non-local skill '{name}' (source: {source:?})"
-                            )));
-                        }
+        match std::fs::read_to_string(&manifest_path).ok() {
+            Some(toml_str) => {
+                let manifest: SkillManifest =
+                    toml::from_str(&toml_str).map_err(SkillError::from)?;
+                match &manifest.source {
+                    Some(SkillSource::Local) | Some(SkillSource::Native) => {}
+                    Some(other) => {
+                        return Err(SkillError::SecurityBlocked(format!(
+                            "Cannot delete non-local skill '{name}' (source: {other:?})"
+                        )));
+                    }
+                    None => {
+                        return Err(SkillError::SecurityBlocked(format!(
+                            "Cannot delete skill '{name}': manifest has no `source` field. \
+                             Refusing to delete unclassified skills — edit skill.toml to add \
+                             `source = {{ type = \"local\" }}` if this is indeed a local skill."
+                        )));
                     }
                 }
+            }
+            None => {
+                // Manifest file failed to read (permissions?). Not a
+                // parse error — treat as unknown and refuse.
+                return Err(SkillError::SecurityBlocked(format!(
+                    "Cannot delete skill '{name}': manifest unreadable"
+                )));
             }
         }
     }
@@ -1174,7 +1338,10 @@ fn walk_files_relative_inner(base: &Path, current: &Path, depth: usize, out: &mu
 }
 
 /// Rollback a skill to its previous version.
-pub fn rollback_skill(skill: &InstalledSkill) -> Result<EvolutionResult, SkillError> {
+pub fn rollback_skill(
+    skill: &InstalledSkill,
+    author: EvolutionAuthor<'_>,
+) -> Result<EvolutionResult, SkillError> {
     let name = &skill.manifest.skill.name;
     let skill_dir = &skill.path;
 
@@ -1211,6 +1378,17 @@ pub fn rollback_skill(skill: &InstalledSkill) -> Result<EvolutionResult, SkillEr
 
     let new_version = bump_patch_version(&skill.manifest.skill.version);
 
+    // Save the current (about-to-be-overwritten) content as a snapshot
+    // first so the rollback itself is reversible — otherwise rollback
+    // eats the most recent snapshot and you can never undo the rollback.
+    if let Some(current) = &skill.manifest.prompt_context {
+        // Ignore errors — if snapshotting the current version fails, we
+        // still want the rollback to proceed (the user explicitly asked
+        // for it). The worst case is a less-reversible rollback, which
+        // is no worse than the pre-fix behavior.
+        let _ = save_rollback_snapshot(skill_dir, current);
+    }
+
     // Write restored content
     atomic_write(&skill_dir.join("prompt_context.md"), &old_content)?;
 
@@ -1227,6 +1405,7 @@ pub fn rollback_skill(skill: &InstalledSkill) -> Result<EvolutionResult, SkillEr
         &new_version,
         "Rolled back to previous version",
         &old_content,
+        author,
     )?;
 
     // Remove the used snapshot
@@ -1248,7 +1427,11 @@ pub fn get_evolution_info(skill: &InstalledSkill) -> SkillEvolutionMeta {
 }
 
 /// Record a successful skill usage (for tracking effectiveness).
+///
+/// Serializes read-modify-write against the per-skill evolution lock so
+/// concurrent tool invocations don't clobber each other's increments.
 pub fn record_skill_usage(skill_dir: &Path) -> Result<(), SkillError> {
+    let _lock = acquire_skill_lock(skill_dir)?;
     let mut meta = load_evolution_meta(skill_dir);
     meta.use_count += 1;
     save_evolution_meta(skill_dir, &meta)

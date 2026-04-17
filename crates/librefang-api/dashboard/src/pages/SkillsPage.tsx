@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, fanghubListSkills, installSkill, listHands, getSkillDetail, createSkill, type ClawHubBrowseItem, type FangHubSkill, type HandDefinitionItem, type SkillDetail } from "../api";
+import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, fanghubListSkills, installSkill, listHands, getSkillDetail, createSkill, reloadSkills, evolveUpdateSkill, evolvePatchSkill, evolveRollbackSkill, evolveDeleteSkill, evolveWriteFile, evolveRemoveFile, getSupportingFile, type ClawHubBrowseItem, type FangHubSkill, type HandDefinitionItem, type SkillDetail } from "../api";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Card } from "../components/ui/Card";
@@ -16,7 +16,7 @@ import {
   Download, Trash2, Star, Loader2, Sparkles, Package,
   Code, GitBranch, Globe, Cloud, Monitor, Bot, Database,
   Briefcase, Shield, Terminal, Calendar, Store, Zap, RefreshCw,
-  Plus, History, Eye, RotateCcw, FileText, Tag,
+  Plus, History, Eye, RotateCcw, FileText, Tag, Edit as EditIcon, Upload,
 } from "lucide-react";
 
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
@@ -295,17 +295,310 @@ function CreateSkillModal({ isOpen, onClose, onCreated, t }: {
 }
 
 // Skill Detail Modal with evolution history
+// ── Evolve sub-panes (embedded inside SkillDetailModal) ─────────────
+//
+// These are thin, stateful forms. They don't own mutation state — the
+// parent (SkillDetailModal) does, so sub-panes simply call onSubmit
+// with the collected params and let the parent handle the API call,
+// refetch, toasts, and error display.
+
+function EvolveUpdatePane({ skillName, initialContent, onSubmit, onCancel, busy, t }: {
+  skillName: string;
+  initialContent: string;
+  onSubmit: (params: { prompt_context: string; changelog: string }) => void;
+  onCancel: () => void;
+  busy: boolean;
+  t: (key: string, opts?: any) => string;
+}) {
+  const [content, setContent] = useState(initialContent);
+  const [changelog, setChangelog] = useState("");
+  const dirty = content !== initialContent;
+  return (
+    <div className="rounded-lg border border-border bg-surface-1 p-3 space-y-2">
+      <p className="text-xs font-bold uppercase text-text-dim">
+        {t("skills.evo_update_title", { defaultValue: "Update {{name}}", name: skillName })}
+      </p>
+      <textarea
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        className="w-full h-64 px-3 py-2 text-sm rounded-lg bg-surface-2 border border-border text-text-main resize-y font-mono"
+      />
+      <p className="text-[10px] text-text-dim">{content.length.toLocaleString()} / 160,000</p>
+      <Input
+        value={changelog}
+        onChange={(e) => setChangelog(e.target.value)}
+        placeholder={t("skills.evo_changelog_placeholder", { defaultValue: "What changed and why" })}
+      />
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" onClick={onCancel} disabled={busy}>{t("common.cancel")}</Button>
+        <Button
+          onClick={() => onSubmit({ prompt_context: content, changelog: changelog.trim() })}
+          disabled={busy || !dirty || !changelog.trim()}
+          leftIcon={busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <EditIcon className="w-4 h-4" />}
+        >
+          {t("skills.evo_update", { defaultValue: "Update" })}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function EvolvePatchPane({ skillName, onSubmit, onCancel, busy, t }: {
+  skillName: string;
+  onSubmit: (params: { old_string: string; new_string: string; changelog: string; replace_all: boolean }) => void;
+  onCancel: () => void;
+  busy: boolean;
+  t: (key: string, opts?: any) => string;
+}) {
+  const [oldStr, setOldStr] = useState("");
+  const [newStr, setNewStr] = useState("");
+  const [changelog, setChangelog] = useState("");
+  const [replaceAll, setReplaceAll] = useState(false);
+  return (
+    <div className="rounded-lg border border-border bg-surface-1 p-3 space-y-2">
+      <p className="text-xs font-bold uppercase text-text-dim">
+        {t("skills.evo_patch_title", { defaultValue: "Patch {{name}}", name: skillName })}
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <div>
+          <label className="block text-[10px] font-bold uppercase text-text-dim mb-1">{t("skills.evo_patch_old", { defaultValue: "Find" })}</label>
+          <textarea
+            value={oldStr}
+            onChange={(e) => setOldStr(e.target.value)}
+            className="w-full h-40 px-2 py-1.5 text-xs rounded bg-surface-2 border border-border text-text-main resize-y font-mono"
+          />
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase text-text-dim mb-1">{t("skills.evo_patch_new", { defaultValue: "Replace with" })}</label>
+          <textarea
+            value={newStr}
+            onChange={(e) => setNewStr(e.target.value)}
+            className="w-full h-40 px-2 py-1.5 text-xs rounded bg-surface-2 border border-border text-text-main resize-y font-mono"
+          />
+        </div>
+      </div>
+      <Input
+        value={changelog}
+        onChange={(e) => setChangelog(e.target.value)}
+        placeholder={t("skills.evo_changelog_placeholder", { defaultValue: "What changed and why" })}
+      />
+      <label className="inline-flex items-center gap-2 text-xs text-text-dim">
+        <input type="checkbox" checked={replaceAll} onChange={(e) => setReplaceAll(e.target.checked)} />
+        {t("skills.evo_replace_all", { defaultValue: "Replace all occurrences" })}
+      </label>
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" onClick={onCancel} disabled={busy}>{t("common.cancel")}</Button>
+        <Button
+          onClick={() => onSubmit({ old_string: oldStr, new_string: newStr, changelog: changelog.trim(), replace_all: replaceAll })}
+          disabled={busy || !oldStr || !changelog.trim()}
+          leftIcon={busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Code className="w-4 h-4" />}
+        >
+          {t("skills.evo_patch", { defaultValue: "Patch" })}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function EvolveUploadPane({ skillName, onSubmit, onCancel, busy, t }: {
+  skillName: string;
+  onSubmit: (params: { path: string; content: string }) => void;
+  onCancel: () => void;
+  busy: boolean;
+  t: (key: string, opts?: any) => string;
+}) {
+  const [subdir, setSubdir] = useState("references");
+  const [filename, setFilename] = useState("");
+  const [content, setContent] = useState("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const handleFilePick = async (file: File) => {
+    // Read as text — supporting files are limited to 1 MiB per skill rules.
+    if (file.size > 1024 * 1024) {
+      alert(t("skills.evo_file_too_large", { defaultValue: "File exceeds 1 MiB limit" }));
+      return;
+    }
+    const text = await file.text();
+    setContent(text);
+    if (!filename) setFilename(file.name);
+  };
+  const path = filename ? `${subdir}/${filename}` : "";
+  return (
+    <div className="rounded-lg border border-border bg-surface-1 p-3 space-y-2">
+      <p className="text-xs font-bold uppercase text-text-dim">
+        {t("skills.evo_upload_title", { defaultValue: "Add file to {{name}}", name: skillName })}
+      </p>
+      <div className="grid grid-cols-3 gap-2">
+        <div>
+          <label className="block text-[10px] font-bold uppercase text-text-dim mb-1">{t("skills.evo_folder", { defaultValue: "Folder" })}</label>
+          <select
+            value={subdir}
+            onChange={(e) => setSubdir(e.target.value)}
+            className="w-full px-2 py-1.5 text-xs rounded bg-surface-2 border border-border text-text-main"
+          >
+            <option value="references">references</option>
+            <option value="templates">templates</option>
+            <option value="scripts">scripts</option>
+            <option value="assets">assets</option>
+          </select>
+        </div>
+        <div className="col-span-2">
+          <label className="block text-[10px] font-bold uppercase text-text-dim mb-1">{t("skills.evo_filename", { defaultValue: "Filename" })}</label>
+          <Input value={filename} onChange={(e) => setFilename(e.target.value)} placeholder="example.md" />
+        </div>
+      </div>
+      <div>
+        <label className="block text-[10px] font-bold uppercase text-text-dim mb-1">{t("skills.evo_content", { defaultValue: "Content" })}</label>
+        <textarea
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          className="w-full h-40 px-2 py-1.5 text-xs rounded bg-surface-2 border border-border text-text-main resize-y font-mono"
+          placeholder={t("skills.evo_content_placeholder", { defaultValue: "Paste file content or load from disk below" })}
+        />
+        <div className="flex items-center gap-2 mt-1">
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleFilePick(f); }}
+          />
+          <Button variant="ghost" onClick={() => fileInputRef.current?.click()} leftIcon={<Upload className="w-3 h-3" />}>
+            {t("skills.evo_load_from_disk", { defaultValue: "Load from disk" })}
+          </Button>
+          <span className="text-[10px] text-text-dim">{content.length.toLocaleString()} chars</span>
+        </div>
+      </div>
+      {path && <p className="text-[10px] text-text-dim font-mono">→ {path}</p>}
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" onClick={onCancel} disabled={busy}>{t("common.cancel")}</Button>
+        <Button
+          onClick={() => onSubmit({ path, content })}
+          disabled={busy || !filename.trim() || !content}
+          leftIcon={busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+        >
+          {t("skills.evo_upload", { defaultValue: "Upload" })}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// Read-only viewer for a skill's supporting file. Fetches on demand so
+// the rest of the detail modal doesn't pay for files the user never
+// opens. Truncated responses are flagged so the user doesn't mistake a
+// capped preview for complete content.
+function SupportingFileViewer({ skillName, path, onClose, t }: {
+  skillName: string;
+  path: string;
+  onClose: () => void;
+  t: (key: string, opts?: any) => string;
+}) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["skill-file", skillName, path],
+    queryFn: () => getSupportingFile(skillName, path),
+  });
+  return (
+    <div className="rounded-lg border border-border bg-surface-1 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-bold uppercase text-text-dim font-mono">{path}</p>
+        <button className="text-text-dim hover:text-text-main" onClick={onClose}><X className="w-4 h-4" /></button>
+      </div>
+      {isLoading && <div className="flex items-center justify-center py-6"><Loader2 className="w-5 h-5 animate-spin text-text-dim" /></div>}
+      {error && <p className="text-xs text-error">{(error as any)?.message || "Failed to load file"}</p>}
+      {data && (
+        <>
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all text-[11px] bg-surface-2 p-2 rounded font-mono">{data.content}</pre>
+          {data.truncated && (
+            <p className="text-[10px] text-text-dim">
+              {t("skills.evo_file_truncated", { defaultValue: "File truncated to 256 KiB preview" })}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+type EvolvePane = "none" | "update" | "patch" | "upload";
+
 function SkillDetailModal({ skillName, isOpen, onClose, t }: {
   skillName: string | null;
   isOpen: boolean;
   onClose: () => void;
   t: (key: string, opts?: any) => string;
 }) {
-  const { data: detail, isLoading } = useQuery({
+  const queryClient = useQueryClient();
+  const { addToast } = useUIStore();
+  const { data: detail, isLoading, refetch } = useQuery({
     queryKey: ["skill-detail", skillName],
     queryFn: () => getSkillDetail(skillName!),
     enabled: isOpen && !!skillName,
   });
+
+  const [pane, setPane] = useState<EvolvePane>("none");
+  const [viewingFile, setViewingFile] = useState<string | null>(null);
+  useEffect(() => {
+    // Reset sub-pane every time the modal is reopened or the skill changes.
+    if (!isOpen) { setPane("none"); setViewingFile(null); }
+  }, [isOpen, skillName]);
+
+  const [busy, setBusy] = useState(false);
+
+  // ── mutation helpers ───────────────────────────────────────────────
+  const runMutation = async <T,>(fn: () => Promise<T>, successMsg: string) => {
+    if (!skillName) return;
+    setBusy(true);
+    try {
+      await fn();
+      await refetch();
+      queryClient.invalidateQueries({ queryKey: ["skills"] });
+      addToast(successMsg, "success");
+      setPane("none");
+    } catch (e: any) {
+      addToast(e?.message || "Action failed", "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRollback = () => {
+    if (!skillName) return;
+    if (!confirm(t("skills.evo_rollback_confirm", { defaultValue: "Roll back to the previous version? This cannot be undone unless you patch again." }))) return;
+    void runMutation(
+      () => evolveRollbackSkill(skillName),
+      t("skills.evo_rolled_back", { defaultValue: "Skill rolled back" })
+    );
+  };
+
+  const handleRemoveFile = (path: string) => {
+    if (!skillName) return;
+    if (!confirm(t("skills.evo_remove_file_confirm", { defaultValue: `Remove ${path}?`, path }))) return;
+    void runMutation(
+      () => evolveRemoveFile(skillName, path),
+      t("skills.evo_file_removed", { defaultValue: "File removed" })
+    );
+  };
+
+  const handleDelete = () => {
+    if (!skillName) return;
+    // Delete goes through the evolve/delete path which enforces source
+    // === Local/Native — safer than the Uninstall button which removes
+    // any source. Two confirmations because this is destructive.
+    if (!confirm(t("skills.evo_delete_confirm", { defaultValue: `Permanently delete ${skillName}? This cannot be undone.`, name: skillName }))) return;
+    (async () => {
+      if (!skillName) return;
+      setBusy(true);
+      try {
+        await evolveDeleteSkill(skillName);
+        queryClient.invalidateQueries({ queryKey: ["skills"] });
+        addToast(t("skills.evo_deleted", { defaultValue: "Skill deleted" }), "success");
+        onClose();
+      } catch (e: any) {
+        addToast(e?.message || "Delete failed", "error");
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={detail?.name || skillName || ""} size="xl">
@@ -324,6 +617,87 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
               ))}
             </div>
           </div>
+
+          {/* Evolve actions */}
+          <div className="flex flex-wrap gap-2">
+            <Button variant="ghost" onClick={() => setPane(pane === "update" ? "none" : "update")} leftIcon={<EditIcon className="w-4 h-4" />} disabled={busy}>
+              {t("skills.evo_update", { defaultValue: "Update" })}
+            </Button>
+            <Button variant="ghost" onClick={() => setPane(pane === "patch" ? "none" : "patch")} leftIcon={<Code className="w-4 h-4" />} disabled={busy}>
+              {t("skills.evo_patch", { defaultValue: "Patch" })}
+            </Button>
+            <Button variant="ghost" onClick={() => setPane(pane === "upload" ? "none" : "upload")} leftIcon={<Upload className="w-4 h-4" />} disabled={busy}>
+              {t("skills.evo_add_file", { defaultValue: "Add File" })}
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={handleRollback}
+              leftIcon={<RotateCcw className="w-4 h-4" />}
+              disabled={busy || detail.evolution.versions.length < 1}
+              title={detail.evolution.versions.length < 1 ? t("skills.evo_no_rollback", { defaultValue: "No prior version to roll back to" }) : ""}
+            >
+              {t("skills.evo_rollback", { defaultValue: "Rollback" })}
+            </Button>
+            <Button
+              variant="ghost"
+              className="text-error hover:text-error ml-auto"
+              onClick={handleDelete}
+              leftIcon={<Trash2 className="w-4 h-4" />}
+              disabled={busy}
+              title={t("skills.evo_delete_title", { defaultValue: "Delete this agent-evolved skill" })}
+            >
+              {t("skills.evo_delete", { defaultValue: "Delete" })}
+            </Button>
+          </div>
+
+          {/* Embedded edit panes */}
+          {pane === "update" && skillName && (
+            <EvolveUpdatePane
+              skillName={skillName}
+              initialContent={detail.prompt_context || ""}
+              onSubmit={(params) => runMutation(
+                () => evolveUpdateSkill(skillName, params),
+                t("skills.evo_updated", { defaultValue: "Skill updated" })
+              )}
+              onCancel={() => setPane("none")}
+              busy={busy}
+              t={t}
+            />
+          )}
+          {pane === "patch" && skillName && (
+            <EvolvePatchPane
+              skillName={skillName}
+              onSubmit={(params) => runMutation(
+                () => evolvePatchSkill(skillName, params),
+                t("skills.evo_patched", { defaultValue: "Skill patched" })
+              )}
+              onCancel={() => setPane("none")}
+              busy={busy}
+              t={t}
+            />
+          )}
+          {pane === "upload" && skillName && (
+            <EvolveUploadPane
+              skillName={skillName}
+              onSubmit={(params) => runMutation(
+                () => evolveWriteFile(skillName, params),
+                t("skills.evo_file_uploaded", { defaultValue: "File uploaded" })
+              )}
+              onCancel={() => setPane("none")}
+              busy={busy}
+              t={t}
+            />
+          )}
+
+          {/* Inline supporting-file viewer. Open on click, close via X. */}
+          {viewingFile && skillName && (
+            <SupportingFileViewer
+              skillName={skillName}
+              path={viewingFile}
+              onClose={() => setViewingFile(null)}
+              t={t}
+            />
+          )}
 
           {/* Stats */}
           <div className="grid grid-cols-3 gap-3">
@@ -364,9 +738,28 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
                 <div key={dir} className="mb-2">
                   <p className="text-[10px] font-bold uppercase text-text-dim mb-1">{dir}/</p>
                   <div className="flex flex-wrap gap-1">
-                    {files.map(f => (
-                      <span key={f} className="px-2 py-0.5 rounded bg-surface-2 text-xs font-mono">{f}</span>
-                    ))}
+                    {files.map(f => {
+                      const rel = `${dir}/${f}`;
+                      return (
+                        <span key={f} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-2 text-xs font-mono group">
+                          <button
+                            className="hover:text-brand"
+                            onClick={() => setViewingFile(rel)}
+                            title={t("skills.evo_view_file", { defaultValue: "View file" })}
+                          >
+                            {f}
+                          </button>
+                          <button
+                            className="opacity-0 group-hover:opacity-100 transition-opacity text-error hover:text-error-dim"
+                            onClick={() => handleRemoveFile(rel)}
+                            title={t("skills.evo_remove_file", { defaultValue: "Remove file" })}
+                            disabled={busy}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      );
+                    })}
                   </div>
                 </div>
               ))}
@@ -383,7 +776,10 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
                     <Badge variant={i === 0 ? "success" : "default"}>v{v.version}</Badge>
                     <div className="flex-1 min-w-0">
                       <p className="text-text-main">{v.changelog}</p>
-                      <p className="text-[10px] text-text-dim mt-0.5">{new Date(v.timestamp).toLocaleString()}</p>
+                      <p className="text-[10px] text-text-dim mt-0.5">
+                        {new Date(v.timestamp).toLocaleString()}
+                        {v.author && <span className="ml-2 font-mono">· {v.author}</span>}
+                      </p>
                     </div>
                   </div>
                 ))}
@@ -850,10 +1246,28 @@ export function SkillsPage() {
           </button>
           <button
             className="flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-colors"
-            onClick={() => { void skillsQuery.refetch(); void searchQuery.refetch(); void activeSkillhubQuery.refetch(); }}
+            onClick={async () => {
+              // Rescan the skills directory on disk before refetching the list.
+              // The kernel holds a cached registry — a plain query refetch only
+              // re-reads that cache. A full reload picks up skills created by
+              // the CLI, the agent evolve tools, or direct FS edits while the
+              // dashboard was open.
+              try {
+                const res = await reloadSkills();
+                addToast(
+                  t("skills.reloaded", { defaultValue: "Rescanned skills directory ({{count}} loaded)", count: (res as any).count ?? 0 }),
+                  "success",
+                );
+              } catch (e: any) {
+                addToast(e?.message || "Reload failed", "error");
+              }
+              void skillsQuery.refetch();
+              void searchQuery.refetch();
+              void activeSkillhubQuery.refetch();
+            }}
           >
             <RefreshCw className={`h-3.5 w-3.5 ${isAnyFetching ? "animate-spin" : ""}`} />
-            <span className="hidden sm:inline">{t("common.refresh")}</span>
+            <span className="hidden sm:inline">{t("skills.reload_from_disk", { defaultValue: "Reload" })}</span>
           </button>
         </div>
       </div>
@@ -1097,7 +1511,7 @@ export function SkillsPage() {
         onClose={() => setShowCreateModal(false)}
         onCreated={() => {
           queryClient.invalidateQueries({ queryKey: ["skills"] });
-          addToast({ type: "success", message: t("skills.evo_created", { defaultValue: "Skill created successfully" }) });
+          addToast(t("skills.evo_created", { defaultValue: "Skill created successfully" }), "success");
         }}
         t={t}
       />

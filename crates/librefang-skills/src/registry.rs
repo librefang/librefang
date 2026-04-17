@@ -22,6 +22,45 @@ pub struct SkillRegistry {
 
 // ── Platform filtering ──────────────────────────────────────────────
 
+/// Tags that hint at OS compatibility and should not be treated as
+/// human-facing categories. Keep this list in sync with
+/// [`is_platform_tag`].
+pub const PLATFORM_TAGS: &[&str] = &[
+    "macos",
+    "linux",
+    "windows",
+    "macos-only",
+    "linux-only",
+    "windows-only",
+];
+
+/// True iff `tag` is a reserved platform-compatibility tag. Used to
+/// separate category-style tags from OS constraints so UI grouping,
+/// prompt grouping, and list filtering all agree on what "category"
+/// actually means.
+pub fn is_platform_tag(tag: &str) -> bool {
+    PLATFORM_TAGS.contains(&tag)
+}
+
+/// Derive a human-facing category for a skill.
+///
+/// Precedence:
+///  1. Explicit `[skill].category` field (not yet in manifest — reserved)
+///  2. First non-platform tag in `tags`
+///  3. Fallback string "general"
+///
+/// Call sites (API list handler, kernel prompt builder) share this so
+/// the dashboard, system prompt, and CLI all group skills identically.
+pub fn derive_category(manifest: &crate::SkillManifest) -> &str {
+    manifest
+        .skill
+        .tags
+        .iter()
+        .map(String::as_str)
+        .find(|t| !is_platform_tag(t))
+        .unwrap_or("general")
+}
+
 /// Check if a skill is compatible with the current platform.
 ///
 /// If the manifest declares no `tags` containing platform hints, the skill
@@ -31,12 +70,7 @@ fn skill_matches_platform(manifest: &crate::SkillManifest) -> bool {
         .skill
         .tags
         .iter()
-        .filter(|t| {
-            matches!(
-                t.as_str(),
-                "macos" | "linux" | "windows" | "macos-only" | "linux-only" | "windows-only"
-            )
-        })
+        .filter(|t| is_platform_tag(t))
         .map(|t| t.as_str())
         .collect();
 
@@ -353,6 +387,9 @@ impl SkillRegistry {
             .get(name)
             .ok_or_else(|| SkillError::NotFound(name.to_string()))?;
         let skill_dir = skill.path.clone();
+        // Preserve the prior enabled flag — evolution mutations must not
+        // silently re-enable a skill the operator explicitly disabled.
+        let prior_enabled = skill.enabled;
 
         // Re-read from disk
         let manifest_path = skill_dir.join("skill.toml");
@@ -380,7 +417,7 @@ impl SkillRegistry {
             InstalledSkill {
                 manifest,
                 path: skill_dir,
-                enabled: true,
+                enabled: prior_enabled,
             },
         );
 
@@ -396,6 +433,7 @@ impl SkillRegistry {
         name: &str,
         new_prompt_context: &str,
         changelog: &str,
+        author: crate::evolution::EvolutionAuthor<'_>,
     ) -> Result<crate::evolution::EvolutionResult, SkillError> {
         let skill = self
             .skills
@@ -403,7 +441,7 @@ impl SkillRegistry {
             .ok_or_else(|| SkillError::NotFound(name.to_string()))?
             .clone();
 
-        let result = crate::evolution::update_skill(&skill, new_prompt_context, changelog)?;
+        let result = crate::evolution::update_skill(&skill, new_prompt_context, changelog, author)?;
         self.reload_skill(name)?;
         Ok(result)
     }
@@ -416,6 +454,7 @@ impl SkillRegistry {
         new_str: &str,
         changelog: &str,
         replace_all: bool,
+        author: crate::evolution::EvolutionAuthor<'_>,
     ) -> Result<crate::evolution::EvolutionResult, SkillError> {
         let skill = self
             .skills
@@ -423,8 +462,14 @@ impl SkillRegistry {
             .ok_or_else(|| SkillError::NotFound(name.to_string()))?
             .clone();
 
-        let result =
-            crate::evolution::patch_skill(&skill, old_str, new_str, changelog, replace_all)?;
+        let result = crate::evolution::patch_skill(
+            &skill,
+            old_str,
+            new_str,
+            changelog,
+            replace_all,
+            author,
+        )?;
         self.reload_skill(name)?;
         Ok(result)
     }
@@ -433,6 +478,7 @@ impl SkillRegistry {
     pub fn evolve_rollback(
         &mut self,
         name: &str,
+        author: crate::evolution::EvolutionAuthor<'_>,
     ) -> Result<crate::evolution::EvolutionResult, SkillError> {
         let skill = self
             .skills
@@ -440,7 +486,7 @@ impl SkillRegistry {
             .ok_or_else(|| SkillError::NotFound(name.to_string()))?
             .clone();
 
-        let result = crate::evolution::rollback_skill(&skill)?;
+        let result = crate::evolution::rollback_skill(&skill, author)?;
         self.reload_skill(name)?;
         Ok(result)
     }
@@ -610,6 +656,50 @@ impl SkillRegistry {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn make_manifest(tags: &[&str]) -> crate::SkillManifest {
+        crate::SkillManifest {
+            skill: crate::SkillMeta {
+                name: "t".into(),
+                version: "0.1.0".into(),
+                description: String::new(),
+                author: String::new(),
+                license: String::new(),
+                tags: tags.iter().map(|s| s.to_string()).collect(),
+            },
+            runtime: Default::default(),
+            tools: Default::default(),
+            requirements: Default::default(),
+            prompt_context: None,
+            source: None,
+            config: Default::default(),
+        }
+    }
+
+    #[test]
+    fn derive_category_skips_platform_tags() {
+        // First tag is a platform tag — must fall through to the next.
+        let m = make_manifest(&["macos", "devops"]);
+        assert_eq!(derive_category(&m), "devops");
+    }
+
+    #[test]
+    fn derive_category_only_platform_tags_falls_back_to_general() {
+        let m = make_manifest(&["linux"]);
+        assert_eq!(derive_category(&m), "general");
+    }
+
+    #[test]
+    fn derive_category_no_tags_returns_general() {
+        let m = make_manifest(&[]);
+        assert_eq!(derive_category(&m), "general");
+    }
+
+    #[test]
+    fn derive_category_first_non_platform_wins() {
+        let m = make_manifest(&["data", "linux", "pipeline"]);
+        assert_eq!(derive_category(&m), "data");
+    }
 
     fn create_test_skill(dir: &Path, name: &str) {
         let skill_dir = dir.join(name);

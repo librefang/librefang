@@ -454,6 +454,13 @@ pub struct LibreFangKernel {
     /// to the Unix epoch (seconds) of their last review. This prevents spamming
     /// LLM calls while allowing different agents to independently trigger reviews.
     skill_review_cooldowns: dashmap::DashMap<String, i64>,
+    /// Global in-flight review counter — caps how many background skill
+    /// reviews can run concurrently across the whole kernel. Without this,
+    /// many agents finishing complex tasks simultaneously could stampede
+    /// the default driver and blow the global budget before per-agent
+    /// cooldowns catch up. Semaphore starts at
+    /// [`Self::MAX_INFLIGHT_SKILL_REVIEWS`] permits.
+    skill_review_concurrency: std::sync::Arc<tokio::sync::Semaphore>,
     /// Generation counter for MCP tool definitions — bumped whenever mcp_tools
     /// are modified (connect, disconnect, rebuild). Used by the tool list cache.
     mcp_generation: std::sync::atomic::AtomicU64,
@@ -2230,6 +2237,9 @@ impl LibreFangKernel {
             prompt_metadata_cache: PromptMetadataCache::new(),
             skill_generation: std::sync::atomic::AtomicU64::new(0),
             skill_review_cooldowns: dashmap::DashMap::new(),
+            skill_review_concurrency: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                Self::MAX_INFLIGHT_SKILL_REVIEWS,
+            )),
             mcp_generation: std::sync::atomic::AtomicU64::new(0),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
             budget_config: std::sync::RwLock::new(initial_budget),
@@ -3525,11 +3535,36 @@ system_prompt = "You are a helpful assistant."
                 // Cooldown: per-agent, at most one review every SKILL_REVIEW_COOLDOWN_SECS.
                 let now_epoch = chrono::Utc::now().timestamp();
                 let agent_id_str = agent_id.to_string();
+                // Pre-claim gate 1: eligibility. Only consider claiming
+                // the cooldown slot if this loop actually suggested a
+                // review AND the agent didn't already evolve a skill.
+                let eligible = result.skill_evolution_suggested && !used_evolution_tool;
+                // Pre-claim gate 2: budget. Background reviews are
+                // optional work — if the global budget is exhausted we
+                // want to skip WITHOUT burning the 5-minute cooldown
+                // slot, so that the next message (after any budget top-up
+                // or rollover) can re-try immediately. Checking before
+                // claim is the whole point here.
+                let budget_ok = if eligible {
+                    match self.metering.check_global_budget(&self.budget_config()) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::debug!(
+                                agent_id = %agent_id,
+                                error = %e,
+                                "Skipping background skill review — global budget exhausted"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
                 // Atomic claim: only proceed if we successfully move the
                 // cooldown tick forward for this agent. Closes the
-                // previous check-then-insert race between concurrent
-                // agent loops for the same agent id.
-                let claimed = if result.skill_evolution_suggested && !used_evolution_tool {
+                // check-then-insert race between concurrent agent loops
+                // for the same agent id.
+                let claimed = if budget_ok {
                     self.try_claim_skill_review_slot(&agent_id_str, now_epoch)
                 } else {
                     false
@@ -3542,7 +3577,37 @@ system_prompt = "You are a helpful assistant."
                     let kernel_weak = self.self_handle.get().cloned();
                     let audit_log = self.audit_log.clone();
                     let agent_id_for_task = agent_id_str.clone();
+                    // Capture defaults for cost attribution — the review
+                    // uses `default_driver` so its cost rolls up under the
+                    // default model in the user's dashboards.
+                    let default_model = self.default_model();
+                    let review_agent_id = agent_id;
+                    // Clone the semaphore handle so the spawned task can
+                    // acquire a permit. try_acquire_owned inside the task
+                    // (not here) lets us release the cooldown slot fast:
+                    // if no permit is available we skip the review but
+                    // still log it so operators can see the congestion.
+                    let review_sem = self.skill_review_concurrency.clone();
+                    let cooldowns = std::sync::Arc::new(()); // unused placeholder to keep diff clean
+                    let _ = cooldowns;
+                    let audit_log_success = audit_log.clone();
+                    let agent_id_for_success = agent_id_str.clone();
                     tokio::spawn(async move {
+                        // Acquire a global review permit. If all permits
+                        // are in use we drop the review entirely rather
+                        // than queueing — the cooldown still gates this
+                        // agent from retrying for 5 minutes, so we don't
+                        // want unbounded task queues piling up.
+                        let _permit = match review_sem.try_acquire_owned() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                tracing::info!(
+                                    agent_id = %agent_id_for_task,
+                                    "Skipping background skill review — global concurrency limit reached"
+                                );
+                                return;
+                            }
+                        };
                         // Retry with exponential backoff, but only for
                         // transient errors (timeout / LLM driver failure).
                         // Permanent errors (parse/validation) fail fast —
@@ -3564,11 +3629,24 @@ system_prompt = "You are a helpful assistant."
                                 &trace_summary,
                                 &response_summary,
                                 kernel_weak.clone(),
+                                review_agent_id,
+                                &default_model,
                             )
                             .await
                             {
                                 Ok(()) => {
                                     last_err.clear();
+                                    // Audit successful review completion. The reviewer may have
+                                    // chosen "skip" — that's still a successful review outcome,
+                                    // just with no skill change. The audit tells operators "a
+                                    // review ran", leaving the specific mutation (if any) to
+                                    // be inferred from the version history it produced.
+                                    audit_log_success.record(
+                                        agent_id_for_success.clone(),
+                                        librefang_runtime::audit::AuditAction::AgentMessage,
+                                        "skill_review",
+                                        format!("completed after {attempts_used} attempt(s)"),
+                                    );
                                     break;
                                 }
                                 Err(e) => {
@@ -9944,6 +10022,13 @@ system_prompt = "You are a helpful assistant."
     /// memory bounded when many ephemeral agents cycle through.
     const SKILL_REVIEW_COOLDOWN_CAP: usize = 2048;
 
+    /// Maximum number of background skill reviews allowed to run
+    /// concurrently across the whole kernel. Reviews acquire a permit
+    /// before making the LLM call, so a burst of finishing agents cannot
+    /// stampede the default driver. Chosen low because reviews are
+    /// optional / best-effort work.
+    const MAX_INFLIGHT_SKILL_REVIEWS: usize = 3;
+
     /// Attempt to claim a per-agent cooldown slot for a background review.
     ///
     /// Returns `true` iff this caller successfully advanced the agent's
@@ -10052,33 +10137,83 @@ system_prompt = "You are a helpful assistant."
         trace_summary: &str,
         response_summary: &str,
         kernel_weak: Option<std::sync::Weak<LibreFangKernel>>,
+        triggering_agent_id: AgentId,
+        default_model: &librefang_types::config::DefaultModelConfig,
     ) -> Result<(), String> {
         use librefang_runtime::llm_driver::CompletionRequest;
         use librefang_types::message::Message;
 
+        // Collect the short list of skills that already exist so the
+        // reviewer can choose `update`/`patch` on a relevant one rather
+        // than creating a duplicate. We only send name + description —
+        // the full prompt_context would blow the review budget.
+        let existing_skills_block: String = kernel_weak
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .map(|kernel| {
+                let reg = kernel
+                    .skill_registry
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let lines: Vec<String> = reg
+                    .list()
+                    .iter()
+                    .take(100) // hard cap
+                    .map(|s| {
+                        let desc: String = s
+                            .manifest
+                            .skill
+                            .description
+                            .chars()
+                            .take(120)
+                            .collect();
+                        format!("- {}: {}", s.manifest.skill.name, desc)
+                    })
+                    .collect();
+                if lines.is_empty() {
+                    "(no skills installed)".to_string()
+                } else {
+                    lines.join("\n")
+                }
+            })
+            .unwrap_or_else(|| "(unknown)".to_string());
+
         let review_prompt = concat!(
             "You are a skill evolution reviewer. Analyze the completed task below and decide ",
-            "whether the approach should be saved as a reusable skill.\n\n",
-            "A skill is worth saving when:\n",
+            "whether the approach should be saved or merged into the skill library.\n\n",
+            "First, check the EXISTING SKILLS list. If the task's methodology fits one of them, ",
+            "prefer `update` (full rewrite) or `patch` (small fix) over creating a duplicate.\n\n",
+            "A skill is worth evolving when:\n",
             "- The task required trial-and-error or changing course\n",
             "- A non-obvious workflow was discovered\n",
             "- The approach involved 5+ steps that could benefit future similar tasks\n",
             "- The user's preferred method differs from the obvious approach\n\n",
-            "If worth saving, respond with a JSON object:\n",
+            "Choose exactly ONE of these JSON responses:\n",
             "```json\n",
             "{\"action\": \"create\", \"name\": \"skill-name\", \"description\": \"one-line desc\", ",
             "\"prompt_context\": \"# Skill Title\\n\\nMarkdown instructions...\", ",
             "\"tags\": [\"tag1\", \"tag2\"]}\n",
-            "```\n\n",
-            "If nothing is worth saving, respond with:\n",
+            "```\n",
+            "```json\n",
+            "{\"action\": \"update\", \"name\": \"existing-skill-name\", ",
+            "\"prompt_context\": \"# fully rewritten markdown...\", ",
+            "\"changelog\": \"why the rewrite\"}\n",
+            "```\n",
+            "```json\n",
+            "{\"action\": \"patch\", \"name\": \"existing-skill-name\", ",
+            "\"old_string\": \"text to find\", \"new_string\": \"replacement\", ",
+            "\"changelog\": \"why the change\"}\n",
+            "```\n",
             "```json\n",
             "{\"action\": \"skip\", \"reason\": \"brief explanation\"}\n",
             "```\n\n",
             "Respond with ONLY the JSON block, nothing else.",
         );
 
-        let user_msg =
-            format!("## Task Summary\n{response_summary}\n\n## Tool Calls\n{trace_summary}");
+        let user_msg = format!(
+            "## Task Summary\n{response_summary}\n\n## Tool Calls\n{trace_summary}\n\n\
+             ## Existing Skills\n{existing_skills_block}"
+        );
 
         let request = CompletionRequest {
             model: String::new(),
@@ -10094,13 +10229,50 @@ system_prompt = "You are a helpful assistant."
             extra_body: None,
         };
 
+        let start = std::time::Instant::now();
         let response =
             tokio::time::timeout(std::time::Duration::from_secs(30), driver.complete(request))
                 .await
                 .map_err(|_| "Background skill review timed out (30s)".to_string())?
                 .map_err(|e| format!("LLM call failed: {e}"))?;
+        let latency_ms = start.elapsed().as_millis() as u64;
 
         let text = response.text();
+
+        // Attribute cost to the triggering agent so per-agent budgets
+        // and dashboards reflect work done on that agent's behalf. We
+        // use the kernel's default model config for provider/model —
+        // that's what `default_driver` was configured with — and the
+        // live model catalog for pricing. Usage recording is best-effort:
+        // failures are logged but don't abort the review.
+        if let Some(kernel) = kernel_weak.as_ref().and_then(|w| w.upgrade()) {
+            let cost = MeteringEngine::estimate_cost_with_catalog(
+                &kernel
+                    .model_catalog
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner()),
+                &default_model.model,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+                response.usage.cache_read_input_tokens,
+                response.usage.cache_creation_input_tokens,
+            );
+            let usage_record = librefang_memory::usage::UsageRecord {
+                agent_id: triggering_agent_id,
+                provider: default_model.provider.clone(),
+                model: default_model.model.clone(),
+                input_tokens: response.usage.input_tokens,
+                output_tokens: response.usage.output_tokens,
+                cost_usd: cost,
+                // decision_traces isn't meaningful here — the review call
+                // is single-shot, so tool_calls is always 0.
+                tool_calls: 0,
+                latency_ms,
+            };
+            if let Err(e) = kernel.metering.record(&usage_record) {
+                tracing::debug!(error = %e, "Failed to record background review usage");
+            }
+        }
 
         // Extract JSON from response using multiple strategies:
         // 1. Try to extract from ```json ... ``` code block (most reliable)
@@ -10115,79 +10287,197 @@ system_prompt = "You are a helpful assistant."
         // Missing action → behave as "skip". Log at debug since this is
         // common for badly-formatted responses.
         let action = parsed["action"].as_str().unwrap_or("skip");
+        let review_author = format!("reviewer:agent:{triggering_agent_id}");
+
+        // Helper: lift an `Ok(result)` into a hot-reload + return.
+        let do_reload = || {
+            if let Some(kernel) = kernel_weak.as_ref().and_then(|w| w.upgrade()) {
+                kernel.reload_skills();
+            }
+        };
+
+        let name = parsed["name"].as_str();
         match action {
             "skip" => {
                 tracing::debug!(
                     reason = parsed["reason"].as_str().unwrap_or(""),
                     "Background skill review: nothing to save"
                 );
-                return Ok(());
+                Ok(())
             }
-            "create" => {} // handled below
+
+            // Full rewrite of an existing skill. Requires a `changelog`
+            // and the target skill must already be installed.
+            "update" => {
+                let name = name.ok_or("Missing 'name' in update response")?;
+                let prompt_context = parsed["prompt_context"]
+                    .as_str()
+                    .ok_or("Missing 'prompt_context' in update response")?;
+                let changelog = parsed["changelog"]
+                    .as_str()
+                    .ok_or("Missing 'changelog' in update response")?;
+
+                let kernel = kernel_weak
+                    .as_ref()
+                    .and_then(|w| w.upgrade())
+                    .ok_or_else(|| "Kernel dropped before update".to_string())?;
+                let skill = {
+                    let reg = kernel
+                        .skill_registry
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner());
+                    reg.get(name).cloned()
+                };
+                let skill = match skill {
+                    Some(s) => s,
+                    None => {
+                        tracing::info!(
+                            skill = name,
+                            "Reviewer asked to update missing skill — skipping"
+                        );
+                        return Ok(());
+                    }
+                };
+                match librefang_skills::evolution::update_skill(
+                    &skill,
+                    prompt_context,
+                    changelog,
+                    Some(&review_author),
+                ) {
+                    Ok(result) => {
+                        tracing::info!(skill = %result.skill_name, version = %result.version.as_deref().unwrap_or("?"), "💾 Background review: updated skill");
+                        do_reload();
+                        Ok(())
+                    }
+                    Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
+                        Err(format!("security_blocked: {msg}"))
+                    }
+                    Err(e) => Err(format!("update_skill: {e}")),
+                }
+            }
+
+            // Fuzzy find-and-replace patch. Useful for small corrections
+            // where the reviewer identifies a specific sentence that's
+            // wrong or outdated.
+            "patch" => {
+                let name = name.ok_or("Missing 'name' in patch response")?;
+                let old_string = parsed["old_string"]
+                    .as_str()
+                    .ok_or("Missing 'old_string' in patch response")?;
+                let new_string = parsed["new_string"]
+                    .as_str()
+                    .ok_or("Missing 'new_string' in patch response")?;
+                let changelog = parsed["changelog"]
+                    .as_str()
+                    .ok_or("Missing 'changelog' in patch response")?;
+
+                let kernel = kernel_weak
+                    .as_ref()
+                    .and_then(|w| w.upgrade())
+                    .ok_or_else(|| "Kernel dropped before patch".to_string())?;
+                let skill = {
+                    let reg = kernel
+                        .skill_registry
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner());
+                    reg.get(name).cloned()
+                };
+                let skill = match skill {
+                    Some(s) => s,
+                    None => {
+                        tracing::info!(
+                            skill = name,
+                            "Reviewer asked to patch missing skill — skipping"
+                        );
+                        return Ok(());
+                    }
+                };
+                match librefang_skills::evolution::patch_skill(
+                    &skill,
+                    old_string,
+                    new_string,
+                    changelog,
+                    false, // never replace_all from the reviewer — too risky
+                    Some(&review_author),
+                ) {
+                    Ok(result) => {
+                        tracing::info!(skill = %result.skill_name, version = %result.version.as_deref().unwrap_or("?"), "💾 Background review: patched skill");
+                        do_reload();
+                        Ok(())
+                    }
+                    Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
+                        Err(format!("security_blocked: {msg}"))
+                    }
+                    Err(e) => {
+                        // Patch failures on the reviewer path are common
+                        // (fuzzy matching is finicky) — log but don't
+                        // treat as fatal.
+                        tracing::debug!(skill = name, error = %e, "Reviewer patch failed");
+                        Ok(())
+                    }
+                }
+            }
+
+            "create" => {
+                let name = name.ok_or("Missing 'name' in create response")?;
+                let description = parsed["description"]
+                    .as_str()
+                    .ok_or("Missing 'description' in create response")?;
+                let prompt_context = parsed["prompt_context"]
+                    .as_str()
+                    .ok_or("Missing 'prompt_context' in create response")?;
+                let tags: Vec<String> = parsed["tags"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                match librefang_skills::evolution::create_skill(
+                    skills_dir,
+                    name,
+                    description,
+                    prompt_context,
+                    tags,
+                    Some(&review_author),
+                ) {
+                    Ok(result) => {
+                        tracing::info!(
+                            skill = name,
+                            "💾 Background skill review: created skill '{}'",
+                            result.skill_name
+                        );
+                        do_reload();
+                        Ok(())
+                    }
+                    Err(librefang_skills::SkillError::AlreadyInstalled(_)) => {
+                        tracing::debug!(skill = name, "Skill already exists — skipping creation");
+                        Ok(())
+                    }
+                    Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
+                        // Security-rejected content is a permanent failure —
+                        // the reviewer proposed something the scanner blocked.
+                        // Surface it without triggering retry.
+                        Err(format!("security_blocked: {msg}"))
+                    }
+                    Err(e) => {
+                        tracing::debug!(skill = name, error = %e, "Background skill creation failed");
+                        Err(format!("create_skill: {e}"))
+                    }
+                }
+            }
+
+            // Unknown action — info-log and skip. Future reviewer prompts
+            // may add new actions and we should degrade gracefully.
             other => {
-                // Unknown action — info-log so the operator can see what
-                // the reviewer returned. Not treated as an error: future
-                // reviewer prompts might add new actions and we should
-                // degrade gracefully.
                 tracing::info!(
                     action = other,
                     reason = parsed["reason"].as_str().unwrap_or(""),
                     "Background skill review: unrecognized action, skipping"
                 );
-                return Ok(());
-            }
-        }
-
-        let name = parsed["name"]
-            .as_str()
-            .ok_or("Missing 'name' in review response")?;
-        let description = parsed["description"]
-            .as_str()
-            .ok_or("Missing 'description' in review response")?;
-        let prompt_context = parsed["prompt_context"]
-            .as_str()
-            .ok_or("Missing 'prompt_context' in review response")?;
-        let tags: Vec<String> = parsed["tags"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        match librefang_skills::evolution::create_skill(
-            skills_dir,
-            name,
-            description,
-            prompt_context,
-            tags,
-        ) {
-            Ok(result) => {
-                tracing::info!(
-                    skill = name,
-                    "💾 Background skill review: created skill '{}'",
-                    result.skill_name
-                );
-                // Hot-reload so the new skill is available immediately
-                if let Some(kernel) = kernel_weak.and_then(|w| w.upgrade()) {
-                    kernel.reload_skills();
-                }
                 Ok(())
-            }
-            Err(librefang_skills::SkillError::AlreadyInstalled(_)) => {
-                tracing::debug!(skill = name, "Skill already exists — skipping creation");
-                Ok(())
-            }
-            Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
-                // Security-rejected content is a permanent failure — the
-                // reviewer proposed something the scanner blocked. Surface
-                // it so the operator can inspect without triggering retry.
-                Err(format!("security_blocked: {msg}"))
-            }
-            Err(e) => {
-                tracing::debug!(skill = name, error = %e, "Background skill creation failed");
-                Err(format!("create_skill: {e}"))
             }
         }
     }
@@ -10462,20 +10752,15 @@ system_prompt = "You are a helpful assistant."
             return String::new();
         }
 
-        // Group skills by category (derived from parent directory name or tags)
+        // Group skills by category. Category derivation lives in
+        // `librefang_skills::registry::derive_category` so this grouping
+        // matches the API list handler and the dashboard sidebar.
         let mut categories: std::collections::BTreeMap<
             String,
             Vec<&librefang_skills::InstalledSkill>,
         > = std::collections::BTreeMap::new();
         for skill in &skills {
-            // Derive category: use first tag if available, else "general"
-            let category = skill
-                .manifest
-                .skill
-                .tags
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "general".to_string());
+            let category = librefang_skills::registry::derive_category(&skill.manifest).to_string();
             categories.entry(category).or_default().push(skill);
         }
 

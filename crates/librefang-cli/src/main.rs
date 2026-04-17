@@ -692,6 +692,116 @@ enum SkillCommands {
         long_about = "Scaffold a new skill project with boilerplate files.\n\nCreates a skill.toml, SKILL.md, and starter tool implementation.\n\nExamples:\n  librefang skill create"
     )]
     Create,
+    /// Agent-driven skill evolution — create/update/patch/rollback installed skills.
+    #[command(
+        subcommand,
+        long_about = "Manually invoke the skill evolution pipeline that agents use internally.\n\nOperates on the globally-installed skill directory (~/.librefang/skills).\nAll mutations go through the same validation, security scan, file locking,\nand version-history bookkeeping as the agent tools.\n\nExamples:\n  librefang skill evolve create --name my-skill --description ... --context-file prompt.md\n  librefang skill evolve update my-skill prompt.md --changelog \"tightened wording\"\n  librefang skill evolve patch my-skill --old-file a.txt --new-file b.txt --changelog \"fix typo\"\n  librefang skill evolve rollback my-skill\n  librefang skill evolve history my-skill"
+    )]
+    Evolve(EvolveCommands),
+}
+
+#[derive(Subcommand)]
+enum EvolveCommands {
+    /// Create a new prompt-only skill from a Markdown file.
+    Create {
+        /// Skill name (lowercase alphanumeric + hyphens).
+        #[arg(long)]
+        name: String,
+        /// One-line description (≤1024 chars).
+        #[arg(long)]
+        description: String,
+        /// File containing the Markdown prompt_context. Use "-" for stdin.
+        #[arg(long = "context-file")]
+        context_file: PathBuf,
+        /// Comma-separated tags (e.g., "data,csv,analysis").
+        #[arg(long, default_value = "")]
+        tags: String,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Fully rewrite a skill's prompt_context from a file.
+    Update {
+        /// Skill name.
+        name: String,
+        /// File containing the new prompt_context. Use "-" for stdin.
+        context_file: PathBuf,
+        /// Brief description of what changed and why.
+        #[arg(long)]
+        changelog: String,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Find-and-replace patch a skill's prompt_context (fuzzy-matched).
+    Patch {
+        /// Skill name.
+        name: String,
+        /// File containing the text to find.
+        #[arg(long = "old-file")]
+        old_file: PathBuf,
+        /// File containing the replacement text.
+        #[arg(long = "new-file")]
+        new_file: PathBuf,
+        /// Brief description of what changed and why.
+        #[arg(long)]
+        changelog: String,
+        /// Replace every occurrence (default: require unique match).
+        #[arg(long)]
+        replace_all: bool,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Delete a locally-evolved skill.
+    Delete {
+        /// Skill name.
+        name: String,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Roll back the most recent evolution of a skill.
+    Rollback {
+        /// Skill name.
+        name: String,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Add a supporting file to a skill (under references/, templates/, scripts/, or assets/).
+    WriteFile {
+        /// Skill name.
+        name: String,
+        /// Relative path under the skill directory (e.g., references/api.md).
+        path: String,
+        /// Source file whose contents will be copied. Use "-" for stdin.
+        source: PathBuf,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Remove a supporting file from a skill.
+    RemoveFile {
+        /// Skill name.
+        name: String,
+        /// Relative path of the file to remove.
+        path: String,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Print the version history and usage counters for a skill.
+    History {
+        /// Skill name.
+        name: String,
+        /// Emit JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1661,6 +1771,7 @@ fn main() {
                 dry_run,
             } => cmd_skill_publish(path, repo, tag, output, dry_run),
             SkillCommands::Create => cmd_skill_create(),
+            SkillCommands::Evolve(sub) => cmd_skill_evolve(sub),
         },
         Some(Commands::Channel(sub)) => match sub {
             ChannelCommands::List => cmd_channel_list(),
@@ -5178,12 +5289,12 @@ fn cmd_skill_list(hand: Option<&str>) {
 }
 
 fn cmd_skill_remove(name: &str, hand: Option<&str>) {
+    // Route through the safe uninstall path (lock + path-traversal
+    // guard) instead of `registry.remove()` which calls `remove_dir_all`
+    // with no serialisation against concurrent evolve operations.
     let skills_dir = resolve_skills_dir(hand);
-
-    let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
-    let _ = registry.load_all();
-    match registry.remove(name) {
-        Ok(()) => {
+    match librefang_skills::evolution::uninstall_skill(&skills_dir, name) {
+        Ok(_) => {
             if let Some(h) = hand {
                 println!("Removed skill '{name}' from hand '{h}'");
             } else {
@@ -5527,6 +5638,241 @@ if __name__ == "__main__":
         "  3. Install: librefang skill install {}",
         skill_dir.display()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Skill evolve commands — thin CLI wrappers over librefang_skills::evolution
+// ---------------------------------------------------------------------------
+
+/// Read a file path, or stdin if path is "-".
+fn read_file_or_stdin(path: &std::path::Path) -> std::io::Result<String> {
+    if path == std::path::Path::new("-") {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        Ok(buf)
+    } else {
+        std::fs::read_to_string(path)
+    }
+}
+
+/// Print an EvolutionResult as a one-line status.
+fn print_evolution_result(result: &librefang_skills::evolution::EvolutionResult) {
+    let marker = if result.success { "OK" } else { "FAIL" };
+    match &result.version {
+        Some(v) => println!("[{marker}] {} (v{v})", result.message),
+        None => println!("[{marker}] {}", result.message),
+    }
+}
+
+/// Resolve a skill by name. Respects `--hand` so evolve operations can
+/// target a per-hand workspace skills dir just like `install`/`list`.
+fn load_installed_skill(
+    name: &str,
+    hand: Option<&str>,
+) -> (PathBuf, librefang_skills::InstalledSkill) {
+    let skills_dir = resolve_skills_dir(hand);
+    let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir.clone());
+    if let Err(e) = registry.load_all() {
+        eprintln!("Error loading skill registry: {e}");
+        std::process::exit(1);
+    }
+    match registry.get(name) {
+        Some(skill) => (skills_dir, skill.clone()),
+        None => {
+            eprintln!("Skill '{name}' not found in {}", skills_dir.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_skill_evolve(sub: EvolveCommands) {
+    match sub {
+        EvolveCommands::Create {
+            name,
+            description,
+            context_file,
+            tags,
+            hand,
+        } => {
+            let prompt_context = match read_file_or_stdin(&context_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to read {}: {e}", context_file.display());
+                    std::process::exit(1);
+                }
+            };
+            let tag_list: Vec<String> = tags
+                .split(',')
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+                .collect();
+            let skills_dir = resolve_skills_dir(hand.as_deref());
+            if let Err(e) = std::fs::create_dir_all(&skills_dir) {
+                eprintln!("Failed to create skills dir: {e}");
+                std::process::exit(1);
+            }
+            match librefang_skills::evolution::create_skill(
+                &skills_dir,
+                &name,
+                &description,
+                &prompt_context,
+                tag_list,
+                Some("cli"),
+            ) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Create failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::Update {
+            name,
+            context_file,
+            changelog,
+            hand,
+        } => {
+            let new_ctx = match read_file_or_stdin(&context_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to read {}: {e}", context_file.display());
+                    std::process::exit(1);
+                }
+            };
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            match librefang_skills::evolution::update_skill(
+                &skill,
+                &new_ctx,
+                &changelog,
+                Some("cli"),
+            ) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Update failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::Patch {
+            name,
+            old_file,
+            new_file,
+            changelog,
+            replace_all,
+            hand,
+        } => {
+            let old_str = match read_file_or_stdin(&old_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to read {}: {e}", old_file.display());
+                    std::process::exit(1);
+                }
+            };
+            let new_str = match read_file_or_stdin(&new_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to read {}: {e}", new_file.display());
+                    std::process::exit(1);
+                }
+            };
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            match librefang_skills::evolution::patch_skill(
+                &skill,
+                &old_str,
+                &new_str,
+                &changelog,
+                replace_all,
+                Some("cli"),
+            ) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Patch failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::Delete { name, hand } => {
+            let skills_dir = resolve_skills_dir(hand.as_deref());
+            match librefang_skills::evolution::delete_skill(&skills_dir, &name) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Delete failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::Rollback { name, hand } => {
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            match librefang_skills::evolution::rollback_skill(&skill, Some("cli")) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Rollback failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::WriteFile {
+            name,
+            path,
+            source,
+            hand,
+        } => {
+            let content = match read_file_or_stdin(&source) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to read {}: {e}", source.display());
+                    std::process::exit(1);
+                }
+            };
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            match librefang_skills::evolution::write_supporting_file(&skill, &path, &content) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Write-file failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::RemoveFile { name, path, hand } => {
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            match librefang_skills::evolution::remove_supporting_file(&skill, &path) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Remove-file failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::History { name, json, hand } => {
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            let meta = librefang_skills::evolution::get_evolution_info(&skill);
+            if json {
+                match serde_json::to_string_pretty(&meta) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => {
+                        eprintln!("Failed to serialize history: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+            println!("Skill: {}", skill.manifest.skill.name);
+            println!("Current version: {}", skill.manifest.skill.version);
+            println!("Use count: {}", meta.use_count);
+            println!("Evolution count: {}", meta.evolution_count);
+            if meta.versions.is_empty() {
+                println!("\nNo version history recorded.");
+                return;
+            }
+            println!("\n{:<10} {:<25} CHANGELOG", "VERSION", "TIMESTAMP");
+            println!("{}", "-".repeat(70));
+            for v in meta.versions.iter().rev() {
+                println!("{:<10} {:<25} {}", v.version, v.timestamp, v.changelog);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
