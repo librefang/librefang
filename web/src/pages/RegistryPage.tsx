@@ -7,6 +7,7 @@ import { translations, languages } from './../i18n'
 import type { Translation } from './../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
+import { fetchRegistryRaw } from '../lib/registry-raw'
 
 interface RegistryPageProps {
   category: RegistryCategory
@@ -49,14 +50,6 @@ function sortItems(items: Detail[]): Detail[] {
     if (ap !== bp) return ap - bp
     return a.name.localeCompare(b.name)
   })
-}
-
-const RAW_API = 'https://stats.librefang.ai/api/registry/raw'
-
-async function fetchRaw(path: string): Promise<string> {
-  const res = await fetch(`${RAW_API}?path=${encodeURIComponent(path)}`)
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return res.text()
 }
 
 const TRENDING_API = 'https://stats.librefang.ai/api/registry/trending'
@@ -345,7 +338,7 @@ export default function RegistryPage({ category }: RegistryPageProps) {
                 // in-flight or fresh, so it's safe to call on every hover.
                 queryClient.prefetchQuery({
                   queryKey: ['registry-raw', rawPath],
-                  queryFn: () => fetchRaw(rawPath),
+                  queryFn: () => fetchRegistryRaw(rawPath),
                   staleTime: 1000 * 60 * 60,
                 }).catch(() => { /* prefetch failure is silent */ })
               }

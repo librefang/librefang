@@ -8,13 +8,13 @@ import { translations } from '../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
 import { highlightToml } from '../lib/toml-highlight'
+import { fetchRegistryRaw } from '../lib/registry-raw'
 
 interface RegistryDetailPageProps {
   category: RegistryCategory
   id: string
 }
 
-const RAW_API = 'https://stats.librefang.ai/api/registry/raw'
 const COMMIT_API = 'https://stats.librefang.ai/api/registry/commit'
 const CLICK_API = 'https://stats.librefang.ai/api/registry/click'
 
@@ -60,15 +60,6 @@ const COMMAND_TEMPLATE: Partial<Record<RegistryCategory, string>> = {
   hands:    'librefang hand activate {id}',
   agents:   'librefang agent new {id}',
   channels: 'librefang channel setup {id}',
-}
-
-async function fetchRaw(path: string): Promise<string> {
-  const res = await fetch(`${RAW_API}?path=${encodeURIComponent(path)}`)
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`HTTP ${res.status}${body ? `: ${body}` : ''}`)
-  }
-  return res.text()
 }
 
 function isPopular(item: Detail | undefined) {
@@ -138,7 +129,7 @@ export default function RegistryDetailPage({ category, id }: RegistryDetailPageP
   const rawPath = pathFor(category, id)
   const rawQuery = useQuery({
     queryKey: ['registry-raw', rawPath],
-    queryFn: () => fetchRaw(rawPath),
+    queryFn: () => fetchRegistryRaw(rawPath),
     staleTime: 1000 * 60 * 60,
     retry: 1,
   })

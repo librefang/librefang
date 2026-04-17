@@ -1,6 +1,29 @@
 import { expect, test } from '@playwright/test'
 
+// Deterministic TOML payload fed to the page so the .toml-highlight renderer
+// is exercised without the tests depending on stats.librefang.ai (its
+// /api/registry/raw endpoint isn't live yet) or GitHub raw (rate-limited on
+// CI). Both upstream URLs are intercepted — see fetchRegistryRaw.
+const FIXTURE_TOML = `# Fixture manifest used by detail-dom e2e tests.
+id = "fixture-hand"
+name = "Fixture Hand"
+description = "Deterministic manifest for Playwright"
+
+[metadata]
+category = "test"
+version = "0.0.1"
+`
+
 test.describe('detail page DOM', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/stats.librefang.ai/api/registry/raw**', route =>
+      route.fulfill({ status: 200, contentType: 'text/plain', body: FIXTURE_TOML })
+    )
+    await page.route('**/raw.githubusercontent.com/librefang/librefang-registry/**', route =>
+      route.fulfill({ status: 200, contentType: 'text/plain', body: FIXTURE_TOML })
+    )
+  })
+
   test('TOML manifest renders highlighted spans', async ({ page }) => {
     // Use /hands because skill manifests ship as SKILL.md (YAML frontmatter),
     // not TOML — only TOML-backed categories exercise the .toml-highlight
