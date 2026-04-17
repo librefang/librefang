@@ -59,6 +59,22 @@ export default function SubpageHeader({ crumbs, sourceUrl, onOpenSearch }: Subpa
     { label: rc?.channels.title || 'Channels', href: `${langPrefix}/channels` },
   ]
 
+  // Homepage on-page sections. From a subpage these are cross-page navs that
+  // jump to the landing page + scroll-to hash.
+  const anchorLinks = [
+    { label: t.nav.architecture, href: `${homeHref}#architecture` },
+    { label: t.nav.workflows || t.workflows?.label || 'Workflows', href: `${homeHref}#workflows` },
+    { label: t.nav.performance, href: `${homeHref}#performance` },
+  ]
+
+  // Flat right-nav entries — match the homepage Nav so the cluster is
+  // consistent whether you're on / or /skills.
+  const flatLinks = [
+    { label: t.nav.install, href: `${homeHref}#install` },
+    { label: t.nav.downloads || 'Downloads', href: `${homeHref}#downloads` },
+    { label: t.nav.docs, href: 'https://docs.librefang.ai', external: true },
+  ]
+
   return (
     <div className="border-b border-black/10 dark:border-white/5 bg-surface-100 sticky top-0 z-40 backdrop-blur-md bg-surface-100/90">
       <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between gap-4">
@@ -101,7 +117,10 @@ export default function SubpageHeader({ crumbs, sourceUrl, onOpenSearch }: Subpa
               <ChevronDown className={cn('w-3 h-3 transition-transform', featuresOpen && 'rotate-180')} />
             </button>
             {featuresOpen && (
-              <div className="absolute right-0 mt-2 w-56 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50 py-1">
+              <div className="absolute right-0 mt-2 w-64 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50 py-1">
+                <div className="px-4 pt-2 pb-1 text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest">
+                  {t.nav.registry || 'Registry'}
+                </div>
                 {featureLinks.map(l => (
                   <a
                     key={l.label}
@@ -115,8 +134,39 @@ export default function SubpageHeader({ crumbs, sourceUrl, onOpenSearch }: Subpa
                     {l.highlight && <Sparkles className="w-3.5 h-3.5" />}
                   </a>
                 ))}
+                <div className="border-t border-black/10 dark:border-white/10 mt-2 pt-2" />
+                <div className="px-4 pb-1 text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest">
+                  {t.nav.learnMore || 'Learn More'}
+                </div>
+                {anchorLinks.map(l => (
+                  <a
+                    key={l.label}
+                    href={l.href}
+                    className="flex items-center justify-between px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                  >
+                    <span>{l.label}</span>
+                  </a>
+                ))}
               </div>
             )}
+          </div>
+
+          {/* Flat links — Install / Downloads / Docs. Install + Downloads
+              are on-page anchors on the homepage, so from a subpage they
+              are cross-page navigation that lands with a scroll-to hash. */}
+          <div className="hidden lg:flex items-center gap-1">
+            {flatLinks.map(l => (
+              <a
+                key={l.label}
+                href={l.href}
+                target={l.external ? '_blank' : undefined}
+                rel={l.external ? 'noopener noreferrer' : undefined}
+                className="px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium flex items-center gap-1"
+              >
+                {l.label}
+                {l.external && <ExternalLink className="w-3 h-3" />}
+              </a>
+            ))}
           </div>
 
           {onOpenSearch && (
