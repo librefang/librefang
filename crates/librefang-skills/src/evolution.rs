@@ -92,6 +92,13 @@ pub struct SkillEvolutionMeta {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MatchStrategy {
     Exact,
+    /// All whitespace stripped from both sides of the comparison.
+    /// Useful for CJK content where inter-character spaces carry no
+    /// semantic meaning (`仔细分析 （` ≡ `仔细分析（`). Applied as a
+    /// substring match on the stripped forms; mapping back to the
+    /// original content uses the character offsets of the stripped
+    /// needle's boundaries.
+    WhitespaceStripped,
     LineTrimmed,
     WhitespaceNormalized,
     IndentFlexible,
@@ -277,14 +284,17 @@ fn strip_indent(s: &str) -> String {
         .join("\n")
 }
 
-/// 5-strategy fuzzy find-and-replace. Returns None if no match found.
+/// 6-strategy fuzzy find-and-replace. Returns None if no match found.
 ///
 /// Strategies tried in order (strict → loose):
 /// 1. **Exact**: literal substring match
 /// 2. **Line-trimmed**: trim each line's leading/trailing whitespace
-/// 3. **Whitespace-normalized**: collapse whitespace runs
+/// 3. **Whitespace-normalized**: collapse whitespace runs to single space
 /// 4. **Indent-flexible**: strip all leading whitespace
 /// 5. **Block-anchor**: match first+last lines, check middle similarity ≥60%
+/// 6. **Whitespace-stripped**: remove ALL whitespace from both sides, then
+///    substring match. Last resort — needed for CJK content where
+///    inter-character spaces carry no semantic meaning.
 pub fn fuzzy_find_and_replace(
     content: &str,
     old_str: &str,
@@ -366,6 +376,16 @@ pub fn fuzzy_find_and_replace(
 
     // Strategy 5: Block-anchor (first+last line match, middle ≥60% similar)
     if let Some(result) = try_block_anchor_replace(content, old_str, new_str, replace_all)? {
+        return Ok(result);
+    }
+
+    // Strategy 6: Whitespace-stripped (last-resort CJK-friendly match).
+    // Strip all whitespace from both sides and do a substring match
+    // there. To map back to the original content, we re-scan the
+    // original content collecting (stripped_index -> original_index)
+    // so we know which substring in the ORIGINAL content corresponds
+    // to the stripped-match range — then replace that range verbatim.
+    if let Some(result) = try_whitespace_stripped_replace(content, old_str, new_str, replace_all)? {
         return Ok(result);
     }
 
@@ -525,6 +545,101 @@ fn try_normalized_replace(
         new_content: result_lines.join("\n"),
         match_count: replacements_done,
         strategy,
+    }))
+}
+
+/// Whitespace-stripped strategy: remove **all** whitespace on both sides
+/// and substring-match. Maps the stripped match boundaries back to the
+/// original-content byte offsets so the replacement preserves non-match
+/// text verbatim.
+///
+/// Needed because `normalize_whitespace` collapses runs to a single
+/// space, which still leaves CJK content mismatched — `仔细分析（` (no
+/// space) vs `仔细分析 （` (one space, preserved after normalization)
+/// are semantically identical but compare as different strings. Only
+/// this strategy normalizes to the empty string and reconstructs.
+///
+/// Cost: O(N × M) worst-case for the substring probe on the stripped
+/// needle, then O(N) for the mapping table. Acceptable as a final
+/// fallback.
+fn try_whitespace_stripped_replace(
+    content: &str,
+    old_str: &str,
+    new_str: &str,
+    replace_all: bool,
+) -> Result<Option<FuzzyReplaceResult>, SkillError> {
+    // Build a stripped projection and remember BOTH the start byte and
+    // the end byte of every non-whitespace character. An earlier
+    // version kept only start offsets and used `start[i+n]` as the
+    // end — which silently swallowed any whitespace (including
+    // newlines!) that sat between the last match char and the next
+    // non-whitespace char. Example: content `"甲乙丙\n甲乙丙"`, match
+    // on chars 0..3, needs to replace bytes `[0, 9)` (just `"甲乙丙"`),
+    // not `[0, 10)` (which eats the `\n`).
+    struct Span {
+        start: usize,
+        end: usize,
+    }
+    let mut stripped_chars: Vec<char> = Vec::with_capacity(content.len());
+    let mut spans: Vec<Span> = Vec::with_capacity(content.len());
+    for (byte_idx, ch) in content.char_indices() {
+        if !ch.is_whitespace() {
+            stripped_chars.push(ch);
+            spans.push(Span {
+                start: byte_idx,
+                end: byte_idx + ch.len_utf8(),
+            });
+        }
+    }
+
+    let needle_chars: Vec<char> = old_str.chars().filter(|c| !c.is_whitespace()).collect();
+    let needle_len = needle_chars.len();
+    if needle_len == 0 || stripped_chars.len() < needle_len {
+        return Ok(None);
+    }
+
+    // Find non-overlapping match positions.
+    let mut match_char_starts: Vec<usize> = Vec::new();
+    let mut i = 0;
+    while i + needle_len <= stripped_chars.len() {
+        if stripped_chars[i..i + needle_len] == needle_chars[..] {
+            match_char_starts.push(i);
+            i += needle_len;
+        } else {
+            i += 1;
+        }
+    }
+
+    let match_count = match_char_starts.len();
+    if match_count == 0 {
+        return Ok(None);
+    }
+    if match_count > 1 && !replace_all {
+        return Err(SkillError::InvalidManifest(format!(
+            "Multiple matches ({match_count}) via WhitespaceStripped — set replace_all=true or provide more context"
+        )));
+    }
+
+    // Splice replacements in reverse so earlier byte offsets stay
+    // valid. Each match's byte range is `[first_char.start,
+    // last_char.end)` — strictly the match characters themselves, no
+    // surrounding whitespace absorbed.
+    let to_replace: &[usize] = if replace_all {
+        &match_char_starts
+    } else {
+        &match_char_starts[..1]
+    };
+    let mut new_content = content.to_string();
+    for &char_start in to_replace.iter().rev() {
+        let byte_start = spans[char_start].start;
+        let byte_end = spans[char_start + needle_len - 1].end;
+        new_content.replace_range(byte_start..byte_end, new_str);
+    }
+
+    Ok(Some(FuzzyReplaceResult {
+        new_content,
+        match_count: if replace_all { match_count } else { 1 },
+        strategy: MatchStrategy::WhitespaceStripped,
     }))
 }
 
@@ -1800,6 +1915,76 @@ mod tests {
         let result = fuzzy_find_and_replace("aa bb aa", "aa", "cc", true).unwrap();
         assert_eq!(result.new_content, "cc bb cc");
         assert_eq!(result.match_count, 2);
+    }
+
+    // ── WhitespaceStripped (CJK) tests ─────────────────────────────
+
+    #[test]
+    fn test_fuzzy_whitespace_stripped_cjk() {
+        // The case that originally motivated adding this strategy.
+        // Content has no inter-character space; old_str has several
+        // spaces between the same characters. Earlier strategies
+        // preserve at least one space when normalizing, so none of
+        // them match. WhitespaceStripped treats `仔细分析 （` and
+        // `仔细分析（` as identical and maps back to the original
+        // range for replacement.
+        let content = "- 仔细分析（必须引用证据）";
+        let result = fuzzy_find_and_replace(
+            content,
+            "- 仔细分析   （必须引用证据）",
+            "- 审慎分析（标注来源）",
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.strategy, MatchStrategy::WhitespaceStripped);
+        assert_eq!(result.new_content, "- 审慎分析（标注来源）");
+    }
+
+    #[test]
+    fn test_fuzzy_whitespace_stripped_replace_all() {
+        let content = "步骤一：采集数据\n步骤二：清洗\n步骤一：采集数据";
+        let result =
+            fuzzy_find_and_replace(content, "步骤一  ：采集  数据", "步骤一：抽取数据", true)
+                .unwrap();
+        assert_eq!(result.strategy, MatchStrategy::WhitespaceStripped);
+        assert_eq!(result.match_count, 2);
+        assert_eq!(
+            result.new_content,
+            "步骤一：抽取数据\n步骤二：清洗\n步骤一：抽取数据"
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_whitespace_stripped_multi_match_without_replace_all_errors() {
+        let content = "甲乙丙\n甲乙丙";
+        let err =
+            fuzzy_find_and_replace(content, "甲 乙 丙", "丁", false).expect_err("multi match");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WhitespaceStripped") && msg.contains("Multiple matches"),
+            "error must mention both strategy and multi-match: got {msg}"
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_whitespace_stripped_no_match_returns_error() {
+        let err = fuzzy_find_and_replace("hello world", "goodbye friend", "x", false);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_fuzzy_whitespace_stripped_english_substring_not_falsely_matched() {
+        // Guard against the one real risk of Strategy 6: in English
+        // removing whitespace creates spurious substring hits
+        // ("cat walks" → "catwalks" which is a real word). We rely
+        // on strategy ORDER — Strategies 1-5 find the natural English
+        // match first, so Strategy 6 should never be reached with
+        // ordinary English input. Verify the order assumption by
+        // checking that an exact English phrase is caught by
+        // `MatchStrategy::Exact`, not `WhitespaceStripped`.
+        let content = "The cat walks home.";
+        let result = fuzzy_find_and_replace(content, "cat walks", "dog runs", false).unwrap();
+        assert_eq!(result.strategy, MatchStrategy::Exact);
     }
 
     #[test]
