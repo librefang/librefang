@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatTime } from "../lib/datetime";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { loadDashboardSnapshot, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics,
-  listModels, listProviders, listAgentTemplates, getAgentTemplateToml, deleteAgent, cloneAgent, resetAgentSession } from "../api";
+  listModels, listProviders, listAgentTemplates, getAgentTemplateToml, deleteAgent, cloneAgent, resetAgentSession,
+  getAgentTools, updateAgentTools, listTools, type ToolDefinition } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -14,6 +15,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Modal } from "../components/ui/Modal";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
+import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { Card } from "../components/ui/Card";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
@@ -51,6 +53,14 @@ export function AgentsPage() {
     tone?: "default" | "destructive";
   } | null>(null);
   const [showHandAgents, setShowHandAgents] = useState(false);
+  const [showToolsEditor, setShowToolsEditor] = useState(false);
+  const [toolsEditorAgentId, setToolsEditorAgentId] = useState<string | null>(null);
+  const [toolAllowlistDraft, setToolAllowlistDraft] = useState<string[]>([]);
+  const [toolBlocklistDraft, setToolBlocklistDraft] = useState<string[]>([]);
+  const [toolsDisabledState, setToolsDisabledState] = useState(false);
+  const [toolsEditorLoading, setToolsEditorLoading] = useState(false);
+  const [toolsEditorSaving, setToolsEditorSaving] = useState(false);
+  const [availableToolNames, setAvailableToolNames] = useState<string[]>([]);
   const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
   const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
   const addToast = useUIStore((s) => s.addToast);
@@ -129,7 +139,58 @@ export function AgentsPage() {
   function closeDetailModal() {
     setDetailAgent(null);
     setEditingModel(false);
+    closeToolsEditor();
   }
+
+  function closeToolsEditor() {
+    setShowToolsEditor(false);
+    setToolsEditorAgentId(null);
+    setToolsEditorLoading(false);
+    setToolsEditorSaving(false);
+    setAvailableToolNames([]);
+    setToolAllowlistDraft([]);
+    setToolBlocklistDraft([]);
+    setToolsDisabledState(false);
+  }
+
+  useEffect(() => {
+    if (!showToolsEditor || !toolsEditorAgentId) return;
+
+    let cancelled = false;
+
+    async function loadToolsEditorState() {
+      setToolsEditorLoading(true);
+      try {
+        const agentId = toolsEditorAgentId;
+        if (!agentId) return;
+        const [allTools, agentTools] = await Promise.all([
+          listTools(),
+          getAgentTools(agentId),
+        ]);
+        if (cancelled) return;
+        const names = Array.isArray(allTools)
+          ? allTools.map((tool: ToolDefinition) => tool.name).filter(Boolean)
+          : [];
+        setAvailableToolNames(names);
+        setToolAllowlistDraft(Array.isArray(agentTools?.tool_allowlist) ? agentTools.tool_allowlist : []);
+        setToolBlocklistDraft(Array.isArray(agentTools?.tool_blocklist) ? agentTools.tool_blocklist : []);
+        setToolsDisabledState(Boolean(agentTools?.disabled));
+      } catch (err: any) {
+        if (cancelled) return;
+        addToast(err?.message || t("agents.tools_load_failed", { defaultValue: "Failed to load tools" }), "error");
+      } finally {
+        if (!cancelled) {
+          setToolsEditorLoading(false);
+        }
+      }
+    }
+
+    void loadToolsEditorState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showToolsEditor, toolsEditorAgentId, addToast, t]);
 
   function saveModelEdit() {
     if (!detailAgent) return;
@@ -238,6 +299,10 @@ export function AgentsPage() {
     }), [visibleAgents, search, stateFilter, sortBy]);
 
   const coreAgents = filteredAgents;
+  const conflictingToolNames = useMemo(
+    () => toolAllowlistDraft.filter((name) => toolBlocklistDraft.includes(name)),
+    [toolAllowlistDraft, toolBlocklistDraft],
+  );
 
   const renderAgentCard = (agent: any) => {
     const isSuspended = (agent.state || "").toLowerCase() === "suspended";
@@ -624,7 +689,22 @@ export function AgentsPage() {
                     {t("agents.capabilities")}
                   </h4>
                   <div className="flex flex-wrap gap-2">
-                    {detailAgent.capabilities.tools && <Badge variant="brand" dot>{t("agents.tools_cap")}</Badge>}
+                    {detailAgent.capabilities.tools && (
+                      <button
+                        type="button"
+                        className="inline-flex"
+                        aria-label={t("agents.tools_edit_aria", { defaultValue: "Edit tools" })}
+                        onClick={(e: React.MouseEvent) => {
+                          e.stopPropagation();
+                          setToolsEditorAgentId(detailAgent.id);
+                          setShowToolsEditor(true);
+                        }}
+                      >
+                        <Badge variant="brand" dot className="hover:bg-brand/20 transition-colors">
+                          {`${t("agents.tools_cap")} ✎`}
+                        </Badge>
+                      </button>
+                    )}
                     {detailAgent.capabilities.network && <Badge variant="brand" dot>{t("agents.network")}</Badge>}
                   </div>
                 </div>
@@ -770,6 +850,136 @@ export function AgentsPage() {
         </div>
         );
       })()}
+
+      {/* Tools Editor Modal */}
+      {showToolsEditor && toolsEditorAgentId && (
+        <Modal isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg" zIndex={60} overflowVisible>
+          <div className="p-6 space-y-5">
+            <div>
+              <p className="text-[11px] text-text-dim/70">
+                {t("agents.tools_editor_desc", { defaultValue: "Review the current tools state for this agent. Empty allowlist means no allow restriction; blocklist still removes selected tools." })}
+              </p>
+              {!toolsEditorLoading && (
+                <p className="mt-2 text-[10px] text-text-dim/50 font-mono">
+                  {availableToolNames.length} {t("agents.tools_available", { defaultValue: "tools available" })} · {toolAllowlistDraft.length} {t("agents.tools_allowed_count", { defaultValue: "allowed" })} · {toolBlocklistDraft.length} {t("agents.tools_blocked_count", { defaultValue: "blocked" })}
+                </p>
+              )}
+            </div>
+
+            {toolsEditorLoading ? (
+              <div className="flex items-center gap-2 text-xs text-text-dim py-8 justify-center">
+                <Loader2 className="w-4 h-4 animate-spin" /> {t("common.loading")}
+              </div>
+            ) : (
+              <>
+                <div className="rounded-xl border border-border-subtle bg-main/40 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-bold text-text">{t("agents.tools_disabled_label", { defaultValue: "Disable all tools" })}</div>
+                    <p className="mt-1 text-[11px] text-text-dim/70">
+                      {toolsDisabledState
+                        ? t("agents.tools_disabled_hint_active", { defaultValue: "Tools are disabled for this agent; editing allow/block filters is blocked here. Re-enable tools in the agent config to manage filters." })
+                        : t("agents.tools_disabled_hint", { defaultValue: "Tools are currently enabled. Allowlist and blocklist below control which tools remain available." })}
+                    </p>
+                  </div>
+                </div>
+
+                {toolsDisabledState && (
+                  <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-[11px] text-warning">
+                    {t("agents.tools_disabled_save_blocked", { defaultValue: "All tools are disabled for this agent. To re-enable tools, edit the agent manifest or config directly — this editor only manages allow/block filters." })}
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <div>
+                    <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-2">
+                      {t("agents.tools_allowlist_title", { defaultValue: "Allowlist" })}
+                    </h4>
+                    <p className="text-[11px] text-text-dim/70 mb-3">
+                      {t("agents.tools_allowlist_desc", { defaultValue: "These tools are explicitly allowed. Leave empty to allow all tools except blocked ones." })}
+                    </p>
+                  </div>
+                  <MultiSelectCmdk
+                    options={availableToolNames}
+                    value={toolAllowlistDraft}
+                    onChange={setToolAllowlistDraft}
+                    placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
+                    disabled={toolsDisabledState}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div>
+                    <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-2">
+                      {t("agents.tools_blocklist_title", { defaultValue: "Blocklist" })}
+                    </h4>
+                    <p className="text-[11px] text-text-dim/70 mb-3">
+                      {t("agents.tools_blocklist_desc", { defaultValue: "These tools are blocked even if they are present in the allowlist." })}
+                    </p>
+                  </div>
+                  <MultiSelectCmdk
+                    options={availableToolNames}
+                    value={toolBlocklistDraft}
+                    onChange={setToolBlocklistDraft}
+                    placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
+                    disabled={toolsDisabledState}
+                  />
+                </div>
+
+                {conflictingToolNames.length > 0 && (
+                  <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-[11px] text-warning">
+                    {t("agents.tools_conflict_warning", {
+                      defaultValue: "{{count}} tools are in both lists. Blocklist wins and those tools will be removed from the allowlist when you save.",
+                      count: conflictingToolNames.length,
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+
+            <div className="flex flex-col gap-2 pt-2">
+              {toolsDisabledState && (
+                <p className="text-center text-[10px] text-text-dim/50">
+                  {t("agents.tools_disabled_save_hint", { defaultValue: "Re-enable tools in the agent config to modify filters" })}
+                </p>
+              )}
+              <div className="flex gap-2">
+              <Button variant="primary" size="sm" className="flex-1" disabled={toolsEditorLoading || toolsEditorSaving || toolsDisabledState} onClick={async () => {
+                if (!toolsEditorAgentId) return;
+                setToolsEditorSaving(true);
+                try {
+                  const resolvedAllowlist = toolAllowlistDraft.filter((name) => !toolBlocklistDraft.includes(name));
+                  await updateAgentTools(toolsEditorAgentId, {
+                    tool_allowlist: resolvedAllowlist,
+                    tool_blocklist: toolBlocklistDraft,
+                  });
+                  addToast(
+                    conflictingToolNames.length > 0
+                      ? t("agents.tools_saved_conflicts", { defaultValue: "Tools updated. Conflicts were resolved in favor of the blocklist." })
+                      : t("agents.tools_saved", { defaultValue: "Tools updated" }),
+                    "success",
+                  );
+                  queryClient.invalidateQueries({ queryKey: ["agent-detail", toolsEditorAgentId] });
+                  if (detailAgent?.id === toolsEditorAgentId) {
+                    getAgentDetail(toolsEditorAgentId).then(setDetailAgent).catch(() => {});
+                  }
+                  closeToolsEditor();
+                } catch (err: any) {
+                  addToast(err?.message || t("agents.tools_save_failed", { defaultValue: "Failed to update tools" }), "error");
+                } finally {
+                  setToolsEditorSaving(false);
+                }
+              }}>
+                {toolsEditorSaving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}
+                {toolsEditorSaving ? t("common.saving") : t("common.save")}
+              </Button>
+              <Button variant="secondary" size="sm" onClick={closeToolsEditor}>
+                {t("common.cancel")}
+              </Button>
+              </div>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       {/* Create Agent Modal */}
       <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("agents.create_agent")} size="lg">
