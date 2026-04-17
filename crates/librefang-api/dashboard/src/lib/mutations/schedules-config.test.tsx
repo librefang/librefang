@@ -25,7 +25,7 @@ describe("useRunSchedule", () => {
 
     const { result } = renderHook(() => useRunSchedule(), { wrapper });
 
-    result.current.mutateAsync("schedule-1");
+    await result.current.mutateAsync("schedule-1");
 
     await waitFor(() => {
       expect(spy).toHaveBeenCalled();
@@ -48,7 +48,7 @@ describe("useSetConfigValue", () => {
 
     const { result } = renderHook(() => useSetConfigValue(), { wrapper });
 
-    result.current.mutateAsync({ path: "kernel.max_agents", value: 10 });
+    await result.current.mutateAsync({ path: "kernel.max_agents", value: 10 });
 
     await waitFor(() => {
       expect(spy).toHaveBeenCalled();
@@ -71,7 +71,7 @@ describe("useSetConfigValue", () => {
       { wrapper },
     );
 
-    result.current.mutateAsync({ path: "kernel.max_agents", value: 10 });
+    await result.current.mutateAsync({ path: "kernel.max_agents", value: 10 });
 
     await waitFor(() => {
       expect(onSuccess).toHaveBeenCalled();
@@ -92,7 +92,7 @@ describe("useReloadConfig", () => {
 
     const { result } = renderHook(() => useReloadConfig(), { wrapper });
 
-    result.current.mutateAsync();
+    await result.current.mutateAsync();
 
     await waitFor(() => {
       expect(spy).toHaveBeenCalled();
@@ -116,7 +116,7 @@ describe("useReloadConfig", () => {
       { wrapper },
     );
 
-    result.current.mutateAsync();
+    await result.current.mutateAsync();
 
     await waitFor(() => {
       expect(onSuccess).toHaveBeenCalled();

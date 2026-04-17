@@ -34,7 +34,7 @@ describe("useCompleteExperiment", () => {
     });
 
     const variables = { experimentId: "exp-1", agentId: "agent-1" };
-    result.current.mutateAsync(variables);
+    await result.current.mutateAsync(variables);
 
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledTimes(2);
@@ -61,7 +61,7 @@ describe("useSetSessionLabel", () => {
       ),
     });
 
-    result.current.mutateAsync({
+    await result.current.mutateAsync({
       sessionId: "sess-1",
       label: "test label",
       agentId: "agent-1",
@@ -90,7 +90,7 @@ describe("useSetSessionLabel", () => {
       ),
     });
 
-    result.current.mutateAsync({ sessionId: "sess-1", label: "test label" });
+    await result.current.mutateAsync({ sessionId: "sess-1", label: "test label" });
 
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledTimes(1);
@@ -114,7 +114,7 @@ describe("useInstallSkill", () => {
       ),
     });
 
-    result.current.mutateAsync({ name: "test-skill" });
+    await result.current.mutateAsync({ name: "test-skill" });
 
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledTimes(2);
@@ -139,7 +139,7 @@ describe("useInstallSkill", () => {
       ),
     });
 
-    result.current.mutateAsync({ name: "test-skill", hand: "test-hand" });
+    await result.current.mutateAsync({ name: "test-skill", hand: "test-hand" });
 
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledTimes(2);

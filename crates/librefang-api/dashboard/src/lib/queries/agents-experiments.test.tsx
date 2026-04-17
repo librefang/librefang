@@ -59,7 +59,7 @@ describe("usePromptVersions", () => {
     expect(http.listPromptVersions).toHaveBeenCalledWith("agent-1");
   });
 
-  it("should use the correct queryKey", () => {
+  it("should use the correct queryKey", async () => {
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -68,6 +68,10 @@ describe("usePromptVersions", () => {
     );
 
     renderHook(() => usePromptVersions("test-agent"), { wrapper });
+
+    await waitFor(() => {
+      expect(qc.getQueryCache().find(agentKeys.promptVersions("test-agent"))).toBeDefined();
+    });
 
     const cache = qc.getQueryCache().find(agentKeys.promptVersions("test-agent"));
     expect(cache).toBeDefined();
@@ -112,7 +116,7 @@ describe("useExperiments", () => {
     expect(http.listExperiments).toHaveBeenCalledWith("agent-1");
   });
 
-  it("should use the correct queryKey", () => {
+  it("should use the correct queryKey", async () => {
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -121,6 +125,10 @@ describe("useExperiments", () => {
     );
 
     renderHook(() => useExperiments("test-agent"), { wrapper });
+
+    await waitFor(() => {
+      expect(qc.getQueryCache().find(agentKeys.experiments("test-agent"))).toBeDefined();
+    });
 
     const cache = qc.getQueryCache().find(agentKeys.experiments("test-agent"));
     expect(cache).toBeDefined();

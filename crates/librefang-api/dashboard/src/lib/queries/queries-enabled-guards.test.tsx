@@ -58,7 +58,7 @@ describe("useApprovals", () => {
     expect(mockListApprovals).not.toHaveBeenCalled();
   });
 
-  it("should not fetch when enabled is undefined", async () => {
+  it("should fetch by default when enabled is undefined", async () => {
     const { result } = renderHook(() => useApprovals(), {
       wrapper: createWrapper(),
     });
@@ -119,7 +119,7 @@ describe("useAvailableIntegrations", () => {
     expect(mockListAvailableIntegrations).not.toHaveBeenCalled();
   });
 
-  it("should not fetch when enabled is undefined", async () => {
+  it("should fetch by default when enabled is undefined", async () => {
     const { result } = renderHook(() => useAvailableIntegrations(), {
       wrapper: createWrapper(),
     });
@@ -179,7 +179,7 @@ describe("usePluginRegistries", () => {
     expect(mockListPluginRegistries).not.toHaveBeenCalled();
   });
 
-  it("should not fetch when enabled is undefined", async () => {
+  it("should fetch by default when enabled is undefined", async () => {
     const { result } = renderHook(() => usePluginRegistries(undefined), {
       wrapper: createWrapper(),
     });

@@ -53,13 +53,23 @@ describe("useAgentDetail", () => {
     expect(httpClient.getAgentDetail).toHaveBeenCalledWith("agent-1");
   });
 
-  it("should use the correct queryKey", () => {
-    const { result } = renderHook(() => useAgentDetail("test-id"), {
-      wrapper: createWrapper(),
+  it("should use the correct queryKey", async () => {
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    );
+
+    renderHook(() => useAgentDetail("test-id"), { wrapper });
+
+    await waitFor(() => {
+      expect(qc.getQueryCache().find(agentKeys.detail("test-id"))).toBeDefined();
     });
 
-    expect(result.current.data).toBeUndefined();
-    expect(httpClient.getAgentDetail).toHaveBeenCalledWith("test-id");
+    const cache = qc.getQueryCache().find(agentKeys.detail("test-id"));
+    expect(cache).toBeDefined();
+    expect(cache?.queryKey).toEqual(agentKeys.detail("test-id"));
   });
 });
 
