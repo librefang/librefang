@@ -54,6 +54,42 @@ pub struct EvolutionResult {
     /// Number of occurrences replaced by a patch. `None` for non-patch ops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_count: Option<usize>,
+    /// Post-operation `.evolution.json` counters so agent tools don't
+    /// have to read the skill directory separately to report state.
+    /// `None` when the skill no longer exists on disk (delete /
+    /// uninstall) or the operation doesn't interact with the metadata
+    /// file. Populated for create, update, patch, rollback, and
+    /// supporting-file writes/removes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evolution_count: Option<u64>,
+    /// Post-operation mutation counter (post-create edits only).
+    /// Fresh create reports `Some(0)`. `None` alongside
+    /// `evolution_count = None` after delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_count: Option<u64>,
+    /// Post-operation usage counter. Bumped by `record_skill_usage`
+    /// after a successful skill-tool invocation; unchanged by the
+    /// evolve tools themselves. Included here so agents can
+    /// self-check whether a skill is being used without a second
+    /// query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_count: Option<u64>,
+}
+
+/// Build a "read-meta-and-populate" helper for the three counter
+/// fields on EvolutionResult. Returns `(None, None, None)` when the
+/// skill directory is gone (delete/uninstall) or `.evolution.json`
+/// is unreadable.
+fn counters_for(skill_dir: &Path) -> (Option<u64>, Option<u64>, Option<u64>) {
+    if !skill_dir.exists() {
+        return (None, None, None);
+    }
+    let meta = load_evolution_meta(skill_dir);
+    (
+        Some(meta.evolution_count),
+        Some(meta.mutation_count),
+        Some(meta.use_count),
+    )
 }
 
 /// A snapshot of a skill version for rollback.
@@ -994,11 +1030,15 @@ pub fn create_skill(
 
     info!(skill = name, "Created evolved skill");
 
+    let (evolution_count, mutation_count, use_count) = counters_for(&skill_dir);
     Ok(EvolutionResult {
         success: true,
         message: format!("Skill '{name}' created successfully"),
         skill_name: name.to_string(),
         version: Some("0.1.0".to_string()),
+        evolution_count,
+        mutation_count,
+        use_count,
         ..Default::default()
     })
 }
@@ -1069,11 +1109,15 @@ pub fn update_skill(
 
     info!(skill = %name, version = %new_version, "Updated evolved skill");
 
+    let (evolution_count, mutation_count, use_count) = counters_for(skill_dir);
     Ok(EvolutionResult {
         success: true,
         message: format!("Skill '{name}' updated to v{new_version}"),
         skill_name: name.to_string(),
         version: Some(new_version),
+        evolution_count,
+        mutation_count,
+        use_count,
         ..Default::default()
     })
 }
@@ -1160,6 +1204,7 @@ pub fn patch_skill(
         "Patched evolved skill"
     );
 
+    let (evolution_count, mutation_count, use_count) = counters_for(skill_dir);
     Ok(EvolutionResult {
         success: true,
         message: format!(
@@ -1170,6 +1215,9 @@ pub fn patch_skill(
         version: Some(new_version),
         match_strategy: Some(result.strategy),
         match_count: Some(result.match_count),
+        evolution_count,
+        mutation_count,
+        use_count,
     })
 }
 
@@ -1414,11 +1462,15 @@ pub fn write_supporting_file(
 
     info!(skill = %name, path = rel_path, "Wrote supporting file");
 
+    let (evolution_count, mutation_count, use_count) = counters_for(&skill.path);
     Ok(EvolutionResult {
         success: true,
         message: format!("File '{rel_path}' written to skill '{name}'"),
         skill_name: name.to_string(),
         version: None,
+        evolution_count,
+        mutation_count,
+        use_count,
         ..Default::default()
     })
 }
@@ -1491,11 +1543,15 @@ pub fn remove_supporting_file(
 
     info!(skill = %name, path = rel_path, "Removed supporting file");
 
+    let (evolution_count, mutation_count, use_count) = counters_for(&skill.path);
     Ok(EvolutionResult {
         success: true,
         message: format!("File '{rel_path}' removed from skill '{name}'"),
         skill_name: name.to_string(),
         version: None,
+        evolution_count,
+        mutation_count,
+        use_count,
         ..Default::default()
     })
 }
@@ -1649,11 +1705,15 @@ pub fn rollback_skill(
 
     info!(skill = %name, version = %new_version, "Rolled back skill");
 
+    let (evolution_count, mutation_count, use_count) = counters_for(skill_dir);
     Ok(EvolutionResult {
         success: true,
         message: format!("Skill '{name}' rolled back to v{new_version}"),
         skill_name: name.to_string(),
         version: Some(new_version),
+        evolution_count,
+        mutation_count,
+        use_count,
         ..Default::default()
     })
 }
@@ -2180,6 +2240,50 @@ mod tests {
         // evolution_count: a newly-created skill should read as
         // "never modified" (0), not as "modified once" (1).
         assert_eq!(meta.mutation_count, 0);
+    }
+
+    #[test]
+    fn test_evolution_result_carries_counters_so_agents_dont_need_extra_query() {
+        // Regression: agent tools would return EvolutionResult without
+        // counter fields, so LLMs couldn't answer "what's evolution_count
+        // now?" without a follow-up read of `.evolution.json`. With the
+        // counters exposed on the result, a single tool call returns
+        // enough state for the agent to report it directly.
+        let dir = TempDir::new().unwrap();
+        let result = create_skill(dir.path(), "counter-t", "desc", "# ctx", vec![], None).unwrap();
+        assert_eq!(result.evolution_count, Some(1));
+        assert_eq!(result.mutation_count, Some(0));
+        assert_eq!(result.use_count, Some(0));
+
+        let skill = InstalledSkill {
+            manifest: SkillManifest {
+                skill: SkillMeta {
+                    name: "counter-t".to_string(),
+                    version: "0.1.0".to_string(),
+                    description: "desc".to_string(),
+                    author: "agent-evolved".to_string(),
+                    license: String::new(),
+                    tags: vec![],
+                },
+                runtime: SkillRuntimeConfig::default(),
+                tools: SkillTools::default(),
+                requirements: Default::default(),
+                prompt_context: Some("# ctx".to_string()),
+                source: Some(SkillSource::Local),
+                config: HashMap::new(),
+            },
+            path: dir.path().join("counter-t"),
+            enabled: true,
+        };
+        let updated = update_skill(&skill, "# new", "bump", None).unwrap();
+        assert_eq!(updated.evolution_count, Some(2));
+        assert_eq!(updated.mutation_count, Some(1));
+
+        // delete_skill returns None counters since the dir is gone.
+        let deleted = delete_skill(dir.path(), "counter-t").unwrap();
+        assert_eq!(deleted.evolution_count, None);
+        assert_eq!(deleted.mutation_count, None);
+        assert_eq!(deleted.use_count, None);
     }
 
     #[test]

@@ -3648,14 +3648,14 @@ fn evolution_err_to_response(
 fn evolution_ok_response(
     result: librefang_skills::evolution::EvolutionResult,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // Serialize the whole struct so dashboard consumers pick up the
+    // full set of EvolutionResult fields automatically
+    // (match_strategy, match_count, evolution_count, mutation_count,
+    // use_count) instead of relying on this handler being updated
+    // every time a new field is added.
     (
         StatusCode::OK,
-        Json(serde_json::json!({
-            "success": result.success,
-            "message": result.message,
-            "skill_name": result.skill_name,
-            "version": result.version,
-        })),
+        Json(serde_json::to_value(result).unwrap_or(serde_json::json!({}))),
     )
 }
 

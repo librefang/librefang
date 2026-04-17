@@ -206,6 +206,16 @@ export interface EvolutionResult {
   message: string;
   skill_name: string;
   version?: string;
+  /** Set only on patch ops: which fuzzy strategy matched. */
+  match_strategy?: "Exact" | "WhitespaceStripped" | "LineTrimmed" | "WhitespaceNormalized" | "IndentFlexible" | "BlockAnchor";
+  /** Set only on patch ops: replaced occurrence count. */
+  match_count?: number;
+  /** Post-op version-history size (includes initial creation). */
+  evolution_count?: number;
+  /** Post-op mutation counter (post-create edits only — 0 on fresh create). */
+  mutation_count?: number;
+  /** Post-op usage counter. */
+  use_count?: number;
 }
 
 export interface ProvidersResponse {
