@@ -32,6 +32,7 @@ import {
   Bot,
   User,
   AlertCircle,
+  FileText,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Skeleton } from "../components/ui/Skeleton";
@@ -46,7 +47,9 @@ import {
   useHandStats,
   useHandStatsBatch,
   useHandSession,
+  useHandManifestToml,
 } from "../lib/queries/hands";
+import { TomlViewer } from "../components/TomlViewer";
 import {
   useActivateHand,
   useDeactivateHand,
@@ -422,6 +425,9 @@ function HandDetailPanel({
   const { t } = useTranslation();
   const isPaused = instance?.status === "paused";
 
+  const [showManifest, setShowManifest] = useState(false);
+  const manifestQuery = useHandManifestToml(hand.id, showManifest);
+
   const settingsQuery = useHandSettingsQuery(hand.id);
 
   const statsQuery = useHandStats(instance?.instance_id ?? "");
@@ -506,6 +512,17 @@ function HandDetailPanel({
             {hand.description && (
               <p className="text-sm text-text-dim leading-relaxed">{hand.description}</p>
             )}
+
+            {/* View raw manifest — discreet link, useful for debugging /
+                code review without leaving the panel. */}
+            <button
+              type="button"
+              onClick={() => setShowManifest(true)}
+              className="text-[11px] font-bold text-text-dim hover:text-brand inline-flex items-center gap-1"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              {t("hands.view_manifest")}
+            </button>
 
             {/* Primary action bar */}
             <div className="flex items-center gap-2">
@@ -598,6 +615,18 @@ function HandDetailPanel({
           </div>
         </div>
       </div>
+      <TomlViewer
+        isOpen={showManifest}
+        onClose={() => setShowManifest(false)}
+        title={t("hands.manifest_title", { name: hand.name || hand.id })}
+        toml={manifestQuery.data}
+        downloadName={`${hand.id}.HAND.toml`}
+        error={
+          manifestQuery.error
+            ? (manifestQuery.error as Error).message ?? t("hands.manifest_error")
+            : null
+        }
+      />
     </div>
   );
 }

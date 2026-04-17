@@ -6,13 +6,18 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
   RefreshCw, Save, Zap, Settings, Search, RotateCcw,
-  AlertTriangle, X, Copy, Check,
+  AlertTriangle, X, Copy, Check, FileText,
 } from "lucide-react";
 import { type ConfigFieldSchema } from "../api";
-import { useConfigSchema, useFullConfig } from "../lib/queries/config";
+import {
+  useConfigSchema,
+  useFullConfig,
+  useRawConfigToml,
+} from "../lib/queries/config";
 import { useSetConfigValue, useReloadConfig } from "../lib/mutations/config";
 import { configKeys } from "../lib/queries/keys";
 import { setConfigValue } from "../lib/http/client";
+import { TomlViewer } from "../components/TomlViewer";
 
 /* ------------------------------------------------------------------ */
 /*  Category → sections mapping                                        */
@@ -285,7 +290,9 @@ export function ConfigPage({ category }: { category: string }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [reloadStatus, setReloadStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const [activeSection, setActiveSection] = useState<string | null>(null);
+  const [showRawToml, setShowRawToml] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const rawTomlQuery = useRawConfigToml(showRawToml);
 
   const hasPendingChanges = Object.keys(pendingChanges).length > 0;
 
@@ -530,6 +537,10 @@ export function ConfigPage({ category }: { category: string }) {
               {reloadStatus.msg}
             </span>
           )}
+          <Button variant="secondary" size="sm" onClick={() => setShowRawToml(true)}>
+            <FileText className="w-3 h-3 mr-1.5" />
+            {t("config.view_raw_toml", "View Raw TOML")}
+          </Button>
           <Button variant="secondary" size="sm" onClick={() => reloadMutation.mutate()} isLoading={reloadMutation.isPending}>
             <RefreshCw className="w-3 h-3 mr-1.5" />
             {t("config.reload", "Reload")}
@@ -773,6 +784,18 @@ export function ConfigPage({ category }: { category: string }) {
           </div>
         </div>
       )}
+      <TomlViewer
+        isOpen={showRawToml}
+        onClose={() => setShowRawToml(false)}
+        title={t("config.raw_toml_title", "config.toml")}
+        toml={rawTomlQuery.data}
+        downloadName="librefang-config.toml"
+        error={
+          rawTomlQuery.error
+            ? (rawTomlQuery.error as Error).message ?? t("config.raw_toml_error", "Failed to load config.toml")
+            : null
+        }
+      />
     </div>
   );
 }

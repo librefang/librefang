@@ -2071,6 +2071,14 @@ export async function listHands(): Promise<HandDefinitionItem[]> {
   return data.hands ?? [];
 }
 
+export async function getHandManifestToml(handId: string): Promise<string> {
+  return getText(`/api/hands/${encodeURIComponent(handId)}/manifest`);
+}
+
+export async function getRawConfigToml(): Promise<string> {
+  return getText("/api/config/export");
+}
+
 export async function listActiveHands(): Promise<HandInstanceItem[]> {
   const data = await get<{ instances?: HandInstanceItem[]; total?: number }>("/api/hands/active");
   return data.instances ?? [];

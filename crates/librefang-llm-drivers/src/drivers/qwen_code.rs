@@ -1057,6 +1057,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1104,6 +1105,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1178,6 +1180,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1277,6 +1280,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1319,6 +1323,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
