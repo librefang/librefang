@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildAuthenticatedWebSocketUrl,
+  getAgentTools,
   getMetricsText,
   listTools,
   patchAgentConfig,
   setApiKey,
+  updateAgentTools,
   verifyStoredAuth,
 } from "./api";
 
@@ -125,5 +127,70 @@ describe("dashboard auth helpers", () => {
     const body = JSON.parse(options.body);
     expect(body.temperature).toBe(1.5);
     expect(body.max_tokens).toBe(8192);
+  });
+
+  it("getAgentTools requests the agent tools endpoint", async () => {
+    setApiKey("secret-token");
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ tool_allowlist: ["bash"], tool_blocklist: ["rm"], disabled: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await expect(getAgentTools("agent-123")).resolves.toEqual({
+      tool_allowlist: ["bash"],
+      tool_blocklist: ["rm"],
+      disabled: false,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/agents/agent-123/tools");
+    const headers = options?.headers as Headers;
+    expect(headers.get("authorization")).toBe("Bearer secret-token");
+  });
+
+  it("updateAgentTools sends both allowlist and blocklist", async () => {
+    setApiKey("secret-token");
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await updateAgentTools("agent-123", {
+      tool_allowlist: ["bash", "webfetch"],
+      tool_blocklist: ["rm"],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/agents/agent-123/tools");
+    expect(options.method).toBe("PUT");
+    expect(JSON.parse(options.body)).toEqual({
+      tool_allowlist: ["bash", "webfetch"],
+      tool_blocklist: ["rm"],
+    });
+  });
+
+  it("listTools supports both wrapped and direct array responses", async () => {
+    setApiKey("secret-token");
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ tools: [{ name: "bash" }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify([{ name: "webfetch" }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await expect(listTools()).resolves.toEqual([{ name: "bash" }]);
+    await expect(listTools()).resolves.toEqual([{ name: "webfetch" }]);
   });
 });
