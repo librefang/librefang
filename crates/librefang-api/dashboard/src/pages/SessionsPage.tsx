@@ -1,8 +1,10 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { formatRelativeTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { deleteSession, listAgents, listSessions, switchAgentSession, setSessionLabel } from "../api";
+import { listAgents } from "../api";
+import { useSessions } from "../lib/queries/sessions";
+import { useSwitchSession, useDeleteSession, useSetSessionLabel } from "../lib/mutations/sessions";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
@@ -13,11 +15,8 @@ import { useUIStore } from "../lib/store";
 import { Clock, Search, MessageCircle, Trash2, Play, Users, Tag, Check, X } from "lucide-react";
 import { truncateId } from "../lib/string";
 
-const REFRESH_MS = 30000;
-
 export function SessionsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -25,18 +24,12 @@ export function SessionsPage() {
   const [labelValue, setLabelValue] = useState("");
   const addToast = useUIStore((s) => s.addToast);
 
-  const sessionsQuery = useQuery({ queryKey: ["sessions", "list"], queryFn: listSessions, refetchInterval: REFRESH_MS });
+  const sessionsQuery = useSessions();
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "sessions"], queryFn: () => listAgents() });
 
-  const switchMutation = useMutation({ mutationFn: ({ agentId, sessionId }: any) => switchAgentSession(agentId, sessionId) });
-  const deleteMutation = useMutation({ mutationFn: (id: string) => deleteSession(id) });
-  const labelMutation = useMutation({
-    mutationFn: ({ sessionId, label }: { sessionId: string; label: string }) => setSessionLabel(sessionId, label),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      setEditingLabelId(null);
-    },
-  });
+  const switchMutation = useSwitchSession();
+  const deleteMutation = useDeleteSession();
+  const labelMutation = useSetSessionLabel();
 
   const agents = agentsQuery.data ?? [];
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
@@ -65,7 +58,6 @@ export function SessionsPage() {
     setPendingId(sessionId);
     try {
       await switchMutation.mutateAsync({ agentId, sessionId });
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
       addToast(t("common.success"), "success");
     } catch (e: any) {
       addToast(e.message || t("common.error"), "error");
@@ -78,7 +70,6 @@ export function SessionsPage() {
     setPendingId(id);
     try {
       await deleteMutation.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
     } catch (e: any) {
       addToast(e.message || t("common.error"), "error");
     } finally { setPendingId(null); }
@@ -168,11 +159,11 @@ export function SessionsPage() {
                           autoFocus
                           value={labelValue}
                           onChange={e => setLabelValue(e.target.value)}
-                          onKeyDown={e => { if (e.key === "Enter") labelMutation.mutate({ sessionId: s.session_id, label: labelValue }); if (e.key === "Escape") setEditingLabelId(null); }}
+                          onKeyDown={e => { if (e.key === "Enter") labelMutation.mutate({ sessionId: s.session_id, label: labelValue }, { onSuccess: () => setEditingLabelId(null) }); if (e.key === "Escape") setEditingLabelId(null); }}
                           className="px-1.5 py-0.5 rounded border border-brand bg-main text-[10px] w-24 outline-none"
                           placeholder={t("sessions.label_placeholder", { defaultValue: "Label..." })}
                         />
-                        <button onClick={() => labelMutation.mutate({ sessionId: s.session_id, label: labelValue })} className="text-success"><Check className="w-3 h-3" /></button>
+                        <button onClick={() => labelMutation.mutate({ sessionId: s.session_id, label: labelValue }, { onSuccess: () => setEditingLabelId(null) })} className="text-success"><Check className="w-3 h-3" /></button>
                         <button onClick={() => setEditingLabelId(null)} className="text-text-dim"><X className="w-3 h-3" /></button>
                       </span>
                     ) : (
