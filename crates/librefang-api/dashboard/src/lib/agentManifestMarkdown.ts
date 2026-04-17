@@ -102,6 +102,7 @@ export const generateManifestMarkdown = (
   pushList(lines, "Tool blocklist", form.tool_blocklist);
 
   pushAdvancedFormSections(lines, form);
+  pushLifecycleOverrides(lines, form);
 
   // Advanced — anything in extras that survived round-trip.
   const advancedLines = renderExtras(extras);
@@ -213,6 +214,47 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
     }
     lines.push("");
   }
+};
+
+// Lifecycle overrides — only emit values that differ from kernel defaults,
+// so a vanilla agent stays clean and an unusual config stands out.
+const pushLifecycleOverrides = (lines: string[], form: ManifestFormState): void => {
+  const items: string[] = [];
+  if (form.priority !== "Normal") {
+    items.push(`- **Priority**: \`${form.priority}\``);
+  }
+  if (form.session_mode !== "persistent") {
+    items.push(`- **session_mode**: \`${form.session_mode}\``);
+  }
+  if (form.web_search_augmentation !== "auto") {
+    items.push(`- **web_search_augmentation**: \`${form.web_search_augmentation}\``);
+  }
+  if (form.exec_policy_shorthand) {
+    items.push(`- **exec_policy**: \`${form.exec_policy_shorthand}\``);
+  }
+  if (form.pinned_model.trim()) {
+    items.push(`- **Pinned model**: \`${form.pinned_model.trim()}\``);
+  }
+  if (form.workspace.trim()) {
+    items.push(`- **Workspace**: \`${form.workspace.trim()}\``);
+  }
+  if (form.allowed_plugins.length) {
+    items.push(`- **Allowed plugins**: ${form.allowed_plugins.map((p) => `\`${p}\``).join(", ")}`);
+  }
+  if (form.skills_disabled) items.push("- ⚠️ **Skills disabled**");
+  if (form.tools_disabled) items.push("- ⚠️ **Tools disabled**");
+  if (!form.inherit_parent_context) {
+    items.push("- **inherit_parent_context**: `false`");
+  }
+  if (!form.generate_identity_files) {
+    items.push("- **generate_identity_files**: `false`");
+  }
+
+  if (items.length === 0) return;
+  lines.push("## Lifecycle & Overrides");
+  lines.push("");
+  for (const item of items) lines.push(item);
+  lines.push("");
 };
 
 const pushBullet = (lines: string[], label: string, value: string): void => {

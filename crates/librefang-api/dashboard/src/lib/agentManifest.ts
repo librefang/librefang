@@ -927,13 +927,27 @@ const parseScheduleField = (raw: unknown): ManifestFormState["schedule"] => {
   return { mode: "reactive" };
 };
 
+// exec_policy_lenient on the kernel side (serde_compat.rs) accepts
+// aliases for each canonical mode. The form's dropdown only knows the
+// canonical names, so normalize aliases at the parse boundary —
+// otherwise the alias spelling rounds-trips to an empty shorthand and
+// the user's intent (deny / allowlist / full) is silently lost.
+const EXEC_POLICY_ALIASES: Record<string, ManifestFormState["exec_policy_shorthand"]> = {
+  none: "deny",
+  disabled: "deny",
+  restricted: "allowlist",
+  all: "full",
+  unrestricted: "full",
+};
+
 const parseExecPolicyShorthand = (
   raw: unknown,
 ): ManifestFormState["exec_policy_shorthand"] => {
   if (typeof raw !== "string") return "";
-  return (EXEC_SHORTHANDS as readonly string[]).includes(raw)
-    ? (raw as ManifestFormState["exec_policy_shorthand"])
-    : "";
+  if ((EXEC_SHORTHANDS as readonly string[]).includes(raw)) {
+    return raw as ManifestFormState["exec_policy_shorthand"];
+  }
+  return EXEC_POLICY_ALIASES[raw] ?? "";
 };
 
 const parseResponseFormatField = (raw: unknown): ManifestFormState["response_format"] => {

@@ -1,4 +1,4 @@
-import { useId, useMemo } from "react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, Plus, Trash2, X } from "lucide-react";
 import type { ManifestFormState } from "../lib/agentManifest";
@@ -998,23 +998,24 @@ function Field({
   invalid?: boolean;
   children: React.ReactNode;
 }) {
-  const id = useId();
+  // Wrap children inside the <label> rather than relying on htmlFor —
+  // implicit association works without each child needing an id, and
+  // clicking the label text focuses the input as users expect.
   return (
-    <div>
+    <label className="block">
       {label && (
-        <label
-          htmlFor={id}
-          className={`text-[10px] font-bold uppercase ${
+        <span
+          className={`text-[10px] font-bold uppercase block ${
             invalid ? "text-error" : "text-text-dim"
           }`}
         >
           {label}
           {required && <span className="ml-0.5 text-error">*</span>}
-        </label>
+        </span>
       )}
-      <div className={label ? "mt-1" : ""}>{children}</div>
-      {hint && <p className="mt-1 text-[10px] text-text-dim/70">{hint}</p>}
-    </div>
+      <span className={label ? "mt-1 block" : "block"}>{children}</span>
+      {hint && <span className="mt-1 text-[10px] text-text-dim/70 block">{hint}</span>}
+    </label>
   );
 }
 

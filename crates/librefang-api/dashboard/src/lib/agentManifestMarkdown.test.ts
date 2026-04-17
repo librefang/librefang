@@ -165,6 +165,44 @@ describe("generateManifestMarkdown", () => {
     expect(md).toContain("json");
   });
 
+  it("includes lifecycle overrides when set to non-default values", () => {
+    const form = emptyManifestForm();
+    form.name = "ops";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.priority = "Critical";
+    form.session_mode = "new";
+    form.web_search_augmentation = "always";
+    form.exec_policy_shorthand = "deny";
+    form.pinned_model = "gpt-4o-2024-05-13";
+    form.workspace = "/var/agents/ops";
+    form.allowed_plugins = ["telegram"];
+    form.skills_disabled = true;
+    form.inherit_parent_context = false;
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("## Lifecycle & Overrides");
+    expect(md).toContain("Critical");
+    expect(md).toContain("session_mode");
+    expect(md).toContain("new");
+    expect(md).toContain("always");
+    expect(md).toContain("deny");
+    expect(md).toContain("gpt-4o-2024-05-13");
+    expect(md).toContain("/var/agents/ops");
+    expect(md).toContain("telegram");
+    expect(md).toContain("Skills disabled");
+  });
+
+  it("does not emit lifecycle section when everything is default", () => {
+    const form = emptyManifestForm();
+    form.name = "plain";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    const md = generateManifestMarkdown(form);
+    expect(md).not.toContain("## Lifecycle & Overrides");
+  });
+
   it("falls back to a placeholder name when blank", () => {
     const form = emptyManifestForm();
     const md = generateManifestMarkdown(form);

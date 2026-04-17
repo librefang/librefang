@@ -315,6 +315,29 @@ max_cost_per_hour_usd = 1
     expect(reparsed.extras.model.exotic_subtable).toEqual({ foo: "bar" });
   });
 
+  it("normalizes exec_policy aliases the kernel accepts to canonical form", () => {
+    // exec_policy_lenient on the kernel side accepts aliases for each
+    // mode; the form's dropdown only has the 4 canonical names. Without
+    // normalisation the alias spelling rounds-trips to an empty
+    // shorthand (form treats it as "use global policy") and the user's
+    // intent is silently lost.
+    const cases: Array<[string, "deny" | "allowlist" | "full"]> = [
+      ["none", "deny"],
+      ["disabled", "deny"],
+      ["restricted", "allowlist"],
+      ["all", "full"],
+      ["unrestricted", "full"],
+    ];
+    for (const [alias, canonical] of cases) {
+      const parsed = parseManifestToml(
+        `name = "a"\nexec_policy = "${alias}"\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.exec_policy_shorthand).toBe(canonical);
+    }
+  });
+
   it("does not emit both response_format form-mode and preserved [response_format] extras", () => {
     // Same shape as the exec_policy P1: TOML carries an unmappable
     // response_format → preserved as extras → user picks json/json_schema
