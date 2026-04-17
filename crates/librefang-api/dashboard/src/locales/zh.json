@@ -2000,7 +2000,8 @@
     "search_placeholder": "搜索页面...",
     "navigate": "导航",
     "open": "打开",
-    "close": "关闭"
+    "close": "关闭",
+    "registry": "注册表 (librefang.ai)"
   },
   "terminal": {
     "badge": "终端",

@@ -1993,7 +1993,8 @@
     "search_placeholder": "Search pages...",
     "navigate": "Navigate",
     "open": "Open",
-    "close": "Close"
+    "close": "Close",
+    "registry": "Registry (librefang.ai)"
   },
   "terminal": {
     "badge": "Terminal",
