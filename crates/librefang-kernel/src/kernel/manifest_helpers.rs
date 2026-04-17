@@ -98,15 +98,15 @@ pub(super) fn apply_thinking_override(
     thinking_override: Option<bool>,
 ) {
     match thinking_override {
-        Some(true) => {
-            if manifest.thinking.is_none() {
-                manifest.thinking = Some(librefang_types::config::ThinkingConfig::default());
-            }
+        Some(true) if manifest.thinking.is_none() => {
+            manifest.thinking = Some(librefang_types::config::ThinkingConfig::default());
         }
         Some(false) => {
             manifest.thinking = None;
         }
-        None => {}
+        // Some(true) when thinking is already set — keep the existing budget
+        // — and None when no override is requested are both no-ops.
+        _ => {}
     }
 }
 

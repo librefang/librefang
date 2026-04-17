@@ -1109,7 +1109,7 @@ export function AgentsPage() {
         isOpen={showCreate}
         onClose={closeCreateModal}
         title={t("agents.create_agent")}
-        size="lg"
+        size="4xl"
       >
         <div className="p-5 space-y-4">
           {/* Mode tabs — switching between Form and TOML round-trips the

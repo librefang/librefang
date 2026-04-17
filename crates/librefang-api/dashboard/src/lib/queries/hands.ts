@@ -7,6 +7,7 @@ import {
   getHandStats,
   getHandSession,
   getHandInstanceStatus,
+  getHandManifestToml,
   type HandStatsResponse,
 } from "../http/client";
 import { handKeys } from "./keys";
@@ -120,4 +121,16 @@ export function useHandSession(instanceId: string) {
 
 export function useHandInstanceStatus(instanceId: string) {
   return useQuery(handQueries.instanceStatus(instanceId));
+}
+
+// Lazy-load the raw HAND.toml. Disabled by default — caller passes
+// `enabled: true` only when the viewer modal opens, so we don't fetch
+// every hand's TOML eagerly.
+export function useHandManifestToml(handId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: handKeys.manifest(handId),
+    queryFn: () => getHandManifestToml(handId),
+    enabled: enabled && !!handId,
+    staleTime: 60_000,
+  });
 }

@@ -704,6 +704,9 @@
   "hands": {
     "title": "Hands",
     "subtitle": "Autonomous capability packages.",
+    "view_manifest": "View HAND.toml",
+    "manifest_title": "HAND.toml — {{name}}",
+    "manifest_error": "Failed to load HAND.toml",
     "available": "Available Hands",
     "instances": "Active Instances",
     "running_now": "Running Now",
@@ -1336,6 +1339,9 @@
     "title": "Configuration",
     "desc": "System configuration editor",
     "reload": "Reload",
+    "view_raw_toml": "View Raw TOML",
+    "raw_toml_title": "config.toml",
+    "raw_toml_error": "Failed to load config.toml",
     "hot_reload": "Hot Reload",
     "root_level": "Root Level",
     "no_section": "Section not found",
@@ -2207,5 +2213,14 @@
     "url_hint": "URL must start with http:// or https://",
     "env_setup_title": "Configure {{name}}",
     "env_setup_desc": "Enter the required API keys and environment variables to complete the installation."
+  },
+  "toml_viewer": {
+    "tab_toml": "TOML",
+    "tab_markdown": "Markdown",
+    "copy": "Copy to clipboard",
+    "copied": "Copied to clipboard",
+    "copy_failed": "Failed to copy",
+    "download": "Download",
+    "loading": "Loading…"
   }
 }

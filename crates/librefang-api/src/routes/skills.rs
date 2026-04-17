@@ -76,6 +76,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/hands/active", axum::routing::get(list_active_hands))
         .route("/hands/{hand_id}", axum::routing::get(get_hand))
         .route(
+            "/hands/{hand_id}/manifest",
+            axum::routing::get(get_hand_manifest),
+        )
+        .route(
             "/hands/{hand_id}/activate",
             axum::routing::post(activate_hand),
         )
@@ -1585,6 +1589,90 @@ pub async fn get_hand(
         }
         None => ApiErrorResponse::not_found(format!("Hand not found: {hand_id}")).into_json_tuple(),
     }
+}
+
+/// GET /api/hands/{hand_id}/manifest — Return the hand's HAND.toml as text.
+///
+/// Reads the on-disk HAND.toml from either the registry or workspaces dir
+/// so comments and original formatting survive. Falls back to serializing
+/// the in-memory `HandDefinition` if the file isn't on disk (e.g. installed
+/// programmatically), so the endpoint always has something to return for
+/// any hand the registry knows about.
+#[utoipa::path(
+    get,
+    path = "/api/hands/{hand_id}/manifest",
+    tag = "hands",
+    params(
+        ("hand_id" = String, Path, description = "Hand ID"),
+    ),
+    responses(
+        (status = 200, description = "HAND.toml content", content_type = "application/toml")
+    )
+)]
+pub async fn get_hand_manifest(
+    State(state): State<Arc<AppState>>,
+    Path(hand_id): Path<String>,
+) -> impl IntoResponse {
+    use axum::body::Body;
+
+    // Gate the filesystem lookup on registry membership so a crafted
+    // hand_id can't be used to probe for `**/HAND.toml` paths under the
+    // home dir. Mirrors the `get_hand` pattern above.
+    let definition = match state.kernel.hands().get_definition(&hand_id) {
+        Some(def) => def,
+        None => {
+            return ApiErrorResponse::not_found(format!("Hand not found: {hand_id}"))
+                .into_json_tuple()
+                .into_response();
+        }
+    };
+
+    let home = state.kernel.home_dir();
+    // Two install layouts that scan_hands_dir actually walks
+    // (librefang-hands/src/registry.rs:165). Anything else is a
+    // codebase inconsistency that wouldn't make it into the registry,
+    // so the gate above would already 404 it before we get here.
+    let candidates = [
+        home.join("registry")
+            .join("hands")
+            .join(&hand_id)
+            .join("HAND.toml"),
+        home.join("workspaces").join(&hand_id).join("HAND.toml"),
+    ];
+
+    let mut toml_content: Option<String> = None;
+    for path in &candidates {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                toml_content = Some(content);
+                break;
+            }
+        }
+    }
+
+    // Fall back to re-serialising the in-memory definition so hands
+    // installed via API (no on-disk HAND.toml) still get a useful
+    // payload. Loses comments / formatting but preserves structure.
+    if toml_content.is_none() {
+        match toml::to_string_pretty(&definition) {
+            Ok(s) => toml_content = Some(s),
+            Err(e) => {
+                return ApiErrorResponse::internal(format!(
+                    "Failed to serialize hand definition: {e}"
+                ))
+                .into_json_tuple()
+                .into_response();
+            }
+        }
+    }
+
+    let text = toml_content.expect("toml_content set in fallback above");
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/toml")],
+        Body::from(text),
+    )
+        .into_response()
 }
 
 /// POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a hand.
