@@ -343,17 +343,16 @@ impl OpenAIDriver {
         // Convert messages
         for msg in &request.messages {
             match (&msg.role, &msg.content) {
-                (Role::System, MessageContent::Text(text)) => {
-                    if request.system.is_none() {
-                        oai_messages.push(OaiMessage {
-                            role: "system".to_string(),
-                            content: Some(OaiMessageContent::Text(text.clone())),
-                            tool_calls: None,
-                            tool_call_id: None,
-                            reasoning_content: None,
-                        });
-                    }
+                (Role::System, MessageContent::Text(text)) if request.system.is_none() => {
+                    oai_messages.push(OaiMessage {
+                        role: "system".to_string(),
+                        content: Some(OaiMessageContent::Text(text.clone())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                    });
                 }
+                (Role::System, MessageContent::Text(_)) => {}
                 (Role::User, MessageContent::Text(text)) => {
                     oai_messages.push(OaiMessage {
                         role: "user".to_string(),
@@ -1756,6 +1755,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
         let oai = driver.build_request(&request).expect("build request");
         let extra = oai.extra_body.as_ref().expect("extra_body present");
@@ -1781,6 +1781,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
         let oai = driver.build_request(&request).expect("build request");
         let extra = oai.extra_body.as_ref().expect("extra_body present");
@@ -1806,6 +1807,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
         let oai = driver.build_request(&request).expect("build request");
         // Non-ollama: extra_body should mirror the (None) request.extra_body.

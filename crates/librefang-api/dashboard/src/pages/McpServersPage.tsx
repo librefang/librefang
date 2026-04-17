@@ -1,13 +1,12 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  listMcpServers, addMcpServer, updateMcpServer, deleteMcpServer,
   getMcpAuthStatus, startMcpAuth, revokeMcpAuth,
-  listAvailableIntegrations,
   type McpServerConfigured, type McpServerConnected, type McpServerTransport,
   type IntegrationTemplate,
 } from "../api";
+import { useMcpServers, useAvailableIntegrations } from "../lib/queries/mcp";
+import { useAddMcpServer, useUpdateMcpServer, useDeleteMcpServer } from "../lib/mutations/mcp";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -24,8 +23,6 @@ import {
   Shield, ShieldCheck, ShieldAlert, ShieldX, Check, ExternalLink,
   Search, Clock, Filter, Store, Key, Download,
 } from "lucide-react";
-
-const REFRESH_MS = 30000;
 
 type TransportType = "stdio" | "sse" | "http";
 type StatusFilter = "all" | "connected" | "disconnected";
@@ -533,7 +530,6 @@ function ServerCard({
 
 export function McpServersPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
 
   const [tab, setTab] = useState<"servers" | "registry">("servers");
@@ -550,53 +546,12 @@ export function McpServersPage() {
 
   useCreateShortcut(() => setShowAddModal(true));
 
-  const serversQuery = useQuery({
-    queryKey: ["mcp-servers"],
-    queryFn: listMcpServers,
-    refetchInterval: REFRESH_MS,
-  });
+  const serversQuery = useMcpServers();
+  const registryQuery = useAvailableIntegrations({ enabled: tab === "registry" });
 
-  const registryQuery = useQuery({
-    queryKey: ["integrations-available"],
-    queryFn: listAvailableIntegrations,
-    enabled: tab === "registry",
-  });
-
-  const addMutation = useMutation({
-    mutationFn: (server: McpServerConfigured) => addMcpServer(server),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
-      queryClient.invalidateQueries({ queryKey: ["integrations-available"] });
-      setShowAddModal(false);
-      setInstallingTemplate(null);
-      setEnvInputs({});
-      setForm(defaultForm);
-      addToast(t("mcp.add_success"), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("mcp.add_failed"), "error"),
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: ({ name, server }: { name: string; server: Partial<McpServerConfigured> }) => updateMcpServer(name, server),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
-      setEditingServer(null);
-      setForm(defaultForm);
-      addToast(t("mcp.update_success"), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("mcp.update_failed"), "error"),
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: (name: string) => deleteMcpServer(name),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
-      queryClient.invalidateQueries({ queryKey: ["integrations-available"] });
-      setDeletingServer(null);
-      addToast(t("mcp.delete_success"), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("mcp.delete_failed"), "error"),
-  });
+  const addMutation = useAddMcpServer();
+  const updateMutation = useUpdateMcpServer();
+  const deleteMutation = useDeleteMcpServer();
 
   const data = serversQuery.data;
   const configured = data?.configured ?? [];
@@ -649,9 +604,28 @@ export function McpServersPage() {
   function handleSubmit() {
     const payload = formToPayload(form);
     if (editingServer) {
-      updateMutation.mutate({ name: editingServer.name, server: payload });
+      updateMutation.mutate(
+        { name: editingServer.name, server: payload },
+        {
+          onSuccess: () => {
+            setEditingServer(null);
+            setForm(defaultForm);
+            addToast(t("mcp.update_success"), "success");
+          },
+          onError: (e: any) => addToast(e?.message || t("mcp.update_failed"), "error"),
+        },
+      );
     } else {
-      addMutation.mutate(payload);
+      addMutation.mutate(payload, {
+        onSuccess: () => {
+          setShowAddModal(false);
+          setInstallingTemplate(null);
+          setEnvInputs({});
+          setForm(defaultForm);
+          addToast(t("mcp.add_success"), "success");
+        },
+        onError: (e: any) => addToast(e?.message || t("mcp.add_failed"), "error"),
+      });
     }
   }
 
@@ -685,13 +659,31 @@ export function McpServersPage() {
       setEnvInputs(defaults);
       setInstallingTemplate(tpl);
     } else {
-      addMutation.mutate(buildPayloadFromTemplate(tpl));
+      addMutation.mutate(buildPayloadFromTemplate(tpl), {
+        onSuccess: () => {
+          setShowAddModal(false);
+          setInstallingTemplate(null);
+          setEnvInputs({});
+          setForm(defaultForm);
+          addToast(t("mcp.add_success"), "success");
+        },
+        onError: (e: any) => addToast(e?.message || t("mcp.add_failed"), "error"),
+      });
     }
   }
 
   function confirmTemplateInstall() {
     if (!installingTemplate) return;
-    addMutation.mutate(buildPayloadFromTemplate(installingTemplate, envInputs));
+    addMutation.mutate(buildPayloadFromTemplate(installingTemplate, envInputs), {
+      onSuccess: () => {
+        setShowAddModal(false);
+        setInstallingTemplate(null);
+        setEnvInputs({});
+        setForm(defaultForm);
+        addToast(t("mcp.add_success"), "success");
+      },
+      onError: (e: any) => addToast(e?.message || t("mcp.add_failed"), "error"),
+    });
   }
 
   const registryTemplates = registryQuery.data?.integrations ?? [];
@@ -1180,7 +1172,15 @@ export function McpServersPage() {
         message={t("mcp.delete_confirm")}
         tone="destructive"
         confirmLabel={t("common.delete")}
-        onConfirm={() => { if (deletingServer) deleteMutation.mutate(deletingServer); }}
+        onConfirm={() => {
+          if (deletingServer) deleteMutation.mutate(deletingServer, {
+            onSuccess: () => {
+              setDeletingServer(null);
+              addToast(t("mcp.delete_success"), "success");
+            },
+            onError: (e: any) => addToast(e?.message || t("mcp.delete_failed"), "error"),
+          });
+        }}
         onClose={() => setDeletingServer(null)}
       />
     </div>

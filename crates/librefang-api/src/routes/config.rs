@@ -2119,7 +2119,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         };
         let mut agent_entries_visible: Vec<_> = agent_entries.iter().collect();
         // Sort by last_active descending — matches AgentsPage default query order.
-        agent_entries_visible.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        agent_entries_visible.sort_by_key(|b| std::cmp::Reverse(b.last_active));
         agent_entries_visible
             .iter()
             .map(|e| super::agents::enrich_agent_json(e, &dm, &catalog))
@@ -2145,10 +2145,16 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         match cached {
             Some(n) => n,
             None => {
-                let skills_dir = state.kernel.home_dir().join("skills");
-                let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
-                let _ = registry.load_all();
-                let n = registry.list().len();
+                // Use the kernel's LIVE registry so `skills.disabled` and
+                // `skills.extra_dirs` from config are honoured. The old
+                // fresh-registry path showed disabled skills in the count
+                // and missed extra_dirs entries.
+                let n = state
+                    .kernel
+                    .skill_registry_ref()
+                    .read()
+                    .map(|r| r.list().len())
+                    .unwrap_or(0);
                 *SKILL_COUNT_CACHE.lock().unwrap_or_else(|p| p.into_inner()) =
                     Some((n, std::time::Instant::now()));
                 n

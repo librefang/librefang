@@ -1,7 +1,9 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listChannels, configureChannel, testChannel, reloadChannels, wechatQrStart, wechatQrStatus, whatsappQrStart, whatsappQrStatus, type ChannelItem } from "../api";
+import { configureChannel, wechatQrStart, wechatQrStatus, whatsappQrStart, whatsappQrStatus, type ChannelItem } from "../api";
+import { useChannels } from "../lib/queries/channels";
+import { useConfigureChannel, useTestChannel, useReloadChannels } from "../lib/mutations/channels";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import QRCode from "qrcode";
@@ -17,8 +19,6 @@ import {
   Settings, Key, Clock, AlertCircle, CheckSquare, Square,
   MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Wifi, Globe
 } from "lucide-react";
-
-const REFRESH_MS = 30000;
 
 const channelIcons: Record<string, React.ReactNode> = {
   slack: <MessageCircle className="w-5 h-5" />,
@@ -317,7 +317,6 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
 
 // Config Dialog — standard form with controlled inputs
 function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () => void; t: (key: string) => string }) {
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const fields = useMemo(() => (channel.fields ?? []).filter(f => !f.advanced), [channel.fields]);
 
@@ -350,6 +349,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
   );
 
   // Only submit non-readonly, non-empty values (skip untouched secrets)
+  const configMutation = useConfigureChannel();
   const handleSubmit = () => {
     const payload: Record<string, string> = {};
     for (const f of visibleFields) {
@@ -357,18 +357,17 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
       const v = values[f.key];
       if (v) payload[f.key] = v;
     }
-    configMutation.mutate(payload);
+    configMutation.mutate(
+      { channelName: channel.name, config: payload },
+      {
+        onSuccess: () => {
+          addToast(t("channels.config_success") || `${channel.display_name || channel.name} configured`, "success");
+          onClose();
+        },
+        onError: (err: any) => addToast(err.message || t("channels.config_failed") || "Failed to configure channel", "error"),
+      },
+    );
   };
-
-  const configMutation = useMutation({
-    mutationFn: (payload: Record<string, string>) => configureChannel(channel.name, payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["channels", "list"] });
-      addToast(t("channels.config_success") || `${channel.display_name || channel.name} configured`, "success");
-      onClose();
-    },
-    onError: (err: any) => addToast(err.message || t("channels.config_failed") || "Failed to configure channel", "error"),
-  });
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 backdrop-blur-sm" onClick={onClose}>
@@ -605,26 +604,24 @@ export function ChannelsPage() {
   const [configuringChannel, setConfiguringChannel] = useState<Channel | null>(null);
   const [qrLoginChannel, setQrLoginChannel] = useState<Channel | null>(null);
 
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
 
-  const channelsQuery = useQuery({ queryKey: ["channels", "list"], queryFn: listChannels, refetchInterval: REFRESH_MS });
-  const testMut = useMutation({
-    mutationFn: (name: string) => testChannel(name),
-    onSuccess: (_data, name) => {
-      addToast(t("channels.test_success", { defaultValue: `Channel "${name}" test passed` }), "success");
-      queryClient.invalidateQueries({ queryKey: ["channels"] });
-    },
-    onError: (err: any, name) => addToast(err.message || t("channels.test_failed", { defaultValue: `Channel "${name}" test failed` }), "error"),
-  });
-  const reloadMut = useMutation({
-    mutationFn: reloadChannels,
-    onSuccess: () => {
-      addToast(t("channels.reload_success", { defaultValue: "Channels reloaded" }), "success");
-      queryClient.invalidateQueries({ queryKey: ["channels"] });
-    },
-    onError: (err: any) => addToast(err.message || t("common.error"), "error"),
-  });
+  const channelsQuery = useChannels();
+  const testMut = useTestChannel();
+  const reloadMut = useReloadChannels();
+
+  const handleTest = (name: string) => {
+    testMut.mutate(name, {
+      onSuccess: () => addToast(t("channels.test_success", { defaultValue: `Channel "${name}" test passed` }), "success"),
+      onError: (err: any) => addToast(err.message || t("channels.test_failed", { defaultValue: `Channel "${name}" test failed` }), "error"),
+    });
+  };
+  const handleReload = () => {
+    reloadMut.mutate(undefined, {
+      onSuccess: () => addToast(t("channels.reload_success", { defaultValue: "Channels reloaded" }), "success"),
+      onError: (err: any) => addToast(err.message || t("common.error"), "error"),
+    });
+  };
 
   const channels = channelsQuery.data ?? [];
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
@@ -704,7 +701,7 @@ export function ChannelsPage() {
         helpText={t("channels.help")}
         actions={
           <div className="flex items-center gap-2">
-            <Button variant="secondary" size="sm" onClick={() => reloadMut.mutate()} disabled={reloadMut.isPending}>
+            <Button variant="secondary" size="sm" onClick={handleReload} disabled={reloadMut.isPending}>
               {t("channels.reload", { defaultValue: "Reload" })}
             </Button>
             <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase text-text-dim sm:block">
@@ -850,7 +847,7 @@ export function ChannelsPage() {
               setConfiguringChannel(ch);
             }
           }}
-          onTest={() => testMut.mutate(detailsChannel.name)}
+          onTest={() => handleTest(detailsChannel.name)}
           t={t}
         />
       )}

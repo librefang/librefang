@@ -25,6 +25,9 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 serde_yaml = { workspace = true }
 zip = { workspace = true }
+aho-corasick = "1.1"
+semver = "1"
+fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }

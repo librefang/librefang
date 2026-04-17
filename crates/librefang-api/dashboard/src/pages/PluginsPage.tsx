@@ -1,11 +1,13 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatBytes } from "../lib/format";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { usePlugins, usePluginRegistries } from "../lib/queries/plugins";
 import {
-  listPlugins, listPluginRegistries, installPlugin, uninstallPlugin,
-  scaffoldPlugin, installPluginDeps,
-} from "../api";
+  useInstallPlugin,
+  useUninstallPlugin,
+  useScaffoldPlugin,
+  useInstallPluginDeps,
+} from "../lib/mutations/plugins";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -20,11 +22,8 @@ import {
   GitBranch, Loader2, Check, AlertCircle, FileCode
 } from "lucide-react";
 
-const REFRESH_MS = 30000;
-
 export function PluginsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [tab, setTab] = useState<"installed" | "registry">("installed");
   const [showInstall, setShowInstall] = useState(false);
   const [showScaffold, setShowScaffold] = useState(false);
@@ -45,48 +44,14 @@ export function PluginsPage() {
   const [scaffoldDesc, setScaffoldDesc] = useState("");
   const [scaffoldRuntime, setScaffoldRuntime] = useState("python");
 
-  const pluginsQuery = useQuery({ queryKey: ["plugins"], queryFn: listPlugins, refetchInterval: REFRESH_MS });
-  const registriesQuery = useQuery({ queryKey: ["plugins", "registries"], queryFn: listPluginRegistries, enabled: tab === "registry" });
+  const pluginsQuery = usePlugins();
+  const registriesQuery = usePluginRegistries(tab === "registry");
 
   const addToast = useUIStore((s) => s.addToast);
-  const installMutation = useMutation({
-    mutationFn: installPlugin,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["plugins"] });
-      setShowInstall(false);
-      resetInstallForm();
-      addToast(t("plugins.install_success", { defaultValue: "Plugin installed" }), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("plugins.install_failed", { defaultValue: "Install failed" }), "error"),
-    onSettled: () => { setInstallingName(null); },
-  });
-  const uninstallMutation = useMutation({
-    mutationFn: uninstallPlugin,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["plugins"] });
-      setConfirmDelete(null);
-      addToast(t("plugins.uninstall_success", { defaultValue: "Plugin removed" }), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
-  });
-  const scaffoldMutation = useMutation({
-    mutationFn: ({ name, desc, runtime }: { name: string; desc: string; runtime: string }) =>
-      scaffoldPlugin(name, desc, runtime),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["plugins"] });
-      setShowScaffold(false);
-      setScaffoldName("");
-      setScaffoldDesc("");
-      setScaffoldRuntime("python");
-      addToast(t("plugins.scaffold_success", { defaultValue: "Plugin created" }), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("plugins.scaffold_failed", { defaultValue: "Create failed" }), "error"),
-  });
-  const depsMutation = useMutation({
-    mutationFn: installPluginDeps,
-    onSuccess: () => addToast(t("plugins.deps_installed", { defaultValue: "Dependencies installed" }), "success"),
-    onError: (e: any) => addToast(e?.message || t("plugins.deps_failed", { defaultValue: "Dependency install failed" }), "error"),
-  });
+  const installMutation = useInstallPlugin();
+  const uninstallMutation = useUninstallPlugin();
+  const scaffoldMutation = useScaffoldPlugin();
+  const depsMutation = useInstallPluginDeps();
 
   const plugins = pluginsQuery.data?.plugins ?? [];
   const registries = registriesQuery.data?.registries ?? [];
@@ -95,25 +60,54 @@ export function PluginsPage() {
     setInstallName(""); setInstallPath(""); setInstallUrl(""); setInstallBranch(""); setInstallRepo("");
   };
 
+  const onInstallSuccess = () => {
+    setShowInstall(false);
+    resetInstallForm();
+    addToast(t("plugins.install_success", { defaultValue: "Plugin installed" }), "success");
+  };
+  const onInstallError = (e: any) => addToast(e?.message || t("plugins.install_failed", { defaultValue: "Install failed" }), "error");
+
   const handleInstall = () => {
     if (installSource === "registry") {
-      installMutation.mutate({ source: "registry", name: installName, github_repo: installRepo || undefined });
+      installMutation.mutate(
+        { source: "registry", name: installName, github_repo: installRepo || undefined },
+        { onSuccess: onInstallSuccess, onError: onInstallError, onSettled: () => setInstallingName(null) },
+      );
     } else if (installSource === "local") {
-      installMutation.mutate({ source: "local", path: installPath });
+      installMutation.mutate(
+        { source: "local", path: installPath },
+        { onSuccess: onInstallSuccess, onError: onInstallError, onSettled: () => setInstallingName(null) },
+      );
     } else {
-      installMutation.mutate({ source: "git", url: installUrl, branch: installBranch || undefined });
+      installMutation.mutate(
+        { source: "git", url: installUrl, branch: installBranch || undefined },
+        { onSuccess: onInstallSuccess, onError: onInstallError, onSettled: () => setInstallingName(null) },
+      );
     }
   };
 
   const handleRegistryInstall = (name: string, repo: string) => {
     setInstallingName(name);
-    installMutation.mutate({ source: "registry", name, github_repo: repo });
+    installMutation.mutate(
+      { source: "registry", name, github_repo: repo },
+      {
+        onSuccess: () => addToast(t("plugins.install_success", { defaultValue: "Plugin installed" }), "success"),
+        onError: (e: any) => addToast(e?.message || t("plugins.install_failed", { defaultValue: "Install failed" }), "error"),
+        onSettled: () => setInstallingName(null),
+      },
+    );
   };
 
   const handleDelete = (name: string) => {
     if (confirmDelete !== name) { setConfirmDelete(name); return; }
     setConfirmDelete(null);
-    uninstallMutation.mutate(name);
+    uninstallMutation.mutate(name, {
+      onSuccess: () => {
+        setConfirmDelete(null);
+        addToast(t("plugins.uninstall_success", { defaultValue: "Plugin removed" }), "success");
+      },
+      onError: (e: any) => addToast(e?.message || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
+    });
   };
 
   const formatSize = formatBytes;
@@ -189,7 +183,10 @@ export function PluginsPage() {
                   </div>
                   <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
                     <Button variant="secondary" size="sm"
-                      onClick={() => depsMutation.mutate(p.name)}
+                      onClick={() => depsMutation.mutate(p.name, {
+                        onSuccess: () => addToast(t("plugins.deps_installed", { defaultValue: "Dependencies installed" }), "success"),
+                        onError: (e: any) => addToast(e?.message || t("plugins.deps_failed", { defaultValue: "Dependency install failed" }), "error"),
+                      })}
                       disabled={depsMutation.isPending}>
                       {depsMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
                       <span className="hidden sm:inline">{t("plugins.deps")}</span>
@@ -419,7 +416,19 @@ export function PluginsPage() {
           </div>
           <div className="flex gap-2 pt-2">
             <Button variant="primary" className="flex-1"
-              onClick={() => scaffoldMutation.mutate({ name: scaffoldName, desc: scaffoldDesc, runtime: scaffoldRuntime })}
+              onClick={() => scaffoldMutation.mutate(
+                { name: scaffoldName, desc: scaffoldDesc, runtime: scaffoldRuntime },
+                {
+                  onSuccess: () => {
+                    setShowScaffold(false);
+                    setScaffoldName("");
+                    setScaffoldDesc("");
+                    setScaffoldRuntime("python");
+                    addToast(t("plugins.scaffold_success", { defaultValue: "Plugin created" }), "success");
+                  },
+                  onError: (e: any) => addToast(e?.message || t("plugins.scaffold_failed", { defaultValue: "Create failed" }), "error"),
+                },
+              )}
               disabled={!scaffoldName.trim() || scaffoldMutation.isPending}>
               {scaffoldMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
               {t("plugins.create")}

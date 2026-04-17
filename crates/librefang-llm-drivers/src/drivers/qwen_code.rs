@@ -263,11 +263,10 @@ impl QwenCodeDriver {
                     let mut msg_parts = Vec::new();
                     for block in blocks {
                         match block {
-                            ContentBlock::Text { text, .. } => {
-                                if !text.is_empty() {
-                                    msg_parts.push(text.clone());
-                                }
+                            ContentBlock::Text { text, .. } if !text.is_empty() => {
+                                msg_parts.push(text.clone());
                             }
+                            ContentBlock::Text { .. } => {}
                             ContentBlock::Image { media_type, data } => {
                                 // Decode first — if the base64 is bad, we
                                 // don't want to have created a temp dir or
@@ -1058,6 +1057,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1105,6 +1105,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1179,6 +1180,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1278,6 +1280,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1320,6 +1323,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);

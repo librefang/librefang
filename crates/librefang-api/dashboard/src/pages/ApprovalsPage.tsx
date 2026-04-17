@@ -1,16 +1,17 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { type ApprovalAuditEntry } from "../api";
 import {
-  approveApproval,
-  rejectApproval,
-  listApprovals,
-  batchResolveApprovals,
-  modifyAndRetryApproval,
-  queryApprovalAudit,
-  totpStatus,
-  type ApprovalAuditEntry,
-} from "../api";
+  useApprovals,
+  useApprovalAudit,
+  useTotpStatus,
+} from "../lib/queries/approvals";
+import {
+  useApproveApproval,
+  useRejectApproval,
+  useBatchResolveApprovals,
+  useModifyAndRetryApproval,
+} from "../lib/mutations/approvals";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -21,7 +22,6 @@ import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { CheckCircle, XCircle, Clock, MessageSquare, ChevronLeft, ChevronRight } from "lucide-react";
 
-const REFRESH_MS = 15000;
 const AUDIT_PAGE_SIZE = 20;
 
 type Tab = "pending" | "audit";
@@ -91,22 +91,17 @@ function ModifyForm({
 }) {
   const { t } = useTranslation();
   const [feedback, setFeedback] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
+  const modifyAndRetry = useModifyAndRetryApproval();
 
   async function handleSubmit() {
     if (!feedback.trim()) return;
-    setSubmitting(true);
     try {
-      await modifyAndRetryApproval(id, feedback.trim());
+      await modifyAndRetry.mutateAsync({ id, feedback: feedback.trim() });
       addToast(t("approvals.modifiedToast"), "success");
-      queryClient.invalidateQueries({ queryKey: ["approvals"] });
       onDone();
     } catch (e: any) {
       addToast(e.message || t("common.error"), "error");
-    } finally {
-      setSubmitting(false);
     }
   }
 
@@ -128,8 +123,8 @@ function ModifyForm({
           variant="primary"
           size="sm"
           onClick={handleSubmit}
-          disabled={submitting || !feedback.trim()}
-          isLoading={submitting}
+          disabled={modifyAndRetry.isPending || !feedback.trim()}
+          isLoading={modifyAndRetry.isPending}
         >
           {t("approvals.modifySubmit")}
         </Button>
@@ -146,10 +141,7 @@ function AuditLogTab() {
   const { t } = useTranslation();
   const [offset, setOffset] = useState(0);
 
-  const auditQuery = useQuery({
-    queryKey: ["approvals", "audit", offset],
-    queryFn: () => queryApprovalAudit({ limit: AUDIT_PAGE_SIZE, offset }),
-  });
+  const auditQuery = useApprovalAudit({ limit: AUDIT_PAGE_SIZE, offset });
 
   const entries: ApprovalAuditEntry[] = auditQuery.data?.entries ?? [];
   const total = auditQuery.data?.total ?? 0;
@@ -251,7 +243,6 @@ function AuditLogTab() {
 
 export function ApprovalsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [modifyingId, setModifyingId] = useState<string | null>(null);
@@ -260,20 +251,13 @@ export function ApprovalsPage() {
   const [totpInput, setTotpInput] = useState("");
   const addToast = useUIStore((s) => s.addToast);
 
-  const approvalsQuery = useQuery({ queryKey: ["approvals", "list"], queryFn: listApprovals, refetchInterval: REFRESH_MS });
-  const totpQuery = useQuery({ queryKey: ["totp", "status"], queryFn: totpStatus, staleTime: 60_000 });
+  const approvalsQuery = useApprovals();
+  const totpQuery = useTotpStatus();
+  const approveMutation = useApproveApproval();
+  const rejectMutation = useRejectApproval();
+  const batchResolve = useBatchResolveApprovals();
 
   const totpEnforced = totpQuery.data?.enforced ?? false;
-
-  const approveMutation = useMutation({
-    mutationFn: ({ id, totpCode }: { id: string; totpCode?: string }) =>
-      approveApproval(id, totpCode),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["approvals"] }),
-  });
-  const rejectMutation = useMutation({
-    mutationFn: (id: string) => rejectApproval(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["approvals"] }),
-  });
 
   const approvals = approvalsQuery.data ?? [];
   const pendingApprovals = approvals.filter((a) => !a.status || a.status === "pending");
@@ -326,10 +310,9 @@ export function ApprovalsPage() {
     const ids = Array.from(selected);
     setPendingId("batch");
     try {
-      await batchResolveApprovals(ids, decision);
+      await batchResolve.mutateAsync({ ids, decision });
       addToast(t("approvals.batchSuccess"), "success");
       setSelected(new Set());
-      queryClient.invalidateQueries({ queryKey: ["approvals"] });
     } catch (e: any) {
       addToast(e.message || t("common.error"), "error");
     } finally {

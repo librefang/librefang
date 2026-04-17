@@ -1,7 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { createSchedule, deleteSchedule, updateSchedule, listAgents, listSchedules, listTriggers, listWorkflows, updateTrigger, deleteTrigger, runSchedule } from "../api";
+import { useAgents } from "../lib/queries/agents";
+import { useWorkflows } from "../lib/queries/workflows";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -13,12 +13,19 @@ import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Modal } from "../components/ui/Modal";
 import { truncateId } from "../lib/string";
-
-const REFRESH_MS = 30000;
+import { formatTriggerPattern } from "../lib/triggerPattern";
+import { useSchedules, useTriggers } from "../lib/queries/schedules";
+import {
+  useCreateSchedule,
+  useDeleteSchedule,
+  useRunSchedule,
+  useUpdateSchedule,
+  useUpdateTrigger,
+  useDeleteTrigger,
+} from "../lib/mutations/schedules";
 
 export function SchedulerPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [showCreate, setShowCreate] = useState(false);
   useCreateShortcut(() => setShowCreate(true));
@@ -32,23 +39,17 @@ export function SchedulerPage() {
   const [message, setMessage] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<{ type: "schedule" | "trigger"; id: string } | null>(null);
 
-  const agentsQuery = useQuery({ queryKey: ["agents", "list", "scheduler"], queryFn: () => listAgents() });
-  const schedulesQuery = useQuery({ queryKey: ["schedules", "list"], queryFn: listSchedules, refetchInterval: REFRESH_MS });
-  const triggersQuery = useQuery({ queryKey: ["triggers", "list"], queryFn: listTriggers });
-  const workflowsQuery = useQuery({ queryKey: ["workflows", "list", "scheduler"], queryFn: listWorkflows });
+  const agentsQuery = useAgents();
+  const schedulesQuery = useSchedules();
+  const triggersQuery = useTriggers();
+  const workflowsQuery = useWorkflows();
 
-  const createMut = useMutation({ mutationFn: createSchedule });
-  const runMut = useMutation({ mutationFn: runSchedule });
-  const deleteScheduleMut = useMutation({ mutationFn: deleteSchedule });
-  const toggleScheduleMut = useMutation({
-    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => updateSchedule(id, { enabled }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["schedules"] }),
-  });
-  const toggleTriggerMut = useMutation({
-    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => updateTrigger(id, { enabled }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["triggers"] }),
-  });
-  const deleteTriggerMut = useMutation({ mutationFn: deleteTrigger });
+  const createMut = useCreateSchedule();
+  const runMut = useRunSchedule();
+  const deleteScheduleMut = useDeleteSchedule();
+  const toggleScheduleMut = useUpdateSchedule();
+  const toggleTriggerMut = useUpdateTrigger();
+  const deleteTriggerMut = useDeleteTrigger();
 
   const agents = agentsQuery.data ?? [];
   const workflows = workflowsQuery.data ?? [];
@@ -65,7 +66,6 @@ export function SchedulerPage() {
         ...(targetType === "agent" ? { agent_id: agentId } : { workflow_id: workflowId }),
       });
       setShowCreate(false); setName(""); setMessage(""); setCron("0 9 * * *"); setCronTz(undefined); setAgentId(""); setWorkflowId(""); setTargetType("agent");
-      await queryClient.invalidateQueries({ queryKey: ["schedules"] });
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
 
@@ -77,7 +77,6 @@ export function SchedulerPage() {
     setConfirmDelete(null);
     try {
       await deleteScheduleMut.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["schedules"] });
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
 
@@ -89,7 +88,6 @@ export function SchedulerPage() {
     setConfirmDelete(null);
     try {
       await deleteTriggerMut.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["triggers"] });
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
 
@@ -158,7 +156,7 @@ export function SchedulerPage() {
                     </div>
                     <h3 className="text-xs sm:text-sm font-bold truncate flex-1 min-w-0">{s.name || s.description || truncateId(s.id)}</h3>
                     <button
-                      onClick={() => toggleScheduleMut.mutate({ id: s.id, enabled: !isEnabled })}
+                      onClick={() => toggleScheduleMut.mutate({ id: s.id, data: { enabled: !isEnabled } })}
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition-colors ${isEnabled ? "bg-success/10 text-success hover:bg-success/20" : "bg-main text-text-dim/40 hover:text-text-dim"}`}
                       disabled={toggleScheduleMut.isPending}
                     >
@@ -213,10 +211,10 @@ export function SchedulerPage() {
                       <Zap className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${isEnabled ? "text-warning" : "text-text-dim/30"}`} />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <h3 className="text-xs sm:text-sm font-bold truncate">{tr.pattern || tr.name || truncateId(tr.id, 12)}</h3>
+                      <h3 className="text-xs sm:text-sm font-bold truncate">{formatTriggerPattern(tr.pattern) || truncateId(tr.id, 12)}</h3>
                     </div>
                     <button
-                      onClick={() => toggleTriggerMut.mutate({ id: tr.id, enabled: !isEnabled })}
+                      onClick={() => toggleTriggerMut.mutate({ id: tr.id, data: { enabled: !isEnabled } })}
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition-colors ${isEnabled ? "bg-success/10 text-success hover:bg-success/20" : "bg-main text-text-dim/40 hover:text-text-dim"}`}
                       disabled={toggleTriggerMut.isPending}
                     >

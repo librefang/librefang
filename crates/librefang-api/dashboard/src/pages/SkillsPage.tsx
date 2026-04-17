@@ -1,25 +1,42 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, fanghubListSkills, installSkill, listHands, type ClawHubBrowseItem, type FangHubSkill, type HandDefinitionItem } from "../api";
+import {
+  getSkillDetail,
+  createSkill,
+  reloadSkills,
+  evolveUpdateSkill,
+  evolvePatchSkill,
+  evolveRollbackSkill,
+  evolveDeleteSkill,
+  evolveWriteFile,
+  evolveRemoveFile,
+  getSupportingFile,
+  type ClawHubBrowseItem,
+  type FangHubSkill,
+  type HandDefinitionItem,
+} from "../api";
+import { useSkills, skillQueries } from "../lib/queries/skills";
+import { useHands } from "../lib/queries/hands";
+import { useUninstallSkill, useClawHubInstall, useSkillHubInstall, useInstallSkill } from "../lib/mutations/skills";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
+import { Modal } from "../components/ui/Modal";
 import { useUIStore } from "../lib/store";
 import {
   Wrench, Search, CheckCircle2, X,
   Download, Trash2, Star, Loader2, Sparkles, Package,
   Code, GitBranch, Globe, Cloud, Monitor, Bot, Database,
   Briefcase, Shield, Terminal, Calendar, Store, Zap, RefreshCw,
+  Plus, History, Eye, RotateCcw, FileText, Tag, Edit as EditIcon, Upload,
 } from "lucide-react";
 
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
-
-const REFRESH_MS = 30000;
 
 type ViewMode = "installed" | "marketplace" | "skillhub" | "fanghub";
 type MarketplaceSource = "clawhub" | "skillhub";
@@ -112,9 +129,10 @@ function FangHubSkillCard({ skill, pendingId, onInstall, t }: {
 }
 
 // Skill Card - Installed
-function InstalledSkillCard({ skill, onUninstall, t }: {
-  skill: { name: string; version?: string; description?: string; author?: string; tools_count?: number };
+function InstalledSkillCard({ skill, onUninstall, onViewDetail, t }: {
+  skill: { name: string; version?: string; description?: string; author?: string; tools_count?: number; tags?: string[] };
   onUninstall: (name: string) => void;
+  onViewDetail: (name: string) => void;
   t: (key: string) => string;
 }) {
   return (
@@ -134,15 +152,667 @@ function InstalledSkillCard({ skill, onUninstall, t }: {
           <Badge variant="success">{t("skills.installed")}</Badge>
         </div>
         <p className="text-xs text-text-dim line-clamp-2 italic mb-4 flex-1">{skill.description || "-"}</p>
-        <div className="flex justify-between items-center text-[10px] font-bold text-text-dim uppercase mb-4">
+        <div className="flex justify-between items-center text-[10px] font-bold text-text-dim uppercase mb-3">
           <span>{t("skills.author")}: {skill.author || t("common.unknown")}</span>
           <span>{t("skills.tools")}: {skill.tools_count || 0}</span>
         </div>
-        <Button variant="ghost" className="w-full text-error hover:text-error" onClick={() => onUninstall(skill.name)} leftIcon={<Trash2 className="w-4 h-4" />}>
-          {t("skills.uninstall")}
-        </Button>
+        {skill.tags && skill.tags.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-3">
+            {skill.tags.slice(0, 3).map(tag => (
+              <span key={tag} className="px-1.5 py-0.5 text-[10px] rounded bg-surface-2 text-text-dim">{tag}</span>
+            ))}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <Button variant="ghost" className="flex-1" onClick={() => onViewDetail(skill.name)} leftIcon={<Eye className="w-4 h-4" />}>
+            {t("common.detail")}
+          </Button>
+          <Button variant="ghost" className="flex-1 text-error hover:text-error" onClick={() => onUninstall(skill.name)} leftIcon={<Trash2 className="w-4 h-4" />}>
+            {t("skills.uninstall")}
+          </Button>
+        </div>
       </div>
     </Card>
+  );
+}
+
+// Create Skill Modal
+function CreateSkillModal({ isOpen, onClose, onCreated, t }: {
+  isOpen: boolean;
+  onClose: () => void;
+  onCreated: () => void;
+  t: (key: string, opts?: any) => string;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [promptContext, setPromptContext] = useState("");
+  const [tags, setTags] = useState("");
+  const [error, setError] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  // Track mounted state to prevent state updates after unmount
+  const mountedRef = useRef(true);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      // Cancel any in-flight request when component unmounts
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
+  // Reset form state when modal closes
+  useEffect(() => {
+    if (!isOpen) {
+      setError("");
+      setCreating(false);
+    }
+  }, [isOpen]);
+
+  /// Map common API error messages to user-friendly localized strings
+  const formatApiError = useCallback((e: any): string => {
+    const msg = (e?.message || "").toLowerCase();
+    if (msg.includes("already installed") || msg.includes("already exists")) {
+      return t("skills.err_name_conflict", { defaultValue: "A skill with this name already exists. Please choose a different name." });
+    }
+    if (msg.includes("description too long")) {
+      return t("skills.err_desc_too_long", { defaultValue: "Description is too long (max 1024 characters)." });
+    }
+    if (msg.includes("prompt context too large")) {
+      return t("skills.err_prompt_too_large", { defaultValue: "Prompt context is too large (max 160,000 characters)." });
+    }
+    if (msg.includes("security") || msg.includes("blocked")) {
+      return t("skills.err_security_blocked", { defaultValue: "Content was blocked by security scan. Please remove potentially dangerous patterns." });
+    }
+    if (msg.includes("invalid") && msg.includes("name")) {
+      return t("skills.err_invalid_name", { defaultValue: "Invalid skill name. Use lowercase letters, numbers, hyphens, and underscores only." });
+    }
+    return e?.message || t("skills.err_create_failed", { defaultValue: "Failed to create skill. Please try again." });
+  }, [t]);
+
+  const handleCreate = async () => {
+    setError("");
+    if (!name.trim() || !description.trim()) {
+      setError(t("skills.evo_fill_required", { defaultValue: "Name and description are required" }));
+      return;
+    }
+
+    // Abort any previous in-flight request
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    setCreating(true);
+    try {
+      await createSkill({
+        name: name.trim(),
+        description: description.trim(),
+        prompt_context: promptContext.trim(),
+        tags: tags.split(",").map(t => t.trim()).filter(Boolean),
+      });
+      // Only update state if still mounted and not aborted
+      if (mountedRef.current && !controller.signal.aborted) {
+        onCreated();
+        onClose();
+        setName(""); setDescription(""); setPromptContext(""); setTags("");
+      }
+    } catch (e: any) {
+      // Ignore abort errors
+      if (e?.name === "AbortError") return;
+      if (mountedRef.current && !controller.signal.aborted) {
+        setError(formatApiError(e));
+      }
+    } finally {
+      if (mountedRef.current && !controller.signal.aborted) {
+        setCreating(false);
+      }
+    }
+  };
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={t("skills.evo_create_title", { defaultValue: "Create Skill" })} size="xl">
+      <div className="space-y-4 p-1">
+        <div>
+          <label className="block text-xs font-bold uppercase text-text-dim mb-1">{t("common.name")}</label>
+          <Input value={name} onChange={e => setName(e.target.value)} placeholder="my-skill-name" />
+          <p className="text-[10px] text-text-dim mt-1">{t("skills.evo_name_hint", { defaultValue: "Lowercase, hyphens allowed (e.g., csv-analysis)" })}</p>
+        </div>
+        <div>
+          <label className="block text-xs font-bold uppercase text-text-dim mb-1">{t("common.description")}</label>
+          <Input value={description} onChange={e => setDescription(e.target.value)} placeholder={t("skills.evo_desc_placeholder", { defaultValue: "What this skill teaches agents to do" })} />
+        </div>
+        <div>
+          <label className="block text-xs font-bold uppercase text-text-dim mb-1">{t("skills.evo_prompt_context", { defaultValue: "Prompt Context (Markdown)" })}</label>
+          <textarea
+            value={promptContext}
+            onChange={e => setPromptContext(e.target.value)}
+            className="w-full h-48 px-3 py-2 text-sm rounded-lg bg-surface-2 border border-border text-text-main resize-y font-mono"
+            placeholder={t("skills.evo_prompt_placeholder", { defaultValue: "# Skill Instructions\n\nMarkdown instructions injected into the system prompt..." })}
+          />
+          <p className="text-[10px] text-text-dim mt-1">{promptContext.length.toLocaleString()} / 160,000</p>
+        </div>
+        <div>
+          <label className="block text-xs font-bold uppercase text-text-dim mb-1">{t("skills.evo_tags", { defaultValue: "Tags (comma-separated)" })}</label>
+          <Input value={tags} onChange={e => setTags(e.target.value)} placeholder="data, csv, analysis" />
+        </div>
+        {error && <p className="text-xs text-error">{error}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button onClick={handleCreate} disabled={creating} leftIcon={creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}>
+            {creating ? t("common.creating", { defaultValue: "Creating..." }) : t("common.create")}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Skill Detail Modal with evolution history
+// ── Evolve sub-panes (embedded inside SkillDetailModal) ─────────────
+//
+// These are thin, stateful forms. They don't own mutation state — the
+// parent (SkillDetailModal) does, so sub-panes simply call onSubmit
+// with the collected params and let the parent handle the API call,
+// refetch, toasts, and error display.
+
+function EvolveUpdatePane({ skillName, initialContent, onSubmit, onCancel, busy, t }: {
+  skillName: string;
+  initialContent: string;
+  onSubmit: (params: { prompt_context: string; changelog: string }) => void;
+  onCancel: () => void;
+  busy: boolean;
+  t: (key: string, opts?: any) => string;
+}) {
+  const [content, setContent] = useState(initialContent);
+  const [changelog, setChangelog] = useState("");
+  const dirty = content !== initialContent;
+  return (
+    <div className="rounded-lg border border-border bg-surface-1 p-3 space-y-2">
+      <p className="text-xs font-bold uppercase text-text-dim">
+        {t("skills.evo_update_title", { defaultValue: "Update {{name}}", name: skillName })}
+      </p>
+      <textarea
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        className="w-full h-64 px-3 py-2 text-sm rounded-lg bg-surface-2 border border-border text-text-main resize-y font-mono"
+      />
+      <p className="text-[10px] text-text-dim">{content.length.toLocaleString()} / 160,000</p>
+      <Input
+        value={changelog}
+        onChange={(e) => setChangelog(e.target.value)}
+        placeholder={t("skills.evo_changelog_placeholder", { defaultValue: "What changed and why" })}
+      />
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" onClick={onCancel} disabled={busy}>{t("common.cancel")}</Button>
+        <Button
+          onClick={() => onSubmit({ prompt_context: content, changelog: changelog.trim() })}
+          disabled={busy || !dirty || !changelog.trim()}
+          leftIcon={busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <EditIcon className="w-4 h-4" />}
+        >
+          {t("skills.evo_update", { defaultValue: "Update" })}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function EvolvePatchPane({ skillName, onSubmit, onCancel, busy, t }: {
+  skillName: string;
+  onSubmit: (params: { old_string: string; new_string: string; changelog: string; replace_all: boolean }) => void;
+  onCancel: () => void;
+  busy: boolean;
+  t: (key: string, opts?: any) => string;
+}) {
+  const [oldStr, setOldStr] = useState("");
+  const [newStr, setNewStr] = useState("");
+  const [changelog, setChangelog] = useState("");
+  const [replaceAll, setReplaceAll] = useState(false);
+  return (
+    <div className="rounded-lg border border-border bg-surface-1 p-3 space-y-2">
+      <p className="text-xs font-bold uppercase text-text-dim">
+        {t("skills.evo_patch_title", { defaultValue: "Patch {{name}}", name: skillName })}
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <div>
+          <label className="block text-[10px] font-bold uppercase text-text-dim mb-1">{t("skills.evo_patch_old", { defaultValue: "Find" })}</label>
+          <textarea
+            value={oldStr}
+            onChange={(e) => setOldStr(e.target.value)}
+            className="w-full h-40 px-2 py-1.5 text-xs rounded bg-surface-2 border border-border text-text-main resize-y font-mono"
+          />
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase text-text-dim mb-1">{t("skills.evo_patch_new", { defaultValue: "Replace with" })}</label>
+          <textarea
+            value={newStr}
+            onChange={(e) => setNewStr(e.target.value)}
+            className="w-full h-40 px-2 py-1.5 text-xs rounded bg-surface-2 border border-border text-text-main resize-y font-mono"
+          />
+        </div>
+      </div>
+      <Input
+        value={changelog}
+        onChange={(e) => setChangelog(e.target.value)}
+        placeholder={t("skills.evo_changelog_placeholder", { defaultValue: "What changed and why" })}
+      />
+      <label className="inline-flex items-center gap-2 text-xs text-text-dim">
+        <input type="checkbox" checked={replaceAll} onChange={(e) => setReplaceAll(e.target.checked)} />
+        {t("skills.evo_replace_all", { defaultValue: "Replace all occurrences" })}
+      </label>
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" onClick={onCancel} disabled={busy}>{t("common.cancel")}</Button>
+        <Button
+          onClick={() => onSubmit({ old_string: oldStr, new_string: newStr, changelog: changelog.trim(), replace_all: replaceAll })}
+          disabled={busy || !oldStr || !changelog.trim()}
+          leftIcon={busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Code className="w-4 h-4" />}
+        >
+          {t("skills.evo_patch", { defaultValue: "Patch" })}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function EvolveUploadPane({ skillName, onSubmit, onCancel, busy, t }: {
+  skillName: string;
+  onSubmit: (params: { path: string; content: string }) => void;
+  onCancel: () => void;
+  busy: boolean;
+  t: (key: string, opts?: any) => string;
+}) {
+  const [subdir, setSubdir] = useState("references");
+  const [filename, setFilename] = useState("");
+  const [content, setContent] = useState("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const handleFilePick = async (file: File) => {
+    // Read as text — supporting files are limited to 1 MiB per skill rules.
+    if (file.size > 1024 * 1024) {
+      alert(t("skills.evo_file_too_large", { defaultValue: "File exceeds 1 MiB limit" }));
+      return;
+    }
+    const text = await file.text();
+    setContent(text);
+    if (!filename) setFilename(file.name);
+  };
+  const path = filename ? `${subdir}/${filename}` : "";
+  return (
+    <div className="rounded-lg border border-border bg-surface-1 p-3 space-y-2">
+      <p className="text-xs font-bold uppercase text-text-dim">
+        {t("skills.evo_upload_title", { defaultValue: "Add file to {{name}}", name: skillName })}
+      </p>
+      <div className="grid grid-cols-3 gap-2">
+        <div>
+          <label className="block text-[10px] font-bold uppercase text-text-dim mb-1">{t("skills.evo_folder", { defaultValue: "Folder" })}</label>
+          <select
+            value={subdir}
+            onChange={(e) => setSubdir(e.target.value)}
+            className="w-full px-2 py-1.5 text-xs rounded bg-surface-2 border border-border text-text-main"
+          >
+            <option value="references">references</option>
+            <option value="templates">templates</option>
+            <option value="scripts">scripts</option>
+            <option value="assets">assets</option>
+          </select>
+        </div>
+        <div className="col-span-2">
+          <label className="block text-[10px] font-bold uppercase text-text-dim mb-1">{t("skills.evo_filename", { defaultValue: "Filename" })}</label>
+          <Input value={filename} onChange={(e) => setFilename(e.target.value)} placeholder="example.md" />
+        </div>
+      </div>
+      <div>
+        <label className="block text-[10px] font-bold uppercase text-text-dim mb-1">{t("skills.evo_content", { defaultValue: "Content" })}</label>
+        <textarea
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          className="w-full h-40 px-2 py-1.5 text-xs rounded bg-surface-2 border border-border text-text-main resize-y font-mono"
+          placeholder={t("skills.evo_content_placeholder", { defaultValue: "Paste file content or load from disk below" })}
+        />
+        <div className="flex items-center gap-2 mt-1">
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleFilePick(f); }}
+          />
+          <Button variant="ghost" onClick={() => fileInputRef.current?.click()} leftIcon={<Upload className="w-3 h-3" />}>
+            {t("skills.evo_load_from_disk", { defaultValue: "Load from disk" })}
+          </Button>
+          <span className="text-[10px] text-text-dim">{content.length.toLocaleString()} chars</span>
+        </div>
+      </div>
+      {path && <p className="text-[10px] text-text-dim font-mono">→ {path}</p>}
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" onClick={onCancel} disabled={busy}>{t("common.cancel")}</Button>
+        <Button
+          onClick={() => onSubmit({ path, content })}
+          disabled={busy || !filename.trim() || !content}
+          leftIcon={busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+        >
+          {t("skills.evo_upload", { defaultValue: "Upload" })}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// Read-only viewer for a skill's supporting file. Fetches on demand so
+// the rest of the detail modal doesn't pay for files the user never
+// opens. Truncated responses are flagged so the user doesn't mistake a
+// capped preview for complete content.
+function SupportingFileViewer({ skillName, path, onClose, t }: {
+  skillName: string;
+  path: string;
+  onClose: () => void;
+  t: (key: string, opts?: any) => string;
+}) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["skill-file", skillName, path],
+    queryFn: () => getSupportingFile(skillName, path),
+  });
+  return (
+    <div className="rounded-lg border border-border bg-surface-1 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-bold uppercase text-text-dim font-mono">{path}</p>
+        <button className="text-text-dim hover:text-text-main" onClick={onClose}><X className="w-4 h-4" /></button>
+      </div>
+      {isLoading && <div className="flex items-center justify-center py-6"><Loader2 className="w-5 h-5 animate-spin text-text-dim" /></div>}
+      {error && <p className="text-xs text-error">{(error as any)?.message || "Failed to load file"}</p>}
+      {data && (
+        <>
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all text-[11px] bg-surface-2 p-2 rounded font-mono">{data.content}</pre>
+          {data.truncated && (
+            <p className="text-[10px] text-text-dim">
+              {t("skills.evo_file_truncated", { defaultValue: "File truncated to 256 KiB preview" })}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+type EvolvePane = "none" | "update" | "patch" | "upload";
+
+function SkillDetailModal({ skillName, isOpen, onClose, t }: {
+  skillName: string | null;
+  isOpen: boolean;
+  onClose: () => void;
+  t: (key: string, opts?: any) => string;
+}) {
+  const queryClient = useQueryClient();
+  const { addToast } = useUIStore();
+  const { data: detail, isLoading, refetch } = useQuery({
+    queryKey: ["skill-detail", skillName],
+    queryFn: () => getSkillDetail(skillName!),
+    enabled: isOpen && !!skillName,
+  });
+
+  const [pane, setPane] = useState<EvolvePane>("none");
+  const [viewingFile, setViewingFile] = useState<string | null>(null);
+  useEffect(() => {
+    // Reset sub-pane every time the modal is reopened or the skill changes.
+    if (!isOpen) { setPane("none"); setViewingFile(null); }
+  }, [isOpen, skillName]);
+
+  const [busy, setBusy] = useState(false);
+
+  // ── mutation helpers ───────────────────────────────────────────────
+  const runMutation = async <T,>(fn: () => Promise<T>, successMsg: string) => {
+    if (!skillName) return;
+    setBusy(true);
+    try {
+      await fn();
+      await refetch();
+      queryClient.invalidateQueries({ queryKey: ["skills"] });
+      addToast(successMsg, "success");
+      setPane("none");
+    } catch (e: any) {
+      addToast(e?.message || "Action failed", "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRollback = () => {
+    if (!skillName) return;
+    if (!confirm(t("skills.evo_rollback_confirm", { defaultValue: "Roll back to the previous version? This cannot be undone unless you patch again." }))) return;
+    void runMutation(
+      () => evolveRollbackSkill(skillName),
+      t("skills.evo_rolled_back", { defaultValue: "Skill rolled back" })
+    );
+  };
+
+  const handleRemoveFile = (path: string) => {
+    if (!skillName) return;
+    if (!confirm(t("skills.evo_remove_file_confirm", { defaultValue: `Remove ${path}?`, path }))) return;
+    void runMutation(
+      () => evolveRemoveFile(skillName, path),
+      t("skills.evo_file_removed", { defaultValue: "File removed" })
+    );
+  };
+
+  const handleDelete = () => {
+    if (!skillName) return;
+    // Delete goes through the evolve/delete path which enforces source
+    // === Local/Native — safer than the Uninstall button which removes
+    // any source. Two confirmations because this is destructive.
+    if (!confirm(t("skills.evo_delete_confirm", { defaultValue: `Permanently delete ${skillName}? This cannot be undone.`, name: skillName }))) return;
+    (async () => {
+      if (!skillName) return;
+      setBusy(true);
+      try {
+        await evolveDeleteSkill(skillName);
+        queryClient.invalidateQueries({ queryKey: ["skills"] });
+        addToast(t("skills.evo_deleted", { defaultValue: "Skill deleted" }), "success");
+        onClose();
+      } catch (e: any) {
+        addToast(e?.message || "Delete failed", "error");
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={detail?.name || skillName || ""} size="xl">
+      {isLoading ? (
+        <div className="flex items-center justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-text-dim" /></div>
+      ) : detail ? (
+        <div className="space-y-5 p-1">
+          {/* Header */}
+          <div>
+            <p className="text-sm text-text-dim italic">{detail.description}</p>
+            <div className="flex flex-wrap gap-2 mt-2">
+              <Badge variant="default">v{detail.version}</Badge>
+              <Badge variant="default">{detail.runtime}</Badge>
+              {detail.tags.map(tag => (
+                <Badge key={tag} variant="default"><Tag className="w-3 h-3 mr-1" />{tag}</Badge>
+              ))}
+            </div>
+          </div>
+
+          {/* Evolve actions */}
+          <div className="flex flex-wrap gap-2">
+            <Button variant="ghost" onClick={() => setPane(pane === "update" ? "none" : "update")} leftIcon={<EditIcon className="w-4 h-4" />} disabled={busy}>
+              {t("skills.evo_update", { defaultValue: "Update" })}
+            </Button>
+            <Button variant="ghost" onClick={() => setPane(pane === "patch" ? "none" : "patch")} leftIcon={<Code className="w-4 h-4" />} disabled={busy}>
+              {t("skills.evo_patch", { defaultValue: "Patch" })}
+            </Button>
+            <Button variant="ghost" onClick={() => setPane(pane === "upload" ? "none" : "upload")} leftIcon={<Upload className="w-4 h-4" />} disabled={busy}>
+              {t("skills.evo_add_file", { defaultValue: "Add File" })}
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={handleRollback}
+              leftIcon={<RotateCcw className="w-4 h-4" />}
+              disabled={busy || detail.evolution.versions.length < 1}
+              title={detail.evolution.versions.length < 1 ? t("skills.evo_no_rollback", { defaultValue: "No prior version to roll back to" }) : ""}
+            >
+              {t("skills.evo_rollback", { defaultValue: "Rollback" })}
+            </Button>
+            <Button
+              variant="ghost"
+              className="text-error hover:text-error ml-auto"
+              onClick={handleDelete}
+              leftIcon={<Trash2 className="w-4 h-4" />}
+              disabled={busy}
+              title={t("skills.evo_delete_title", { defaultValue: "Delete this agent-evolved skill" })}
+            >
+              {t("skills.evo_delete", { defaultValue: "Delete" })}
+            </Button>
+          </div>
+
+          {/* Embedded edit panes */}
+          {pane === "update" && skillName && (
+            <EvolveUpdatePane
+              skillName={skillName}
+              initialContent={detail.prompt_context || ""}
+              onSubmit={(params) => runMutation(
+                () => evolveUpdateSkill(skillName, params),
+                t("skills.evo_updated", { defaultValue: "Skill updated" })
+              )}
+              onCancel={() => setPane("none")}
+              busy={busy}
+              t={t}
+            />
+          )}
+          {pane === "patch" && skillName && (
+            <EvolvePatchPane
+              skillName={skillName}
+              onSubmit={(params) => runMutation(
+                () => evolvePatchSkill(skillName, params),
+                t("skills.evo_patched", { defaultValue: "Skill patched" })
+              )}
+              onCancel={() => setPane("none")}
+              busy={busy}
+              t={t}
+            />
+          )}
+          {pane === "upload" && skillName && (
+            <EvolveUploadPane
+              skillName={skillName}
+              onSubmit={(params) => runMutation(
+                () => evolveWriteFile(skillName, params),
+                t("skills.evo_file_uploaded", { defaultValue: "File uploaded" })
+              )}
+              onCancel={() => setPane("none")}
+              busy={busy}
+              t={t}
+            />
+          )}
+
+          {/* Inline supporting-file viewer. Open on click, close via X. */}
+          {viewingFile && skillName && (
+            <SupportingFileViewer
+              skillName={skillName}
+              path={viewingFile}
+              onClose={() => setViewingFile(null)}
+              t={t}
+            />
+          )}
+
+          {/* Stats */}
+          <div className="grid grid-cols-3 gap-3">
+            <div className="p-3 rounded-lg bg-surface-2 text-center">
+              <p className="text-2xl font-black">{detail.tools.length}</p>
+              <p className="text-[10px] font-bold uppercase text-text-dim">{t("skills.tools")}</p>
+            </div>
+            <div className="p-3 rounded-lg bg-surface-2 text-center">
+              <p className="text-2xl font-black">{detail.evolution.use_count}</p>
+              <p className="text-[10px] font-bold uppercase text-text-dim">{t("skills.evo_uses", { defaultValue: "Uses" })}</p>
+            </div>
+            <div className="p-3 rounded-lg bg-surface-2 text-center">
+              <p className="text-2xl font-black">{detail.evolution.evolution_count}</p>
+              <p className="text-[10px] font-bold uppercase text-text-dim">{t("skills.evo_evolutions", { defaultValue: "Evolutions" })}</p>
+            </div>
+          </div>
+
+          {/* Tools */}
+          {detail.tools.length > 0 && (
+            <div>
+              <h3 className="text-xs font-bold uppercase text-text-dim mb-2"><Wrench className="w-3 h-3 inline mr-1" />{t("skills.tools")}</h3>
+              <div className="space-y-1">
+                {detail.tools.map(tool => (
+                  <div key={tool.name} className="px-3 py-2 rounded bg-surface-2 text-xs">
+                    <span className="font-mono font-bold">{tool.name}</span>
+                    <span className="text-text-dim ml-2">{tool.description}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Linked Files */}
+          {Object.keys(detail.linked_files).length > 0 && (
+            <div>
+              <h3 className="text-xs font-bold uppercase text-text-dim mb-2"><FileText className="w-3 h-3 inline mr-1" />{t("skills.evo_files", { defaultValue: "Supporting Files" })}</h3>
+              {Object.entries(detail.linked_files).map(([dir, files]) => (
+                <div key={dir} className="mb-2">
+                  <p className="text-[10px] font-bold uppercase text-text-dim mb-1">{dir}/</p>
+                  <div className="flex flex-wrap gap-1">
+                    {files.map(f => {
+                      const rel = `${dir}/${f}`;
+                      return (
+                        <span key={f} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-2 text-xs font-mono group">
+                          <button
+                            className="hover:text-brand"
+                            onClick={() => setViewingFile(rel)}
+                            title={t("skills.evo_view_file", { defaultValue: "View file" })}
+                          >
+                            {f}
+                          </button>
+                          <button
+                            className="opacity-0 group-hover:opacity-100 transition-opacity text-error hover:text-error-dim"
+                            onClick={() => handleRemoveFile(rel)}
+                            title={t("skills.evo_remove_file", { defaultValue: "Remove file" })}
+                            disabled={busy}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Version History */}
+          {detail.evolution.versions.length > 0 && (
+            <div>
+              <h3 className="text-xs font-bold uppercase text-text-dim mb-2"><History className="w-3 h-3 inline mr-1" />{t("skills.evo_history", { defaultValue: "Version History" })}</h3>
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {[...detail.evolution.versions].reverse().map((v, i) => (
+                  <div key={i} className="flex items-start gap-3 px-3 py-2 rounded bg-surface-2 text-xs">
+                    <Badge variant={i === 0 ? "success" : "default"}>v{v.version}</Badge>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-text-main">{v.changelog}</p>
+                      <p className="text-[10px] text-text-dim mt-0.5">
+                        {new Date(v.timestamp).toLocaleString()}
+                        {v.author && <span className="ml-2 font-mono">· {v.author}</span>}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Meta */}
+          <div className="text-[10px] text-text-dim space-y-0.5 pt-2 border-t border-border">
+            <p>{t("skills.author")}: {detail.author || "-"}</p>
+            <p>{t("skills.evo_prompt_size", { defaultValue: "Prompt context" })}: {detail.prompt_context_length.toLocaleString()} chars</p>
+            <p className="font-mono truncate">{detail.path}</p>
+          </div>
+        </div>
+      ) : (
+        <p className="text-sm text-text-dim py-8 text-center">{t("skills.evo_not_found", { defaultValue: "Skill not found" })}</p>
+      )}
+    </Modal>
   );
 }
 
@@ -340,8 +1010,8 @@ function UninstallDialog({ skillName, onClose, onConfirm, isPending }: {
 
 export function SkillsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
+  const queryClient = useQueryClient();
 
   // View state — default to the region-appropriate marketplace
   const [viewMode, setViewMode] = useState<ViewMode>("fanghub");
@@ -356,8 +1026,11 @@ export function SkillsPage() {
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [targetHand, setTargetHand] = useState<string>("");
 
-  // Hands query for install target selector
-  const handsQuery = useQuery({ queryKey: ["hands", "list"], queryFn: listHands });
+  // Skill evolution state
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [detailSkillName, setDetailSkillName] = useState<string | null>(null);
+
+  const handsQuery = useHands();
   const hands = handsQuery.data ?? [];
 
   // Get search keyword from category or use search input
@@ -366,32 +1039,25 @@ export function SkillsPage() {
     : search;
 
   // Queries
-  const skillsQuery = useQuery({ queryKey: ["skills", "list"], queryFn: listSkills, refetchInterval: REFRESH_MS });
+  const skillsQuery = useSkills();
 
-  // ClawHub search API — always runs in marketplace mode; falls back to "python"
-  // when no keyword so the tab shows results instead of an empty state.
+  // ClawHub search — always runs in marketplace mode; falls back to "python"
   const effectiveKeyword = searchKeyword || "python";
   const searchQuery = useQuery({
-    queryKey: ["clawhub", "search", effectiveKeyword],
-    queryFn: () => clawhubSearch(effectiveKeyword),
-    staleTime: 60000,
+    ...skillQueries.clawhubSearch(effectiveKeyword),
     enabled: viewMode === "marketplace",
   });
 
-  // Skillhub queries — category selection also drives search
+  // Skillhub queries — category selection also drives search.
+  // Browse only fires when no keyword; search only fires when keyword present.
   const skillhubKeyword = skillhubSearch_ || (selectedCategory ? categories.find(c => c.id === selectedCategory)?.keyword || "" : "");
 
   const skillhubBrowseQuery = useQuery({
-    queryKey: ["skillhub", "browse"],
-    queryFn: () => skillhubBrowse(),
-    staleTime: 60000,
+    ...skillQueries.skillhubBrowse(),
     enabled: viewMode === "skillhub" && !skillhubKeyword,
   });
-
   const skillhubSearchQuery = useQuery({
-    queryKey: ["skillhub", "search", skillhubKeyword],
-    queryFn: () => skillhubSearch(skillhubKeyword),
-    staleTime: 60000,
+    ...skillQueries.skillhubSearch(skillhubKeyword),
     enabled: viewMode === "skillhub" && !!skillhubKeyword,
   });
 
@@ -399,22 +1065,20 @@ export function SkillsPage() {
 
   // FangHub — official skills from local registry (~/.librefang/registry/skills)
   const fanghubQuery = useQuery({
-    queryKey: ["fanghub", "list"],
-    queryFn: fanghubListSkills,
-    staleTime: 60000,
+    ...skillQueries.fanghubList(),
     enabled: viewMode === "fanghub",
   });
 
-  const detailQuery = useQuery({
-    queryKey: [detailsSource, "skill", detailsSkill?.slug],
-    queryFn: () => {
-      if (!detailsSkill?.slug) return Promise.resolve(null);
-      return detailsSource === "skillhub"
-        ? skillhubGetSkill(detailsSkill.slug)
-        : clawhubGetSkill(detailsSkill.slug);
-    },
-    enabled: !!detailsSkill?.slug,
+  // Detail query — conditionally fetches from skillhub or clawhub via factory keys
+  const clawhubDetailQuery = useQuery({
+    ...skillQueries.clawhubSkill(detailsSkill?.slug ?? ""),
+    enabled: !!detailsSkill?.slug && detailsSource === "clawhub",
   });
+  const skillhubDetailQuery = useQuery({
+    ...skillQueries.skillhubSkill(detailsSkill?.slug ?? ""),
+    enabled: !!detailsSkill?.slug && detailsSource === "skillhub",
+  });
+  const detailQuery = detailsSource === "skillhub" ? skillhubDetailQuery : clawhubDetailQuery;
 
   const skillWithDetails = detailQuery.data && detailsSkill
     ? {
@@ -471,68 +1135,10 @@ export function SkillsPage() {
   }, [fanghubSkills, selectedCategory]);
 
   // Mutations
-  const uninstallMutation = useMutation({
-    mutationKey: ["uninstall", "skill"],
-    mutationFn: uninstallSkill,
-    retry: 0,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["skills", "list"] });
-      addToast(t("common.success"), "success");
-      setUninstalling(null);
-    }
-  });
-
-  const installMutation = useMutation({
-    mutationKey: ["install", "skill", "clawhub"],
-    mutationFn: ({ slug, hand }: { slug: string; hand?: string }) => clawhubInstall(slug, undefined, hand || undefined),
-    retry: 0,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["skills", "list"] });
-      addToast(t("common.success"), "success");
-      setInstallingId(null);
-      setDetailsSkill(null);
-    },
-    onError: (error: any) => {
-      const msg = error.message || t("common.error");
-      addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
-      setInstallingId(null);
-    }
-  });
-
-  const skillhubInstallMutation = useMutation({
-    mutationKey: ["install", "skill", "skillhub"],
-    mutationFn: ({ slug, hand }: { slug: string; hand?: string }) => skillhubInstall(slug, hand || undefined),
-    retry: 0,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["skills", "list"] });
-      queryClient.invalidateQueries({ queryKey: ["fanghub", "list"] });
-      addToast(t("common.success"), "success");
-      setInstallingId(null);
-      setDetailsSkill(null);
-    },
-    onError: (error: any) => {
-      const msg = error.message || t("common.error");
-      addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
-      setInstallingId(null);
-    }
-  });
-
-  const fanghubInstallMutation = useMutation({
-    mutationKey: ["install", "skill", "fanghub"],
-    mutationFn: ({ name, hand }: { name: string; hand?: string }) => installSkill(name, hand || undefined),
-    retry: 0,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["skills", "list"] });
-      queryClient.invalidateQueries({ queryKey: ["fanghub", "list"] });
-      addToast(t("common.success"), "success");
-      setInstallingId(null);
-    },
-    onError: (error: any) => {
-      const msg = error.message || t("common.error");
-      addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
-      setInstallingId(null);
-    }
-  });
+  const uninstallMutation = useUninstallSkill();
+  const installMutation = useClawHubInstall();
+  const skillhubInstallMutation = useSkillHubInstall();
+  const fanghubInstallMutation = useInstallSkill();
 
   const handleCategoryClick = (categoryId: string) => {
     if (selectedCategory === categoryId) {
@@ -547,15 +1153,36 @@ export function SkillsPage() {
   const handleInstall = (slug: string, source: MarketplaceSource = "clawhub") => {
     setInstallingId(slug);
     const hand = targetHand || undefined;
+    const opts = {
+      onSuccess: () => {
+        addToast(t("common.success"), "success");
+        setInstallingId(null);
+        setDetailsSkill(null);
+      },
+      onError: (error: any) => {
+        const msg = error.message || t("common.error");
+        addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
+        setInstallingId(null);
+      },
+    };
     if (source === "skillhub") {
-      skillhubInstallMutation.mutate({ slug, hand });
+      skillhubInstallMutation.mutate({ slug, hand }, opts);
     } else {
-      installMutation.mutate({ slug, hand });
+      installMutation.mutate({ slug, hand }, opts);
     }
   };
 
   const handleUninstall = (name: string) => setUninstalling(name);
-  const confirmUninstall = () => { if (uninstalling) uninstallMutation.mutate(uninstalling); };
+  const confirmUninstall = () => {
+    if (uninstalling) {
+      uninstallMutation.mutate(uninstalling, {
+        onSuccess: () => {
+          addToast(t("common.success"), "success");
+          setUninstalling(null);
+        },
+      });
+    }
+  };
   const handleViewDetails = (skill: ClawHubSkillWithStatus, source: MarketplaceSource) => {
     setDetailsSkill(skill);
     setDetailsSource(source);
@@ -579,11 +1206,36 @@ export function SkillsPage() {
             {t("skills.installed_count", { count: installedSkills.length })}
           </span>
           <button
+            className="flex h-8 items-center gap-1.5 rounded-xl border border-brand/30 bg-brand/10 px-3 text-xs font-bold text-brand hover:bg-brand/20 transition-colors"
+            onClick={() => setShowCreateModal(true)}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">{t("skills.evo_create", { defaultValue: "Create Skill" })}</span>
+          </button>
+          <button
             className="flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-colors"
-            onClick={() => { void skillsQuery.refetch(); void searchQuery.refetch(); void activeSkillhubQuery.refetch(); }}
+            onClick={async () => {
+              // Rescan the skills directory on disk before refetching the list.
+              // The kernel holds a cached registry — a plain query refetch only
+              // re-reads that cache. A full reload picks up skills created by
+              // the CLI, the agent evolve tools, or direct FS edits while the
+              // dashboard was open.
+              try {
+                const res = await reloadSkills();
+                addToast(
+                  t("skills.reloaded", { defaultValue: "Rescanned skills directory ({{count}} loaded)", count: (res as any).count ?? 0 }),
+                  "success",
+                );
+              } catch (e: any) {
+                addToast(e?.message || "Reload failed", "error");
+              }
+              void skillsQuery.refetch();
+              void searchQuery.refetch();
+              void activeSkillhubQuery.refetch();
+            }}
           >
             <RefreshCw className={`h-3.5 w-3.5 ${isAnyFetching ? "animate-spin" : ""}`} />
-            <span className="hidden sm:inline">{t("common.refresh")}</span>
+            <span className="hidden sm:inline">{t("skills.reload_from_disk", { defaultValue: "Reload" })}</span>
           </button>
         </div>
       </div>
@@ -723,7 +1375,7 @@ export function SkillsPage() {
         ) : (
           <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
             {installedSkills.map(s => (
-              <InstalledSkillCard key={s.name} skill={s} onUninstall={handleUninstall} t={t} />
+              <InstalledSkillCard key={s.name} skill={s} onUninstall={handleUninstall} onViewDetail={setDetailSkillName} t={t} />
             ))}
           </div>
         )
@@ -789,7 +1441,20 @@ export function SkillsPage() {
                 pendingId={installingId}
                 onInstall={(name) => {
                   setInstallingId(name);
-                  fanghubInstallMutation.mutate({ name, hand: targetHand || undefined });
+                  fanghubInstallMutation.mutate(
+                    { name, hand: targetHand || undefined },
+                    {
+                      onSuccess: () => {
+                        addToast(t("common.success"), "success");
+                        setInstallingId(null);
+                      },
+                      onError: (error: any) => {
+                        const msg = error.message || t("common.error");
+                        addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
+                        setInstallingId(null);
+                      },
+                    },
+                  );
                 }}
                 t={t}
               />
@@ -820,6 +1485,25 @@ export function SkillsPage() {
           isPending={uninstallMutation.isPending}
         />
       )}
+
+      {/* Create Skill Modal */}
+      <CreateSkillModal
+        isOpen={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        onCreated={() => {
+          queryClient.invalidateQueries({ queryKey: ["skills"] });
+          addToast(t("skills.evo_created", { defaultValue: "Skill created successfully" }), "success");
+        }}
+        t={t}
+      />
+
+      {/* Skill Detail Modal */}
+      <SkillDetailModal
+        skillName={detailSkillName}
+        isOpen={!!detailSkillName}
+        onClose={() => setDetailSkillName(null)}
+        t={t}
+      />
     </div>
   );
 }

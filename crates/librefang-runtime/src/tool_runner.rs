@@ -574,6 +574,23 @@ pub async fn execute_tool_raw(
         // Skill file read tool
         "skill_read_file" => tool_skill_read_file(input, *skill_registry, *allowed_skills).await,
 
+        // Skill evolution tools
+        "skill_evolve_create" => {
+            tool_skill_evolve_create(input, *skill_registry, *caller_agent_id).await
+        }
+        "skill_evolve_update" => {
+            tool_skill_evolve_update(input, *skill_registry, *caller_agent_id).await
+        }
+        "skill_evolve_patch" => {
+            tool_skill_evolve_patch(input, *skill_registry, *caller_agent_id).await
+        }
+        "skill_evolve_delete" => tool_skill_evolve_delete(input, *skill_registry).await,
+        "skill_evolve_rollback" => {
+            tool_skill_evolve_rollback(input, *skill_registry, *caller_agent_id).await
+        }
+        "skill_evolve_write_file" => tool_skill_evolve_write_file(input, *skill_registry).await,
+        "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry).await,
+
         // Cron scheduling tools
         "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id).await,
         "cron_list" => tool_cron_list(*kernel, *caller_agent_id).await,
@@ -770,6 +787,7 @@ pub async fn execute_tool_raw(
             else if let Some(registry) = skill_registry {
                 if let Some(skill) = registry.find_tool_provider(other) {
                     debug!(tool = other, skill = %skill.manifest.skill.name, "Dispatching to skill");
+                    let skill_dir = skill.path.clone();
                     match librefang_skills::loader::execute_skill_tool(
                         &skill.manifest,
                         &skill.path,
@@ -784,6 +802,14 @@ pub async fn execute_tool_raw(
                             if skill_result.is_error {
                                 Err(content)
                             } else {
+                                // Fire-and-forget usage increment on success.
+                                tokio::task::spawn_blocking(move || {
+                                    if let Err(e) =
+                                        librefang_skills::evolution::record_skill_usage(&skill_dir)
+                                    {
+                                        tracing::debug!(error = %e, dir = %skill_dir.display(), "record_skill_usage failed");
+                                    }
+                                });
                                 Ok(content)
                             }
                         }
@@ -1833,6 +1859,96 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "title": { "type": "string", "description": "Optional title for the canvas panel" }
                 },
                 "required": ["html"]
+            }),
+        },
+        // --- Skill evolution tools ---
+        ToolDefinition {
+            name: "skill_evolve_create".to_string(),
+            description: "Create a new prompt-only skill from a successful task approach. Use after completing a complex task (5+ tool calls) that involved trial-and-error or a non-trivial workflow worth reusing. The skill becomes available to all agents.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Skill name: lowercase alphanumeric with hyphens (e.g., 'csv-analysis', 'api-debugging')" },
+                    "description": { "type": "string", "description": "One-line description of what this skill teaches (max 1024 chars)" },
+                    "prompt_context": { "type": "string", "description": "Markdown instructions that will be injected into the system prompt when this skill is active. Should capture the methodology, pitfalls, and best practices discovered." },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags for discovery (e.g., ['data', 'csv', 'analysis'])" }
+                },
+                "required": ["name", "description", "prompt_context"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_evolve_update".to_string(),
+            description: "Rewrite a skill's prompt_context entirely. Use when the skill needs a major overhaul based on new learnings. Creates a rollback snapshot automatically.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the existing skill to update" },
+                    "prompt_context": { "type": "string", "description": "New Markdown instructions (full replacement)" },
+                    "changelog": { "type": "string", "description": "Brief description of what changed and why" }
+                },
+                "required": ["name", "prompt_context", "changelog"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_evolve_patch".to_string(),
+            description: "Make a targeted find-and-replace edit to a skill's prompt_context. Use when only a section needs fixing. Supports fuzzy matching (tolerates whitespace/indent differences).".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the existing skill to patch" },
+                    "old_string": { "type": "string", "description": "Text to find in the current prompt_context (fuzzy-matched)" },
+                    "new_string": { "type": "string", "description": "Replacement text" },
+                    "changelog": { "type": "string", "description": "Brief description of what changed and why" },
+                    "replace_all": { "type": "boolean", "description": "Replace all occurrences (default: false)" }
+                },
+                "required": ["name", "old_string", "new_string", "changelog"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_evolve_delete".to_string(),
+            description: "Delete an agent-evolved skill. Only works on locally-created skills (not marketplace installs).".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the skill to delete" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_evolve_rollback".to_string(),
+            description: "Roll back a skill to its previous version. Use when a recent update degraded the skill's effectiveness.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the skill to roll back" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_evolve_write_file".to_string(),
+            description: "Add a supporting file to a skill (references, templates, scripts, or assets). Use to enrich a skill with additional context like API docs, code templates, or example configurations.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the skill to add the file to" },
+                    "path": { "type": "string", "description": "Relative path under the skill directory (e.g., 'references/api.md', 'templates/config.yaml'). Must be under references/, templates/, scripts/, or assets/" },
+                    "content": { "type": "string", "description": "File content to write" }
+                },
+                "required": ["name", "path", "content"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_evolve_remove_file".to_string(),
+            description: "Remove a supporting file from a skill.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the skill" },
+                    "path": { "type": "string", "description": "Relative path of file to remove (e.g., 'references/old-api.md')" }
+                },
+                "required": ["name", "path"]
             }),
         },
     ]
@@ -4706,6 +4822,266 @@ pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, Stri
     Ok(html.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Skill evolution tools
+// ---------------------------------------------------------------------------
+
+/// Build the author tag for an agent-triggered evolution. Use the
+/// agent's id so the dashboard history can attribute the change.
+fn agent_author_tag(caller: Option<&str>) -> String {
+    caller
+        .map(|id| format!("agent:{id}"))
+        .unwrap_or_else(|| "agent".to_string())
+}
+
+/// Reject evolution ops when the registry is frozen (Stable mode).
+///
+/// The registry's frozen flag is meant to express "no skill changes in
+/// this kernel", but the evolution module writes to disk directly and
+/// then triggers `reload_skills`, which no-ops under freeze. Without
+/// this gate, an agent running under Stable mode would silently
+/// persist skill mutations that'd be picked up at the next unfreeze
+/// or restart — defeating the whole point of the mode.
+fn ensure_not_frozen(registry: &SkillRegistry) -> Result<(), String> {
+    if registry.is_frozen() {
+        Err("Skill registry is frozen (Stable mode) — skill evolution is disabled".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+async fn tool_skill_evolve_create(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+    caller_agent_id: Option<&str>,
+) -> Result<String, String> {
+    let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
+    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+    let description = input["description"]
+        .as_str()
+        .ok_or("Missing 'description' parameter")?;
+    let prompt_context = input["prompt_context"]
+        .as_str()
+        .ok_or("Missing 'prompt_context' parameter")?;
+    let tags: Vec<String> = input["tags"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let author = agent_author_tag(caller_agent_id);
+    let skills_dir = registry.skills_dir();
+    match librefang_skills::evolution::create_skill(
+        skills_dir,
+        name,
+        description,
+        prompt_context,
+        tags,
+        Some(&author),
+    ) {
+        Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
+        Err(e) => Err(format!("Failed to create skill: {e}")),
+    }
+}
+
+async fn tool_skill_evolve_update(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+    caller_agent_id: Option<&str>,
+) -> Result<String, String> {
+    let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
+    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+    let prompt_context = input["prompt_context"]
+        .as_str()
+        .ok_or("Missing 'prompt_context' parameter")?;
+    let changelog = input["changelog"]
+        .as_str()
+        .ok_or("Missing 'changelog' parameter")?;
+
+    // Registry hot-reload happens AFTER the turn finishes, so within
+    // the same turn `create` followed by `update` would find the
+    // registry cache still stale. Fall back to loading straight from
+    // disk when the cache misses — if the skill truly doesn't exist
+    // the helper returns NotFound too.
+    let skill_owned;
+    let skill = match registry.get(name) {
+        Some(s) => s,
+        None => {
+            skill_owned = librefang_skills::evolution::load_installed_skill_from_disk(
+                registry.skills_dir(),
+                name,
+            )
+            .map_err(|e| format!("Skill '{name}' not found: {e}"))?;
+            &skill_owned
+        }
+    };
+
+    let author = agent_author_tag(caller_agent_id);
+    match librefang_skills::evolution::update_skill(skill, prompt_context, changelog, Some(&author))
+    {
+        Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
+        Err(e) => Err(format!("Failed to update skill: {e}")),
+    }
+}
+
+async fn tool_skill_evolve_patch(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+    caller_agent_id: Option<&str>,
+) -> Result<String, String> {
+    let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
+    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+    let old_string = input["old_string"]
+        .as_str()
+        .ok_or("Missing 'old_string' parameter")?;
+    let new_string = input["new_string"]
+        .as_str()
+        .ok_or("Missing 'new_string' parameter")?;
+    let changelog = input["changelog"]
+        .as_str()
+        .ok_or("Missing 'changelog' parameter")?;
+    let replace_all = input["replace_all"].as_bool().unwrap_or(false);
+
+    // Same-turn create→patch fallback (see tool_skill_evolve_update).
+    let skill_owned;
+    let skill = match registry.get(name) {
+        Some(s) => s,
+        None => {
+            skill_owned = librefang_skills::evolution::load_installed_skill_from_disk(
+                registry.skills_dir(),
+                name,
+            )
+            .map_err(|e| format!("Skill '{name}' not found: {e}"))?;
+            &skill_owned
+        }
+    };
+
+    let author = agent_author_tag(caller_agent_id);
+    match librefang_skills::evolution::patch_skill(
+        skill,
+        old_string,
+        new_string,
+        changelog,
+        replace_all,
+        Some(&author),
+    ) {
+        Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
+        Err(e) => Err(format!("Failed to patch skill: {e}")),
+    }
+}
+
+async fn tool_skill_evolve_delete(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+) -> Result<String, String> {
+    let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
+    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+
+    let skills_dir = registry.skills_dir();
+    match librefang_skills::evolution::delete_skill(skills_dir, name) {
+        Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
+        Err(e) => Err(format!("Failed to delete skill: {e}")),
+    }
+}
+
+async fn tool_skill_evolve_rollback(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+    caller_agent_id: Option<&str>,
+) -> Result<String, String> {
+    let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
+    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+
+    // Same-turn create→rollback fallback (see tool_skill_evolve_update).
+    let skill_owned;
+    let skill = match registry.get(name) {
+        Some(s) => s,
+        None => {
+            skill_owned = librefang_skills::evolution::load_installed_skill_from_disk(
+                registry.skills_dir(),
+                name,
+            )
+            .map_err(|e| format!("Skill '{name}' not found: {e}"))?;
+            &skill_owned
+        }
+    };
+
+    let author = agent_author_tag(caller_agent_id);
+    match librefang_skills::evolution::rollback_skill(skill, Some(&author)) {
+        Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
+        Err(e) => Err(format!("Failed to rollback skill: {e}")),
+    }
+}
+
+async fn tool_skill_evolve_write_file(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+) -> Result<String, String> {
+    let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
+    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    let content = input["content"]
+        .as_str()
+        .ok_or("Missing 'content' parameter")?;
+
+    // Same-turn create→write_file fallback.
+    let skill_owned;
+    let skill = match registry.get(name) {
+        Some(s) => s,
+        None => {
+            skill_owned = librefang_skills::evolution::load_installed_skill_from_disk(
+                registry.skills_dir(),
+                name,
+            )
+            .map_err(|e| format!("Skill '{name}' not found: {e}"))?;
+            &skill_owned
+        }
+    };
+
+    match librefang_skills::evolution::write_supporting_file(skill, path, content) {
+        Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
+        Err(e) => Err(format!("Failed to write file: {e}")),
+    }
+}
+
+async fn tool_skill_evolve_remove_file(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+) -> Result<String, String> {
+    let registry = skill_registry.ok_or("Skill registry not available")?;
+    ensure_not_frozen(registry)?;
+    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+
+    // Same-turn fallback (see tool_skill_evolve_update).
+    let skill_owned;
+    let skill = match registry.get(name) {
+        Some(s) => s,
+        None => {
+            skill_owned = librefang_skills::evolution::load_installed_skill_from_disk(
+                registry.skills_dir(),
+                name,
+            )
+            .map_err(|e| format!("Skill '{name}' not found: {e}"))?;
+            &skill_owned
+        }
+    };
+
+    match librefang_skills::evolution::remove_supporting_file(skill, path) {
+        Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
+        Err(e) => Err(format!("Failed to remove file: {e}")),
+    }
+}
+
 /// Read a companion file from an installed skill directory.
 ///
 /// Security: resolves the path relative to the skill's installed directory and
@@ -4764,6 +5140,21 @@ async fn tool_skill_read_file(
     let content = tokio::fs::read_to_string(&canonical)
         .await
         .map_err(|e| format!("Failed to read '{}': {}", rel_path, e))?;
+
+    // Fire-and-forget usage tracking — only count when the agent actually
+    // loads the skill's core prompt content, not every supporting file
+    // read. Reading references/templates/scripts/assets shouldn't inflate
+    // the usage metric. Failures (lock contention, disk error) must not
+    // affect tool execution, so we swallow them.
+    let is_core_prompt = matches!(rel_path, "prompt_context.md" | "SKILL.md" | "skill.md");
+    if is_core_prompt {
+        let skill_dir = skill.path.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = librefang_skills::evolution::record_skill_usage(&skill_dir) {
+                tracing::debug!(error = %e, dir = %skill_dir.display(), "record_skill_usage failed");
+            }
+        });
+    }
 
     // Cap output to avoid flooding the context.
     // Use floor_char_boundary to avoid panicking on multi-byte UTF-8.
@@ -7168,4 +7559,49 @@ description = "test"
         assert!(result.contains("truncated"));
         // Must not panic — the point of this test
     }
+}
+
+// ── skill evolve frozen-registry gating ───────────────────────────
+
+#[tokio::test]
+async fn test_evolve_tools_rejected_when_registry_frozen() {
+    // In Stable mode (registry frozen) every evolution tool must
+    // refuse at the handler boundary, BEFORE touching disk. The
+    // `evolution` module underneath would happily write files that
+    // the frozen registry never loads — burning reviewer tokens
+    // and leaving disk state the operator explicitly didn't want.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut registry = SkillRegistry::new(tmp.path().to_path_buf());
+    registry.freeze();
+
+    let input = serde_json::json!({
+        "name": "gated",
+        "description": "x",
+        "prompt_context": "# x",
+        "tags": [],
+    });
+    let err = tool_skill_evolve_create(&input, Some(&registry), None)
+        .await
+        .expect_err("must reject under freeze");
+    assert!(
+        err.contains("frozen") || err.contains("Stable"),
+        "error must mention Stable/frozen, got: {err}"
+    );
+
+    let err = tool_skill_evolve_delete(&serde_json::json!({ "name": "gated" }), Some(&registry))
+        .await
+        .expect_err("delete must reject under freeze");
+    assert!(err.contains("frozen") || err.contains("Stable"));
+
+    let err = tool_skill_evolve_write_file(
+        &serde_json::json!({
+            "name": "gated",
+            "path": "references/x.md",
+            "content": "hi",
+        }),
+        Some(&registry),
+    )
+    .await
+    .expect_err("write_file must reject under freeze");
+    assert!(err.contains("frozen") || err.contains("Stable"));
 }

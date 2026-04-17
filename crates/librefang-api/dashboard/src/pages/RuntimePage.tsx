@@ -1,16 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type {
-  DashboardSnapshot, VersionResponse, QueueStatusResponse, HealthCheck,
-  HealthDetailResponse, SecurityStatusResponse, AuditEntry, BackupItem, TaskQueueItem,
-} from "../api";
-import {
-  loadDashboardSnapshot, getVersionInfo, getQueueStatus, shutdownServer, reloadConfig,
-  getHealthDetail, getSecurityStatus, listAuditRecent, verifyAuditChain,
-  listBackups, createBackup, restoreBackup, deleteBackup,
-  getTaskQueueStatus, listTaskQueue, deleteTaskFromQueue, retryTask, cleanupSessions,
-} from "../api";
+import type { HealthCheck, AuditEntry, BackupItem, TaskQueueItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { isProviderAvailable } from "../lib/status";
@@ -25,8 +15,28 @@ import {
   Shield, ShieldCheck, Archive, Download, Trash2, RotateCcw,
   AlertTriangle, Clock, Brain, Database, Lock, Eye,
 } from "lucide-react";
-
-const REFRESH_MS = 30000;
+import {
+  useDashboardSnapshot,
+  useVersionInfo,
+  useQueueStatus,
+  useHealthDetail,
+  useSecurityStatus,
+  useAuditRecent,
+  useAuditVerify,
+  useBackups,
+  useTaskQueueStatus,
+  useTaskQueue,
+} from "../lib/queries/runtime";
+import {
+  useShutdownServer,
+  useCreateBackup,
+  useRestoreBackup,
+  useDeleteBackup,
+  useDeleteTask,
+  useRetryTask,
+  useCleanupSessions,
+} from "../lib/mutations/runtime";
+import { useReloadConfig } from "../lib/mutations/config";
 
 function formatUptime(seconds?: number): string {
   if (seconds === undefined || seconds <= 0) return "-";
@@ -76,95 +86,35 @@ function ProtectionBadge({ name, enabled }: { name: string; enabled: boolean }) 
 
 export function RuntimePage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [showShutdownConfirm, setShowShutdownConfirm] = useState(false);
   const [reloadResult, setReloadResult] = useState<string | null>(null);
 
-  // --- Queries ---
-  const snapshotQuery = useQuery<DashboardSnapshot>({
-    queryKey: ["dashboard", "snapshot"],
-    queryFn: loadDashboardSnapshot,
-    refetchInterval: REFRESH_MS,
-  });
-  const versionQuery = useQuery<VersionResponse>({
-    queryKey: ["version"],
-    queryFn: getVersionInfo,
-    staleTime: Infinity,
-  });
-  const queueQuery = useQuery<QueueStatusResponse>({
-    queryKey: ["queue", "status"],
-    queryFn: getQueueStatus,
-    refetchInterval: 15000,
-  });
-  const healthDetailQuery = useQuery<HealthDetailResponse>({
-    queryKey: ["health", "detail"],
-    queryFn: getHealthDetail,
-    refetchInterval: REFRESH_MS,
-  });
-  const securityQuery = useQuery<SecurityStatusResponse>({
-    queryKey: ["security"],
-    queryFn: getSecurityStatus,
-    refetchInterval: REFRESH_MS * 4,
-  });
-  const auditQuery = useQuery({
-    queryKey: ["audit", "recent"],
-    queryFn: () => listAuditRecent(20),
-    refetchInterval: REFRESH_MS,
-  });
-  const auditVerifyQuery = useQuery({
-    queryKey: ["audit", "verify"],
-    queryFn: verifyAuditChain,
-    refetchInterval: REFRESH_MS * 4,
-  });
-  const backupsQuery = useQuery({
-    queryKey: ["backups"],
-    queryFn: listBackups,
-    refetchInterval: REFRESH_MS * 2,
-  });
-  const taskStatusQuery = useQuery({
-    queryKey: ["tasks", "status"],
-    queryFn: getTaskQueueStatus,
-    refetchInterval: 15000,
-  });
-  const taskListQuery = useQuery({
-    queryKey: ["tasks", "list"],
-    queryFn: () => listTaskQueue(),
-    refetchInterval: REFRESH_MS,
-  });
+  const snapshotQuery = useDashboardSnapshot();
+  const versionQuery = useVersionInfo();
+  const queueQuery = useQueueStatus();
+  const healthDetailQuery = useHealthDetail();
+  const securityQuery = useSecurityStatus();
+  const auditQuery = useAuditRecent(20);
+  const auditVerifyQuery = useAuditVerify();
+  const backupsQuery = useBackups();
+  const taskStatusQuery = useTaskQueueStatus();
+  const taskListQuery = useTaskQueue();
 
-  // --- Mutations ---
-  const shutdownMutation = useMutation({
-    mutationFn: shutdownServer,
+  const shutdownMutation = useShutdownServer({
     onSuccess: () => setShowShutdownConfirm(false),
   });
-  const reloadMutation = useMutation({
-    mutationFn: reloadConfig,
+  const reloadMutation = useReloadConfig({
     onSuccess: (data) => {
       setReloadResult(data.status);
       setTimeout(() => setReloadResult(null), 5000);
-      snapshotQuery.refetch();
     },
   });
-  const backupMutation = useMutation({
-    mutationFn: createBackup,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["backups"] }),
-  });
-  const restoreMutation = useMutation({
-    mutationFn: restoreBackup,
-  });
-  const deleteBackupMutation = useMutation({
-    mutationFn: deleteBackup,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["backups"] }),
-  });
-  const deleteTaskMutation = useMutation({
-    mutationFn: deleteTaskFromQueue,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["tasks"] }); },
-  });
-  const retryTaskMutation = useMutation({
-    mutationFn: retryTask,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["tasks"] }); },
-  });
-  const cleanupMutation = useMutation({ mutationFn: cleanupSessions });
+  const backupMutation = useCreateBackup();
+  const restoreMutation = useRestoreBackup();
+  const deleteBackupMutation = useDeleteBackup();
+  const deleteTaskMutation = useDeleteTask();
+  const retryTaskMutation = useRetryTask();
+  const cleanupMutation = useCleanupSessions();
 
   // --- Derived data ---
   const snapshot = snapshotQuery.data ?? null;

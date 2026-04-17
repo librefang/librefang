@@ -27,9 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10
+      - name: Enable corepack (activates pnpm from packageManager field)
+        run: corepack enable
 
       - uses: actions/setup-node@v6
         with:
@@ -37,7 +36,7 @@ jobs:
           cache: "pnpm"
           cache-dependency-path: web/pnpm-lock.yaml
 
-      - run: cd web && pnpm install --frozen-lockfile
+      - run: cd web && pnpm --version && pnpm install --frozen-lockfile
 
       - run: cd web && pnpm lint
 

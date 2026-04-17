@@ -8,6 +8,7 @@
 //! - Remote skills from FangHub registry
 
 pub mod clawhub;
+pub mod evolution;
 pub(crate) mod http_client;
 pub mod loader;
 pub mod marketplace;

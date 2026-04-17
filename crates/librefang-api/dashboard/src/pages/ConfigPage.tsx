@@ -1,17 +1,23 @@
 import { useTranslation } from "react-i18next";
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
   RefreshCw, Save, Zap, Settings, Search, RotateCcw,
-  AlertTriangle, X, Copy, Check,
+  AlertTriangle, X, Copy, Check, FileText,
 } from "lucide-react";
+import { type ConfigFieldSchema } from "../api";
 import {
-  getConfigSchema, getFullConfig, setConfigValue, reloadConfig,
-  type ConfigFieldSchema,
-} from "../api";
+  useConfigSchema,
+  useFullConfig,
+  useRawConfigToml,
+} from "../lib/queries/config";
+import { useSetConfigValue, useReloadConfig } from "../lib/mutations/config";
+import { configKeys } from "../lib/queries/keys";
+import { setConfigValue } from "../lib/http/client";
+import { TomlViewer } from "../components/TomlViewer";
 
 /* ------------------------------------------------------------------ */
 /*  Category → sections mapping                                        */
@@ -276,24 +282,17 @@ export function ConfigPage({ category }: { category: string }) {
   const queryClient = useQueryClient();
   const router = useRouter();
 
-  const schemaQuery = useQuery({
-    queryKey: ["config", "schema"],
-    queryFn: getConfigSchema,
-    staleTime: 300_000,
-  });
-
-  const configQuery = useQuery({
-    queryKey: ["config", "full"],
-    queryFn: getFullConfig,
-    staleTime: 30_000,
-  });
+  const schemaQuery = useConfigSchema();
+  const configQuery = useFullConfig();
 
   const [pendingChanges, setPendingChanges] = useState<Record<string, unknown>>({});
   const [saveStatus, setSaveStatus] = useState<Record<string, { ok: boolean; msg: string }>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [reloadStatus, setReloadStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const [activeSection, setActiveSection] = useState<string | null>(null);
+  const [showRawToml, setShowRawToml] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const rawTomlQuery = useRawConfigToml(showRawToml);
 
   const hasPendingChanges = Object.keys(pendingChanges).length > 0;
 
@@ -363,8 +362,7 @@ export function ConfigPage({ category }: { category: string }) {
     [configQuery.data, schemaQuery.data]
   );
 
-  const saveMutation = useMutation({
-    mutationFn: ({ path, value }: { path: string; value: unknown }) => setConfigValue(path, value),
+  const saveMutation = useSetConfigValue({
     onSuccess: (data, variables) => {
       const reloadFailed = data.status === "saved_reload_failed";
       const restartRequired = data.status === "applied_partial" || data.restart_required;
@@ -380,7 +378,6 @@ export function ConfigPage({ category }: { category: string }) {
         }
         return p;
       });
-      queryClient.invalidateQueries({ queryKey: ["config", "full"] });
       setTimeout(() => setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; }), 3000);
     },
     onError: (err: Error, variables) => {
@@ -412,7 +409,7 @@ export function ConfigPage({ category }: { category: string }) {
       }
     }
     setPendingChanges({});
-    queryClient.invalidateQueries({ queryKey: ["config", "full"] });
+    queryClient.invalidateQueries({ queryKey: configKeys.all });
     setBatchSaving(false);
     setTimeout(() => setSaveStatus({}), errors > 0 ? 5000 : 3000);
   }, [pendingChanges, queryClient, t]);
@@ -439,10 +436,8 @@ export function ConfigPage({ category }: { category: string }) {
     []
   );
 
-  const reloadMutation = useMutation({
-    mutationFn: reloadConfig,
+  const reloadMutation = useReloadConfig({
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["config", "full"] });
       setReloadStatus({ ok: true, msg: t("config.reload_success", "Config reloaded") });
     },
     onError: (err: Error) => {
@@ -542,6 +537,10 @@ export function ConfigPage({ category }: { category: string }) {
               {reloadStatus.msg}
             </span>
           )}
+          <Button variant="secondary" size="sm" onClick={() => setShowRawToml(true)}>
+            <FileText className="w-3 h-3 mr-1.5" />
+            {t("config.view_raw_toml", "View Raw TOML")}
+          </Button>
           <Button variant="secondary" size="sm" onClick={() => reloadMutation.mutate()} isLoading={reloadMutation.isPending}>
             <RefreshCw className="w-3 h-3 mr-1.5" />
             {t("config.reload", "Reload")}
@@ -785,6 +784,18 @@ export function ConfigPage({ category }: { category: string }) {
           </div>
         </div>
       )}
+      <TomlViewer
+        isOpen={showRawToml}
+        onClose={() => setShowRawToml(false)}
+        title={t("config.raw_toml_title", "config.toml")}
+        toml={rawTomlQuery.data}
+        downloadName="librefang-config.toml"
+        error={
+          rawTomlQuery.error
+            ? (rawTomlQuery.error as Error).message ?? t("config.raw_toml_error", "Failed to load config.toml")
+            : null
+        }
+      />
     </div>
   );
 }

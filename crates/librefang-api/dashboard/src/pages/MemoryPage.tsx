@@ -1,8 +1,9 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDateTime } from "../lib/datetime";
 import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { listMemories, searchMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, getMemoryConfig, updateMemoryConfig, type MemoryConfigResponse, type MemoryStatsResponse, type MemoryItem } from "../api";
+import { type MemoryStatsResponse } from "../api";
+import { useMemoryStats, useMemoryConfig, useMemoryHealth, useMemorySearchOrList } from "../lib/queries/memory";
+import { useAddMemory, useUpdateMemory, useDeleteMemory, useCleanupMemories, useUpdateMemoryConfig } from "../lib/mutations/memory";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -16,23 +17,21 @@ import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, Edit2, Loader2, Settings } from "lucide-react";
 
-const REFRESH_MS = 30000;
-
 // Add Memory Dialog
 function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [content, setContent] = useState("");
   const [agentId, setAgentId] = useState("");
   const [level, setLevel] = useState("episodic");
 
-  const addMutation = useMutation({
-    mutationFn: () => addMemoryFromText(content, agentId || undefined),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["memory"] });
-      onClose();
-    }
-  });
+  const addMutation = useAddMemory();
+
+  const handleAdd = () => {
+    addMutation.mutate(
+      { content, agentId: agentId || undefined },
+      { onSuccess: () => onClose() }
+    );
+  };
 
   return (
     <Modal isOpen={true} onClose={onClose} title={t("memory.add_memory")} size="md">
@@ -77,7 +76,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
 
         <div className="flex gap-3 mt-6">
           <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
-          <Button variant="primary" className="flex-1" onClick={() => addMutation.mutate()} disabled={!content.trim() || addMutation.isPending}>
+          <Button variant="primary" className="flex-1" onClick={handleAdd} disabled={!content.trim() || addMutation.isPending}>
             {addMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
             {t("common.save")}
           </Button>
@@ -90,16 +89,16 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
 // Edit Memory Dialog
 function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?: string }; onClose: () => void }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [content, setContent] = useState(memory.content || "");
 
-  const editMutation = useMutation({
-    mutationFn: () => updateMemory(memory.id, content),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["memory"] });
-      onClose();
-    }
-  });
+  const editMutation = useUpdateMemory();
+
+  const handleSave = () => {
+    editMutation.mutate(
+      { id: memory.id, content },
+      { onSuccess: () => onClose() }
+    );
+  };
 
   return (
     <Modal isOpen={true} onClose={onClose} title={t("memory.edit_memory")} size="md">
@@ -116,7 +115,7 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
 
         <div className="flex gap-3 mt-6">
           <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
-          <Button variant="primary" className="flex-1" onClick={() => editMutation.mutate()} disabled={!content.trim() || editMutation.isPending}>
+          <Button variant="primary" className="flex-1" onClick={handleSave} disabled={!content.trim() || editMutation.isPending}>
             {editMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
           </Button>
         </div>
@@ -153,20 +152,16 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
 
 function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
 
-  const configQuery = useQuery({
-    queryKey: ["memory", "config"],
-    queryFn: getMemoryConfig,
-  });
+  const configQuery = useMemoryConfig();
+  const updateConfig = useUpdateMemoryConfig();
 
   const [form, setForm] = useState<Record<string, any> | null>(null);
-  const [saving, setSaving] = useState(false);
 
   // Init form from API data
   useEffect(() => {
-    const data = configQuery.data as MemoryConfigResponse | undefined;
+    const data = configQuery.data;
     if (data && !form) {
       setForm({
         embedding_provider: data.embedding_provider || "",
@@ -184,9 +179,8 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
 
   const handleSave = async () => {
     if (!form) return;
-    setSaving(true);
     try {
-      await updateMemoryConfig({
+      await updateConfig.mutateAsync({
         embedding_provider: form.embedding_provider || undefined,
         embedding_model: form.embedding_model || undefined,
         embedding_api_key_env: form.embedding_api_key_env || undefined,
@@ -200,13 +194,10 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
         },
       });
       addToast(t("common.success"), "success");
-      queryClient.invalidateQueries({ queryKey: ["memory"] });
-      queryClient.invalidateQueries({ queryKey: ["health"] });
       onClose();
     } catch (error) {
       addToast(error instanceof Error ? error.message : "Failed to save", "error");
     }
-    setSaving(false);
   };
 
   const inputCls = "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
@@ -293,8 +284,8 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
         )}
 
         <div className="flex gap-2 p-6 pt-3">
-          <Button variant="primary" className="flex-1" onClick={handleSave} disabled={saving}>
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
+          <Button variant="primary" className="flex-1" onClick={handleSave} disabled={updateConfig.isPending}>
+            {updateConfig.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
           </Button>
           <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
         </div>
@@ -305,7 +296,6 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
 
 export function MemoryPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [search, setSearch] = useState("");
   const [levelFilter, setLevelFilter] = useState<string>("all");
@@ -315,42 +305,27 @@ export function MemoryPage() {
   const [editingMemory, setEditingMemory] = useState<{ id: string; content?: string } | null>(null);
 
 
-  const healthQuery = useQuery<{ memory?: { embedding_available: boolean; embedding_provider: string; embedding_model: string; extraction_model: string; proactive_memory_enabled: boolean } }>({
-    queryKey: ["health", "detail"],
-    queryFn: () => fetch("/api/health/detail").then(r => r.json()),
-    staleTime: 60000,
-  });
-  const memoryConfig = healthQuery.data?.memory;
-
-  const memoryQuery = useQuery<{ memories: MemoryItem[]; total: number }>({
-    queryKey: ["memory", "list", search],
-    queryFn: async () => {
-      if (search.trim()) {
-        const items = await searchMemories({ query: search.trim(), limit: 50 });
-        return { memories: items, total: items.length };
+  const memoryConfigQuery = useMemoryConfig();
+  // Server-side liveness probe — distinct from "provider is configured".
+  // Defaults to false while loading so a misconfigured backend can't flash a
+  // green badge before the real health signal arrives.
+  const memoryHealthQuery = useMemoryHealth();
+  const embeddingAvailable = memoryHealthQuery.data ?? false;
+  const memoryConfig = memoryConfigQuery.data
+    ? {
+        embedding_available: embeddingAvailable,
+        embedding_provider: memoryConfigQuery.data.embedding_provider ?? "",
+        embedding_model: memoryConfigQuery.data.embedding_model ?? "",
+        extraction_model: memoryConfigQuery.data.proactive_memory?.extraction_model ?? "",
+        proactive_memory_enabled: memoryConfigQuery.data.proactive_memory?.enabled ?? false,
       }
-      const res = await listMemories({ offset: 0, limit: 10000 });
-      return { memories: res.memories ?? [], total: res.total ?? 0 };
-    },
-    refetchInterval: REFRESH_MS,
-  });
-  const statsQuery = useQuery({ queryKey: ["memory", "stats"], queryFn: () => getMemoryStats(), refetchInterval: REFRESH_MS * 2 });
+    : null;
 
-  const deleteMutation = useMutation({
-    mutationFn: deleteMemory,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["memory"] });
-      addToast(t("common.success"), "success");
-    }
-  });
+  const memoryQuery = useMemorySearchOrList(search);
 
-  const cleanupMutation = useMutation({
-    mutationFn: cleanupMemories,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["memory"] });
-      addToast(t("common.success"), "success");
-    }
-  });
+  const statsQuery = useMemoryStats();
+  const deleteMutation = useDeleteMemory();
+  const cleanupMutation = useCleanupMemories();
 
 
   const memories = memoryQuery.data?.memories ?? [];
@@ -384,7 +359,10 @@ export function MemoryPage() {
 <Button variant="secondary" size="sm" onClick={() => setShowConfigDialog(true)}>
               <Settings className="w-4 h-4" />
             </Button>
-            <Button variant="secondary" size="sm" onClick={() => cleanupMutation.mutate()} disabled={cleanupMutation.isPending}>
+            <Button variant="secondary" size="sm" onClick={() => cleanupMutation.mutate(undefined, {
+              onSuccess: () => addToast(t("memory.cleanup_success", { defaultValue: "Cleanup complete" }), "success"),
+              onError: (err) => addToast(err instanceof Error ? err.message : t("common.error"), "error"),
+            })} disabled={cleanupMutation.isPending}>
               {cleanupMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
               <span className="hidden sm:inline">{t("memory.cleanup")}</span>
             </Button>
@@ -495,7 +473,10 @@ export function MemoryPage() {
                   <Button variant="ghost" size="sm" onClick={() => setEditingMemory(m)}>
                     <Edit2 className="h-3.5 w-3.5" />
                   </Button>
-                  <Button variant="ghost" size="sm" className="text-error! hover:bg-error/10!" onClick={() => deleteMutation.mutate(m.id)}>
+                  <Button variant="ghost" size="sm" className="text-error! hover:bg-error/10!" onClick={() => deleteMutation.mutate(m.id, {
+                    onSuccess: () => addToast(t("memory.delete_success", { defaultValue: "Memory deleted" }), "success"),
+                    onError: (err) => addToast(err instanceof Error ? err.message : t("common.error"), "error"),
+                  })}>
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>
