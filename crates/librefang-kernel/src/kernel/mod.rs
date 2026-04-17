@@ -9984,19 +9984,12 @@ system_prompt = "You are a helpful assistant."
                     .collect()
             };
             for t in mcp_candidates {
-                // When the agent explicitly lists MCP servers (non-empty mcp_servers),
-                // all tools from those servers are always available — mcp_servers is a
-                // separate permission grant independent of capabilities.tools (which
-                // governs builtin tools). Listing a server implies permission to use
-                // all of its tools.
-                // When mcp_servers is empty (use all servers), still apply the
-                // declared_tools filter so capabilities.tools can narrow them down.
-                if !tools_unrestricted
-                    && mcp_allowlist.is_empty()
-                    && !declared_tools.iter().any(|d| glob_matches(d, &t.name))
-                {
-                    continue;
-                }
+                // MCP tools are NOT filtered by capabilities.tools.
+                // mcp_candidates is already scoped to the agent's allowed servers
+                // (via mcp_allowlist above), so no further declared_tools filtering
+                // is needed. capabilities.tools governs builtin tools only — MCP tool
+                // names are dynamic and unknown at agent-definition time. Use
+                // tool_blocklist to restrict specific MCP tools if needed.
                 all_tools.push(t);
             }
         }
