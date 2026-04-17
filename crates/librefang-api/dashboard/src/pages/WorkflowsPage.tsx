@@ -1,27 +1,17 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
-  deleteWorkflow,
-  dryRunWorkflow,
-  getWorkflowRun,
-  listWorkflowRuns,
-  listWorkflows,
-  runWorkflow,
-  listWorkflowTemplates,
-  instantiateTemplate,
   createSchedule,
   type DryRunResult,
-  type WorkflowRunDetail,
   type WorkflowTemplate,
 } from "../api";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
-import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -31,14 +21,27 @@ import {
   Calendar, FileText, Activity, Bot, ArrowRight, Loader2, Clock, ChevronRight,
   ChevronDown, FlaskConical, AlertCircle, CheckCircle2, SkipForward,
 } from "lucide-react";
+import {
+  useWorkflows,
+  useWorkflowRuns,
+  useWorkflowRunDetail,
+  useWorkflowTemplates,
+} from "../lib/queries/workflows";
+import {
+  useRunWorkflow,
+  useDryRunWorkflow,
+  useDeleteWorkflow,
+  useInstantiateTemplate,
+} from "../lib/mutations/workflows";
+import { useUIStore } from "../lib/store";
 
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   creation: FileText, language: Bot, thinking: Activity, business: Calendar,
 };
-const REFRESH_MS = 30000;
 
 export function WorkflowsPage() {
   const { t, i18n } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>("");
@@ -51,30 +54,13 @@ export function WorkflowsPage() {
   const [expandedStepIdx, setExpandedStepIdx] = useState<number | null>(null);
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
 
-  const workflowsQuery = useQuery({ queryKey: ["workflows", "list"], queryFn: listWorkflows, refetchInterval: REFRESH_MS });
-  const runsQuery = useQuery({ queryKey: ["workflows", "runs", selectedWorkflowId], queryFn: () => listWorkflowRuns(selectedWorkflowId), enabled: Boolean(selectedWorkflowId) });
-  const runDetailQuery = useQuery<WorkflowRunDetail>({
-    queryKey: ["workflows", "run-detail", selectedRunId],
-    queryFn: () => getWorkflowRun(selectedRunId!),
-    enabled: Boolean(selectedRunId),
-  });
-  const addToast = useUIStore((s) => s.addToast);
-  const runMutation = useMutation({
-    mutationFn: ({ workflowId, input }: any) => runWorkflow(workflowId, input),
-    onSuccess: () => addToast(t("workflows.run_started", { defaultValue: "Workflow run started" }), "success"),
-    onError: (e: any) => addToast(e?.message || t("workflows.run_failed", { defaultValue: "Failed to start workflow" }), "error"),
-  });
-  const dryRunMutation = useMutation({
-    mutationFn: ({ workflowId, input }: { workflowId: string; input: string }) =>
-      dryRunWorkflow(workflowId, input),
-    onSuccess: (data) => setDryRunResult(data),
-    onError: (e: any) => addToast(e?.message || t("workflows.dry_run_failed", { defaultValue: "Dry run failed" }), "error"),
-  });
-  const deleteMutation = useMutation({
-    mutationFn: deleteWorkflow,
-    onSuccess: () => addToast(t("workflows.deleted", { defaultValue: "Workflow deleted" }), "success"),
-    onError: (e: any) => addToast(e?.message || t("workflows.delete_failed", { defaultValue: "Failed to delete workflow" }), "error"),
-  });
+  const workflowsQuery = useWorkflows();
+  const runsQuery = useWorkflowRuns(selectedWorkflowId);
+  const runDetailQuery = useWorkflowRunDetail(selectedRunId ?? "");
+  const runMutation = useRunWorkflow();
+  const dryRunMutation = useDryRunWorkflow();
+  const deleteMutation = useDeleteWorkflow();
+  const instantiateMutation = useInstantiateTemplate();
 
   const workflows = useMemo(() =>
     [...(workflowsQuery.data ?? [])]
@@ -86,10 +72,17 @@ export function WorkflowsPage() {
   const handleRun = async () => {
     if (!selectedWorkflowId) return;
     setDryRunResult(null);
+    dryRunMutation.reset();
     try {
       await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
+      addToast(t("workflows.run_started", { defaultValue: "Run started" }), "success");
       await runsQuery.refetch();
-    } catch { /* ignore */ }
+    } catch (err) {
+      addToast(
+        err instanceof Error ? err.message : t("workflows.run_failed", { defaultValue: "Run failed" }),
+        "error",
+      );
+    }
   };
 
   const handleDryRun = async () => {
@@ -97,15 +90,25 @@ export function WorkflowsPage() {
     setDryRunResult(null);
     runMutation.reset();
     try {
-      await dryRunMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
-    } catch { /* ignore */ }
+      const result = await dryRunMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
+      setDryRunResult(result);
+    } catch {
+      // Error already surfaced via dryRunMutation.error panel at line 465.
+    }
   };
 
 
   const handleDelete = async (id: string) => {
     if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
     setConfirmDeleteId(null);
-    try { await deleteMutation.mutateAsync(id); await queryClient.invalidateQueries({ queryKey: ["workflows"] }); } catch { /* ignore */ }
+    try {
+      await deleteMutation.mutateAsync(id);
+    } catch (err) {
+      addToast(
+        err instanceof Error ? err.message : t("workflows.delete_failed", { defaultValue: "Delete failed" }),
+        "error",
+      );
+    }
   };
 
   const handleNewWorkflow = () => {
@@ -149,10 +152,9 @@ export function WorkflowsPage() {
       return;
     }
     try {
-      const resp = await instantiateTemplate(tmpl.id, {});
+      const resp = await instantiateMutation.mutateAsync({ id: tmpl.id, params: {} });
       const workflowId = (resp as any).workflow_id || (resp as any).id;
       if (workflowId) {
-        await queryClient.invalidateQueries({ queryKey: ["workflows"] });
         openWorkflow(workflowId);
       } else {
         // Instantiation succeeded but no ID returned — fall back to pre-populated canvas
@@ -177,7 +179,7 @@ export function WorkflowsPage() {
     navigate({ to: "/canvas", search: { t: undefined, wf: wfId } });
   };
 
-  const templatesQuery = useQuery({ queryKey: ["workflow-templates"], queryFn: () => listWorkflowTemplates() });
+  const templatesQuery = useWorkflowTemplates();
   const apiTemplates = templatesQuery.data ?? [];
   const lang = i18n.language?.split("-")[0] ?? "en";
   const tmplName = (tmpl: WorkflowTemplate) => tmpl.i18n?.[lang]?.name || tmpl.name;

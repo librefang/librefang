@@ -1,9 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatCompact, formatCost as formatCostUtil } from "../lib/format";
 import type { ModelItem, ModelOverrides } from "../api";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listModels, addCustomModel, removeCustomModel, getModelOverrides, updateModelOverrides, deleteModelOverrides } from "../api";
+import { useModels, useModelOverrides } from "../lib/queries/models";
+import { useAddCustomModel, useRemoveCustomModel, useUpdateModelOverrides, useDeleteModelOverrides } from "../lib/mutations/models";
 import { SliderInput } from "../components/ui/SliderInput";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -26,10 +26,8 @@ type SortDir = "asc" | "desc";
 const GRID_COLS = "grid-cols-[minmax(140px,1fr)_90px_70px_70px_70px_70px_40px_40px_40px_40px_70px]";
 const GRID_MIN_W = "min-w-[860px]";
 
-const REFRESH_MS = 60000;
 export function ModelsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [search, setSearch] = useState("");
   const [tierFilter, setTierFilter] = useState<string>("all");
@@ -71,28 +69,10 @@ export function ModelsPage() {
   const [formVision, setFormVision] = useState(false);
   const [formStreaming, setFormStreaming] = useState(true);
 
-  const modelsQuery = useQuery({
-    queryKey: ["models"],
-    queryFn: () => listModels(),
-    refetchInterval: REFRESH_MS,
-  });
+  const modelsQuery = useModels();
 
-  const addMut = useMutation({
-    mutationFn: addCustomModel,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["models"] });
-      addToast(t("models.model_added"), "success");
-      resetForm();
-    },
-  });
-
-  const deleteMut = useMutation({
-    mutationFn: removeCustomModel,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["models"] });
-      addToast(t("models.model_deleted"), "success");
-    },
-  });
+  const addMut = useAddCustomModel();
+  const deleteMut = useRemoveCustomModel();
 
   const resetForm = () => {
     setShowAdd(false);
@@ -111,18 +91,24 @@ export function ModelsPage() {
   const handleAdd = async (e: FormEvent) => {
     e.preventDefault();
     if (!formId.trim() || !formProvider.trim()) return;
-    await addMut.mutateAsync({
-      id: formId.trim(),
-      provider: formProvider.trim(),
-      display_name: formDisplayName.trim() || undefined,
-      context_window: formContextWindow,
-      max_output_tokens: formMaxOutput,
-      input_cost_per_m: formInputCost,
-      output_cost_per_m: formOutputCost,
-      supports_tools: formTools,
-      supports_vision: formVision,
-      supports_streaming: formStreaming,
-    });
+    try {
+      await addMut.mutateAsync({
+        id: formId.trim(),
+        provider: formProvider.trim(),
+        display_name: formDisplayName.trim() || undefined,
+        context_window: formContextWindow,
+        max_output_tokens: formMaxOutput,
+        input_cost_per_m: formInputCost,
+        output_cost_per_m: formOutputCost,
+        supports_tools: formTools,
+        supports_vision: formVision,
+        supports_streaming: formStreaming,
+      });
+      addToast(t("models.model_added"), "success");
+      resetForm();
+    } catch (err: any) {
+      addToast(err?.message || t("common.error"), "error");
+    }
   };
 
   const handleDelete = async (id: string) => {
@@ -130,6 +116,7 @@ export function ModelsPage() {
     setConfirmDeleteId(null);
     try {
       await deleteMut.mutateAsync(id);
+      addToast(t("models.model_deleted"), "success");
       const orphan = hiddenModelKeys.find(k => k.endsWith(`:${id}`));
       if (orphan) unhideModelAction(orphan);
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
@@ -705,7 +692,10 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
   const { t } = useTranslation();
   const overrideKey = `${model.provider}:${model.id}`;
 
-  const [loading, setLoading] = useState(true);
+  const overridesQuery = useModelOverrides(overrideKey);
+  const updateMut = useUpdateModelOverrides();
+  const deleteMut = useDeleteModelOverrides();
+
   const [saving, setSaving] = useState(false);
 
   // Form state
@@ -724,23 +714,24 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
   const [useMaxCompletionTokens, setUseMaxCompletionTokens] = useState(false);
   const [noSystemRole, setNoSystemRole] = useState(false);
   const [forceMaxTokens, setForceMaxTokens] = useState(false);
+  const [overridesLoaded, setOverridesLoaded] = useState(false);
 
-  // Load existing overrides
+  // Load existing overrides from query
   useEffect(() => {
-    getModelOverrides(overrideKey).then((o) => {
-      if (o.model_type) setModelType(o.model_type);
-      if (o.temperature != null) { setTemperature(o.temperature); setTempEnabled(true); }
-      if (o.top_p != null) { setTopP(o.top_p); setTopPEnabled(true); }
-      if (o.max_tokens != null) { setMaxTokens(o.max_tokens); setMaxTokensEnabled(true); }
-      if (o.frequency_penalty != null) { setFreqPenalty(o.frequency_penalty); setFreqEnabled(true); }
-      if (o.presence_penalty != null) { setPresPenalty(o.presence_penalty); setPresEnabled(true); }
-      if (o.reasoning_effort) setReasoningEffort(o.reasoning_effort);
-      if (o.use_max_completion_tokens) setUseMaxCompletionTokens(true);
-      if (o.no_system_role) setNoSystemRole(true);
-      if (o.force_max_tokens) setForceMaxTokens(true);
-      setLoading(false);
-    }).catch(() => setLoading(false));
-  }, [overrideKey]);
+    const o = overridesQuery.data;
+    if (!o || overridesLoaded) return;
+    if (o.model_type) setModelType(o.model_type);
+    if (o.temperature != null) { setTemperature(o.temperature); setTempEnabled(true); }
+    if (o.top_p != null) { setTopP(o.top_p); setTopPEnabled(true); }
+    if (o.max_tokens != null) { setMaxTokens(o.max_tokens); setMaxTokensEnabled(true); }
+    if (o.frequency_penalty != null) { setFreqPenalty(o.frequency_penalty); setFreqEnabled(true); }
+    if (o.presence_penalty != null) { setPresPenalty(o.presence_penalty); setPresEnabled(true); }
+    if (o.reasoning_effort) setReasoningEffort(o.reasoning_effort);
+    if (o.use_max_completion_tokens) setUseMaxCompletionTokens(true);
+    if (o.no_system_role) setNoSystemRole(true);
+    if (o.force_max_tokens) setForceMaxTokens(true);
+    setOverridesLoaded(true);
+  }, [overridesQuery.data, overridesLoaded]);
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -756,7 +747,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     if (noSystemRole) overrides.no_system_role = true;
     if (forceMaxTokens) overrides.force_max_tokens = true;
     try {
-      await updateModelOverrides(overrideKey, overrides);
+      await updateMut.mutateAsync({ modelKey: overrideKey, overrides });
       onSaved();
       onClose();
     } catch (e: any) {
@@ -764,19 +755,19 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     } finally {
       setSaving(false);
     }
-  }, [overrideKey, modelType, temperature, tempEnabled, topP, topPEnabled, maxTokens, maxTokensEnabled, freqPenalty, freqEnabled, presPenalty, presEnabled, reasoningEffort, useMaxCompletionTokens, noSystemRole, forceMaxTokens, onSaved, onClose, onError]);
+  }, [overrideKey, modelType, temperature, tempEnabled, topP, topPEnabled, maxTokens, maxTokensEnabled, freqPenalty, freqEnabled, presPenalty, presEnabled, reasoningEffort, useMaxCompletionTokens, noSystemRole, forceMaxTokens, onSaved, onClose, onError, updateMut]);
 
   const handleReset = useCallback(async () => {
     try {
-      await deleteModelOverrides(overrideKey);
+      await deleteMut.mutateAsync(overrideKey);
       onReset();
       onClose();
     } catch (e: any) {
       onError(e?.message);
     }
-  }, [overrideKey, onReset, onClose, onError]);
+  }, [overrideKey, onReset, onClose, onError, deleteMut]);
 
-  if (loading) {
+  if (overridesQuery.isLoading) {
     return (
       <Modal isOpen onClose={onClose} title={t("models.settings_title")} size="lg">
         <div className="flex items-center justify-center p-12">

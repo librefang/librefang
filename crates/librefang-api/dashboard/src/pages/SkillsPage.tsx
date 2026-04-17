@@ -1,8 +1,25 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, fanghubListSkills, installSkill, listHands, getSkillDetail, createSkill, reloadSkills, evolveUpdateSkill, evolvePatchSkill, evolveRollbackSkill, evolveDeleteSkill, evolveWriteFile, evolveRemoveFile, getSupportingFile, type ClawHubBrowseItem, type FangHubSkill, type HandDefinitionItem, type SkillDetail } from "../api";
+import {
+  getSkillDetail,
+  createSkill,
+  reloadSkills,
+  evolveUpdateSkill,
+  evolvePatchSkill,
+  evolveRollbackSkill,
+  evolveDeleteSkill,
+  evolveWriteFile,
+  evolveRemoveFile,
+  getSupportingFile,
+  type ClawHubBrowseItem,
+  type FangHubSkill,
+  type HandDefinitionItem,
+} from "../api";
+import { useSkills, skillQueries } from "../lib/queries/skills";
+import { useHands } from "../lib/queries/hands";
+import { useUninstallSkill, useClawHubInstall, useSkillHubInstall, useInstallSkill } from "../lib/mutations/skills";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Card } from "../components/ui/Card";
@@ -20,8 +37,6 @@ import {
 } from "lucide-react";
 
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
-
-const REFRESH_MS = 30000;
 
 type ViewMode = "installed" | "marketplace" | "skillhub" | "fanghub";
 type MarketplaceSource = "clawhub" | "skillhub";
@@ -995,8 +1010,8 @@ function UninstallDialog({ skillName, onClose, onConfirm, isPending }: {
 
 export function SkillsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
+  const queryClient = useQueryClient();
 
   // View state — default to the region-appropriate marketplace
   const [viewMode, setViewMode] = useState<ViewMode>("fanghub");
@@ -1015,8 +1030,7 @@ export function SkillsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [detailSkillName, setDetailSkillName] = useState<string | null>(null);
 
-  // Hands query for install target selector
-  const handsQuery = useQuery({ queryKey: ["hands", "list"], queryFn: listHands });
+  const handsQuery = useHands();
   const hands = handsQuery.data ?? [];
 
   // Get search keyword from category or use search input
@@ -1025,32 +1039,25 @@ export function SkillsPage() {
     : search;
 
   // Queries
-  const skillsQuery = useQuery({ queryKey: ["skills", "list"], queryFn: listSkills, refetchInterval: REFRESH_MS });
+  const skillsQuery = useSkills();
 
-  // ClawHub search API — always runs in marketplace mode; falls back to "python"
-  // when no keyword so the tab shows results instead of an empty state.
+  // ClawHub search — always runs in marketplace mode; falls back to "python"
   const effectiveKeyword = searchKeyword || "python";
   const searchQuery = useQuery({
-    queryKey: ["clawhub", "search", effectiveKeyword],
-    queryFn: () => clawhubSearch(effectiveKeyword),
-    staleTime: 60000,
+    ...skillQueries.clawhubSearch(effectiveKeyword),
     enabled: viewMode === "marketplace",
   });
 
-  // Skillhub queries — category selection also drives search
+  // Skillhub queries — category selection also drives search.
+  // Browse only fires when no keyword; search only fires when keyword present.
   const skillhubKeyword = skillhubSearch_ || (selectedCategory ? categories.find(c => c.id === selectedCategory)?.keyword || "" : "");
 
   const skillhubBrowseQuery = useQuery({
-    queryKey: ["skillhub", "browse"],
-    queryFn: () => skillhubBrowse(),
-    staleTime: 60000,
+    ...skillQueries.skillhubBrowse(),
     enabled: viewMode === "skillhub" && !skillhubKeyword,
   });
-
   const skillhubSearchQuery = useQuery({
-    queryKey: ["skillhub", "search", skillhubKeyword],
-    queryFn: () => skillhubSearch(skillhubKeyword),
-    staleTime: 60000,
+    ...skillQueries.skillhubSearch(skillhubKeyword),
     enabled: viewMode === "skillhub" && !!skillhubKeyword,
   });
 
@@ -1058,22 +1065,20 @@ export function SkillsPage() {
 
   // FangHub — official skills from local registry (~/.librefang/registry/skills)
   const fanghubQuery = useQuery({
-    queryKey: ["fanghub", "list"],
-    queryFn: fanghubListSkills,
-    staleTime: 60000,
+    ...skillQueries.fanghubList(),
     enabled: viewMode === "fanghub",
   });
 
-  const detailQuery = useQuery({
-    queryKey: [detailsSource, "skill", detailsSkill?.slug],
-    queryFn: () => {
-      if (!detailsSkill?.slug) return Promise.resolve(null);
-      return detailsSource === "skillhub"
-        ? skillhubGetSkill(detailsSkill.slug)
-        : clawhubGetSkill(detailsSkill.slug);
-    },
-    enabled: !!detailsSkill?.slug,
+  // Detail query — conditionally fetches from skillhub or clawhub via factory keys
+  const clawhubDetailQuery = useQuery({
+    ...skillQueries.clawhubSkill(detailsSkill?.slug ?? ""),
+    enabled: !!detailsSkill?.slug && detailsSource === "clawhub",
   });
+  const skillhubDetailQuery = useQuery({
+    ...skillQueries.skillhubSkill(detailsSkill?.slug ?? ""),
+    enabled: !!detailsSkill?.slug && detailsSource === "skillhub",
+  });
+  const detailQuery = detailsSource === "skillhub" ? skillhubDetailQuery : clawhubDetailQuery;
 
   const skillWithDetails = detailQuery.data && detailsSkill
     ? {
@@ -1130,68 +1135,10 @@ export function SkillsPage() {
   }, [fanghubSkills, selectedCategory]);
 
   // Mutations
-  const uninstallMutation = useMutation({
-    mutationKey: ["uninstall", "skill"],
-    mutationFn: uninstallSkill,
-    retry: 0,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["skills", "list"] });
-      addToast(t("common.success"), "success");
-      setUninstalling(null);
-    }
-  });
-
-  const installMutation = useMutation({
-    mutationKey: ["install", "skill", "clawhub"],
-    mutationFn: ({ slug, hand }: { slug: string; hand?: string }) => clawhubInstall(slug, undefined, hand || undefined),
-    retry: 0,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["skills", "list"] });
-      addToast(t("common.success"), "success");
-      setInstallingId(null);
-      setDetailsSkill(null);
-    },
-    onError: (error: any) => {
-      const msg = error.message || t("common.error");
-      addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
-      setInstallingId(null);
-    }
-  });
-
-  const skillhubInstallMutation = useMutation({
-    mutationKey: ["install", "skill", "skillhub"],
-    mutationFn: ({ slug, hand }: { slug: string; hand?: string }) => skillhubInstall(slug, hand || undefined),
-    retry: 0,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["skills", "list"] });
-      queryClient.invalidateQueries({ queryKey: ["fanghub", "list"] });
-      addToast(t("common.success"), "success");
-      setInstallingId(null);
-      setDetailsSkill(null);
-    },
-    onError: (error: any) => {
-      const msg = error.message || t("common.error");
-      addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
-      setInstallingId(null);
-    }
-  });
-
-  const fanghubInstallMutation = useMutation({
-    mutationKey: ["install", "skill", "fanghub"],
-    mutationFn: ({ name, hand }: { name: string; hand?: string }) => installSkill(name, hand || undefined),
-    retry: 0,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["skills", "list"] });
-      queryClient.invalidateQueries({ queryKey: ["fanghub", "list"] });
-      addToast(t("common.success"), "success");
-      setInstallingId(null);
-    },
-    onError: (error: any) => {
-      const msg = error.message || t("common.error");
-      addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
-      setInstallingId(null);
-    }
-  });
+  const uninstallMutation = useUninstallSkill();
+  const installMutation = useClawHubInstall();
+  const skillhubInstallMutation = useSkillHubInstall();
+  const fanghubInstallMutation = useInstallSkill();
 
   const handleCategoryClick = (categoryId: string) => {
     if (selectedCategory === categoryId) {
@@ -1206,15 +1153,36 @@ export function SkillsPage() {
   const handleInstall = (slug: string, source: MarketplaceSource = "clawhub") => {
     setInstallingId(slug);
     const hand = targetHand || undefined;
+    const opts = {
+      onSuccess: () => {
+        addToast(t("common.success"), "success");
+        setInstallingId(null);
+        setDetailsSkill(null);
+      },
+      onError: (error: any) => {
+        const msg = error.message || t("common.error");
+        addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
+        setInstallingId(null);
+      },
+    };
     if (source === "skillhub") {
-      skillhubInstallMutation.mutate({ slug, hand });
+      skillhubInstallMutation.mutate({ slug, hand }, opts);
     } else {
-      installMutation.mutate({ slug, hand });
+      installMutation.mutate({ slug, hand }, opts);
     }
   };
 
   const handleUninstall = (name: string) => setUninstalling(name);
-  const confirmUninstall = () => { if (uninstalling) uninstallMutation.mutate(uninstalling); };
+  const confirmUninstall = () => {
+    if (uninstalling) {
+      uninstallMutation.mutate(uninstalling, {
+        onSuccess: () => {
+          addToast(t("common.success"), "success");
+          setUninstalling(null);
+        },
+      });
+    }
+  };
   const handleViewDetails = (skill: ClawHubSkillWithStatus, source: MarketplaceSource) => {
     setDetailsSkill(skill);
     setDetailsSource(source);
@@ -1473,7 +1441,20 @@ export function SkillsPage() {
                 pendingId={installingId}
                 onInstall={(name) => {
                   setInstallingId(name);
-                  fanghubInstallMutation.mutate({ name, hand: targetHand || undefined });
+                  fanghubInstallMutation.mutate(
+                    { name, hand: targetHand || undefined },
+                    {
+                      onSuccess: () => {
+                        addToast(t("common.success"), "success");
+                        setInstallingId(null);
+                      },
+                      onError: (error: any) => {
+                        const msg = error.message || t("common.error");
+                        addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
+                        setInstallingId(null);
+                      },
+                    },
+                  );
                 }}
                 t={t}
               />

@@ -1,3 +1,5 @@
+import { ApiError } from "./lib/http/errors";
+
 export interface HealthCheck {
   name: string;
   status: string;
@@ -683,7 +685,7 @@ export function buildAuthenticatedWebSocketUrl(path: string): string {
   return url.toString();
 }
 
-async function parseError(response: Response): Promise<Error> {
+async function parseError(response: Response): Promise<ApiError> {
   // If 401, trigger global logout (only once to prevent infinite loop)
   if (response.status === 401 && _onUnauthorized && !_unauthorizedFired) {
     _unauthorizedFired = true;
@@ -692,18 +694,20 @@ async function parseError(response: Response): Promise<Error> {
   }
   const text = await response.text();
   let message = response.statusText;
+  let code = `HTTP_${response.status}`;
   try {
     const json = JSON.parse(text) as Json;
     // Prefer the human-readable `detail` field over the machine-code `error` field
-    if (typeof (json as any).detail === "string") {
-      message = (json as any).detail;
+    if (typeof json.detail === "string") {
+      message = json.detail;
     } else if (typeof json.error === "string") {
       message = json.error;
+      code = json.error;
     }
   } catch {
     // ignore parse errors
   }
-  return new Error(message || `HTTP ${response.status}`);
+  return new ApiError(response.status, code, message || `HTTP ${response.status}`);
 }
 
 async function get<T>(path: string): Promise<T> {
