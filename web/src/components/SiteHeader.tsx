@@ -99,11 +99,14 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
   ]
   // Features dropdown: one anchor per homepage module, in scroll order.
   // Cross-page nav when viewed from a subpage; smooth-scroll on the
-  // homepage itself. Skips categories that already live in the
-  // Marketplace dropdown (hands, browse) and the external Docs link.
+  // homepage itself. Hands / Workflows appear here too (even though the
+  // Marketplace dropdown has items of the same name) because those are
+  // the homepage teaser sections — different destination from the
+  // /hands and /workflows catalog pages.
   const anchor = (id: string) => (isSubpage ? `${homeHref}#${id}` : `#${id}`)
   const anchorLinks: NavLink[] = [
     { label: t.nav.architecture,                                   href: anchor('architecture') },
+    { label: t.nav.hands,                                          href: anchor('hands') },
     { label: t.nav.evolution || t.evolution?.label || 'Evolution', href: anchor('evolution') },
     { label: t.nav.workflows || t.workflows?.label || 'Workflows', href: anchor('workflows') },
     { label: t.nav.performance,                                    href: anchor('performance') },
@@ -118,7 +121,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
   ]
   const featureActiveIds = ['hands', 'agents', 'skills', 'mcp', 'plugins', 'providers', 'workflows', 'channels']
   const isFeatureActive = featureActiveIds.includes(activeSection)
-  const learnActiveIds = ['architecture', 'evolution', 'workflows', 'performance', 'downloads', 'install', 'faq', 'community']
+  const learnActiveIds = ['architecture', 'hands', 'evolution', 'workflows', 'performance', 'downloads', 'install', 'faq', 'community']
   const isLearnActive = learnActiveIds.includes(activeSection)
 
   const headerClass = cn(
