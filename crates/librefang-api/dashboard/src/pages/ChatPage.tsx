@@ -5,8 +5,9 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders, listActiveHands } from "../api";
+import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders, listActiveHands } from "../api";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
+import { useFullConfig } from "../lib/queries/config";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
@@ -1601,7 +1602,7 @@ export function ChatPage() {
     }
   }, [addToast, t]);
 
-  const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
+  const configQuery = useFullConfig();
   const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "full";
   const mediaConfigRaw = (configQuery.data as Record<string, unknown>)?.media as Record<string, unknown> | undefined;
   const sttAvailable = mediaConfigRaw?.stt_available === true;
