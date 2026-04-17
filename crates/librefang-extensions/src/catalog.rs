@@ -40,6 +40,10 @@ impl McpCatalog {
         // construction time (tests sometimes rebind LIBREFANG_HOME).
         self.catalog_dir = home_dir.join("mcp").join("catalog");
 
+        // Full reload semantics: drop everything first so entries deleted
+        // or renamed on disk don't linger in the in-memory map.
+        self.entries.clear();
+
         let mut count = 0usize;
         if let Ok(entries) = std::fs::read_dir(&self.catalog_dir) {
             for entry in entries.flatten() {

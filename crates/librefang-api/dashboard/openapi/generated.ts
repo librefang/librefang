@@ -547,6 +547,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agents/{id}/session/reboot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST /api/agents/{id}/session/reboot — Hard-reboot an agent's session (full clear, no summary). */
+        post: operations["reboot_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agents/{id}/session/reset": {
         parameters: {
             query?: never;
@@ -590,6 +607,40 @@ export interface paths {
         };
         /** GET /api/sessions/by-label/:label — Find session by label (scoped to agent). */
         get: operations["find_session_by_label"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{id}/sessions/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST /api/agents/{id}/sessions/import — Import a previously exported session. */
+        post: operations["import_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{id}/sessions/{session_id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /api/agents/{id}/sessions/{session_id}/export — Export a session for hibernation. */
+        get: operations["export_session"];
         put?: never;
         post?: never;
         delete?: never;
@@ -736,7 +787,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * GET /api/approvals — List pending approval requests.
+         * GET /api/approvals — List pending and recent approval requests.
          * @description Transforms field names to match the dashboard template expectations:
          *     `action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.
          */
@@ -775,7 +826,6 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** POST /api/approvals/{id}/approve — Approve a pending request. */
         post: operations["approve_request"];
         delete?: never;
         options?: never;
@@ -1153,6 +1203,40 @@ export interface paths {
         put?: never;
         /** POST /api/channels/reload — Manually trigger a channel hot-reload from disk config. */
         post: operations["reload_channels"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/channels/wechat/qr/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login. */
+        post: operations["wechat_qr_start"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/channels/wechat/qr/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation. */
+        get: operations["wechat_qr_status"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1622,7 +1706,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** GET /api/extensions — List all installed extensions (integrations) with status. */
+        /** GET /api/extensions — List catalog entries annotated with installed state. */
         get: operations["list_extensions"];
         put?: never;
         post?: never;
@@ -1641,7 +1725,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** POST /api/extensions/install — Install an extension by name. */
+        /**
+         * POST /api/extensions/install — Install a catalog entry (alias for
+         *     POST /api/mcp/servers with template_id).
+         */
         post: operations["install_extension"];
         delete?: never;
         options?: never;
@@ -1658,7 +1745,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** POST /api/extensions/uninstall — Uninstall an extension by name. */
+        /** POST /api/extensions/uninstall — Uninstall by catalog id (template_id). */
         post: operations["uninstall_extension"];
         delete?: never;
         options?: never;
@@ -1673,7 +1760,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** GET /api/extensions/:name — Get details for a single extension by name. */
+        /** GET /api/extensions/:name — Get details for a single catalog entry. */
         get: operations["get_extension"];
         put?: never;
         post?: never;
@@ -1813,6 +1900,23 @@ export interface paths {
         get: operations["hand_stats"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/hands/reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST /api/hands/reload — Reload hand definitions from disk. */
+        post: operations["reload_hands"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1985,24 +2089,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/integrations": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** GET /api/integrations — List installed integrations with status. */
-        get: operations["list_integrations"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/integrations/add": {
+    "/api/init": {
         parameters: {
             query?: never;
             header?: never;
@@ -2011,94 +2098,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** POST /api/integrations/add — Install an integration. */
-        post: operations["add_integration"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/integrations/available": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** GET /api/integrations/available — List all available templates. */
-        get: operations["list_available_integrations"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/integrations/health": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** GET /api/integrations/health — Health status for all integrations. */
-        get: operations["integrations_health"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/integrations/reload": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** POST /api/integrations/reload — Hot-reload integration configs and reconnect MCP. */
-        post: operations["reload_integrations"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/integrations/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** GET /api/integrations/:id — Get a single integration by ID. */
-        get: operations["get_integration"];
-        put?: never;
-        post?: never;
-        /** DELETE /api/integrations/:id — Remove an integration. */
-        delete: operations["remove_integration"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/integrations/{id}/reconnect": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** POST /api/integrations/:id/reconnect — Reconnect an MCP server. */
-        post: operations["reconnect_integration"];
+        /**
+         * POST /api/init — Quick initialization (detect provider, write config, reload).
+         * @description Skips if config.toml already exists. Returns the detected provider/model.
+         */
+        post: operations["quick_init"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2151,6 +2155,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/mcp/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /api/mcp/catalog — List all installable MCP catalog entries. */
+        get: operations["list_mcp_catalog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mcp/catalog/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /api/mcp/catalog/{id} — Single catalog entry detail. */
+        get: operations["get_mcp_catalog_entry"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mcp/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /api/mcp/health — Health snapshot across all configured MCP servers. */
+        get: operations["mcp_health_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mcp/reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST /api/mcp/reload — Re-read the catalog and reconnect MCP servers. */
+        post: operations["reload_mcp_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/mcp/servers": {
         parameters: {
             query?: never;
@@ -2196,6 +2268,23 @@ export interface paths {
         post?: never;
         /** DELETE /api/mcp/servers/{name} — Remove an MCP server configuration. */
         delete: operations["delete_mcp_server"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mcp/servers/{name}/reconnect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST /api/mcp/servers/{name}/reconnect — Force a reconnect of an MCP server. */
+        post: operations["reconnect_mcp_server_handler"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2511,10 +2600,17 @@ export interface paths {
          * @description Returns counters and gauges for monitoring LibreFang in production:
          *     - `librefang_agents_active` — number of active agents
          *     - `librefang_uptime_seconds` — seconds since daemon started
-         *     - `librefang_tokens_total` — total tokens consumed (per agent)
-         *     - `librefang_tool_calls_total` — total tool calls (per agent)
+         *     - `librefang_tokens` — total tokens consumed (per agent, rolling 1h gauge)
+         *     - `librefang_tokens_input` — input tokens consumed (per agent, rolling 1h gauge)
+         *     - `librefang_tokens_output` — output tokens consumed (per agent, rolling 1h gauge)
+         *     - `librefang_tool_calls` — tool calls made (per agent, rolling 1h gauge)
+         *     - `librefang_llm_calls` — LLM API calls made (per agent, rolling 1h gauge)
          *     - `librefang_panics_total` — supervisor panic count
          *     - `librefang_restarts_total` — supervisor restart count
+         *     - `librefang_active_sessions` — number of active login sessions
+         *     - `librefang_cost_usd_today` — total estimated cost for today (USD)
+         *     - `librefang_http_requests_total` — HTTP request counts (with telemetry feature)
+         *     - `librefang_http_request_duration_seconds` — HTTP request latencies (with telemetry feature)
          */
         get: operations["prometheus_metrics"];
         put?: never;
@@ -2937,6 +3033,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/providers/{name}/default": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/providers/{name}/default — Set a provider as the default model provider.
+         * @description Looks up the best default model for the given provider and updates both
+         *     the in-memory override and config.toml so it persists across restarts.
+         */
+        post: operations["set_default_provider"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/providers/{name}/key": {
         parameters: {
             query?: never;
@@ -3036,10 +3153,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** GET /api/schedules — List all cron-based scheduled jobs. */
+        /** GET /api/schedules — List all scheduled jobs. */
         get: operations["list_schedules"];
         put?: never;
-        /** POST /api/schedules — Create a new cron-based scheduled job. */
+        /** POST /api/schedules — Create a new scheduled job (backed by CronScheduler). */
         post: operations["create_schedule"];
         delete?: never;
         options?: never;
@@ -3075,7 +3192,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** POST /api/schedules/:id/run — Manually run a scheduled job now. */
+        /** POST /api/schedules/:id/run — Manually trigger a scheduled job now. */
         post: operations["run_schedule"];
         delete?: never;
         options?: never;
@@ -3281,7 +3398,7 @@ export interface paths {
             cookie?: never;
         };
         /** GET /api/templates — List available agent templates. */
-        get: operations["list_templates"];
+        get: operations["list_agent_templates"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3298,7 +3415,7 @@ export interface paths {
             cookie?: never;
         };
         /** GET /api/templates/:name — Get template details. */
-        get: operations["get_template"];
+        get: operations["get_agent_template"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3566,6 +3683,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workflows/{id}/save-as-template": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST /api/workflows/:id/save-as-template — Convert a workflow into a reusable template. */
+        post: operations["save_workflow_as_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/mcp": {
         parameters: {
             query?: never;
@@ -3667,6 +3801,8 @@ export interface components {
         };
         /** @description Request to install a skill from ClawHub. */
         ClawHubInstallRequest: {
+            /** @description Install into a specific hand's workspace instead of globally. */
+            hand?: string | null;
             /** @description ClawHub skill slug (e.g., "github-helper"). */
             slug: string;
         };
@@ -3692,7 +3828,48 @@ export interface components {
         MessageRequest: {
             /** @description Optional file attachments (uploaded via /upload endpoint). */
             attachments?: components["schemas"]["AttachmentRef"][];
+            /** @description Optional channel type (e.g. "whatsapp", "telegram"). */
+            channel_type?: string | null;
+            /**
+             * @description If true, this is an ephemeral "side question" (`/btw`).
+             *     The message is answered using the agent's system prompt but WITHOUT
+             *     loading or saving session history — the real conversation is untouched.
+             */
+            ephemeral?: boolean;
+            /**
+             * @description Optional group participant roster (Phase 2 §C addressee guard).
+             *
+             *     Forwarded by the WhatsApp gateway for group messages so the kernel's
+             *     addressee guard (`is_addressed_to_other_participant`) can detect when
+             *     a turn is addressed to a named participant other than the agent.
+             *
+             *     `#[serde(default)]` ensures backward compatibility for callers (Telegram,
+             *     direct API) that don't populate this field.
+             */
+            group_participants?: components["schemas"]["ParticipantRefSchema"][] | null;
+            /** @description Whether this message originated from a group chat (vs DM). */
+            is_group?: boolean;
             message: string;
+            /** @description Optional sender ID (platform-specific user ID). */
+            sender_id?: string | null;
+            /** @description Optional sender display name. */
+            sender_name?: string | null;
+            /**
+             * @description Whether the response should include the model's thinking/reasoning trace.
+             *
+             *     `None` defaults to `true` when thinking content is available.
+             */
+            show_thinking?: boolean | null;
+            /**
+             * @description Per-call deep-thinking override.
+             *
+             *     - `Some(true)`: force thinking on (even if the manifest has it off)
+             *     - `Some(false)`: force thinking off (even if the manifest has it on)
+             *     - `None`: use the manifest/global default
+             */
+            thinking?: boolean | null;
+            /** @description Whether the bot was @mentioned in a group message. */
+            was_mentioned?: boolean;
         };
         /** @description Response from sending a message. */
         MessageResponse: {
@@ -3725,6 +3902,11 @@ export interface components {
             /** Format: int64 */
             output_tokens: number;
             response: string;
+            /**
+             * @description Combined thinking/reasoning trace from the model, when the caller
+             *     requested `show_thinking = true`.
+             */
+            thinking?: string | null;
         };
         /** @description Request to run a migration. */
         MigrateRequest: {
@@ -3737,6 +3919,20 @@ export interface components {
         MigrateScanRequest: {
             path: string;
         };
+        /**
+         * @description OpenAPI schema stand-in for `librefang_channels::types::ParticipantRef`.
+         *
+         *     The real type lives in `librefang-channels`, which does not depend on
+         *     utoipa. This mirror struct exists only so `#[schema(value_type = ...)]`
+         *     on `MessageRequest.group_participants` can expose the shape to the
+         *     generated OpenAPI document.
+         */
+        ParticipantRefSchema: {
+            /** @description Human-readable name (push-name, contact name, or first part of JID). */
+            display_name: string;
+            /** @description Platform JID (e.g. `1234567890@s.whatsapp.net`). */
+            jid: string;
+        };
         /** @description Request body for patching agent config (name, description, prompt, identity, model). */
         PatchAgentConfigRequest: {
             api_key_env?: string | null;
@@ -3748,11 +3944,23 @@ export interface components {
             emoji?: string | null;
             fallback_models?: unknown[] | null;
             greeting_style?: string | null;
+            /**
+             * Format: int32
+             * @description Maximum tokens for LLM response. Controls conversation window size.
+             */
+            max_tokens?: number | null;
             model?: string | null;
             name?: string | null;
             provider?: string | null;
             system_prompt?: string | null;
+            /**
+             * Format: float
+             * @description Sampling temperature (0.0–2.0). Lower values are more deterministic.
+             */
+            temperature?: number | null;
             vibe?: string | null;
+            /** @description Web search augmentation mode: "off", "auto", or "always". */
+            web_search_augmentation?: string | null;
         };
         /** @description Request body for writing a workspace identity file. */
         SetAgentFileRequest: {
@@ -3764,6 +3972,8 @@ export interface components {
         };
         /** @description Request to install a skill from the marketplace. */
         SkillInstallRequest: {
+            /** @description Install into a specific hand's workspace instead of globally. */
+            hand?: string | null;
             name: string;
         };
         /** @description Request to uninstall a skill. */
@@ -3774,6 +3984,11 @@ export interface components {
         SpawnRequest: {
             /** @description Agent manifest as TOML string (optional if `template` is provided). */
             manifest_toml?: string;
+            /**
+             * @description Optional custom name for the agent. Overrides the name from the template
+             *     or manifest, allowing multiple agents from the same template.
+             */
+            name?: string | null;
             /**
              * @description Optional Ed25519 signed manifest envelope (JSON).
              *     When present, the signature is verified before spawning.
@@ -4787,6 +5002,29 @@ export interface operations {
             };
         };
     };
+    reboot_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Hard-reboot an agent's session without saving summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
     reset_session: {
         parameters: {
             query?: never;
@@ -4876,6 +5114,59 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Session found */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    import_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** @description Exported session JSON */
+        requestBody: {
+            content: {
+                "application/json": unknown;
+            };
+        };
+        responses: {
+            /** @description Session imported successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    export_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+                /** @description Session ID to export */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Exported session data */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5123,7 +5414,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description List pending approvals */
+            /** @description List pending and recent approvals */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5198,7 +5489,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": unknown;
+            };
+        };
         responses: {
             /** @description Request approved */
             200: {
@@ -5748,6 +6043,49 @@ export interface operations {
             };
             /** @description Reload failed */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    wechat_qr_start: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WeChat QR login initiated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    wechat_qr_status: {
+        parameters: {
+            query: {
+                /** @description QR code value from /qr/start */
+                qr_code: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WeChat QR scan status */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6427,7 +6765,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description List all installed extensions with status */
+            /** @description List catalog entries with install/health status */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6451,7 +6789,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Install an extension by name */
+            /** @description Install a catalog entry */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6475,7 +6813,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Uninstall an extension by name */
+            /** @description Uninstall a catalog-backed MCP server */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6491,14 +6829,14 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description Extension name */
+                /** @description Catalog entry id */
                 name: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Get details for a single extension */
+            /** @description Catalog entry detail + install status */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6678,6 +7016,26 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Get dashboard stats for a hand instance */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    reload_hands: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reload hand definitions from disk */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6922,7 +7280,7 @@ export interface operations {
             };
         };
     };
-    list_integrations: {
+    quick_init: {
         parameters: {
             query?: never;
             header?: never;
@@ -6931,169 +7289,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description List installed integrations with status */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    add_integration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": unknown;
-            };
-        };
-        responses: {
-            /** @description Install an integration */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    list_available_integrations: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description List all available integration templates */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    integrations_health: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Health status for all integrations */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    reload_integrations: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Hot-reload integration configs and reconnect MCP */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_integration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Integration ID */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Integration detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Integration not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    remove_integration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Integration ID */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Remove an integration */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    reconnect_integration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Integration ID */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Reconnect an integration MCP server */
+            /** @description Quick init result */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7135,6 +7331,98 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Search the FangHub marketplace */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    list_mcp_catalog: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description MCP catalog entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_mcp_catalog_entry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Catalog entry id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Catalog entry detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Catalog entry not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    mcp_health_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Health snapshot for all configured MCP servers */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    reload_mcp_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reload catalog and reconnect MCP servers */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7260,6 +7548,38 @@ export interface operations {
         responses: {
             /** @description Remove an MCP server configuration */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    reconnect_mcp_server_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Server name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reconnect an MCP server */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description MCP server not configured */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8362,6 +8682,47 @@ export interface operations {
             };
         };
     };
+    set_default_provider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Provider identifier */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": unknown;
+            };
+        };
+        responses: {
+            /** @description Default provider updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description No model found for provider */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Provider not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     set_provider_key: {
         parameters: {
             query?: never;
@@ -8919,7 +9280,7 @@ export interface operations {
             };
         };
     };
-    list_templates: {
+    list_agent_templates: {
         parameters: {
             query?: never;
             header?: never;
@@ -8939,7 +9300,7 @@ export interface operations {
             };
         };
     };
-    get_template: {
+    get_agent_template: {
         parameters: {
             query?: never;
             header?: never;
@@ -9020,7 +9381,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown[];
+                    "application/json": unknown;
                 };
             };
         };
@@ -9414,6 +9775,36 @@ export interface operations {
                 content: {
                     "application/json": unknown[];
                 };
+            };
+        };
+    };
+    save_workflow_as_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Template created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Workflow not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

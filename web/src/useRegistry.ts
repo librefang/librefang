@@ -95,15 +95,17 @@ async function fetchRegistryData(): Promise<RegistryData> {
       plugins: mergeDetails(localData.plugins, apiData.plugins),
       skills: mergeDetails(localData.skills, apiData.skills),
       mcp: mergeDetails(localData.mcp, apiData.mcp),
-      // Use API counts (most up to date)
-      handsCount: apiData.handsCount || localData.handsCount,
-      channelsCount: apiData.channelsCount || localData.channelsCount,
-      providersCount: apiData.providersCount || localData.providersCount,
-      workflowsCount: apiData.workflowsCount || localData.workflowsCount,
-      agentsCount: apiData.agentsCount || localData.agentsCount,
-      pluginsCount: apiData.pluginsCount || localData.pluginsCount,
-      skillsCount: apiData.skillsCount || localData.skillsCount,
-      mcpCount: apiData.mcpCount || localData.mcpCount,
+      // Use API counts (most up to date). `??` preserves real zero
+      // values (category legitimately empty) instead of silently
+      // falling through to stale local counts.
+      handsCount: apiData.handsCount ?? localData.handsCount,
+      channelsCount: apiData.channelsCount ?? localData.channelsCount,
+      providersCount: apiData.providersCount ?? localData.providersCount,
+      workflowsCount: apiData.workflowsCount ?? localData.workflowsCount,
+      agentsCount: apiData.agentsCount ?? localData.agentsCount,
+      pluginsCount: apiData.pluginsCount ?? localData.pluginsCount,
+      skillsCount: apiData.skillsCount ?? localData.skillsCount,
+      mcpCount: apiData.mcpCount ?? localData.mcpCount,
     }
   }
 

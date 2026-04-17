@@ -24,7 +24,8 @@ const REGISTRY_ITEMS: { slug: string; labelKey: string; icon: LucideIcon }[] = [
   { slug: "workflows", labelKey: "nav.workflows", icon: Layers },
   { slug: "channels",  labelKey: "nav.channels",  icon: Network },
   { slug: "plugins",   labelKey: "nav.plugins",   icon: Puzzle },
-  { slug: "models",    labelKey: "nav.models",    icon: Cpu },
+  { slug: "mcp",       labelKey: "nav.mcp_servers", icon: Cpu },
+  // `models` intentionally omitted — librefang.ai has no /models route.
 ];
 
 interface CommandPaletteProps {

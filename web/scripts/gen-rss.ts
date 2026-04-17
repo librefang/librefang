@@ -70,7 +70,7 @@ export function buildFeed(md: string, opts: { site?: string; author?: string; ma
   <link href="${site}/changelog/" />
   <id>${site}/feed.xml</id>
   <updated>${latest}T00:00:00Z</updated>
-  <author><name>${author}</name></author>
+  <author><name>${escapeXml(author)}</name></author>
 ${entries.map(renderEntry).join('\n')}
 </feed>
 `

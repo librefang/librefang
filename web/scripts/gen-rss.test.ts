@@ -69,13 +69,12 @@ describe('buildFeed', () => {
     expect(xml).toContain('<updated>2026-04-15T00:00:00Z</updated>')
   })
 
-  it('custom site/author are threaded through', () => {
+  it('custom site/author are threaded through and XML-escaped', () => {
     const { xml } = buildFeed(SAMPLE, { site: 'https://example.com', author: 'X <x@y.z>', max: 1 })
     expect(xml).toContain('https://example.com/feed.xml')
-    expect(xml).toContain('<name>X &lt;x@y.z&gt;</name>'.replace('&lt;', '<').replace('&gt;', '>'))
-    // Author name is embedded verbatim between <name> tags (not escaped by
-    // buildFeed itself). The main() path relies on the author literal being
-    // pre-formatted.
+    // Author name is XML-escaped so angle brackets in the default
+    // `LibreFang <noreply@…>` string don't produce invalid Atom.
+    expect(xml).toContain('<name>X &lt;x@y.z&gt;</name>')
   })
 
   it('empty changelog yields a feed with zero entries', () => {

@@ -147,8 +147,12 @@ function main() {
         if (!Array.isArray(arr)) continue
         const catDir = join(OUT_DIR, def.slug)
         mkdirSync(catDir, { recursive: true })
+        // Registry data is user-contributed. Reject any id that isn't a
+        // pure slug so a crafted entry can't write outside catDir via `..`
+        // or an absolute path.
+        const SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/i
         for (const raw of arr as RegistryItem[]) {
-          if (!raw || typeof raw.id !== 'string') continue
+          if (!raw || typeof raw.id !== 'string' || !SLUG_RE.test(raw.id)) continue
           const d = defBySlug.get(def.slug)!
           writeFileSync(join(catDir, `${raw.id}.svg`), renderItem(d, raw))
           itemCount++

@@ -722,7 +722,16 @@ export function McpServersPage() {
   );
   const disconnectedCount = configured.length - connectedCount;
 
-  const healthOk = healthQuery.data?.ok ?? null;
+  // Backend returns a list of per-server status entries — badge is "ok"
+  // only when every entry reports a ready/healthy state. Null keeps the
+  // badge hidden while loading or before any servers have been pinged.
+  const healthEntries = healthQuery.data?.health;
+  const healthOk =
+    healthEntries === undefined
+      ? null
+      : healthEntries.length === 0
+        ? null
+        : healthEntries.every(h => h.status === "ready" || h.status === "ok");
 
   return (
     <div className="space-y-6">

@@ -7691,7 +7691,11 @@ fn upsert_mcp_server_local(
 ) -> Result<(), String> {
     let mut table: toml::value::Table = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-        toml::from_str(&content).unwrap_or_default()
+        // Propagate parse errors instead of silently defaulting. A
+        // malformed config.toml would otherwise be overwritten as a new
+        // near-empty file, wiping unrelated sections the user may want
+        // to fix by hand.
+        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
     } else {
         toml::value::Table::new()
     };
@@ -7725,7 +7729,7 @@ fn upsert_mcp_server_local(
 fn remove_mcp_server_local(config_path: &std::path::Path, name: &str) -> Result<(), String> {
     let mut table: toml::value::Table = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-        toml::from_str(&content).unwrap_or_default()
+        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
     } else {
         return Ok(());
     };

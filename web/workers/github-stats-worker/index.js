@@ -140,7 +140,7 @@ function handleFetch(request, env, ctx) {
 
   const cors = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   }
 
@@ -824,12 +824,15 @@ async function refreshRegistryCache(env) {
     // File-based: item name already ends in .toml
     const [handDetails, agentDetails, skillDetails, channelDetails, providerDetails, workflowDetails, pluginDetails, mcpDetails] = await Promise.all([
       fetchBatch(hands, h => `hands/${h.name}/HAND.toml`),
-      fetchBatch(agents, a => `agents/${a.name}/AGENT.toml`),
-      fetchBatch(skills, s => `skills/${s.name}/SKILL.toml`),
+      // `agent.toml` is lowercase, skills ship SKILL.md (YAML frontmatter),
+      // plugins are directory-backed — match what fetch-registry.ts uses
+      // so the per-item fetch actually resolves and populates descriptions.
+      fetchBatch(agents, a => `agents/${a.name}/agent.toml`),
+      fetchBatch(skills, s => `skills/${s.name}/SKILL.md`),
       fetchBatch(channels, c => `channels/${c.name}`),
       fetchBatch(providers, p => `providers/${p.name}`),
       fetchBatch(workflows, w => `workflows/${w.name}`),
-      fetchBatch(plugins, p => `plugins/${p.name}`),
+      fetchBatch(plugins, p => `plugins/${p.name}/plugin.toml`),
       fetchBatch(mcp, m => m.name.endsWith('.toml') ? `mcp/${m.name}` : `mcp/${m.name}/MCP.toml`),
     ])
 

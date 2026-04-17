@@ -6,13 +6,16 @@ test.describe('homepage', () => {
     await expect(page).toHaveTitle(/LibreFang/)
     // Hero has the product name in an h1
     await expect(page.locator('h1').first()).toBeVisible()
-    // Nav has the Features dropdown button
+    // Nav has both dropdown buttons.
+    await expect(page.getByRole('button', { name: /marketplace/i })).toBeVisible()
     await expect(page.getByRole('button', { name: /features/i })).toBeVisible()
   })
 
-  test('Features dropdown reveals registry links', async ({ page }) => {
+  test('Marketplace dropdown reveals registry category links', async ({ page }) => {
     await page.goto('/')
-    await page.getByRole('button', { name: /features/i }).click()
+    // Marketplace holds the eight registry categories (Hands, Agents,
+    // Skills, MCP, Plugins, Providers, Workflows, Channels).
+    await page.getByRole('button', { name: /marketplace/i }).click()
     // Scope to <nav> — the homepage Skills Self-Evolution section
     // (#evolution) also has a /skills link and would trip strict mode.
     const nav = page.getByRole('navigation')

@@ -346,7 +346,13 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
                 try to POST from the website (mixed-content + CORS friction);
                 we just deep-link. Clicking errors cleanly if no daemon is up. */}
             <a
-              href={`http://127.0.0.1:4545/${category === 'hands' ? 'hands' : category === 'agents' ? 'agents' : 'skills'}`}
+              href={`http://127.0.0.1:4545/${
+                category === 'hands' ? 'hands'
+                : category === 'agents' ? 'agents'
+                : category === 'channels' ? 'channels'
+                : category === 'mcp' ? 'mcp-servers'
+                : 'skills'
+              }`}
               target="_blank"
               rel="noopener noreferrer"
               className="mt-3 inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"

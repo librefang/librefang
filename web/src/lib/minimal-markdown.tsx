@@ -62,8 +62,15 @@ function renderInline(line: string): ReactNode[] {
   return spans.map((s, i) => {
     const key = `${i}-${escapeKey(s.text)}`
     if (s.href) {
+      // Registry READMEs are third-party data — reject link schemes that
+      // can execute script in the user's context. Allowlist http(s), mailto,
+      // and relative/anchor hrefs; drop everything else to plain text so
+      // javascript: / data: / vbscript: can't sneak in.
+      const href = s.href.trim()
+      const safe = /^(https?:|mailto:|\/|#|\.)/i.test(href)
+      if (!safe) return <span key={key}>{s.text}</span>
       return (
-        <a key={key} href={s.href} target="_blank" rel="noopener noreferrer" className="text-cyan-600 dark:text-cyan-400 hover:underline">
+        <a key={key} href={href} target="_blank" rel="noopener noreferrer" className="text-cyan-600 dark:text-cyan-400 hover:underline">
           {s.text}
         </a>
       )

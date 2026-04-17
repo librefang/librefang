@@ -2755,11 +2755,21 @@ export async function reconnectMcpServer(id: string): Promise<ApiActionResponse>
 
 // ── MCP Health & Reload ────────────────────────────────────────────────
 
+export interface McpHealthEntry {
+  id: string;
+  status: string;
+  tool_count?: number;
+  last_ok?: string | null;
+  last_error?: string | null;
+  consecutive_failures?: number;
+  reconnecting?: boolean;
+  reconnect_attempts?: number;
+  connected_since?: string | null;
+}
+
 export interface McpHealthResponse {
-  ok: boolean;
-  status?: string;
-  servers?: { id?: string; name: string; connected: boolean; message?: string }[];
-  [key: string]: unknown;
+  health: McpHealthEntry[];
+  count: number;
 }
 
 export async function getMcpHealth(): Promise<McpHealthResponse> {
