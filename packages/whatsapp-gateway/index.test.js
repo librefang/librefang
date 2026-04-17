@@ -32,6 +32,10 @@ const {
   echoTracker,
   ECHO_TRACKER_ENABLED,
   EchoTracker,
+  normalizeBaseJid,
+  sessionRecoveryMap,
+  SESSION_RECOVERY_COOLDOWN_MS,
+  SESSION_RECOVERY_MAX_ATTEMPTS,
   lidToPnJid,
   lidMapSet,
   db,
@@ -888,6 +892,44 @@ describe('ID-03 identity_unresolved log shape', () => {
     assert.equal(parsed.reason, 'no_mapping_available');
     assert.equal(parsed.lid_cache_size, 0);
     assert.equal(parsed.confidence, 'lid_unresolved');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Signal session recovery — upsert-path SessionError
+// ---------------------------------------------------------------------------
+describe('normalizeBaseJid', () => {
+  it('strips device suffix :N from phone-number JID', () => {
+    assert.equal(normalizeBaseJid('393760105565:24@s.whatsapp.net'), '393760105565@s.whatsapp.net');
+  });
+
+  it('strips device suffix :N from LID JID', () => {
+    assert.equal(normalizeBaseJid('191856289808491:24@lid'), '191856289808491@lid');
+  });
+
+  it('leaves base JID unchanged when no device suffix', () => {
+    assert.equal(normalizeBaseJid('393760105565@s.whatsapp.net'), '393760105565@s.whatsapp.net');
+  });
+
+  it('handles empty/null input', () => {
+    assert.equal(normalizeBaseJid(''), '');
+    assert.equal(normalizeBaseJid(null), '');
+    assert.equal(normalizeBaseJid(undefined), '');
+  });
+
+  it('leaves group JID unchanged (no :N pattern)', () => {
+    assert.equal(normalizeBaseJid('120363123@g.us'), '120363123@g.us');
+  });
+});
+
+describe('sessionRecoveryMap constants', () => {
+  it('exposes cooldown and max-attempts thresholds', () => {
+    assert.ok(SESSION_RECOVERY_COOLDOWN_MS > 0);
+    assert.ok(SESSION_RECOVERY_MAX_ATTEMPTS >= 1);
+  });
+
+  it('map is a Map instance', () => {
+    assert.ok(sessionRecoveryMap instanceof Map);
   });
 });
 

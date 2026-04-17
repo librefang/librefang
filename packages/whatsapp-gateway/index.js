@@ -499,6 +499,74 @@ function cleanupDecryptRetry(key) {
   decryptRetryMap.delete(key);
 }
 
+// ---------------------------------------------------------------------------
+// Signal session renegotiation tracking (upsert path)
+//
+// The existing messages.update stub-39 hook handles decryption failures that
+// Baileys surfaces via the update channel. A different class of failures —
+// libsignal throwing from session_cipher.js before any stub is emitted —
+// never reaches that hook. Those messages arrive in messages.upsert with
+// msg.message = null/undefined and are silently skipped. The fix is to
+// detect the null-content case in upsert and force a fresh Signal session
+// via assertSessions(..., true) so the peer re-keys on their next send.
+//   baseJid → { attempts, lastAttemptAt, lastMsgId, notified }
+const sessionRecoveryMap = new Map();
+const SESSION_RECOVERY_COOLDOWN_MS = 20_000;
+const SESSION_RECOVERY_MAX_ATTEMPTS = 3;
+const SESSION_RECOVERY_EXPIRE_MS = 30 * 60 * 1000; // 30 min
+
+function normalizeBaseJid(jid) {
+  if (!jid) return '';
+  // Strip device suffix "<id>:<device>@<server>" → "<id>@<server>"
+  return jid.replace(/:\d+@/, '@');
+}
+
+async function handleSessionRecovery(deviceJid, baseJid, msgId) {
+  if (!baseJid || !sock || typeof sock.assertSessions !== 'function') return;
+  const now = Date.now();
+  const entry = sessionRecoveryMap.get(baseJid) || {
+    attempts: 0,
+    lastAttemptAt: 0,
+    lastMsgId: null,
+    notified: false,
+  };
+  if (now - entry.lastAttemptAt < SESSION_RECOVERY_COOLDOWN_MS) return;
+  if (entry.attempts >= SESSION_RECOVERY_MAX_ATTEMPTS) {
+    if (!entry.notified && OWNER_JIDS && OWNER_JIDS.length > 0) {
+      entry.notified = true;
+      sessionRecoveryMap.set(baseJid, entry);
+      const peer = baseJid.replace(/@.*/, '');
+      const body = [
+        `⚠️ Unable to decrypt messages from ${peer}`,
+        `Tried ${entry.attempts} Signal session renegotiations — peer hasn't re-keyed.`,
+        `Last failed message id: ${entry.lastMsgId || 'unknown'}`,
+        `Hint: ask the contact to send a new message, or unlink/relink this device if it is you.`,
+      ].join('\n');
+      for (const ownerJid of OWNER_JIDS) {
+        try {
+          await sock.sendMessage(ownerJid, { text: body });
+        } catch (e) {
+          console.warn(`[gateway][session-recovery] notify ${ownerJid} failed: ${e?.message || e}`);
+        }
+      }
+      console.warn(`[gateway][session-recovery] exhausted, owner notified about ${baseJid}`);
+    }
+    return;
+  }
+  entry.attempts += 1;
+  entry.lastAttemptAt = now;
+  entry.lastMsgId = msgId || entry.lastMsgId;
+  sessionRecoveryMap.set(baseJid, entry);
+  console.warn(`[gateway][session-recovery] SessionError for ${deviceJid} (msgId=${msgId || 'n/a'}) — forcing renegotiation ${entry.attempts}/${SESSION_RECOVERY_MAX_ATTEMPTS}`);
+  try {
+    // Target the specific device so libsignal re-keys the exact chain that
+    // failed. A group/base JID would skip per-device handshake.
+    await sock.assertSessions([deviceJid], true);
+  } catch (e) {
+    console.warn(`[gateway][session-recovery] assertSessions(${deviceJid}) failed: ${e?.message || e}`);
+  }
+}
+
 // Single periodic cleanup for both stores
 setInterval(() => {
   const now = Date.now();
@@ -507,6 +575,9 @@ setInterval(() => {
   }
   for (const [key, entry] of decryptRetryMap) {
     if (now - entry.firstSeen > DECRYPT_RETRY_EXPIRE_MS) cleanupDecryptRetry(key);
+  }
+  for (const [key, entry] of sessionRecoveryMap) {
+    if (now - entry.lastAttemptAt > SESSION_RECOVERY_EXPIRE_MS) sessionRecoveryMap.delete(key);
   }
 }, 60_000).unref();
 
@@ -1150,6 +1221,19 @@ async function startConnection() {
 
       const sender = msg.key.remoteJid || '';
       const innerMsg = msg.message || {};
+
+      // Signal session recovery: inbound message with null payload ⇒ libsignal
+      // rejected the ciphertext before stub 39 was emitted. Force a fresh
+      // session with the actual device (keep the device suffix when
+      // assertSessions is called — the session is per-device, not per-user).
+      if (!msg.message && !msg.key.fromMe && sender) {
+        const recoveryJid = msg.key.participant || sender;
+        const baseJid = normalizeBaseJid(recoveryJid);
+        handleSessionRecovery(recoveryJid, baseJid, msg.key.id).catch(err => {
+          console.warn(`[gateway][session-recovery] handler error: ${err?.message || err}`);
+        });
+        continue;
+      }
 
       // --- FASE 4: Handle reactions ---
       if (innerMsg.reactionMessage) {
@@ -2824,6 +2908,10 @@ module.exports = {
   echoTracker,
   ECHO_TRACKER_ENABLED,
   EchoTracker,
+  normalizeBaseJid,
+  sessionRecoveryMap,
+  SESSION_RECOVERY_COOLDOWN_MS,
+  SESSION_RECOVERY_MAX_ATTEMPTS,
   // Phase 4 §B (ID-02) — persisted LID cache (testing + introspection)
   lidToPnJid,
   lidMapSet,
