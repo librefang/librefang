@@ -131,6 +131,12 @@ impl CompletionResponse {
     }
 }
 
+/// Phase name emitted via `StreamEvent::PhaseChange` to signal that the final
+/// LLM text for the turn has been streamed and the agent loop is about to
+/// enter post-processing (session save, proactive memory). Consumers use
+/// this to unblock user input before the full response payload is ready.
+pub const PHASE_RESPONSE_COMPLETE: &str = "response_complete";
+
 /// Events emitted during streaming LLM completion.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
