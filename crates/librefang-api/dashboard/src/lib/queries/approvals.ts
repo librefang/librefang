@@ -1,0 +1,82 @@
+import { queryOptions, useQuery } from "@tanstack/react-query";
+import {
+  listApprovals,
+  listPendingApprovals,
+  fetchApprovalCount,
+  queryApprovalAudit,
+  totpStatus,
+} from "../../api";
+import { approvalKeys, totpKeys } from "./keys";
+
+const STALE_APPROVALS = 10_000;
+const REFETCH_APPROVALS = 30_000;
+const STALE_COUNT = 10_000;
+const REFETCH_COUNT = 15_000;
+const STALE_PENDING = 5_000;
+const REFETCH_PENDING = 5_000;
+const STALE_TOTP = 60_000;
+
+export const approvalQueries = {
+  list: () =>
+    queryOptions({
+      queryKey: approvalKeys.list(),
+      queryFn: listApprovals,
+      staleTime: STALE_APPROVALS,
+      refetchInterval: REFETCH_APPROVALS,
+    }),
+  count: () =>
+    queryOptions({
+      queryKey: approvalKeys.count(),
+      queryFn: fetchApprovalCount,
+      staleTime: STALE_COUNT,
+      refetchInterval: REFETCH_COUNT,
+    }),
+  pending: (agentId?: string) =>
+    queryOptions({
+      queryKey: approvalKeys.pending(agentId),
+      queryFn: () => listPendingApprovals(agentId),
+      staleTime: STALE_PENDING,
+      refetchInterval: REFETCH_PENDING,
+    }),
+  audit: (params: {
+    limit?: number;
+    offset?: number;
+    agent_id?: string;
+    tool_name?: string;
+  } = {}) =>
+    queryOptions({
+      queryKey: approvalKeys.audit(params),
+      queryFn: () => queryApprovalAudit(params),
+    }),
+  totpStatus: () =>
+    queryOptions({
+      queryKey: totpKeys.status(),
+      queryFn: totpStatus,
+      staleTime: STALE_TOTP,
+    }),
+};
+
+export function useApprovals() {
+  return useQuery(approvalQueries.list());
+}
+
+export function useApprovalCount() {
+  return useQuery(approvalQueries.count());
+}
+
+export function usePendingApprovals(agentId?: string) {
+  return useQuery(approvalQueries.pending(agentId));
+}
+
+export function useApprovalAudit(params: {
+  limit?: number;
+  offset?: number;
+  agent_id?: string;
+  tool_name?: string;
+} = {}) {
+  return useQuery(approvalQueries.audit(params));
+}
+
+export function useTotpStatus() {
+  return useQuery(approvalQueries.totpStatus());
+}
