@@ -2340,6 +2340,7 @@ pub async fn run_agent_loop(
                 Some(manifest.model.extra_params.clone())
             },
             agent_id: Some(agent_id_str.clone()),
+            workspace_root: workspace_root.map(|p| p.to_path_buf()),
         };
 
         // Notify phase: Thinking
@@ -3340,6 +3341,7 @@ pub async fn run_agent_loop_streaming(
                 Some(manifest.model.extra_params.clone())
             },
             agent_id: Some(agent_id_str.clone()),
+            workspace_root: workspace_root.map(|p| p.to_path_buf()),
         };
 
         // Notify phase: on first iteration emit Streaming; on subsequent

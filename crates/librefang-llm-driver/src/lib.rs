@@ -109,6 +109,14 @@ pub struct CompletionRequest {
     /// any request that is not bound to a LibreFang agent — ad-hoc utility
     /// calls, HTTP `/mcp` playground sessions, tests.
     pub agent_id: Option<String>,
+    /// Filesystem root of the agent's workspace.
+    ///
+    /// Subprocess-based drivers (Claude Code CLI, Qwen Code CLI, Codex CLI)
+    /// use this to set the child process' current working directory. With
+    /// `None` the child inherits the daemon's cwd (usually `/`), which makes
+    /// CLI tools miss project-level context (CLAUDE.md, workspace scripts,
+    /// relative-path tools) and skews attachment / memory behaviour.
+    pub workspace_root: Option<std::path::PathBuf>,
 }
 
 /// A response from an LLM completion.
@@ -423,6 +431,7 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            workspace_root: None,
         };
 
         let response = driver.stream(request, tx).await.unwrap();

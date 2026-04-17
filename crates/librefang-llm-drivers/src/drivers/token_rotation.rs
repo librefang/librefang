@@ -369,6 +369,7 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            workspace_root: None,
         }
     }
 

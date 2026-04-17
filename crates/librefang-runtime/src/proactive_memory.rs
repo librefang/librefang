@@ -256,6 +256,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            workspace_root: None,
         };
 
         let response = self
@@ -311,6 +312,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            workspace_root: None,
         };
 
         match self.driver.complete(request).await {

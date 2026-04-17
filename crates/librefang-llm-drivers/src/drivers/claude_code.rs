@@ -563,6 +563,14 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
+        // Anchor the CLI to the agent's workspace. Without this the child
+        // process inherits the daemon's cwd (usually `/`), which starves
+        // Claude Code of project context — no `./CLAUDE.md`, no relative
+        // memory paths, and in practice model degenerates into echoing its
+        // own persona-reminder blocks instead of answering real turns.
+        if let Some(ref ws) = request.workspace_root {
+            cmd.current_dir(ws);
+        }
         let mut args =
             self.build_command_args(&prepared.text, "json", false, model_flag.as_deref());
         if let Some(ref path) = prepared.mcp_config_path {
@@ -809,6 +817,14 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
+        // Anchor the CLI to the agent's workspace. Without this the child
+        // process inherits the daemon's cwd (usually `/`), which starves
+        // Claude Code of project context — no `./CLAUDE.md`, no relative
+        // memory paths, and in practice model degenerates into echoing its
+        // own persona-reminder blocks instead of answering real turns.
+        if let Some(ref ws) = request.workspace_root {
+            cmd.current_dir(ws);
+        }
         let mut args =
             self.build_command_args(&prepared.text, "stream-json", true, model_flag.as_deref());
         if let Some(ref path) = prepared.mcp_config_path {
@@ -1203,6 +1219,7 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            workspace_root: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1246,6 +1263,7 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            workspace_root: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1306,6 +1324,7 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            workspace_root: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1382,6 +1401,7 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            workspace_root: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
