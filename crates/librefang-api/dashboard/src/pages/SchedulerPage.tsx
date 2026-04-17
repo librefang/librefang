@@ -13,6 +13,7 @@ import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Modal } from "../components/ui/Modal";
 import { truncateId } from "../lib/string";
+import { formatTriggerPattern } from "../lib/triggerPattern";
 import { useSchedules, useTriggers } from "../lib/queries/schedules";
 import {
   useCreateSchedule,
@@ -210,7 +211,7 @@ export function SchedulerPage() {
                       <Zap className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${isEnabled ? "text-warning" : "text-text-dim/30"}`} />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <h3 className="text-xs sm:text-sm font-bold truncate">{tr.pattern || tr.name || truncateId(tr.id, 12)}</h3>
+                      <h3 className="text-xs sm:text-sm font-bold truncate">{formatTriggerPattern(tr.pattern) || truncateId(tr.id, 12)}</h3>
                     </div>
                     <button
                       onClick={() => toggleTriggerMut.mutate({ id: tr.id, data: { enabled: !isEnabled } })}
