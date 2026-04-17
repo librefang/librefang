@@ -9845,11 +9845,41 @@ system_prompt = "You are a helpful assistant."
             caps.iter().any(|c| matches!(c, Capability::ToolAll))
         });
 
+        // Skill self-evolution is a first-class capability: every agent
+        // and hand gets `skill_evolve_*` + `skill_read_file` regardless
+        // of whether their manifest explicitly lists them in
+        // `capabilities.tools`. Rationale: the PR's core promise is
+        // "agents improve themselves" — gating this behind a manifest
+        // allowlist means curated hello-world / assistant / hand manifests
+        // can never express the feature out of the box. Operators who
+        // want to *block* self-evolution use Stable mode (freezes the
+        // registry), per-agent `tool_blocklist`, or
+        // `skills.disabled`/`skills.extra_dirs` config — all of which
+        // still override this default (Step 4 blocklist + Stable mode
+        // both short-circuit in evolve handlers).
+        fn is_default_available_tool(name: &str) -> bool {
+            matches!(
+                name,
+                "skill_read_file"
+                    | "skill_evolve_create"
+                    | "skill_evolve_update"
+                    | "skill_evolve_patch"
+                    | "skill_evolve_delete"
+                    | "skill_evolve_rollback"
+                    | "skill_evolve_write_file"
+                    | "skill_evolve_remove_file"
+            )
+        }
+
         let mut all_tools: Vec<ToolDefinition> = if !tools_unrestricted {
-            // Agent declares specific tools — only include matching builtins
+            // Agent declares specific tools — only include matching
+            // builtins, plus the always-available skill-evolution set.
             all_builtins
                 .into_iter()
-                .filter(|t| declared_tools.iter().any(|d| glob_matches(d, &t.name)))
+                .filter(|t| {
+                    declared_tools.iter().any(|d| glob_matches(d, &t.name))
+                        || is_default_available_tool(&t.name)
+                })
                 .collect()
         } else {
             // No specific tools declared — fall back to profile or all builtins
@@ -9860,7 +9890,10 @@ system_prompt = "You are a helpful assistant."
                     let allowed = profile.tools();
                     all_builtins
                         .into_iter()
-                        .filter(|t| allowed.iter().any(|a| a == "*" || a == &t.name))
+                        .filter(|t| {
+                            allowed.iter().any(|a| a == "*" || a == &t.name)
+                                || is_default_available_tool(&t.name)
+                        })
                         .collect()
                 }
                 _ if has_tool_all => all_builtins,

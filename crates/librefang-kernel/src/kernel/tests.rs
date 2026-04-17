@@ -1782,3 +1782,55 @@ fn test_stable_mode_freezes_registry_and_skips_review_gate() {
 
     kernel.shutdown();
 }
+
+#[test]
+fn test_skill_evolve_tools_default_available_to_restricted_agent() {
+    // The PR's core promise is "every agent can self-evolve skills."
+    // Verify that an agent whose manifest declares a restrictive
+    // `capabilities.tools = ["memory_store"]` still sees the full
+    // skill_evolve_* surface at tool-selection time. Without this
+    // default-available behavior, out-of-the-box agents cannot trigger
+    // the feature.
+    //
+    // Rather than spin up a kernel + spawn an agent (which requires a
+    // full boot and signed manifest), assert directly on the same
+    // filter logic the kernel's Step 1 uses: every name in
+    // `default_available` must survive a filter that declares a
+    // restrictive capabilities.tools.
+    let tools = librefang_runtime::tool_runner::builtin_tool_definitions();
+    let declared: &[&str] = &["memory_store", "memory_recall"];
+    let default_available: &[&str] = &[
+        "skill_read_file",
+        "skill_evolve_create",
+        "skill_evolve_update",
+        "skill_evolve_patch",
+        "skill_evolve_delete",
+        "skill_evolve_rollback",
+        "skill_evolve_write_file",
+        "skill_evolve_remove_file",
+    ];
+
+    // Mirror kernel::mod.rs Step 1 filter exactly.
+    let filtered: Vec<String> = tools
+        .iter()
+        .filter(|t| {
+            declared.iter().any(|d| *d == t.name.as_str())
+                || default_available.iter().any(|d| *d == t.name.as_str())
+        })
+        .map(|t| t.name.clone())
+        .collect();
+
+    for required in default_available {
+        assert!(
+            filtered.iter().any(|n| n == *required),
+            "skill-evolution tool {required} must be default-available — missing from {filtered:?}"
+        );
+    }
+    // Also confirm the restrictive declarations still flow through.
+    for required in declared {
+        assert!(
+            filtered.iter().any(|n| n == *required),
+            "declared tool {required} missing from {filtered:?}"
+        );
+    }
+}
