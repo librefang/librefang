@@ -7,7 +7,7 @@ const STALE_MS = 30_000;
 export const pluginQueries = {
   list: () =>
     queryOptions({
-      queryKey: pluginKeys.list(),
+      queryKey: pluginKeys.lists(),
       queryFn: listPlugins,
       staleTime: STALE_MS,
       refetchInterval: STALE_MS,

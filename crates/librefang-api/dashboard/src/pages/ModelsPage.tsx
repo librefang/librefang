@@ -91,20 +91,24 @@ export function ModelsPage() {
   const handleAdd = async (e: FormEvent) => {
     e.preventDefault();
     if (!formId.trim() || !formProvider.trim()) return;
-    await addMut.mutateAsync({
-      id: formId.trim(),
-      provider: formProvider.trim(),
-      display_name: formDisplayName.trim() || undefined,
-      context_window: formContextWindow,
-      max_output_tokens: formMaxOutput,
-      input_cost_per_m: formInputCost,
-      output_cost_per_m: formOutputCost,
-      supports_tools: formTools,
-      supports_vision: formVision,
-      supports_streaming: formStreaming,
-    });
-    addToast(t("models.model_added"), "success");
-    resetForm();
+    try {
+      await addMut.mutateAsync({
+        id: formId.trim(),
+        provider: formProvider.trim(),
+        display_name: formDisplayName.trim() || undefined,
+        context_window: formContextWindow,
+        max_output_tokens: formMaxOutput,
+        input_cost_per_m: formInputCost,
+        output_cost_per_m: formOutputCost,
+        supports_tools: formTools,
+        supports_vision: formVision,
+        supports_streaming: formStreaming,
+      });
+      addToast(t("models.model_added"), "success");
+      resetForm();
+    } catch (err: any) {
+      addToast(err?.message || t("common.error"), "error");
+    }
   };
 
   const handleDelete = async (id: string) => {

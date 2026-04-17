@@ -8,14 +8,14 @@ const REFRESH_MS = 30_000;
 export const scheduleQueries = {
   list: () =>
     queryOptions({
-      queryKey: scheduleKeys.list(),
+      queryKey: scheduleKeys.lists(),
       queryFn: listSchedules,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
     }),
   triggers: () =>
     queryOptions({
-      queryKey: triggerKeys.list(),
+      queryKey: triggerKeys.lists(),
       queryFn: listTriggers,
       staleTime: STALE_MS,
     }),

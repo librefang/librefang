@@ -6,6 +6,6 @@ export function useUpdateBudget() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: updateBudget,
-    onSuccess: () => qc.invalidateQueries({ queryKey: budgetKeys.status() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: budgetKeys.all }),
   });
 }

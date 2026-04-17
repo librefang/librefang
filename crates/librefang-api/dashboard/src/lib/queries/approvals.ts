@@ -9,7 +9,7 @@ import {
 import { approvalKeys, totpKeys } from "./keys";
 
 const STALE_APPROVALS = 10_000;
-const REFETCH_APPROVALS = 30_000;
+const REFETCH_APPROVALS = 15_000;
 const STALE_COUNT = 10_000;
 const REFETCH_COUNT = 15_000;
 const STALE_PENDING = 5_000;
@@ -19,7 +19,7 @@ const STALE_TOTP = 60_000;
 export const approvalQueries = {
   list: () =>
     queryOptions({
-      queryKey: approvalKeys.list(),
+      queryKey: approvalKeys.lists(),
       queryFn: listApprovals,
       staleTime: STALE_APPROVALS,
       refetchInterval: REFETCH_APPROVALS,
@@ -56,12 +56,15 @@ export const approvalQueries = {
     }),
 };
 
-export function useApprovals() {
-  return useQuery(approvalQueries.list());
+export function useApprovals(options: { enabled?: boolean } = {}) {
+  return useQuery({ ...approvalQueries.list(), enabled: options.enabled });
 }
 
-export function useApprovalCount() {
-  return useQuery(approvalQueries.count());
+export function useApprovalCount(options: { refetchInterval?: number } = {}) {
+  return useQuery({
+    ...approvalQueries.count(),
+    refetchInterval: options.refetchInterval ?? REFETCH_COUNT,
+  });
 }
 
 export function usePendingApprovals(agentId?: string) {

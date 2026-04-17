@@ -16,7 +16,7 @@ const TEMPLATE_STALE_MS = 300_000;
 export const workflowQueries = {
   list: () =>
     queryOptions({
-      queryKey: workflowKeys.list(),
+      queryKey: workflowKeys.lists(),
       queryFn: listWorkflows,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,

@@ -6,7 +6,7 @@ import {
 } from "../http/client";
 import { networkKeys, peerKeys, a2aKeys } from "./keys";
 
-const REFRESH_MS = 30_000;
+const REFRESH_MS = 15_000;
 const STALE_MS = 30_000;
 
 export const networkQueries = {

@@ -53,7 +53,7 @@ export const usageQueries = {
 export const budgetQueries = {
   status: () =>
     queryOptions({
-      queryKey: budgetKeys.status(),
+      queryKey: budgetKeys.all,
       queryFn: getBudgetStatus,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,

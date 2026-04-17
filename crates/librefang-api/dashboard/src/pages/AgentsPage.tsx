@@ -82,7 +82,9 @@ export function AgentsPage() {
   const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
   const addToast = useUIStore((s) => s.addToast);
   useCreateShortcut(() => setShowCreate(true));
-  const templatesQuery = useAgentTemplates();
+  const templatesQuery = useAgentTemplates({
+    enabled: showCreate && createMode === "template",
+  });
   const localizedTemplates = useMemo(
     () =>
       (templatesQuery.data ?? []).map((template) => ({
@@ -206,7 +208,10 @@ export function AgentsPage() {
   // Overview tab stay in sync with this list automatically.
   const agentsQuery = useDashboardSnapshot();
 
-  const modelsQuery = useModels({ provider: modelDraft.provider });
+  const modelsQuery = useModels(
+    { provider: modelDraft.provider },
+    { enabled: !!modelDraft.provider.trim() },
+  );
 
   const providersQuery = useProviders();
 
@@ -977,7 +982,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                             </Button>
                           )}
                           {!v.is_active && (
-                            <Button variant="secondary" size="sm" onClick={() => deleteVersionMutation.mutate(v.id)}>
+                            <Button variant="secondary" size="sm" onClick={() => deleteVersionMutation.mutate({ versionId: v.id, agentId })}>
                               <Trash2 className="w-3 h-3" />
                             </Button>
                           )}
@@ -1038,10 +1043,10 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                           <Badge variant={exp.status === "running" ? "success" : exp.status === "completed" ? "default" : "warning"}>{exp.status}</Badge>
                         </div>
                         <div className="flex gap-2">
-                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate(exp.id)}><Play className="w-3 h-3 mr-1" />Start</Button>}
-                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate(exp.id)}><Pause className="w-3 h-3 mr-1" />Pause</Button>}
+                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate({ experimentId: exp.id, agentId })}><Play className="w-3 h-3 mr-1" />Start</Button>}
+                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate({ experimentId: exp.id, agentId })}><Pause className="w-3 h-3 mr-1" />Pause</Button>}
                           {(exp.status === "running" || exp.status === "paused") && (
-                            <Button variant="secondary" size="sm" onClick={() => completeExpMutation.mutate(exp.id)}>
+                            <Button variant="secondary" size="sm" onClick={() => completeExpMutation.mutate({ experimentId: exp.id, agentId })}>
                               <Check className="w-3 h-3 mr-1" />Complete
                             </Button>
                           )}

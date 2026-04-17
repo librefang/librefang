@@ -104,7 +104,10 @@ export function CommsPage() {
 
   const topologyQuery = useCommsTopology();
 
-  const eventsQuery = useCommsEvents(50);
+  const eventsQuery = useCommsEvents(50, {
+    enabled: activeTab === "events",
+    refetchInterval: 5_000,
+  });
 
   const channels = channelsQuery.data ?? [];
   const snapshot = snapshotQuery.data ?? null;

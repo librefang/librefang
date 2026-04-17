@@ -18,7 +18,7 @@ const BROWSE_STALE_MS = 60_000;
 export const skillQueries = {
   list: () =>
     queryOptions({
-      queryKey: skillKeys.list(),
+      queryKey: skillKeys.lists(),
       queryFn: listSkills,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
@@ -63,7 +63,7 @@ export const skillQueries = {
     }),
   fanghubList: () =>
     queryOptions({
-      queryKey: fanghubKeys.list(),
+      queryKey: fanghubKeys.lists(),
       queryFn: fanghubListSkills,
       staleTime: BROWSE_STALE_MS,
     }),

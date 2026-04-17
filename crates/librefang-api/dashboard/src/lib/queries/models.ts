@@ -25,12 +25,11 @@ export const modelQueries = {
     }),
 };
 
-export function useModels(filters: {
-  provider?: string;
-  tier?: string;
-  available?: boolean;
-} = {}) {
-  return useQuery(modelQueries.list(filters));
+export function useModels(
+  filters: { provider?: string; tier?: string; available?: boolean } = {},
+  options: { enabled?: boolean } = {},
+) {
+  return useQuery({ ...modelQueries.list(filters), enabled: options.enabled });
 }
 
 export function useModelOverrides(modelKey: string) {

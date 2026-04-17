@@ -219,11 +219,25 @@ describe("query key factories", () => {
       expect(runtimeKeys.healthDetail().slice(0, prefix.length)).toEqual(prefix);
       expect(runtimeKeys.security().slice(0, prefix.length)).toEqual(prefix);
       expect(runtimeKeys.backups().slice(0, prefix.length)).toEqual(prefix);
+      expect(runtimeKeys.tasks().slice(0, prefix.length)).toEqual(prefix);
       expect(runtimeKeys.taskStatus().slice(0, prefix.length)).toEqual(prefix);
       expect(runtimeKeys.taskList().slice(0, prefix.length)).toEqual(prefix);
       expect(runtimeKeys.taskList("running").slice(0, prefix.length)).toEqual(
         prefix,
       );
+    });
+
+    it("taskStatus and taskList share the tasks() prefix", () => {
+      const tasksPrefix = runtimeKeys.tasks();
+      expect(runtimeKeys.taskStatus().slice(0, tasksPrefix.length)).toEqual(
+        tasksPrefix,
+      );
+      expect(runtimeKeys.taskList().slice(0, tasksPrefix.length)).toEqual(
+        tasksPrefix,
+      );
+      expect(
+        runtimeKeys.taskList("running").slice(0, tasksPrefix.length),
+      ).toEqual(tasksPrefix);
     });
   });
 

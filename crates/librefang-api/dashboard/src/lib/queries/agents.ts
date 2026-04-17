@@ -71,8 +71,8 @@ export function useAgentSessions(agentId: string) {
   return useQuery(agentQueries.sessions(agentId));
 }
 
-export function useAgentTemplates() {
-  return useQuery(agentQueries.templates());
+export function useAgentTemplates(options: { enabled?: boolean } = {}) {
+  return useQuery({ ...agentQueries.templates(), enabled: options.enabled });
 }
 
 export function usePromptVersions(agentId: string) {

@@ -6,7 +6,7 @@ export { useSystemStatus as useProviderStatus } from "./runtime";
 
 export const providersQueryOptions = () =>
   queryOptions({
-    queryKey: providerKeys.list(),
+    queryKey: providerKeys.lists(),
     queryFn: listProviders,
     staleTime: 60_000,
   });

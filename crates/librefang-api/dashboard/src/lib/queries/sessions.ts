@@ -8,7 +8,7 @@ const STALE_MS = 30_000;
 export const sessionQueries = {
   list: () =>
     queryOptions({
-      queryKey: sessionKeys.list(),
+      queryKey: sessionKeys.lists(),
       queryFn: listSessions,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,

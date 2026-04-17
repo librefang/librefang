@@ -6,8 +6,8 @@ export const dashboardSnapshotQueryOptions = () =>
   queryOptions({
     queryKey: overviewKeys.snapshot(),
     queryFn: loadDashboardSnapshot,
-    staleTime: 30_000,
-    refetchInterval: 30_000,
+    staleTime: 5_000,
+    refetchInterval: 5_000,
   });
 
 export const versionInfoQueryOptions = () =>

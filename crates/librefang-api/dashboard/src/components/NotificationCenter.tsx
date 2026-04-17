@@ -12,8 +12,8 @@ export function NotificationCenter() {
   const addToast = useUIStore((s) => s.addToast);
   const navigate = useNavigate();
 
-  const countQuery = useApprovalCount();
-  const listQuery = useApprovals();
+  const countQuery = useApprovalCount({ refetchInterval: 5_000 });
+  const listQuery = useApprovals({ enabled: open });
   const totpQuery = useTotpStatus();
   const approveMutation = useApproveApproval();
   const rejectMutation = useRejectApproval();

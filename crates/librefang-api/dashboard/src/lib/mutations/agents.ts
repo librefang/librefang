@@ -91,7 +91,10 @@ export function usePatchAgentConfig() {
         web_search_augmentation?: "off" | "auto" | "always";
       };
     }) => patchAgentConfig(agentId, config),
-    onSuccess: () => qc.invalidateQueries({ queryKey: agentKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+    },
   });
 }
 
@@ -109,7 +112,10 @@ export function useSwitchAgentSession() {
   return useMutation({
     mutationFn: ({ agentId, sessionId }: { agentId: string; sessionId: string }) =>
       switchAgentSession(agentId, sessionId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: agentKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.sessions(variables.agentId) });
+    },
   });
 }
 
@@ -127,8 +133,11 @@ export function useDeleteAgentSession() {
 export function useDeletePromptVersion() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: deletePromptVersion,
-    onSuccess: () => qc.invalidateQueries({ queryKey: agentKeys.all }),
+    mutationFn: ({ versionId, agentId: _agentId }: { versionId: string; agentId: string }) =>
+      deletePromptVersion(versionId),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.promptVersions(variables.agentId) });
+    },
   });
 }
 
@@ -172,24 +181,36 @@ export function useCreateExperiment() {
 export function useStartExperiment() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: startExperiment,
-    onSuccess: () => qc.invalidateQueries({ queryKey: agentKeys.all }),
+    mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
+      startExperiment(experimentId),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.experimentMetrics(variables.experimentId) });
+    },
   });
 }
 
 export function usePauseExperiment() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: pauseExperiment,
-    onSuccess: () => qc.invalidateQueries({ queryKey: agentKeys.all }),
+    mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
+      pauseExperiment(experimentId),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.experimentMetrics(variables.experimentId) });
+    },
   });
 }
 
 export function useCompleteExperiment() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: completeExperiment,
-    onSuccess: () => qc.invalidateQueries({ queryKey: agentKeys.all }),
+    mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
+      completeExperiment(experimentId),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.experimentMetrics(variables.experimentId) });
+    },
   });
 }
 

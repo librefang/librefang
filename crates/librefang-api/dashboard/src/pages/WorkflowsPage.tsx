@@ -33,6 +33,7 @@ import {
   useDeleteWorkflow,
   useInstantiateTemplate,
 } from "../lib/mutations/workflows";
+import { useUIStore } from "../lib/store";
 
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   creation: FileText, language: Bot, thinking: Activity, business: Calendar,
@@ -40,6 +41,7 @@ const categoryIconMap: Record<string, React.ComponentType<{ className?: string }
 
 export function WorkflowsPage() {
   const { t, i18n } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>("");
@@ -72,8 +74,14 @@ export function WorkflowsPage() {
     setDryRunResult(null);
     try {
       await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
+      addToast(t("workflows.run_started", { defaultValue: "Run started" }), "success");
       await runsQuery.refetch();
-    } catch { /* ignore */ }
+    } catch (err) {
+      addToast(
+        err instanceof Error ? err.message : t("workflows.run_failed", { defaultValue: "Run failed" }),
+        "error",
+      );
+    }
   };
 
   const handleDryRun = async () => {
@@ -81,15 +89,25 @@ export function WorkflowsPage() {
     setDryRunResult(null);
     runMutation.reset();
     try {
-      await dryRunMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
-    } catch { /* ignore */ }
+      const result = await dryRunMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
+      setDryRunResult(result);
+    } catch {
+      // Error already surfaced via dryRunMutation.error panel at line 465.
+    }
   };
 
 
   const handleDelete = async (id: string) => {
     if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
     setConfirmDeleteId(null);
-    try { await deleteMutation.mutateAsync(id); } catch { /* ignore */ }
+    try {
+      await deleteMutation.mutateAsync(id);
+    } catch (err) {
+      addToast(
+        err instanceof Error ? err.message : t("workflows.delete_failed", { defaultValue: "Delete failed" }),
+        "error",
+      );
+    }
   };
 
   const handleNewWorkflow = () => {

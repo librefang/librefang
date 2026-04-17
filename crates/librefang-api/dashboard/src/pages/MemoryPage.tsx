@@ -3,7 +3,6 @@ import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { type MemoryStatsResponse } from "../api";
 import { useMemoryStats, useMemoryConfig, useMemorySearchOrList } from "../lib/queries/memory";
-import { useHealthDetail } from "../lib/queries/runtime";
 import { useAddMemory, useUpdateMemory, useDeleteMemory, useCleanupMemories, useUpdateMemoryConfig } from "../lib/mutations/memory";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -297,6 +296,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
 
 export function MemoryPage() {
   const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const [search, setSearch] = useState("");
   const [levelFilter, setLevelFilter] = useState<string>("all");
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -305,14 +305,16 @@ export function MemoryPage() {
   const [editingMemory, setEditingMemory] = useState<{ id: string; content?: string } | null>(null);
 
 
-  const healthQuery = useHealthDetail();
-  const memoryConfig = (healthQuery.data as { memory?: {
-    embedding_available: boolean;
-    embedding_provider: string;
-    embedding_model: string;
-    extraction_model: string;
-    proactive_memory_enabled: boolean;
-  } } | undefined)?.memory;
+  const memoryConfigQuery = useMemoryConfig();
+  const memoryConfig = memoryConfigQuery.data
+    ? {
+        embedding_available: Boolean(memoryConfigQuery.data.embedding_provider),
+        embedding_provider: memoryConfigQuery.data.embedding_provider ?? "",
+        embedding_model: memoryConfigQuery.data.embedding_model ?? "",
+        extraction_model: memoryConfigQuery.data.proactive_memory?.extraction_model ?? "",
+        proactive_memory_enabled: memoryConfigQuery.data.proactive_memory?.enabled ?? false,
+      }
+    : null;
 
   const memoryQuery = useMemorySearchOrList(search);
 
@@ -352,7 +354,10 @@ export function MemoryPage() {
 <Button variant="secondary" size="sm" onClick={() => setShowConfigDialog(true)}>
               <Settings className="w-4 h-4" />
             </Button>
-            <Button variant="secondary" size="sm" onClick={() => cleanupMutation.mutate()} disabled={cleanupMutation.isPending}>
+            <Button variant="secondary" size="sm" onClick={() => cleanupMutation.mutate(undefined, {
+              onSuccess: () => addToast(t("memory.cleanup_success", { defaultValue: "Cleanup complete" }), "success"),
+              onError: (err) => addToast(err instanceof Error ? err.message : t("common.error"), "error"),
+            })} disabled={cleanupMutation.isPending}>
               {cleanupMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
               <span className="hidden sm:inline">{t("memory.cleanup")}</span>
             </Button>
@@ -463,7 +468,10 @@ export function MemoryPage() {
                   <Button variant="ghost" size="sm" onClick={() => setEditingMemory(m)}>
                     <Edit2 className="h-3.5 w-3.5" />
                   </Button>
-                  <Button variant="ghost" size="sm" className="text-error! hover:bg-error/10!" onClick={() => deleteMutation.mutate(m.id)}>
+                  <Button variant="ghost" size="sm" className="text-error! hover:bg-error/10!" onClick={() => deleteMutation.mutate(m.id, {
+                    onSuccess: () => addToast(t("memory.delete_success", { defaultValue: "Memory deleted" }), "success"),
+                    onError: (err) => addToast(err instanceof Error ? err.message : t("common.error"), "error"),
+                  })}>
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>

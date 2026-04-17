@@ -21,6 +21,7 @@ export const configQueries = {
       queryFn: () => fetchRegistrySchema(contentType),
       enabled: !!contentType,
       staleTime: 300_000,
+      retry: 1,
     }),
 };
 

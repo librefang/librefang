@@ -77,7 +77,7 @@ export function useDeleteTask() {
   return useMutation({
     mutationFn: deleteTaskFromQueue,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
+      queryClient.invalidateQueries({ queryKey: runtimeKeys.tasks() });
     },
   });
 }
@@ -87,7 +87,7 @@ export function useRetryTask() {
   return useMutation({
     mutationFn: retryTask,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
+      queryClient.invalidateQueries({ queryKey: runtimeKeys.tasks() });
     },
   });
 }

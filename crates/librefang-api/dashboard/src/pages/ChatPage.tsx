@@ -839,7 +839,7 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, pro
     [isSlashPrefix, message],
   );
 
-  const modelQuery = useModels();
+  const modelQuery = useModels({}, { enabled: isModelArg });
 
   const modelArg = isModelArg ? message.slice(message.indexOf(" ") + 1).toLowerCase() : "";
   const filteredModels = useMemo(() => {

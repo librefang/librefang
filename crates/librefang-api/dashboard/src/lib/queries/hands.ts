@@ -17,7 +17,7 @@ const REFRESH_MS = 30_000;
 export const handQueries = {
   list: () =>
     queryOptions({
-      queryKey: handKeys.list(),
+      queryKey: handKeys.lists(),
       queryFn: listHands,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,

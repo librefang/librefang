@@ -44,13 +44,11 @@ export const modelKeys = {
 export const providerKeys = {
   all: ["providers"] as const,
   lists: () => [...providerKeys.all, "list"] as const,
-  list: () => [...providerKeys.lists()] as const,
 };
 
 export const channelKeys = {
   all: ["channels"] as const,
   lists: () => [...channelKeys.all, "list"] as const,
-  list: () => [...channelKeys.lists()] as const,
 };
 
 export const commsKeys = {
@@ -62,7 +60,6 @@ export const commsKeys = {
 export const skillKeys = {
   all: ["skills"] as const,
   lists: () => [...skillKeys.all, "list"] as const,
-  list: () => [...skillKeys.lists()] as const,
 };
 
 export const clawhubKeys = {
@@ -90,13 +87,11 @@ export const skillhubKeys = {
 export const fanghubKeys = {
   all: ["fanghub"] as const,
   lists: () => [...fanghubKeys.all, "list"] as const,
-  list: () => [...fanghubKeys.lists()] as const,
 };
 
 export const handKeys = {
   all: ["hands"] as const,
   lists: () => [...handKeys.all, "list"] as const,
-  list: () => [...handKeys.lists()] as const,
   active: () => [...handKeys.all, "active"] as const,
   details: () => [...handKeys.all, "detail"] as const,
   detail: (id: string) => [...handKeys.details(), id] as const,
@@ -115,7 +110,6 @@ export const handKeys = {
 export const workflowKeys = {
   all: ["workflows"] as const,
   lists: () => [...workflowKeys.all, "list"] as const,
-  list: () => [...workflowKeys.lists()] as const,
   details: () => [...workflowKeys.all, "detail"] as const,
   detail: (id: string) => [...workflowKeys.details(), id] as const,
   runs: (workflowId: string) =>
@@ -130,13 +124,11 @@ export const workflowKeys = {
 export const scheduleKeys = {
   all: ["schedules"] as const,
   lists: () => [...scheduleKeys.all, "list"] as const,
-  list: () => [...scheduleKeys.lists()] as const,
 };
 
 export const triggerKeys = {
   all: ["triggers"] as const,
   lists: () => [...triggerKeys.all, "list"] as const,
-  list: () => [...triggerKeys.lists()] as const,
 };
 
 export const cronKeys = {
@@ -148,7 +140,6 @@ export const cronKeys = {
 export const approvalKeys = {
   all: ["approvals"] as const,
   lists: () => [...approvalKeys.all, "list"] as const,
-  list: () => [...approvalKeys.lists()] as const,
   count: () => [...approvalKeys.all, "count"] as const,
   pending: (agentId?: string | null) =>
     [...approvalKeys.all, "pending", agentId] as const,
@@ -191,7 +182,6 @@ export const usageKeys = {
 
 export const budgetKeys = {
   all: ["budget"] as const,
-  status: () => [...budgetKeys.all] as const,
 };
 
 export const goalKeys = {
@@ -222,7 +212,6 @@ export const a2aKeys = {
 export const sessionKeys = {
   all: ["sessions"] as const,
   lists: () => [...sessionKeys.all, "list"] as const,
-  list: () => [...sessionKeys.lists()] as const,
   details: () => [...sessionKeys.all, "detail"] as const,
   detail: (id: string) => [...sessionKeys.details(), id] as const,
 };
@@ -240,9 +229,10 @@ export const runtimeKeys = {
   healthDetail: () => [...runtimeKeys.all, "health", "detail"] as const,
   security: () => [...runtimeKeys.all, "security"] as const,
   backups: () => [...runtimeKeys.all, "backups"] as const,
-  taskStatus: () => [...runtimeKeys.all, "tasks", "status"] as const,
+  tasks: () => [...runtimeKeys.all, "tasks"] as const,
+  taskStatus: () => [...runtimeKeys.tasks(), "status"] as const,
   taskList: (status?: string) =>
-    [...runtimeKeys.all, "tasks", "list", status] as const,
+    [...runtimeKeys.tasks(), "list", status] as const,
 };
 
 export const auditKeys = {
@@ -265,7 +255,6 @@ export const mcpKeys = {
 export const pluginKeys = {
   all: ["plugins"] as const,
   lists: () => [...pluginKeys.all, "list"] as const,
-  list: () => [...pluginKeys.lists()] as const,
   registries: () => [...pluginKeys.all, "registries"] as const,
 };
 
