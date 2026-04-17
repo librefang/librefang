@@ -227,7 +227,8 @@
       "mcp_servers": "MCP 服务器",
       "mcp_servers_placeholder": "留空=可用全部已连接服务器",
       "live_toml": "TOML 实时预览",
-      "switch_to_toml": "切换到 TOML →"
+      "switch_to_toml": "切换到 TOML →",
+      "toml_parse_error": "TOML 解析错误：{{msg}}"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",

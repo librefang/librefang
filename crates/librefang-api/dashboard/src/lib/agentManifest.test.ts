@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  emptyManifestExtras,
   emptyManifestForm,
+  parseManifestToml,
   serializeManifestForm,
   validateManifestForm,
 } from "./agentManifest";
@@ -19,7 +21,6 @@ describe("agentManifest serializer", () => {
     expect(toml).toContain("[model]");
     expect(toml).toContain('provider = "openai"');
     expect(toml).toContain('model = "gpt-4o"');
-    // Empty optional sections should not appear.
     expect(toml).not.toContain("[resources]");
     expect(toml).not.toContain("[capabilities]");
   });
@@ -47,8 +48,6 @@ describe("agentManifest serializer", () => {
     form.model.max_tokens = "8192";
     form.resources.max_cost_per_hour_usd = "1.5";
     form.resources.max_tool_calls_per_minute = "30";
-    // Leave max_llm_tokens_per_hour blank — should be omitted entirely
-    // so the kernel falls back to its default (None / inherit global).
 
     const toml = serializeManifestForm(form);
 
@@ -66,7 +65,7 @@ describe("agentManifest serializer", () => {
     form.model.provider = "openai";
     form.model.model = "gpt-4o";
     form.model.temperature = "not a number";
-    form.model.max_tokens = "1.5"; // not an integer
+    form.model.max_tokens = "1.5";
 
     const toml = serializeManifestForm(form);
     expect(toml).not.toContain("temperature =");
@@ -103,6 +102,31 @@ describe("agentManifest serializer", () => {
     form.enabled = false;
     expect(serializeManifestForm(form)).toContain("enabled = false");
   });
+
+  it("merges extras: top-level scalars + sub-tables", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+
+    const extras = emptyManifestExtras();
+    extras.topLevel.priority = "high";
+    extras.topLevel.thinking = { budget_tokens: 10000, stream_thinking: false };
+    extras.model.api_key_env = "OPENAI_API_KEY";
+    extras.capabilities.memory_read = ["user/*"];
+
+    const toml = serializeManifestForm(form, extras);
+
+    // Form fields stay first in their hand-tuned layout.
+    expect(toml.indexOf('name = "agent"')).toBeLessThan(toml.indexOf("[model]"));
+    // Extras inside [model] live alongside form-known model keys.
+    expect(toml).toContain('api_key_env = "OPENAI_API_KEY"');
+    expect(toml).toContain('memory_read = [ "user/*" ]');
+    // Top-level extras render after the form-known sections.
+    expect(toml).toContain('priority = "high"');
+    expect(toml).toContain("[thinking]");
+    expect(toml).toContain("budget_tokens = 10000");
+  });
 });
 
 describe("agentManifest validator", () => {
@@ -119,5 +143,125 @@ describe("agentManifest validator", () => {
     form.model.provider = "openai";
     form.model.model = "gpt-4o";
     expect(validateManifestForm(form)).toEqual([]);
+  });
+});
+
+describe("agentManifest parser", () => {
+  it("parses the minimum viable manifest", () => {
+    const result = parseManifestToml(
+      'name = "researcher"\nmodule = "builtin:chat"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n',
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.form.name).toBe("researcher");
+    expect(result.form.model.provider).toBe("openai");
+    expect(result.form.model.model).toBe("gpt-4o");
+  });
+
+  it("populates form fields from a richly-typed manifest", () => {
+    const toml = `name = "agent"
+description = "ops bot"
+tags = ["beta"]
+enabled = false
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+temperature = 0.4
+max_tokens = 2048
+
+[resources]
+max_cost_per_hour_usd = 1.5
+max_tool_calls_per_minute = 30
+
+[capabilities]
+network = ["api.openai.com:443"]
+agent_spawn = true
+`;
+    const result = parseManifestToml(toml);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.form.description).toBe("ops bot");
+    expect(result.form.tags).toEqual(["beta"]);
+    expect(result.form.enabled).toBe(false);
+    expect(result.form.model.temperature).toBe("0.4");
+    expect(result.form.model.max_tokens).toBe("2048");
+    expect(result.form.resources.max_cost_per_hour_usd).toBe("1.5");
+    expect(result.form.capabilities.network).toEqual(["api.openai.com:443"]);
+    expect(result.form.capabilities.agent_spawn).toBe(true);
+  });
+
+  it("preserves unknown sections as extras", () => {
+    const toml = `name = "agent"
+priority = "high"
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+api_key_env = "OPENAI_API_KEY"
+
+[capabilities]
+memory_read = ["user/*"]
+
+[thinking]
+budget_tokens = 10000
+stream_thinking = false
+
+[autonomous]
+max_iterations = 100
+`;
+    const result = parseManifestToml(toml);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.extras.topLevel.priority).toBe("high");
+    expect(result.extras.topLevel.thinking).toEqual({
+      budget_tokens: 10000,
+      stream_thinking: false,
+    });
+    expect(result.extras.topLevel.autonomous).toEqual({ max_iterations: 100 });
+    expect(result.extras.model.api_key_env).toBe("OPENAI_API_KEY");
+    expect(result.extras.capabilities.memory_read).toEqual(["user/*"]);
+  });
+
+  it("returns a structured error on malformed TOML", () => {
+    const result = parseManifestToml('name = "unterminated\n[oops');
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message.length).toBeGreaterThan(0);
+  });
+
+  it("round-trips: serialize(parse(toml)) preserves form + extras", () => {
+    const original = `name = "agent"
+description = "test"
+priority = "high"
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+temperature = 0.5
+api_key_env = "OPENAI_API_KEY"
+
+[resources]
+max_cost_per_hour_usd = 2
+
+[capabilities]
+network = ["api.openai.com:443"]
+memory_read = ["user/*"]
+
+[thinking]
+budget_tokens = 5000
+`;
+    const parsed = parseManifestToml(original);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
+    const reparsed = parseManifestToml(reserialized);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+
+    // The form state and extras should match exactly after a full round-trip.
+    expect(reparsed.form).toEqual(parsed.form);
+    expect(reparsed.extras).toEqual(parsed.extras);
   });
 });

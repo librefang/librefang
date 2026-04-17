@@ -227,7 +227,8 @@
       "mcp_servers": "MCP Servers",
       "mcp_servers_placeholder": "Empty = all connected servers",
       "live_toml": "Live TOML Preview",
-      "switch_to_toml": "Switch to TOML →"
+      "switch_to_toml": "Switch to TOML →",
+      "toml_parse_error": "TOML parse error: {{msg}}"
     },
     "delete_confirm": "Are you sure you want to delete agent \"{{name}}\"?",
     "prompts": "Prompts",

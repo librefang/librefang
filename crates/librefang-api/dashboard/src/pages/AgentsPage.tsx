@@ -38,9 +38,12 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import {
+  emptyManifestExtras,
   emptyManifestForm,
+  parseManifestToml,
   serializeManifestForm,
   validateManifestForm,
+  type ManifestExtras,
   type ManifestFormState,
 } from "../lib/agentManifest";
 import {
@@ -78,7 +81,9 @@ export function AgentsPage() {
   const [manifestToml, setManifestToml] = useState("");
   const [templateTomlLoading, setTemplateTomlLoading] = useState(false);
   const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
+  const [formExtras, setFormExtras] = useState<ManifestExtras>(emptyManifestExtras);
   const [formErrors, setFormErrors] = useState<Set<string>>(new Set());
+  const [tomlParseError, setTomlParseError] = useState<string | null>(null);
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
   const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
@@ -315,9 +320,37 @@ export function AgentsPage() {
     [formModelsQuery.data?.models],
   );
   const serializedFormToml = useMemo(
-    () => serializeManifestForm(formState),
-    [formState],
+    () => serializeManifestForm(formState, formExtras),
+    [formState, formExtras],
   );
+
+  // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
+  // serialized output into the textarea so advanced users can keep editing.
+  // Going TOML→Form parses what's in the textarea, populating the form
+  // and stashing unmapped fields ([thinking], [tools.*], etc.) in extras
+  // so they survive a re-serialize.
+  const switchCreateMode = (next: "form" | "template" | "toml") => {
+    if (next === createMode) return;
+    if (next === "form" && manifestToml.trim() && manifestToml !== serializedFormToml) {
+      const parsed = parseManifestToml(manifestToml);
+      if (!parsed.ok) {
+        setTomlParseError(
+          parsed.line !== undefined
+            ? `Line ${parsed.line}:${parsed.column ?? 0} — ${parsed.message}`
+            : parsed.message,
+        );
+        return;
+      }
+      setFormState(parsed.form);
+      setFormExtras(parsed.extras);
+      setTomlParseError(null);
+    }
+    if (next === "toml" && createMode === "form") {
+      setManifestToml(serializedFormToml);
+      setTomlParseError(null);
+    }
+    setCreateMode(next);
+  };
 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
@@ -1058,21 +1091,28 @@ export function AgentsPage() {
       {/* Create Agent Modal */}
       <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("agents.create_agent")} size="lg">
         <div className="p-5 space-y-4">
-          {/* Mode tabs */}
+          {/* Mode tabs — switching between Form and TOML round-trips the
+              manifest in both directions. We only re-parse when content
+              actually differs, so re-clicking the same tab is a no-op. */}
           <div className="flex gap-2">
-            <button onClick={() => setCreateMode("form")}
+            <button onClick={() => switchCreateMode("form")}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "form" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
               {t("agents.from_form")}
             </button>
-            <button onClick={() => setCreateMode("template")}
+            <button onClick={() => switchCreateMode("template")}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
               {t("agents.from_template")}
             </button>
-            <button onClick={() => setCreateMode("toml")}
+            <button onClick={() => switchCreateMode("toml")}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "toml" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
               {t("agents.from_toml")}
             </button>
           </div>
+          {tomlParseError && createMode !== "toml" && (
+            <p className="text-xs text-error">
+              {t("agents.form.toml_parse_error", { msg: tomlParseError })}
+            </p>
+          )}
 
           {createMode === "form" ? (
             <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-4 max-h-[60vh] overflow-y-auto pr-1">
@@ -1090,10 +1130,7 @@ export function AgentsPage() {
                   </label>
                   <button
                     type="button"
-                    onClick={() => {
-                      setManifestToml(serializedFormToml);
-                      setCreateMode("toml");
-                    }}
+                    onClick={() => switchCreateMode("toml")}
                     className="text-[10px] font-bold text-brand hover:underline"
                   >
                     {t("agents.form.switch_to_toml")}
