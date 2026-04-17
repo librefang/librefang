@@ -110,7 +110,7 @@ describe("agentManifest serializer", () => {
     form.model.model = "gpt-4o";
 
     const extras = emptyManifestExtras();
-    extras.topLevel.priority = "high";
+    extras.topLevel.priority = "High";
     extras.topLevel.thinking = { budget_tokens: 10000, stream_thinking: false };
     extras.model.api_key_env = "OPENAI_API_KEY";
     extras.capabilities.memory_read = ["user/*"];
@@ -123,7 +123,7 @@ describe("agentManifest serializer", () => {
     expect(toml).toContain('api_key_env = "OPENAI_API_KEY"');
     expect(toml).toContain('memory_read = [ "user/*" ]');
     // Top-level extras render after the form-known sections.
-    expect(toml).toContain('priority = "high"');
+    expect(toml).toContain('priority = "High"');
     expect(toml).toContain("[thinking]");
     expect(toml).toContain("budget_tokens = 10000");
   });
@@ -191,36 +191,62 @@ agent_spawn = true
     expect(result.form.capabilities.agent_spawn).toBe(true);
   });
 
-  it("preserves unknown sections as extras", () => {
+  it("hydrates advanced fields and only preserves truly-unknown extras", () => {
     const toml = `name = "agent"
-priority = "high"
+priority = "High"
+session_mode = "new"
 
 [model]
 provider = "openai"
 model = "gpt-4o"
 api_key_env = "OPENAI_API_KEY"
-
-[capabilities]
-memory_read = ["user/*"]
+custom_provider_param = "preserved"
 
 [thinking]
 budget_tokens = 10000
-stream_thinking = false
+stream_thinking = true
 
 [autonomous]
 max_iterations = 100
+heartbeat_channel = "telegram"
+
+[[fallback_models]]
+provider = "anthropic"
+model = "claude-3-5-sonnet"
+
+[[context_injection]]
+name = "policy"
+content = "Always be polite."
+position = "before_user"
+
+[tools.web_search]
+params = { region = "us" }
 `;
     const result = parseManifestToml(toml);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.extras.topLevel.priority).toBe("high");
-    expect(result.extras.topLevel.thinking).toEqual({
-      budget_tokens: 10000,
-      stream_thinking: false,
+    // First-class fields are now in form state, not extras.
+    expect(result.form.priority).toBe("High");
+    expect(result.form.session_mode).toBe("new");
+    expect(result.form.model.api_key_env).toBe("OPENAI_API_KEY");
+    expect(result.form.thinking.enabled).toBe(true);
+    expect(result.form.thinking.budget_tokens).toBe("10000");
+    expect(result.form.thinking.stream_thinking).toBe(true);
+    expect(result.form.autonomous.enabled).toBe(true);
+    expect(result.form.autonomous.max_iterations).toBe("100");
+    expect(result.form.autonomous.heartbeat_channel).toBe("telegram");
+    expect(result.form.fallback_models).toEqual([
+      { provider: "anthropic", model: "claude-3-5-sonnet", api_key_env: "", base_url: "" },
+    ]);
+    expect(result.form.context_injection).toEqual([
+      { name: "policy", content: "Always be polite.", position: "before_user", condition: "" },
+    ]);
+    // Genuinely unknown stuff (model.custom_provider_param, [tools.*])
+    // still rides along in extras.
+    expect(result.extras.model.custom_provider_param).toBe("preserved");
+    expect(result.extras.topLevel.tools).toEqual({
+      web_search: { params: { region: "us" } },
     });
-    expect(result.extras.topLevel.autonomous).toEqual({ max_iterations: 100 });
-    expect(result.extras.model.api_key_env).toBe("OPENAI_API_KEY");
-    expect(result.extras.capabilities.memory_read).toEqual(["user/*"]);
   });
 
   it("returns a structured error on malformed TOML", () => {
@@ -230,16 +256,57 @@ max_iterations = 100
     expect(result.message.length).toBeGreaterThan(0);
   });
 
+  it("schedule round-trips through every variant", () => {
+    const periodic = parseManifestToml(
+      'name = "a"\nschedule = { periodic = { cron = "0 9 * * *" } }\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n',
+    );
+    expect(periodic.ok).toBe(true);
+    if (!periodic.ok) return;
+    expect(periodic.form.schedule).toEqual({ mode: "periodic", cron: "0 9 * * *" });
+
+    const continuous = parseManifestToml(
+      'name = "a"\nschedule = { continuous = { check_interval_secs = 600 } }\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n',
+    );
+    expect(continuous.ok).toBe(true);
+    if (!continuous.ok) return;
+    expect(continuous.form.schedule).toEqual({ mode: "continuous", check_interval_secs: "600" });
+  });
+
+  it("response_format json_schema preserves the schema body", () => {
+    const toml = `name = "a"
+response_format = { type = "json_schema", name = "user", schema = { type = "object", properties = { id = { type = "integer" } } }, strict = true }
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+`;
+    const result = parseManifestToml(toml);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.form.response_format.mode).toBe("json_schema");
+    if (result.form.response_format.mode !== "json_schema") return;
+    expect(result.form.response_format.name).toBe("user");
+    expect(result.form.response_format.strict).toBe(true);
+    const parsedSchema = JSON.parse(result.form.response_format.schema);
+    expect(parsedSchema.type).toBe("object");
+    expect(parsedSchema.properties.id.type).toBe("integer");
+  });
+
   it("round-trips: serialize(parse(toml)) preserves form + extras", () => {
     const original = `name = "agent"
 description = "test"
-priority = "high"
+priority = "High"
+session_mode = "new"
+web_search_augmentation = "always"
+schedule = { periodic = { cron = "0 9 * * *" } }
+exec_policy = "allowlist"
 
 [model]
 provider = "openai"
 model = "gpt-4o"
 temperature = 0.5
 api_key_env = "OPENAI_API_KEY"
+custom_provider_param = "preserved"
 
 [resources]
 max_cost_per_hour_usd = 2
@@ -250,6 +317,30 @@ memory_read = ["user/*"]
 
 [thinking]
 budget_tokens = 5000
+stream_thinking = true
+
+[autonomous]
+max_iterations = 100
+heartbeat_channel = "telegram"
+
+[routing]
+simple_model = "claude-haiku"
+medium_model = "claude-sonnet"
+complex_model = "claude-opus"
+simple_threshold = 100
+complex_threshold = 500
+
+[[fallback_models]]
+provider = "anthropic"
+model = "claude-3-5-sonnet"
+
+[[context_injection]]
+name = "policy"
+content = "Be polite."
+position = "before_user"
+
+[tools.web_search]
+params = { region = "us" }
 `;
     const parsed = parseManifestToml(original);
     expect(parsed.ok).toBe(true);

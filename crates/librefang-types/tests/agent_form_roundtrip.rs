@@ -30,6 +30,94 @@ fn parses_form_full_output_with_capabilities_and_resources() {
 }
 
 #[test]
+fn parses_form_with_advanced_sections() {
+    // Mirror the kind of TOML the form's serializer emits when every advanced
+    // section is filled in. Catches drift between the dashboard's output and
+    // the kernel's deserializer (e.g. renamed fields, changed enum variants).
+    let toml = r#"name = "agent"
+priority = "High"
+session_mode = "new"
+web_search_augmentation = "always"
+schedule = { periodic = { cron = "0 9 * * *" } }
+exec_policy = "allowlist"
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+api_key_env = "OPENAI_API_KEY"
+
+[resources]
+max_cost_per_month_usd = 50
+
+[capabilities]
+memory_read = ["user/*"]
+memory_write = ["user/*"]
+agent_message = ["*"]
+ofp_connect = ["peer-*"]
+
+[thinking]
+budget_tokens = 5000
+stream_thinking = true
+
+[autonomous]
+max_iterations = 100
+heartbeat_channel = "telegram"
+
+[routing]
+simple_model = "claude-haiku"
+medium_model = "claude-sonnet"
+complex_model = "claude-opus"
+simple_threshold = 100
+complex_threshold = 500
+
+[[fallback_models]]
+provider = "anthropic"
+model = "claude-3-5-sonnet"
+
+[[context_injection]]
+name = "policy"
+content = "Be polite."
+position = "before_user"
+"#;
+    let m: AgentManifest = toml::from_str(toml).expect("advanced manifest must parse");
+    assert_eq!(m.priority, librefang_types::agent::Priority::High);
+    assert_eq!(m.session_mode, librefang_types::agent::SessionMode::New);
+    assert_eq!(m.fallback_models.len(), 1);
+    assert_eq!(m.fallback_models[0].model, "claude-3-5-sonnet");
+    assert_eq!(m.context_injection.len(), 1);
+    assert_eq!(m.context_injection[0].name, "policy");
+    assert!(m.thinking.is_some());
+    assert_eq!(m.thinking.as_ref().unwrap().budget_tokens, 5000);
+    assert!(m.autonomous.is_some());
+    assert_eq!(m.autonomous.as_ref().unwrap().max_iterations, 100);
+    assert!(m.routing.is_some());
+    assert_eq!(m.routing.as_ref().unwrap().simple_model, "claude-haiku");
+    assert_eq!(m.capabilities.memory_read, vec!["user/*"]);
+}
+
+#[test]
+fn parses_form_response_format_json_schema() {
+    // The form's JSON-schema serializer emits the schema as an inline TOML
+    // table; verify the kernel reads it back as ResponseFormat::JsonSchema.
+    let toml = r#"name = "a"
+response_format = { type = "json_schema", name = "user", schema = { type = "object" }, strict = true }
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+"#;
+    let m: AgentManifest = toml::from_str(toml).expect("response_format must parse");
+    let rf = m.response_format.expect("response_format set");
+    match rf {
+        librefang_types::config::ResponseFormat::JsonSchema { name, strict, .. } => {
+            assert_eq!(name, "user");
+            assert_eq!(strict, Some(true));
+        }
+        _ => panic!("expected JsonSchema variant"),
+    }
+}
+
+#[test]
 fn omitting_optional_sections_uses_defaults() {
     // Form leaves resources/capabilities out when no fields populated;
     // kernel must fall back to ResourceQuota/ManifestCapabilities defaults.

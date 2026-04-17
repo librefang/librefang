@@ -46,6 +46,7 @@ import {
   type ManifestExtras,
   type ManifestFormState,
 } from "../lib/agentManifest";
+import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
 import {
   agentQueries,
   useAgentTemplates,
@@ -323,6 +324,11 @@ export function AgentsPage() {
     () => serializeManifestForm(formState, formExtras),
     [formState, formExtras],
   );
+  const serializedFormMarkdown = useMemo(
+    () => generateManifestMarkdown(formState, formExtras),
+    [formState, formExtras],
+  );
+  const [previewTab, setPreviewTab] = useState<"toml" | "markdown">("toml");
 
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
   // serialized output into the textarea so advanced users can keep editing.
@@ -1124,20 +1130,59 @@ export function AgentsPage() {
                 invalidFields={formErrors}
               />
               <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-[10px] font-bold text-text-dim uppercase">
-                    {t("agents.form.live_toml")}
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => switchCreateMode("toml")}
-                    className="text-[10px] font-bold text-brand hover:underline"
-                  >
-                    {t("agents.form.switch_to_toml")}
-                  </button>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewTab("toml")}
+                      className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
+                        previewTab === "toml"
+                          ? "bg-brand text-white"
+                          : "text-text-dim hover:text-text"
+                      }`}
+                    >
+                      {t("agents.form.preview_toml")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewTab("markdown")}
+                      className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
+                        previewTab === "markdown"
+                          ? "bg-brand text-white"
+                          : "text-text-dim hover:text-text"
+                      }`}
+                    >
+                      {t("agents.form.preview_markdown")}
+                    </button>
+                  </div>
+                  <div className="flex gap-2 items-center">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const text =
+                          previewTab === "toml" ? serializedFormToml : serializedFormMarkdown;
+                        void navigator.clipboard.writeText(text).then(() =>
+                          addToast(t("agents.form.copied"), "success"),
+                        );
+                      }}
+                      className="text-[10px] font-bold text-text-dim hover:text-brand"
+                      title={t("agents.form.copy")}
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                    {previewTab === "toml" && (
+                      <button
+                        type="button"
+                        onClick={() => switchCreateMode("toml")}
+                        className="text-[10px] font-bold text-brand hover:underline"
+                      >
+                        {t("agents.form.switch_to_toml")}
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <pre className="rounded-xl border border-border-subtle bg-main px-3 py-2 text-[11px] font-mono text-text-dim overflow-auto max-h-[55vh] whitespace-pre-wrap break-all">
-                  {serializedFormToml}
+                  {previewTab === "toml" ? serializedFormToml : serializedFormMarkdown}
                 </pre>
               </div>
             </div>
