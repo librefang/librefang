@@ -15,6 +15,8 @@ interface ModalProps {
   disableBackdropClose?: boolean;
   /** z-index override — defaults to 50. */
   zIndex?: number;
+  /** Allow content to overflow the modal container (e.g. for cmdk dropdowns). Defaults to false. */
+  overflowVisible?: boolean;
   children: ReactNode;
 }
 
@@ -46,6 +48,7 @@ export function Modal({
   hideCloseButton,
   disableBackdropClose,
   zIndex = 50,
+  overflowVisible = false,
   children,
 }: ModalProps) {
   const { t } = useTranslation();
@@ -76,7 +79,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={`relative w-full ${SIZE_CLASSES[size]} rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl animate-fade-in-scale max-h-[90vh] overflow-hidden flex flex-col`}
+        className={`relative w-full ${SIZE_CLASSES[size]} rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl animate-fade-in-scale max-h-[90vh] ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`}
         onClick={(e) => e.stopPropagation()}
       >
         {(title || !hideCloseButton) && (

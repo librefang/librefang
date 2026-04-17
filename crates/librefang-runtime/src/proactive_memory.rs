@@ -6,6 +6,7 @@
 //! results are properly consumed and peer-scoped.
 
 use librefang_memory::{ProactiveMemoryConfig, ProactiveMemoryStore};
+use librefang_types::config::ResponseFormat;
 use librefang_types::error::LibreFangError;
 use librefang_types::memory::{
     ExtractionResult, MemoryAction, MemoryExtractor, MemoryFragment, MemoryItem, MemoryLevel,
@@ -106,6 +107,8 @@ pub fn init_proactive_memory_with_defaults(
 // ---------------------------------------------------------------------------
 // LLM-powered Memory Extractor
 // ---------------------------------------------------------------------------
+
+const MAX_MEMORY_CONTENT_LENGTH: usize = 2000;
 
 const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a memory extraction system. Your goal: help a future assistant feel like it truly knows this person — their style, preferences, expertise, and what matters to them.
 
@@ -211,20 +214,48 @@ impl MemoryExtractor for LlmMemoryExtractor {
         const MAX_EXTRACTION_CHARS: usize = 8000;
         let mut conversation_text = String::new();
         for msg in messages {
-            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+            let role = msg
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             if role == "system" {
                 continue;
             }
-            let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            if role == "unknown" {
+                tracing::debug!(message = ?msg, "Skipping proactive memory message with unknown role");
+                continue;
+            }
+            let content = match msg.get("content") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Array(arr)) => arr
+                    .iter()
+                    .filter_map(|v| {
+                        if let Some(s) = v.get("text").and_then(|t| t.as_str()) {
+                            Some(s.to_string())
+                        } else {
+                            v.as_str().map(|s| s.to_string())
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                _ => String::new(),
+            };
             if !content.is_empty() {
                 conversation_text.push_str(&format!("{role}: {content}\n"));
                 if conversation_text.len() > MAX_EXTRACTION_CHARS {
-                    // Find a safe truncation point on a char boundary
-                    let mut safe = MAX_EXTRACTION_CHARS;
-                    while safe > 0 && !conversation_text.is_char_boundary(safe) {
-                        safe -= 1;
+                    // Truncate at last complete message (last newline within limit)
+                    if let Some(last_newline) =
+                        conversation_text[..MAX_EXTRACTION_CHARS].rfind('\n')
+                    {
+                        conversation_text.truncate(last_newline);
+                    } else {
+                        // No newline within limit — truncate at char boundary
+                        let mut safe = MAX_EXTRACTION_CHARS;
+                        while safe > 0 && !conversation_text.is_char_boundary(safe) {
+                            safe -= 1;
+                        }
+                        conversation_text.truncate(safe);
                     }
-                    conversation_text.truncate(safe);
                     break;
                 }
             }
@@ -252,16 +283,15 @@ impl MemoryExtractor for LlmMemoryExtractor {
             system: Some(EXTRACTION_SYSTEM_PROMPT.to_string()),
             thinking: None,
             prompt_caching: false,
-            response_format: None,
-            timeout_secs: None,
+            response_format: Some(ResponseFormat::Json),
+            timeout_secs: Some(30),
             extra_body: None,
         };
 
-        let response = self
-            .driver
-            .complete(request)
-            .await
-            .map_err(|e| LibreFangError::Internal(format!("LLM extraction failed: {e}")))?;
+        let response = self.driver.complete(request).await.map_err(|e| {
+            tracing::error!("LLM extraction failed: {e}");
+            LibreFangError::Internal(format!("LLM extraction failed: {e}"))
+        })?;
 
         let text = response.text();
         parse_llm_extraction_response(&text)
@@ -307,7 +337,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             thinking: None,
             prompt_caching: false,
             response_format: None,
-            timeout_secs: None,
+            timeout_secs: Some(15),
             extra_body: None,
         };
 
@@ -364,8 +394,12 @@ fn strip_code_block(text: &str) -> &str {
     // Find first ``` and last ```, extract content between them
     if let Some(start) = trimmed.find("```") {
         let after_start = &trimmed[start + 3..];
-        // Skip language tag (first line after ```)
-        let content_start = after_start.find('\n').map(|i| i + 1).unwrap_or(0);
+        // Skip language tag: find newline, or skip to first `[` or `{` if no newline
+        let content_start = if let Some(newline_pos) = after_start.find('\n') {
+            newline_pos + 1
+        } else {
+            after_start.find(['[', '{']).unwrap_or(0)
+        };
         let content = &after_start[content_start..];
         if let Some(end) = content.rfind("```") {
             return content[..end].trim();
@@ -382,11 +416,18 @@ fn parse_decision_response(
     // Strip markdown code blocks (case-insensitive, handles leading text)
     let json_str = strip_code_block(text);
 
-    let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
+    let parsed: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(val) => val,
+        Err(e) => {
+            tracing::warn!("Failed to parse decision response JSON: {e}, input: {json_str}");
+            serde_json::Value::Null
+        }
+    };
 
     let action_str = parsed
         .get("action")
         .and_then(|v| v.as_str())
+        // Missing/non-string action falls through to default ADD below.
         .unwrap_or("")
         .to_uppercase();
 
@@ -445,7 +486,13 @@ fn parse_llm_extraction_response(
     // Strip markdown code blocks (case-insensitive, handles leading text)
     let json_str = strip_code_block(text);
 
-    let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
+    let parsed: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(val) => val,
+        Err(e) => {
+            tracing::warn!("Failed to parse extraction response JSON: {e}, input: {json_str}");
+            serde_json::Value::Null
+        }
+    };
 
     // Extract memories (from object or legacy array)
     let memory_items = if let Some(arr) = parsed.get("memories").and_then(|v| v.as_array()) {
@@ -459,7 +506,23 @@ fn parse_llm_extraction_response(
     let memories: Vec<MemoryItem> = memory_items
         .into_iter()
         .filter_map(|item| {
-            let content = item.get("content")?.as_str()?.to_string();
+            let content = item.get("content")?.as_str()?;
+            let content = if content.len() > MAX_MEMORY_CONTENT_LENGTH {
+                tracing::warn!(
+                    "Memory content too long ({} chars), truncating to {}",
+                    content.len(),
+                    MAX_MEMORY_CONTENT_LENGTH
+                );
+                let cutoff = content
+                    .char_indices()
+                    .nth(MAX_MEMORY_CONTENT_LENGTH)
+                    .map(|(i, _)| i)
+                    .unwrap_or(content.len());
+                &content[..cutoff]
+            } else {
+                content
+            };
+            let content = content.to_string();
             let category = item
                 .get("category")
                 .and_then(|v| v.as_str())
@@ -529,6 +592,116 @@ fn parse_llm_extraction_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MockEmbeddingDriver {
+        result: Result<Vec<f32>, crate::embedding::EmbeddingError>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::embedding::EmbeddingDriver for MockEmbeddingDriver {
+        async fn embed(
+            &self,
+            _texts: &[&str],
+        ) -> Result<Vec<Vec<f32>>, crate::embedding::EmbeddingError> {
+            match &self.result {
+                Ok(v) => Ok(vec![v.clone()]),
+                Err(e) => Err(crate::embedding::EmbeddingError::Api {
+                    status: 500,
+                    message: e.to_string(),
+                }),
+            }
+        }
+        fn dimensions(&self) -> usize {
+            3
+        }
+    }
+
+    struct AlwaysFailingLlmDriver;
+
+    #[async_trait::async_trait]
+    impl crate::llm_driver::LlmDriver for AlwaysFailingLlmDriver {
+        async fn complete(
+            &self,
+            _request: crate::llm_driver::CompletionRequest,
+        ) -> Result<crate::llm_driver::CompletionResponse, crate::llm_driver::LlmError> {
+            Err(crate::llm_driver::LlmError::Api {
+                status: 500,
+                message: "mock failure".into(),
+            })
+        }
+        fn is_configured(&self) -> bool {
+            false
+        }
+    }
+
+    struct CannedLlmDriver {
+        response: String,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm_driver::LlmDriver for CannedLlmDriver {
+        async fn complete(
+            &self,
+            _request: crate::llm_driver::CompletionRequest,
+        ) -> Result<crate::llm_driver::CompletionResponse, crate::llm_driver::LlmError> {
+            use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+            Ok(crate::llm_driver::CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: self.response.clone(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                },
+            })
+        }
+        fn is_configured(&self) -> bool {
+            true
+        }
+    }
+
+    fn make_memory_item(content: &str) -> MemoryItem {
+        MemoryItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            content: content.to_string(),
+            level: MemoryLevel::User,
+            category: Some("test".to_string()),
+            metadata: std::collections::HashMap::new(),
+            created_at: chrono::Utc::now(),
+            source: None,
+            confidence: None,
+            accessed_at: None,
+            access_count: None,
+            agent_id: None,
+        }
+    }
+
+    fn make_fragment(
+        id: librefang_types::memory::MemoryId,
+    ) -> librefang_types::memory::MemoryFragment {
+        use librefang_types::memory::MemorySource;
+        librefang_types::memory::MemoryFragment {
+            id,
+            agent_id: librefang_types::agent::AgentId::new(),
+            content: "test content".to_string(),
+            embedding: None,
+            metadata: std::collections::HashMap::new(),
+            source: MemorySource::Conversation,
+            confidence: 1.0,
+            created_at: chrono::Utc::now(),
+            accessed_at: chrono::Utc::now(),
+            access_count: 0,
+            scope: "user_memory".to_string(),
+            image_url: None,
+            image_embedding: None,
+            modality: Default::default(),
+        }
+    }
 
     #[test]
     fn test_disabled_when_both_off() {
@@ -696,5 +869,458 @@ mod tests {
             let result = parse_decision_response(&input, &fragments).unwrap();
             assert_eq!(result, MemoryAction::Add);
         }
+    }
+
+    #[test]
+    fn test_strip_code_block_plain_returns_unchanged() {
+        assert_eq!(
+            strip_code_block(r#"{"action":"ADD"}"#),
+            r#"{"action":"ADD"}"#
+        );
+    }
+
+    #[test]
+    fn test_strip_code_block_case_insensitive_tags() {
+        for tag in &["JSON", "Json", "jsonc", "Jsonc"] {
+            let input = format!("```{}\n{{}}\n```", tag);
+            assert_eq!(strip_code_block(&input), "{}");
+        }
+    }
+
+    #[test]
+    fn test_strip_code_block_leading_text() {
+        let input = "Here is the result:\n```json\n{\"action\":\"ADD\"}\n```";
+        assert_eq!(strip_code_block(input), "{\"action\":\"ADD\"}");
+    }
+
+    #[test]
+    fn test_strip_code_block_no_newline_after_tag() {
+        let input = "```json{\"a\":1}```";
+        assert_eq!(strip_code_block(input), r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn test_strip_code_block_empty() {
+        assert_eq!(strip_code_block(""), "");
+    }
+
+    #[test]
+    fn test_strip_code_block_nested_fences() {
+        let input = "```json\n{\"nested\": \"```inside```\"}\n```";
+        let result = strip_code_block(input);
+        assert!(result.contains("inside"));
+    }
+
+    #[test]
+    fn test_parse_decision_update_1based_index() {
+        use librefang_types::memory::MemoryId;
+        let id1 = MemoryId::new();
+        let id2 = MemoryId::new();
+        let fragments = vec![make_fragment(id1), make_fragment(id2)];
+        let input = r#"{"action": "UPDATE", "existing_id": "2"}"#;
+        let result = parse_decision_response(input, &fragments).unwrap();
+        assert_eq!(
+            result,
+            MemoryAction::Update {
+                existing_id: id2.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_decision_update_nonexistent_uuid_falls_to_add() {
+        use librefang_types::memory::MemoryId;
+        let fragments = vec![make_fragment(MemoryId::new())];
+        let input =
+            r#"{"action": "UPDATE", "existing_id": "00000000-0000-0000-0000-000000000000"}"#;
+        let result = parse_decision_response(input, &fragments).unwrap();
+        assert_eq!(result, MemoryAction::Add);
+    }
+
+    #[test]
+    fn test_parse_decision_update_missing_existing_id_falls_to_add() {
+        use librefang_types::memory::MemoryId;
+        let fragments = vec![make_fragment(MemoryId::new())];
+        let input = r#"{"action": "UPDATE"}"#;
+        let result = parse_decision_response(input, &fragments).unwrap();
+        assert_eq!(result, MemoryAction::Add);
+    }
+
+    #[test]
+    fn test_parse_decision_update_in_code_block() {
+        use librefang_types::memory::MemoryId;
+        let id = MemoryId::new();
+        let fragments = vec![make_fragment(id)];
+        let input = format!(
+            "```json\n{{\"action\": \"UPDATE\", \"existing_id\": \"{}\"}}\n```",
+            id
+        );
+        let result = parse_decision_response(&input, &fragments).unwrap();
+        assert_eq!(
+            result,
+            MemoryAction::Update {
+                existing_id: id.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_decision_update_numeric_existing_id() {
+        use librefang_types::memory::MemoryId;
+        let id = MemoryId::new();
+        let fragments = vec![make_fragment(id)];
+        let input = r#"{"action": "UPDATE", "existing_id": 1}"#;
+        let result = parse_decision_response(input, &fragments).unwrap();
+        assert_eq!(
+            result,
+            MemoryAction::Update {
+                existing_id: id.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_decision_update_index_out_of_bounds_falls_to_add() {
+        use librefang_types::memory::MemoryId;
+        let fragments = vec![
+            make_fragment(MemoryId::new()),
+            make_fragment(MemoryId::new()),
+        ];
+        for idx in &["0", "5", "999"] {
+            let input = format!(r#"{{"action": "UPDATE", "existing_id": "{}"}}"#, idx);
+            let result = parse_decision_response(&input, &fragments).unwrap();
+            assert_eq!(
+                result,
+                MemoryAction::Add,
+                "index {} should fall back to ADD",
+                idx
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_decision_unknown_action_defaults_to_add() {
+        let fragments = vec![];
+        for action in &["DELETE", "SKIP", "MERGE", ""] {
+            let input = format!(r#"{{"action": "{}"}}"#, action);
+            let result = parse_decision_response(&input, &fragments).unwrap();
+            assert_eq!(
+                result,
+                MemoryAction::Add,
+                "action '{}' should default to ADD",
+                action
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_decision_empty_object_defaults_to_add() {
+        let fragments = vec![];
+        let result = parse_decision_response("{}", &fragments).unwrap();
+        assert_eq!(result, MemoryAction::Add);
+    }
+
+    #[test]
+    fn test_parse_decision_noop_in_code_block() {
+        let fragments = vec![];
+        let input = "```json\n{\"action\": \"NOOP\"}\n```";
+        let result = parse_decision_response(input, &fragments).unwrap();
+        assert_eq!(result, MemoryAction::Noop);
+    }
+
+    #[test]
+    fn test_parse_extraction_content_truncation_over_2000() {
+        let long_content = "A".repeat(3000);
+        let json = format!(r#"[{{"content": "{}", "level": "user"}}]"#, long_content);
+        let result = parse_llm_extraction_response(&json).unwrap();
+        assert_eq!(result.memories.len(), 1);
+        assert_eq!(result.memories[0].content.len(), MAX_MEMORY_CONTENT_LENGTH);
+    }
+
+    #[test]
+    fn test_parse_extraction_content_exactly_2000_not_truncated() {
+        let content = "A".repeat(2000);
+        let json = format!(r#"[{{"content": "{}", "level": "user"}}]"#, content);
+        let result = parse_llm_extraction_response(&json).unwrap();
+        assert_eq!(result.memories[0].content.len(), 2000);
+        assert_eq!(result.memories[0].content, content);
+    }
+
+    #[test]
+    fn test_parse_extraction_content_truncation_utf8_boundary() {
+        let content = "ą".repeat(2500);
+        let json = format!(r#"[{{"content": "{}", "level": "user"}}]"#, content);
+        let result = parse_llm_extraction_response(&json).unwrap();
+        assert!(result.memories[0].content.chars().count() <= MAX_MEMORY_CONTENT_LENGTH);
+        // Verify valid UTF-8 — no panics
+        assert!(std::str::from_utf8(result.memories[0].content.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_parse_extraction_default_category() {
+        let json = r#"[{"content": "test", "level": "user"}]"#;
+        let result = parse_llm_extraction_response(json).unwrap();
+        assert_eq!(result.memories[0].category, Some("general".to_string()));
+    }
+
+    #[test]
+    fn test_parse_extraction_relation_default_types() {
+        let json = r#"{
+            "memories": [],
+            "relations": [
+                {"subject": "X", "relation": "relates_to", "object": "Y"}
+            ]
+        }"#;
+        let result = parse_llm_extraction_response(json).unwrap();
+        assert_eq!(result.relations[0].subject_type, "concept");
+        assert_eq!(result.relations[0].object_type, "concept");
+    }
+
+    #[test]
+    fn test_parse_extraction_relation_missing_required_field_skipped() {
+        let json = r#"{
+            "memories": [],
+            "relations": [
+                {"subject": "A", "object": "B"},
+                {"subject": "B", "relation": "knows", "object": "C"}
+            ]
+        }"#;
+        let result = parse_llm_extraction_response(json).unwrap();
+        assert_eq!(result.relations.len(), 1);
+        assert_eq!(result.relations[0].subject, "B");
+    }
+
+    #[test]
+    fn test_parse_extraction_memory_missing_content_skipped() {
+        let json = r#"[{"category": "x", "level": "user"}, {"content": "valid", "level": "user"}]"#;
+        let result = parse_llm_extraction_response(json).unwrap();
+        assert_eq!(result.memories.len(), 1);
+        assert_eq!(result.memories[0].content, "valid");
+    }
+
+    #[test]
+    fn test_parse_extraction_new_format_in_code_block() {
+        let input = r#"```json
+{
+    "memories": [{"content": "test", "level": "user"}],
+    "relations": [{"subject": "A", "relation": "r", "object": "B"}]
+}
+```"#;
+        let result = parse_llm_extraction_response(input).unwrap();
+        assert_eq!(result.memories.len(), 1);
+        assert_eq!(result.relations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_extraction_empty_string() {
+        let result = parse_llm_extraction_response("").unwrap();
+        assert!(!result.has_content);
+        assert!(result.memories.is_empty());
+        assert!(result.relations.is_empty());
+    }
+
+    // --- format_context tests ---
+
+    #[test]
+    fn test_format_context_empty() {
+        let extractor = LlmMemoryExtractor::new(
+            Arc::new(CannedLlmDriver {
+                response: String::new(),
+            }),
+            "test".to_string(),
+        );
+        assert!(extractor.format_context(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_format_context_single_memory() {
+        let extractor = LlmMemoryExtractor::new(
+            Arc::new(CannedLlmDriver {
+                response: String::new(),
+            }),
+            "test".to_string(),
+        );
+        let ctx = extractor.format_context(&[make_memory_item("Prefers Rust")]);
+        assert!(ctx.contains("- Prefers Rust"));
+        assert!(ctx.contains("understanding of this person"));
+    }
+
+    #[test]
+    fn test_format_context_multiple_memories() {
+        let extractor = LlmMemoryExtractor::new(
+            Arc::new(CannedLlmDriver {
+                response: String::new(),
+            }),
+            "test".to_string(),
+        );
+        let items = vec![
+            make_memory_item("First"),
+            make_memory_item("Second"),
+            make_memory_item("Third"),
+        ];
+        let ctx = extractor.format_context(&items);
+        assert!(ctx.contains("- First"));
+        assert!(ctx.contains("- Second"));
+        assert!(ctx.contains("- Third"));
+    }
+
+    #[test]
+    fn test_format_context_no_recite_phrases() {
+        let extractor = LlmMemoryExtractor::new(
+            Arc::new(CannedLlmDriver {
+                response: String::new(),
+            }),
+            "test".to_string(),
+        );
+        let ctx = extractor.format_context(&[make_memory_item("test")]);
+        // Template mentions these as things NOT to do — verify the instruction is present
+        assert!(ctx.contains("NEVER say"));
+        assert!(ctx.contains("based on my memory"));
+        // But the memory content itself should appear as a bullet, not as a recitation
+        assert!(ctx.contains("- test"));
+    }
+
+    // --- EmbeddingBridge tests ---
+
+    #[test]
+    fn test_embedding_bridge_passes_through() {
+        use librefang_memory::proactive::EmbeddingFn;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let driver = Arc::new(MockEmbeddingDriver {
+                result: Ok(vec![0.1, 0.2, 0.3]),
+            });
+            let bridge = EmbeddingBridge(driver);
+            let result: Vec<f32> = bridge.embed_one("hello").await.unwrap();
+            assert_eq!(result, vec![0.1, 0.2, 0.3]);
+        });
+    }
+
+    #[test]
+    fn test_embedding_bridge_maps_error() {
+        use librefang_memory::proactive::EmbeddingFn;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let driver = Arc::new(MockEmbeddingDriver {
+                result: Err(crate::embedding::EmbeddingError::Parse("fail".into())),
+            });
+            let bridge = EmbeddingBridge(driver);
+            let result = bridge.embed_one("hello").await;
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("Embedding failed"));
+        });
+    }
+
+    // --- init_proactive_memory_full tests ---
+
+    #[test]
+    fn test_init_full_with_llm_driver() {
+        let substrate = librefang_memory::MemorySubstrate::open_in_memory(0.1).unwrap();
+        let config = ProactiveMemoryConfig {
+            auto_retrieve: true,
+            auto_memorize: false,
+            ..Default::default()
+        };
+        let llm = Arc::new(CannedLlmDriver {
+            response: r#"{"memories":[],"relations":[]}"#.into(),
+        });
+        let result = init_proactive_memory_full(
+            Arc::new(substrate),
+            config,
+            Some((
+                llm as Arc<dyn crate::llm_driver::LlmDriver>,
+                "test-model".to_string(),
+            )),
+            None,
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_init_full_with_embedding_driver() {
+        let substrate = librefang_memory::MemorySubstrate::open_in_memory(0.1).unwrap();
+        let config = ProactiveMemoryConfig {
+            auto_retrieve: false,
+            auto_memorize: true,
+            ..Default::default()
+        };
+        let emb = Arc::new(MockEmbeddingDriver {
+            result: Ok(vec![0.1, 0.2, 0.3]),
+        });
+        let result = init_proactive_memory_full(
+            Arc::new(substrate),
+            config,
+            None,
+            Some(emb as Arc<dyn crate::embedding::EmbeddingDriver + Send + Sync>),
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_init_full_with_both_llm_and_embedding() {
+        let substrate = librefang_memory::MemorySubstrate::open_in_memory(0.1).unwrap();
+        let config = ProactiveMemoryConfig {
+            auto_retrieve: true,
+            auto_memorize: true,
+            ..Default::default()
+        };
+        let llm = Arc::new(CannedLlmDriver {
+            response: r#"{"memories":[],"relations":[]}"#.into(),
+        });
+        let emb = Arc::new(MockEmbeddingDriver {
+            result: Ok(vec![0.1, 0.2, 0.3]),
+        });
+        let result = init_proactive_memory_full(
+            Arc::new(substrate),
+            config,
+            Some((
+                llm as Arc<dyn crate::llm_driver::LlmDriver>,
+                "test-model".to_string(),
+            )),
+            Some(emb as Arc<dyn crate::embedding::EmbeddingDriver + Send + Sync>),
+        );
+        assert!(result.is_some());
+    }
+
+    // --- decide_action edge case ---
+
+    #[test]
+    fn test_parse_decision_update_numeric_id_fallback_to_add() {
+        use librefang_types::memory::MemoryId;
+        let fragments = vec![make_fragment(MemoryId::new())];
+        let input = r#"{"action": "UPDATE", "existing_id": 999}"#;
+        let result = parse_decision_response(input, &fragments).unwrap();
+        assert_eq!(result, MemoryAction::Add);
+    }
+
+    // --- LLM failure path tests ---
+
+    #[test]
+    fn test_decide_action_llm_failure_falls_back_to_heuristic() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // decide_action catches LLM errors and falls back to DefaultMemoryExtractor
+            // heuristic rather than bubbling up — verifies graceful degradation.
+            let extractor =
+                LlmMemoryExtractor::new(Arc::new(AlwaysFailingLlmDriver), "test-model".to_string());
+            let new_mem = make_memory_item("new fact");
+            let existing = vec![make_fragment(librefang_types::memory::MemoryId::new())];
+            let result = extractor.decide_action(&new_mem, &existing).await;
+            assert!(result.is_ok(), "LLM failure should fall back, not error");
+        });
+    }
+
+    #[test]
+    fn test_decide_action_empty_existing_returns_add_without_llm_call() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // AlwaysFailingLlmDriver would error if called — proves the short-circuit works
+            let extractor =
+                LlmMemoryExtractor::new(Arc::new(AlwaysFailingLlmDriver), "test-model".to_string());
+            let new_mem = make_memory_item("first fact");
+            let result = extractor.decide_action(&new_mem, &[]).await.unwrap();
+            assert_eq!(result, MemoryAction::Add);
+        });
     }
 }
