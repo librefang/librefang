@@ -29,6 +29,7 @@ function runDispatchSelfTest(channelTypeFn) {
 }
 const { EchoTracker } = require('./lib/echo-tracker');
 const lidCache = require('./lib/lid-cache');
+const { createDedupTracker } = require('./lib/dedup-tracker');
 const {
   isLidJid,
   isGroupJid,
@@ -672,23 +673,13 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 // Message deduplication — Baileys can deliver the same message multiple times
 // ---------------------------------------------------------------------------
-const recentMessageIds = new Map(); // Map<msgId, timestamp>
-const DEDUP_WINDOW_MS = 60_000; // 1 minute
-
-function isDuplicate(msgId) {
-  if (!msgId) return false;
-  if (recentMessageIds.has(msgId)) return true;
-  recentMessageIds.set(msgId, Date.now());
-  return false;
-}
-
-// Cleanup dedup cache every 2 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, ts] of recentMessageIds) {
-    if (now - ts > DEDUP_WINDOW_MS) recentMessageIds.delete(id);
-  }
-}, 2 * 60 * 1000);
+// Two-phase (wasProcessed / markProcessed): Baileys re-emits `messages.upsert`
+// for a msgId whose previous handling ended in decrypt failure (null payload /
+// SessionError / PreKeyError). That retransmit is the ONLY window for
+// `assertSessions` to recover the Signal session. A mark-on-sight dedup
+// blocks the retransmit and strands the sender — 2026-04-16 outage, see
+// lib/dedup-tracker.js docstring.
+const dedupTracker = createDedupTracker({ windowMs: 60_000 });
 
 // ---------------------------------------------------------------------------
 // Step F: Escalation deduplication — debounce NOTIFY_OWNER per stranger
@@ -1156,8 +1147,10 @@ async function startConnection() {
       // Skip status broadcasts
       if (msg.key.remoteJid === 'status@broadcast') continue;
 
-      // Deduplication: skip if we've already processed this message ID
-      if (isDuplicate(msg.key.id)) {
+      // Read-only dedup check: do NOT mark here. Marking happens after the
+      // decrypt-failure branch below so WA's retransmit of a failed-decrypt
+      // msgId can reach the session-recovery path instead of being stranded.
+      if (dedupTracker.wasProcessed(msg.key.id)) {
         console.log(`[gateway] Skipping duplicate message: ${msg.key.id}`);
         continue;
       }
@@ -1170,6 +1163,20 @@ async function startConnection() {
 
       const sender = msg.key.remoteJid || '';
       const innerMsg = msg.message || {};
+
+      // Libsignal decrypt failure surfaces as `msg.message == null`. We
+      // intentionally do NOT mark the id as processed so that WA's
+      // retransmit of the same msgId can reach this branch again after
+      // the session recovers. Marking on first sight would strand the
+      // sender permanently behind a "duplicate message" skip.
+      if (!msg.message && !msg.key.fromMe && sender) {
+        console.warn(`[gateway] Decrypt failed for ${msg.key.id} from ${sender} — leaving unmarked so WA can retransmit`);
+        continue;
+      }
+
+      // Decrypt succeeded. Mark so subsequent retransmits of this msgId
+      // are deduped.
+      dedupTracker.markProcessed(msg.key.id);
 
       // --- FASE 4: Handle reactions ---
       if (innerMsg.reactionMessage) {
