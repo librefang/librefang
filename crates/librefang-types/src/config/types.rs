@@ -948,9 +948,15 @@ pub struct SkillsConfig {
     /// Whether user-installed skills from the skills directory are loaded. Default: true.
     pub load_user: bool,
     /// Extra skill directories to scan in addition to `~/.librefang/skills/`.
-    /// Each entry must be an absolute path.
+    /// Each entry must be an absolute path. Scanned read-only after the
+    /// primary skills dir; local skills with the same name win.
     #[serde(default)]
     pub extra_dirs: Vec<std::path::PathBuf>,
+    /// Names of skills to skip at load time. Useful for quickly disabling
+    /// a skill (agent-evolved or marketplace-installed) without deleting
+    /// its directory. Matching is case-sensitive on the skill manifest name.
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 impl Default for SkillsConfig {
@@ -958,6 +964,7 @@ impl Default for SkillsConfig {
         Self {
             load_user: true,
             extra_dirs: Vec::new(),
+            disabled: Vec::new(),
         }
     }
 }

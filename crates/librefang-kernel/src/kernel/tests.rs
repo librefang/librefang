@@ -1568,3 +1568,174 @@ fn sanitize_reviewer_line_strips_newlines_and_brackets() {
     assert!(!out.contains(']'));
     assert!(out.contains('('));
 }
+
+// ── SkillsConfig wiring tests ──────────────────────────────────────
+
+/// Write a minimal valid skill.toml at `path/<name>/skill.toml` so the
+/// registry's `load_skill` accepts it. Also drops a prompt_context.md
+/// to exercise the progressive-loading branch.
+fn install_test_skill(skills_parent: &std::path::Path, name: &str, tags: &[&str]) {
+    let dir = skills_parent.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let tag_toml = tags
+        .iter()
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let toml = format!(
+        "[skill]\n\
+         name = \"{name}\"\n\
+         version = \"0.1.0\"\n\
+         description = \"test skill\"\n\
+         author = \"test\"\n\
+         tags = [{tag_toml}]\n\
+         \n\
+         [runtime]\n\
+         type = \"promptonly\"\n\
+         \n\
+         [source]\n\
+         type = \"local\"\n"
+    );
+    std::fs::write(dir.join("skill.toml"), toml).unwrap();
+    std::fs::write(dir.join("prompt_context.md"), "# Test\n\nstub").unwrap();
+}
+
+#[test]
+fn test_skills_config_disabled_list_filters_at_boot() {
+    // Operator-maintained `skills.disabled` must take effect at boot so
+    // a skill the operator named stays excluded from the registry even
+    // though its directory exists on disk. Without the wiring added in
+    // this commit, `set_disabled_skills` was dead code and this filter
+    // did nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let skills_parent = home_dir.join("skills");
+    install_test_skill(&skills_parent, "kept-skill", &[]);
+    install_test_skill(&skills_parent, "blocked-skill", &[]);
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.skills.disabled = vec!["blocked-skill".to_string()];
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let registry = kernel.skill_registry.read().unwrap();
+    assert!(
+        registry.get("kept-skill").is_some(),
+        "non-disabled skill must load"
+    );
+    assert!(
+        registry.get("blocked-skill").is_none(),
+        "disabled skill must NOT load even though the directory exists"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_skills_config_extra_dirs_loaded_as_overlay() {
+    // Skills from `extra_dirs` should be visible on top of the primary
+    // skills dir — and locally-installed skills with the same name
+    // should win over the external overlay (so operators can override a
+    // shared skill locally).
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // External skill lives outside ~/.librefang
+    let external_dir = dir.path().join("external-skills");
+    std::fs::create_dir_all(&external_dir).unwrap();
+    install_test_skill(&external_dir, "external-only", &["shared-tag"]);
+    // Also install a "collision" skill in both — local should win.
+    install_test_skill(&home_dir.join("skills"), "both-places", &["local"]);
+    install_test_skill(&external_dir, "both-places", &["external"]);
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.skills.extra_dirs = vec![external_dir.clone()];
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let registry = kernel.skill_registry.read().unwrap();
+    assert!(
+        registry.get("external-only").is_some(),
+        "external skill must load"
+    );
+    let both = registry
+        .get("both-places")
+        .expect("collision skill should exist");
+    assert_eq!(
+        both.manifest.skill.tags,
+        vec!["local".to_string()],
+        "local install must win over external overlay"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_reload_skills_preserves_disabled_and_extra_dirs() {
+    // Hot-reload used to instantiate a fresh `SkillRegistry` without
+    // re-applying policy, so the disabled list and extra_dirs overlay
+    // silently vanished after the first `skill_evolve_*` call. Confirm
+    // both survive `reload_skills()`.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let external_dir = dir.path().join("overlay");
+    std::fs::create_dir_all(&external_dir).unwrap();
+    install_test_skill(&external_dir, "overlay-skill", &[]);
+    install_test_skill(&home_dir.join("skills"), "keep-me", &[]);
+    install_test_skill(&home_dir.join("skills"), "silence-me", &[]);
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.skills.disabled = vec!["silence-me".to_string()];
+    config.skills.extra_dirs = vec![external_dir.clone()];
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    // Baseline
+    {
+        let reg = kernel.skill_registry.read().unwrap();
+        assert!(reg.get("keep-me").is_some());
+        assert!(reg.get("silence-me").is_none());
+        assert!(reg.get("overlay-skill").is_some());
+    }
+
+    // Trigger reload — before the wiring fix this would re-enable
+    // "silence-me" and drop "overlay-skill".
+    kernel.reload_skills();
+
+    let reg = kernel.skill_registry.read().unwrap();
+    assert!(
+        reg.get("keep-me").is_some(),
+        "normal skill must stay loaded across reload"
+    );
+    assert!(
+        reg.get("silence-me").is_none(),
+        "disabled skill must STAY disabled across reload"
+    );
+    assert!(
+        reg.get("overlay-skill").is_some(),
+        "extra_dirs overlay must be re-applied on reload"
+    );
+    drop(reg);
+
+    kernel.shutdown();
+}

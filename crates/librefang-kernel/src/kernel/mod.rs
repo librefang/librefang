@@ -1797,9 +1797,19 @@ impl LibreFangKernel {
             "Model catalog: {total_count} models, {available_count} available from configured providers ({local_count} local)"
         );
 
-        // Initialize skill registry
+        // Initialize skill registry. Before `load_all()` we set the
+        // operator-supplied disabled list so the loader can skip those
+        // names at manifest-read time (avoids scanning, prompt-injection
+        // checks, and hot-reload traffic for skills the operator never
+        // wants active). After the primary dir we fold in any
+        // `extra_dirs` — read-only overlays whose skills do NOT override
+        // locally-installed skills of the same name (see
+        // `load_external_dirs`). The exact same order is repeated in
+        // `reload_skills` so hot-reload doesn't silently forget either
+        // field.
         let skills_dir = config.home_dir.join("skills");
         let mut skill_registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
+        skill_registry.set_disabled_skills(config.skills.disabled.clone());
 
         match skill_registry.load_all() {
             Ok(count) => {
@@ -1809,6 +1819,20 @@ impl LibreFangKernel {
             }
             Err(e) => {
                 warn!("Failed to load skill registry: {e}");
+            }
+        }
+        if !config.skills.extra_dirs.is_empty() {
+            match skill_registry.load_external_dirs(&config.skills.extra_dirs) {
+                Ok(count) if count > 0 => {
+                    info!(
+                        "Loaded {count} external skill(s) from {} extra dir(s)",
+                        config.skills.extra_dirs.len()
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("Failed to load external skill dirs: {e}");
+                }
             }
         }
         // In Stable mode, freeze the skill registry
@@ -9998,8 +10022,21 @@ system_prompt = "You are a helpful assistant."
         }
         let skills_dir = self.home_dir_boot.join("skills");
         let mut fresh = librefang_skills::registry::SkillRegistry::new(skills_dir);
+        // Re-apply operator policy on reload: without this the disabled
+        // list and extra_dirs overlay would silently vanish every time
+        // the kernel hot-reloads (e.g., after `skill_evolve_create`),
+        // re-enabling skills the operator had explicitly turned off.
+        let cfg = self.config.load();
+        fresh.set_disabled_skills(cfg.skills.disabled.clone());
         let user = fresh.load_all().unwrap_or(0);
-        info!(user, "Skill registry hot-reloaded");
+        let external = if !cfg.skills.extra_dirs.is_empty() {
+            fresh
+                .load_external_dirs(&cfg.skills.extra_dirs)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        info!(user, external, "Skill registry hot-reloaded");
         *registry = fresh;
 
         // Invalidate cached skill metadata so next message picks up changes
