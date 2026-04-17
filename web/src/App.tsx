@@ -173,6 +173,15 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
     registryLink('workflows',  rc?.workflows.title || 'Workflows'),
     registryLink('channels',   rc?.channels.title  || 'Channels'),
   ]
+  // On-page sections — the homepage anchors we removed from the flat nav.
+  // Links are full paths with a hash so they work whether the visitor is on
+  // the homepage (anchor jump) or on a /skills-style page (cross-page nav).
+  const homeHref = lang === 'en' ? '/' : `/${lang}/`
+  const anchorLinks: NavLink[] = [
+    { label: t.nav.architecture, href: `${homeHref}#architecture` },
+    { label: t.nav.workflows || t.workflows?.label || 'Workflows', href: `${homeHref}#workflows` },
+    { label: t.nav.performance, href: `${homeHref}#performance` },
+  ]
   const links: NavLink[] = [
     { label: t.nav.install, href: '#install' },
     { label: t.nav.downloads || 'Downloads', href: '#downloads' },
@@ -206,18 +215,46 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
             </button>
             {featuresOpen && (
               <div className="absolute left-0 mt-2 w-64 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50 py-1">
+                <div className="px-4 pt-2 pb-1 text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest">
+                  {t.nav.registry || 'Registry'}
+                </div>
                 {featureLinks.map(link => (
                   <a
                     key={link.label}
                     href={link.href}
                     onClick={() => { setFeaturesOpen(false); trackEvent('click', `nav_feature_${link.href}`) }}
                     className={cn(
-                      'flex items-center justify-between px-4 py-2.5 text-sm transition-colors',
+                      'flex items-center justify-between px-4 py-2 text-sm transition-colors',
                       link.highlight ? 'text-amber-600 dark:text-amber-300 hover:bg-amber-500/10' : 'text-gray-700 dark:text-gray-300 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-black/5 dark:hover:bg-white/5'
                     )}
                   >
                     <span>{link.label}</span>
                     {link.highlight && <Sparkles className="w-3.5 h-3.5" />}
+                  </a>
+                ))}
+                <div className="border-t border-black/10 dark:border-white/10 mt-2 pt-2" />
+                <div className="px-4 pb-1 text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest">
+                  {t.nav.learnMore || 'Learn More'}
+                </div>
+                {anchorLinks.map(link => (
+                  <a
+                    key={link.label}
+                    href={link.href}
+                    onClick={(e) => {
+                      // If already on the homepage, do smooth-scroll instead of full nav.
+                      if (window.location.pathname === homeHref || window.location.pathname === homeHref.replace(/\/$/, '')) {
+                        const hash = link.href.split('#')[1]
+                        if (hash) {
+                          e.preventDefault()
+                          const el = document.getElementById(hash)
+                          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                        }
+                      }
+                      setFeaturesOpen(false)
+                    }}
+                    className="flex items-center justify-between px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                  >
+                    <span>{link.label}</span>
                   </a>
                 ))}
               </div>
@@ -319,7 +356,7 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
         <div className="md:hidden bg-surface-100 border-t border-black/10 dark:border-white/5 px-6 py-4 space-y-1">
           <div className="pb-1">
             <div className="text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest py-1.5">
-              {t.nav.features || 'Features'}
+              {t.nav.registry || 'Registry'}
             </div>
             {featureLinks.map(link => (
               <a
@@ -335,6 +372,19 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
               >
                 <span>{link.label}</span>
                 {link.highlight && <Sparkles className="w-3.5 h-3.5" />}
+              </a>
+            ))}
+            <div className="text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest py-1.5 mt-2">
+              {t.nav.learnMore || 'Learn More'}
+            </div>
+            {anchorLinks.map(link => (
+              <a
+                key={link.label}
+                href={link.href}
+                onClick={() => setOpen(false)}
+                className="block py-2 pl-3 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium"
+              >
+                {link.label}
               </a>
             ))}
           </div>
