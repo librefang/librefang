@@ -725,6 +725,98 @@ pub fn set_agent_enabled(
     Ok(())
 }
 
+/// Event-driven trigger: called from the `AgentLoopEnd` hook whenever any
+/// agent finishes a turn. Cheap early-exits for the globally-disabled and
+/// not-opted-in cases so the hot path (every turn for every agent) stays
+/// near-free. The actual gate check + dream invocation run on a detached
+/// tokio task so we never block the agent loop's return path on a lock
+/// stat or SQL query.
+///
+/// This is the primary trigger path. `spawn_scheduler` below is a sparse
+/// backstop for agents that may sit opted-in without ever turning.
+pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
+    {
+        let cfg = kernel.config_snapshot();
+        if !cfg.auto_dream.enabled {
+            return;
+        }
+    }
+    let enrolled = kernel
+        .agent_registry()
+        .get(agent_id)
+        .map(|e| e.manifest.auto_dream_enabled)
+        .unwrap_or(false);
+    if !enrolled {
+        return;
+    }
+
+    tokio::spawn(async move {
+        match check_agent_gates(&kernel, agent_id, false).await {
+            AgentGateResult::Fire { prior_mtime } => {
+                tracing::debug!(agent = %agent_id, "auto_dream: turn-end triggered dream");
+                // Same invocation mode as the scheduler: `None` for the
+                // abort channel so this dream runs to completion or its
+                // own timeout. Manual triggers remain the only
+                // abort-capable entry point.
+                run_dream(kernel, agent_id, prior_mtime, None).await;
+            }
+            AgentGateResult::TooSoon { hours_remaining } => {
+                tracing::trace!(agent = %agent_id, hours_remaining, "auto_dream: turn-end, time gate not open");
+            }
+            AgentGateResult::NoActivity {
+                sessions_since,
+                required,
+            } => {
+                tracing::trace!(agent = %agent_id, sessions_since, required, "auto_dream: turn-end, session gate not met");
+            }
+            AgentGateResult::LockHeld => {
+                tracing::debug!(agent = %agent_id, "auto_dream: turn-end, lock held (dream in progress)");
+            }
+            AgentGateResult::Skipped(reason) => {
+                tracing::warn!(agent = %agent_id, reason, "auto_dream: turn-end skipped");
+            }
+        }
+    });
+}
+
+/// `HookHandler` wiring the runtime's `AgentLoopEnd` event to auto-dream's
+/// event-driven trigger. Registered once during `LibreFangKernel::set_self_handle`
+/// so it can hold a `Weak<LibreFangKernel>` and upgrade on fire.
+pub struct AutoDreamTurnEndHook {
+    kernel: std::sync::Weak<LibreFangKernel>,
+}
+
+impl AutoDreamTurnEndHook {
+    pub fn new(kernel: std::sync::Weak<LibreFangKernel>) -> Self {
+        Self { kernel }
+    }
+}
+
+impl librefang_runtime::hooks::HookHandler for AutoDreamTurnEndHook {
+    fn on_event(&self, ctx: &librefang_runtime::hooks::HookContext) -> Result<(), String> {
+        use librefang_types::agent::HookEvent;
+        // Not our event — observe-only, silent no-op. AgentLoopEnd is the
+        // only one we care about; the registry filters by event type
+        // already, so this branch is defensive.
+        if ctx.event != HookEvent::AgentLoopEnd {
+            return Ok(());
+        }
+        // Kernel has been dropped (process shutting down) — nothing to do.
+        let Some(kernel) = self.kernel.upgrade() else {
+            return Ok(());
+        };
+        let Ok(uuid) = uuid::Uuid::parse_str(ctx.agent_id) else {
+            tracing::debug!(
+                agent_id = %ctx.agent_id,
+                "auto_dream: AgentLoopEnd hook saw non-UUID agent_id, skipping",
+            );
+            return Ok(());
+        };
+        maybe_fire_on_turn_end(kernel, AgentId(uuid));
+        Ok(())
+    }
+}
+
 pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
     tokio::spawn(async move {
         {
@@ -734,7 +826,7 @@ pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
                     min_hours = cfg.auto_dream.min_hours,
                     min_sessions = cfg.auto_dream.min_sessions,
                     check_interval_s = cfg.auto_dream.check_interval_secs,
-                    "auto_dream: enabled (per-agent opt-in via manifest)"
+                    "auto_dream: enabled (event-driven via AgentLoopEnd hook; scheduler is sparse backstop)"
                 );
             } else {
                 tracing::debug!("auto_dream: disabled");
@@ -764,11 +856,14 @@ pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
             for (agent_id, name) in enrolled_agents(&kernel) {
                 match check_agent_gates(&kernel, agent_id, false).await {
                     AgentGateResult::Fire { prior_mtime } => {
-                        // Scheduled dreams run inline — serial token spend.
-                        // `None` for abort_rx: scheduled dreams can't be
-                        // cancelled individually without stalling the
-                        // queue; users who want to interrupt wait for the
-                        // dream's own timeout or disable auto-dream.
+                        // Scheduled (backstop) dreams run inline — serial
+                        // token spend. This path mostly fires for opted-in
+                        // agents that never take a turn (channel bots
+                        // awaiting inbound traffic); active agents are
+                        // already covered by `maybe_fire_on_turn_end`
+                        // invoked from the AgentLoopEnd hook. `None` for
+                        // abort_rx: backstop dreams aren't individually
+                        // cancellable without stalling the queue.
                         run_dream(Arc::clone(&kernel), agent_id, prior_mtime, None).await;
                     }
                     AgentGateResult::TooSoon { hours_remaining } => {
@@ -1085,4 +1180,65 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+    use librefang_runtime::hooks::{HookContext, HookHandler};
+    use librefang_types::agent::HookEvent;
+
+    /// Hook must handle a dangling `Weak<LibreFangKernel>` (the kernel was
+    /// dropped, e.g. shutdown between turn end and hook dispatch) without
+    /// panicking. A panicking hook would crash the agent loop thread.
+    #[test]
+    fn hook_with_dropped_kernel_is_silent_noop() {
+        let hook = AutoDreamTurnEndHook::new(std::sync::Weak::new());
+        let ctx = HookContext {
+            agent_name: "probe",
+            agent_id: &uuid::Uuid::new_v4().to_string(),
+            event: HookEvent::AgentLoopEnd,
+            data: serde_json::json!({"reason": "normal_completion"}),
+        };
+        assert!(hook.on_event(&ctx).is_ok());
+    }
+
+    /// Hook must tolerate a non-UUID `agent_id` in the context rather than
+    /// erroring or panicking. Some internal agents (synthetic probe ids,
+    /// historical data) could surface a non-uuid; silent skip is safer than
+    /// crashing the hook registry.
+    #[test]
+    fn hook_with_non_uuid_agent_id_is_silent_noop() {
+        let hook = AutoDreamTurnEndHook::new(std::sync::Weak::new());
+        let ctx = HookContext {
+            agent_name: "probe",
+            agent_id: "not-a-uuid",
+            event: HookEvent::AgentLoopEnd,
+            data: serde_json::json!({}),
+        };
+        assert!(hook.on_event(&ctx).is_ok());
+    }
+
+    /// Other hook events (BeforeToolCall, etc.) must be silent no-ops —
+    /// auto-dream only reacts to AgentLoopEnd.
+    #[test]
+    fn hook_ignores_unrelated_events() {
+        let hook = AutoDreamTurnEndHook::new(std::sync::Weak::new());
+        for event in [
+            HookEvent::BeforeToolCall,
+            HookEvent::AfterToolCall,
+            HookEvent::BeforePromptBuild,
+        ] {
+            let ctx = HookContext {
+                agent_name: "probe",
+                agent_id: &uuid::Uuid::new_v4().to_string(),
+                event,
+                data: serde_json::json!({}),
+            };
+            assert!(
+                hook.on_event(&ctx).is_ok(),
+                "event {event:?} should be ignored"
+            );
+        }
+    }
 }
