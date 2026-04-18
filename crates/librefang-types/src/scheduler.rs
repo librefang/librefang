@@ -185,10 +185,11 @@ pub struct CronJob {
     pub action: CronAction,
     /// Where to deliver the result.
     pub delivery: CronDelivery,
-    /// Session mode override for this cron job.
-    /// When `None`, inherits the agent's manifest `session_mode`.
-    /// When `Some(New)`, creates a fresh session for each execution.
-    /// When `Some(Persistent)`, reuses the cron channel session (default behavior).
+    /// Session mode for this cron job's agent invocations.
+    /// When `None` or unset, defaults to `New` so session history does not
+    /// accumulate across fires — the old behavior caused token exhaustion
+    /// after ~1.2M tokens (see #2647).
+    /// Set to `Some(Persistent)` to opt back into the pre-#2647 behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_mode: Option<crate::agent::SessionMode>,
     /// When the job was created.
