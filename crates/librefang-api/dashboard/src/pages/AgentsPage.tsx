@@ -342,7 +342,15 @@ export function AgentsPage() {
     setTomlParseError(null);
     setTemplateName("");
     setTemplateCustomName("");
-    spawnMutation.reset();
+    // Don't reset while a spawn is in flight — reset() flips isPending
+    // back to false, and since the fetch isn't actually aborted the user
+    // could reopen the modal and submit again before the first response
+    // lands, producing a duplicate-spawn "already exists" error (the
+    // exact bug #2741 was meant to fix). Once the original request
+    // settles, isPending goes false on its own.
+    if (!spawnMutation.isPending) {
+      spawnMutation.reset();
+    }
   };
 
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
