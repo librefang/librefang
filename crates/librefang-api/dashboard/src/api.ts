@@ -2916,6 +2916,10 @@ export interface AutoDreamAgentStatus {
   next_eligible_at_ms: number;
   hours_since_last: number;
   sessions_since_last: number;
+  /** Resolved min_hours (manifest override or global default). */
+  effective_min_hours: number;
+  /** Resolved min_sessions (manifest override or global default; 0 = gate disabled). */
+  effective_min_sessions: number;
   lock_path: string;
   progress: AutoDreamProgress | null;
   can_abort: boolean;

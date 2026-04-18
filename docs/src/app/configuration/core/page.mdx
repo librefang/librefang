@@ -124,6 +124,16 @@ A dream fires for an agent when all gates hold: `enabled = true`, the agent's ma
 - **API**: `PUT /api/auto-dream/agents/{id}/enabled` with body `{"enabled": true | false}`. The scheduler picks up the new state on its next tick.
 - **Manifest**: set `auto_dream_enabled = true` in the agent's `.toml` for a persistent opt-in that survives restarts.
 
+**Per-agent threshold overrides** (optional) let you tune the schedule heterogeneously. Set either field on the agent's manifest to override the global `[auto_dream]` default — `None` (the default) inherits the global:
+
+```toml
+auto_dream_enabled = true
+auto_dream_min_hours = 168    # weekly, for quiet agents
+auto_dream_min_sessions = 1   # fire after every session, for chatty ones
+```
+
+The status endpoint returns the resolved `effective_min_hours` / `effective_min_sessions` per agent so the dashboard can show what is actually in force.
+
 **Runtime tool restriction**: inside a dream, the kernel clamps the tool allowlist to `memory_store` / `memory_recall` / `memory_list` only, regardless of what the agent's manifest normally permits. This is defence-in-depth against prompt-injected dreams calling shell or network-mutating tools.
 
 **Manual controls**: `POST /api/auto-dream/agents/{id}/trigger` bypasses the time and session gates but still respects the lock and the opt-in flag. `POST /api/auto-dream/agents/{id}/abort` cancels an in-flight manual dream and rolls the lock mtime back so the time gate reopens. `GET /api/auto-dream/status` returns live progress, including token usage and cost for completed dreams.

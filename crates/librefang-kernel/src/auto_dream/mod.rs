@@ -202,13 +202,39 @@ enum AgentGateResult {
     Skipped(String),
 }
 
+/// Resolve the effective `(min_hours, min_sessions)` for an agent: manifest
+/// override wins over global config when `Some`. Separated out so the
+/// status endpoint and the scheduler converge on the same values.
+fn effective_thresholds(kernel: &LibreFangKernel, agent_id: AgentId) -> (f64, u32) {
+    let cfg = kernel.config_snapshot();
+    let (hours, sessions) = kernel
+        .agent_registry()
+        .get(agent_id)
+        .map(|e| {
+            (
+                e.manifest.auto_dream_min_hours,
+                e.manifest.auto_dream_min_sessions,
+            )
+        })
+        .unwrap_or((None, None));
+    (
+        hours.unwrap_or(cfg.auto_dream.min_hours),
+        sessions.unwrap_or(cfg.auto_dream.min_sessions),
+    )
+}
+
 async fn check_agent_gates(
     kernel: &LibreFangKernel,
     agent_id: AgentId,
     bypass_time_gate: bool,
 ) -> AgentGateResult {
-    let cfg = kernel.config_snapshot();
     let lock = lock_for_agent(kernel, agent_id);
+
+    // Per-agent overrides take precedence over the global defaults. A quiet
+    // agent can set `auto_dream_min_hours = 168` for weekly dreams; a chatty
+    // one can set `auto_dream_min_sessions = 1` to consolidate after every
+    // session. Fall back to config.toml when unset.
+    let (effective_min_hours, effective_min_sessions) = effective_thresholds(kernel, agent_id);
 
     let last_at = match lock.read_last_consolidated_at().await {
         Ok(t) => t,
@@ -218,22 +244,22 @@ async fn check_agent_gates(
     if !bypass_time_gate {
         let now = now_ms();
         let hours_since = ((now.saturating_sub(last_at)) as f64) / 3_600_000.0;
-        if hours_since < cfg.auto_dream.min_hours {
+        if hours_since < effective_min_hours {
             return AgentGateResult::TooSoon {
-                hours_remaining: cfg.auto_dream.min_hours - hours_since,
+                hours_remaining: effective_min_hours - hours_since,
             };
         }
     }
 
-    if cfg.auto_dream.min_sessions > 0 && !bypass_time_gate {
+    if effective_min_sessions > 0 && !bypass_time_gate {
         match kernel
             .memory_substrate()
             .count_agent_sessions_touched_since(agent_id, last_at)
         {
-            Ok(count) if count < cfg.auto_dream.min_sessions => {
+            Ok(count) if count < effective_min_sessions => {
                 return AgentGateResult::NoActivity {
                     sessions_since: count,
-                    required: cfg.auto_dream.min_sessions,
+                    required: effective_min_sessions,
                 };
             }
             Ok(_) => {}
@@ -668,6 +694,13 @@ pub struct AutoDreamAgentStatus {
     pub next_eligible_at_ms: u64,
     pub hours_since_last: f64,
     pub sessions_since_last: u32,
+    /// Resolved `min_hours` for this agent — manifest override if set,
+    /// otherwise the global `[auto_dream] min_hours`.
+    pub effective_min_hours: f64,
+    /// Resolved `min_sessions` for this agent — manifest override if set,
+    /// otherwise the global `[auto_dream] min_sessions`. `0` means the
+    /// session-count gate is disabled.
+    pub effective_min_sessions: u32,
     pub lock_path: String,
     /// Current or most recent dream progress for this agent. `None` when
     /// the agent has never dreamed on this daemon's uptime.
@@ -690,11 +723,15 @@ pub async fn current_status(kernel: &LibreFangKernel) -> AutoDreamStatus {
     let cfg = kernel.config_snapshot();
     let lock_dir = lock_dir_for_kernel(kernel);
     let now = now_ms();
-    let min_ms = (cfg.auto_dream.min_hours * 3_600_000.0) as u64;
     let progress_map = all_progress();
 
     let mut agents = Vec::new();
     for (agent_id, name, enabled) in all_agents_dream_state(kernel) {
+        // Per-agent effective thresholds may diverge from the global config
+        // when the manifest overrides either knob.
+        let (eff_hours, eff_sessions) = effective_thresholds(kernel, agent_id);
+        let min_ms = (eff_hours * 3_600_000.0) as u64;
+
         // Runtime stats (lock, sessions-since) only matter for opted-in
         // agents. For opt-out agents we still return a row so the settings
         // UI can render a toggle — but fields stay at zero/defaults.
@@ -736,6 +773,8 @@ pub async fn current_status(kernel: &LibreFangKernel) -> AutoDreamStatus {
             next_eligible_at_ms: last.saturating_add(min_ms),
             hours_since_last: hours_since,
             sessions_since_last: sessions_since,
+            effective_min_hours: eff_hours,
+            effective_min_sessions: eff_sessions,
             lock_path,
             progress,
             can_abort,
