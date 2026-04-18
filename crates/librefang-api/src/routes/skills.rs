@@ -4452,6 +4452,23 @@ fn serialize_catalog_transport(t: &librefang_extensions::McpCatalogTransport) ->
     }
 }
 
+/// Collect catalog ids that are "already installed" for the purposes of
+/// the catalog list/detail endpoints. Includes both `template_id` matches
+/// (server was installed via the template) and `name` matches (manually
+/// configured server occupies the catalog entry's id), so the endpoints
+/// agree with `add_mcp_server`'s 409 name-collision guard and the UI
+/// doesn't offer Install on entries that will definitely fail.
+fn collect_installed_catalog_ids(state: &Arc<AppState>) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for s in state.kernel.config_ref().mcp_servers.iter() {
+        if let Some(tid) = s.template_id.clone() {
+            ids.insert(tid);
+        }
+        ids.insert(s.name.clone());
+    }
+    ids
+}
+
 fn render_catalog_entry(
     entry: &librefang_extensions::McpCatalogEntry,
     installed_template_ids: &std::collections::HashSet<String>,
@@ -4487,22 +4504,7 @@ fn render_catalog_entry(
     )
 )]
 pub async fn list_mcp_catalog(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Build the set of catalog ids that are "blocked" from re-install —
-    // either because a server was installed via the template (matching
-    // `template_id`) OR because a manually-configured server already
-    // occupies the same name. The install path rejects name collisions
-    // with 409, so showing those entries as Available would surface an
-    // Install button that deterministically fails.
-    let mut installed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for s in state.kernel.config_ref().mcp_servers.iter() {
-        if let Some(tid) = s.template_id.clone() {
-            installed_ids.insert(tid);
-        }
-        // The name may equal a catalog id even without a template_id
-        // (hand-edited `[[mcp_servers]]` entry). Include it so the
-        // catalog view matches the install endpoint's acceptance test.
-        installed_ids.insert(s.name.clone());
-    }
+    let installed_ids = collect_installed_catalog_ids(&state);
 
     let catalog = state
         .kernel
@@ -4535,13 +4537,7 @@ pub async fn get_mcp_catalog_entry(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let installed_ids: std::collections::HashSet<String> = state
-        .kernel
-        .config_ref()
-        .mcp_servers
-        .iter()
-        .filter_map(|s| s.template_id.clone())
-        .collect();
+    let installed_ids = collect_installed_catalog_ids(&state);
 
     let catalog = state
         .kernel
