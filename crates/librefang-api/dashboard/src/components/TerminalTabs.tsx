@@ -3,18 +3,15 @@ import {
   useCallback,
   useRef,
   useEffect,
-  useMemo,
   type RefObject,
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Plus, X, AlertCircle } from "lucide-react";
+import { Plus, X } from "lucide-react";
 import { authHeader } from "../api";
 import { useUIStore } from "../lib/store";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
-import { Modal } from "./ui/Modal";
-import { Button } from "./ui/Button";
 
 interface WindowInfo {
   id: string;
@@ -31,7 +28,6 @@ interface TerminalTabsProps {
   onSwitchWindow: (windowId: string) => void;
   terminalRef: RefObject<Terminal | null>;
   fitAddonRef: RefObject<FitAddon | null>;
-  shellName: string;
 }
 
 const WINDOW_NAME_RE = /^[A-Za-z0-9 ._-]{1,64}$/;
@@ -57,16 +53,14 @@ export function TerminalTabs({
   onSwitchWindow,
   terminalRef,
   fitAddonRef,
-  shellName,
 }: TerminalTabsProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { data: windows = [] } = useTmuxWindows(tmuxAvailable);
-  const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const editInputRef = useRef<HTMLInputElement>(null);
   const settleTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const windowsRef = useRef<WindowInfo[]>([]);
 
@@ -74,8 +68,11 @@ export function TerminalTabs({
     windowsRef.current = windows;
   }, [windows]);
 
+  const addToast = useUIStore((s) => s.addToast);
+
   const handleTabClick = useCallback(
     (windowId: string) => {
+      if (editingId === windowId) return;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       ws.send(JSON.stringify({ type: "switch_window", window: windowId }));
       onSwitchWindow(windowId);
@@ -92,7 +89,7 @@ export function TerminalTabs({
       }, 100);
       settleTimeoutsRef.current = [tid];
     },
-    [ws, onSwitchWindow, terminalRef, fitAddonRef]
+    [ws, onSwitchWindow, terminalRef, fitAddonRef, editingId]
   );
 
   useEffect(() => {
@@ -107,80 +104,92 @@ export function TerminalTabs({
     onSwitchWindow(active ? active.id : windows[0].id);
   }, [windows, activeWindowId, onSwitchWindow]);
 
-  // Auto-focus the input when the modal opens.
   useEffect(() => {
-    if (!isCreateOpen) return;
-    const tid = setTimeout(() => {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }, 50);
-    return () => clearTimeout(tid);
-  }, [isCreateOpen]);
-
-  const suggestedName = useMemo(() => {
-    const base = shellName || "sh";
-    const used = new Set(windows.map((w) => w.name));
-    for (let i = windows.length + 1; i <= maxWindows + 1; i++) {
-      const candidate = `${base}-${i}`;
-      if (!used.has(candidate)) return candidate;
+    if (editingId) {
+      const tid = setTimeout(() => {
+        editInputRef.current?.focus();
+        editInputRef.current?.select();
+      }, 0);
+      return () => clearTimeout(tid);
     }
-    return `${base}-${Date.now().toString().slice(-4)}`;
-  }, [shellName, windows, maxWindows]);
-
-  const addToast = useUIStore((s) => s.addToast);
-
-  const openCreateModal = useCallback(() => {
-    setNewName(suggestedName);
-    setCreateError(null);
-    setIsCreateOpen(true);
-  }, [suggestedName]);
-
-  const closeCreateModal = useCallback(() => {
-    if (creating) return;
-    setIsCreateOpen(false);
-    setNewName("");
-    setCreateError(null);
-  }, [creating]);
-
-  const trimmedName = newName.trim();
-  const nameValid = trimmedName === "" || WINDOW_NAME_RE.test(trimmedName);
+  }, [editingId]);
 
   const handleCreate = useCallback(async () => {
-    const name = newName.trim();
-    if (name !== "" && !WINDOW_NAME_RE.test(name)) {
-      setCreateError(t("terminal.tabs.name_invalid"));
-      return;
-    }
-
+    if (creating) return;
     setCreating(true);
-    setCreateError(null);
     try {
       const res = await fetch("/api/terminal/windows", {
         method: "POST",
         headers: { ...authHeader(), "Content-Type": "application/json" },
-        body: JSON.stringify(name ? { name } : {}),
+        body: JSON.stringify({}),
       });
       if (res.status === 429) {
-        setCreateError(t("terminal.tabs.limit_reached"));
+        addToast(t("terminal.tabs.limit_reached"), "error");
         return;
       }
       if (!res.ok) {
-        setCreateError(t("terminal.tabs.create_failed"));
+        addToast(t("terminal.tabs.create_failed"), "error");
         return;
       }
       queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
-      setNewName("");
-      setIsCreateOpen(false);
-      addToast(t("terminal.tabs.create_success"), "success");
     } catch {
-      setCreateError(t("terminal.tabs.create_failed"));
+      addToast(t("terminal.tabs.create_failed"), "error");
     } finally {
       setCreating(false);
     }
-  }, [newName, queryClient, t, addToast]);
+  }, [creating, queryClient, addToast, t]);
+
+  const startRename = useCallback((w: WindowInfo) => {
+    setEditingId(w.id);
+    setEditValue(w.name);
+  }, []);
+
+  const cancelRename = useCallback(() => {
+    setEditingId(null);
+    setEditValue("");
+  }, []);
+
+  const commitRename = useCallback(async () => {
+    if (!editingId) return;
+    const name = editValue.trim();
+    const current = windowsRef.current.find((w) => w.id === editingId);
+    // Nothing changed or empty → just close the editor.
+    if (!current || name === "" || name === current.name) {
+      cancelRename();
+      return;
+    }
+    if (!WINDOW_NAME_RE.test(name)) {
+      addToast(t("terminal.tabs.name_invalid"), "error");
+      return;
+    }
+    // Optimistically update the cache so the tab label swaps instantly; we
+    // revert by re-fetching if the request fails.
+    queryClient.setQueryData<WindowInfo[]>(["terminal-windows"], (prev) =>
+      prev?.map((w) => (w.id === editingId ? { ...w, name } : w))
+    );
+    const idToRename = editingId;
+    cancelRename();
+    try {
+      const res = await fetch(
+        `/api/terminal/windows/${encodeURIComponent(idToRename)}`,
+        {
+          method: "PATCH",
+          headers: { ...authHeader(), "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        }
+      );
+      if (!res.ok) {
+        addToast(t("terminal.tabs.rename_failed"), "error");
+      }
+    } catch {
+      addToast(t("terminal.tabs.rename_failed"), "error");
+    } finally {
+      queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
+    }
+  }, [editingId, editValue, queryClient, cancelRename, addToast, t]);
 
   const handleCloseTab = useCallback(
-    async (windowId: string, e: React.MouseEvent) => {
+    async (windowId: string, e: React.MouseEvent | React.KeyboardEvent) => {
       e.stopPropagation();
       const currentWindows = windowsRef.current;
       if (currentWindows.length <= 1) return;
@@ -221,137 +230,95 @@ export function TerminalTabs({
   const atLimit = windows.length >= maxWindows;
 
   return (
-    <>
-      <div className="flex items-center gap-1 px-2 py-1 bg-gray-900/80 border-b border-gray-700/50 overflow-x-auto shrink-0">
-        {windows.map((w) => (
-          <button
+    <div className="flex items-center gap-1 px-2 py-1 bg-gray-900/80 border-b border-gray-700/50 overflow-x-auto shrink-0">
+      {windows.map((w) => {
+        const isActive = w.id === activeWindowId;
+        const isEditing = editingId === w.id;
+        return (
+          <div
             key={w.id}
             onClick={() => handleTabClick(w.id)}
-            className={`px-3 py-1 rounded-t text-sm whitespace-nowrap transition-colors ${
-              w.id === activeWindowId
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              startRename(w);
+            }}
+            onAuxClick={(e) => {
+              // Middle-click closes, matching VS Code / browser tab behavior.
+              if (e.button === 1 && windows.length > 1) {
+                e.preventDefault();
+                void handleCloseTab(w.id, e);
+              }
+            }}
+            title={isEditing ? undefined : t("terminal.tabs.rename_hint")}
+            className={`group flex items-center gap-1 px-3 py-1 rounded-t text-sm whitespace-nowrap transition-colors cursor-pointer select-none ${
+              isActive
                 ? "bg-[#1a1a2e] text-white border-t border-x border-gray-600"
                 : "text-gray-400 hover:text-gray-200 hover:bg-gray-800/50"
             }`}
           >
-            <span className="flex items-center gap-1">
-              {w.name || t("terminal.tabs.unnamed")}
-              {windows.length > 1 && (
-                <span
-                  role="button"
-                  tabIndex={0}
-                  onClick={(e) => handleCloseTab(w.id, e)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") handleCloseTab(w.id, e as unknown as React.MouseEvent);
-                  }}
-                  className="text-gray-500 hover:text-red-400 cursor-pointer"
-                >
-                  <X className="h-3 w-3" />
-                </span>
-              )}
-            </span>
-          </button>
-        ))}
-        <button
-          onClick={openCreateModal}
-          disabled={atLimit}
-          aria-label={t("terminal.tabs.new")}
-          className="p-1 text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-500"
-          title={
-            atLimit
-              ? t("terminal.tabs.limit_reached")
-              : t("terminal.tabs.new")
-          }
-        >
-          <Plus className="h-4 w-4" />
-        </button>
-        <span className="ml-auto pr-1 text-xs text-gray-500 shrink-0 tabular-nums">
-          {t("terminal.tabs.counter", {
-            used: windows.length,
-            total: maxWindows,
-          })}
-        </span>
-      </div>
-
-      <Modal
-        isOpen={isCreateOpen}
-        onClose={closeCreateModal}
-        title={t("terminal.tabs.create_title")}
-        size="sm"
-      >
-        <div className="p-5 space-y-3">
-          <label className="block text-sm">
-            <span className="block text-text-dim mb-1.5">
-              {t("terminal.tabs.name_label")}
-            </span>
-            <input
-              ref={inputRef}
-              value={newName}
-              onChange={(e) => {
-                setNewName(e.target.value);
-                setCreateError(null);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !creating && nameValid) {
-                  e.preventDefault();
-                  void handleCreate();
-                }
-              }}
-              placeholder={t("terminal.tabs.name_placeholder")}
-              maxLength={64}
-              aria-invalid={!nameValid}
-              className={`w-full px-3 py-2 text-sm bg-gray-800 text-white border rounded-lg focus:outline-none transition-colors ${
-                !nameValid || createError
-                  ? "border-red-500/70 focus:border-red-500"
-                  : "border-gray-600 focus:border-blue-500"
-              }`}
-            />
-          </label>
-
-          <p className="text-xs text-text-dim leading-relaxed">
-            {t("terminal.tabs.name_hint")}
-          </p>
-
-          {!nameValid && (
-            <div className="flex items-start gap-1.5 text-xs text-red-400">
-              <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-              <span>{t("terminal.tabs.name_invalid")}</span>
-            </div>
-          )}
-
-          {createError && nameValid && (
-            <div className="flex items-start gap-1.5 text-xs text-red-400">
-              <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-              <span>{createError}</span>
-            </div>
-          )}
-
-          <div className="flex items-center justify-between pt-2">
-            <span className="text-xs text-text-dim tabular-nums">
-              {t("terminal.tabs.counter", {
-                used: windows.length,
-                total: maxWindows,
-              })}
-            </span>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="secondary"
-                onClick={closeCreateModal}
-                disabled={creating}
+            {isEditing ? (
+              <input
+                ref={editInputRef}
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void commitRename();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    cancelRename();
+                  }
+                  e.stopPropagation();
+                }}
+                onBlur={() => void commitRename()}
+                onClick={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+                maxLength={64}
+                aria-label={t("terminal.tabs.name_label")}
+                className="bg-gray-800 text-white text-sm px-1 py-0 rounded border border-blue-500 outline-none w-32"
+              />
+            ) : (
+              <span>{w.name || t("terminal.tabs.unnamed")}</span>
+            )}
+            {!isEditing && windows.length > 1 && (
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label={t("terminal.tabs.close")}
+                onClick={(e) => handleCloseTab(w.id, e)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") handleCloseTab(w.id, e);
+                }}
+                className={`text-gray-500 hover:text-red-400 cursor-pointer transition-opacity ${
+                  isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                }`}
               >
-                {t("common.cancel")}
-              </Button>
-              <Button
-                onClick={() => void handleCreate()}
-                disabled={creating || !nameValid || atLimit}
-              >
-                {creating
-                  ? t("terminal.tabs.creating")
-                  : t("terminal.tabs.create")}
-              </Button>
-            </div>
+                <X className="h-3 w-3" />
+              </span>
+            )}
           </div>
-        </div>
-      </Modal>
-    </>
+        );
+      })}
+      <button
+        onClick={() => void handleCreate()}
+        disabled={atLimit || creating}
+        aria-label={t("terminal.tabs.new")}
+        className="p-1 text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-500"
+        title={
+          atLimit
+            ? t("terminal.tabs.limit_reached")
+            : t("terminal.tabs.new")
+        }
+      >
+        <Plus className="h-4 w-4" />
+      </button>
+      <span className="ml-auto pr-1 text-xs text-gray-500 shrink-0 tabular-nums">
+        {t("terminal.tabs.counter", {
+          used: windows.length,
+          total: maxWindows,
+        })}
+      </span>
+    </div>
   );
 }

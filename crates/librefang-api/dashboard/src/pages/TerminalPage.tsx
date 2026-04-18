@@ -71,7 +71,6 @@ export function TerminalPage() {
   const [tmuxAvailable, setTmuxAvailable] = useState(false);
   const [maxWindows, setMaxWindows] = useState(16);
   const [activeWindowId, setActiveWindowId] = useState<string | null>(null);
-  const [shellName, setShellName] = useState<string>("sh");
   const [serverOs, setServerOs] = useState<string>("linux");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const terminalEnabled = useUIStore((s) => s.terminalEnabled);
@@ -145,7 +144,6 @@ export function TerminalPage() {
       switch (msg.type) {
         case "started":
           setIsRoot(msg.isRoot ?? false);
-          setShellName(msg.shell ? msg.shell.split("/").pop() || "sh" : "sh");
           terminalRef.current?.write(
             t("terminal.started", { shell: msg.shell, pid: msg.pid }) + "\r\n"
           );
@@ -277,11 +275,15 @@ export function TerminalPage() {
     return () => cancelAnimationFrame(raf1);
   }, [isFullscreen]);
 
-  // ESC exits fullscreen.
+  // ESC exits fullscreen — but not when focus is inside the terminal, since
+  // vim/less/tmux all use Escape as a meaningful key.
   useEffect(() => {
     if (!isFullscreen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setIsFullscreen(false);
+      if (e.key !== "Escape") return;
+      const active = document.activeElement;
+      if (active && containerRef.current?.contains(active)) return;
+      setIsFullscreen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -441,7 +443,6 @@ export function TerminalPage() {
         onSwitchWindow={handleSwitchWindow}
         terminalRef={terminalRef}
         fitAddonRef={fitAddonRef}
-        shellName={shellName}
       />
       <div
         ref={containerRef}
@@ -450,9 +451,17 @@ export function TerminalPage() {
     </div>
   );
 
-  if (isFullscreen) {
-    return (
-      <div className="fixed inset-0 z-50 flex flex-col bg-[#1a1a2e]">
+  // Single tree in both modes so React doesn't unmount the xterm container
+  // when toggling fullscreen. Only the header chrome and outer className swap.
+  return (
+    <div
+      className={
+        isFullscreen
+          ? "fixed inset-0 z-50 flex flex-col bg-[#1a1a2e]"
+          : "flex flex-col h-full"
+      }
+    >
+      {isFullscreen ? (
         <div className="flex items-center justify-between gap-3 px-4 py-2 bg-surface border-b border-border-subtle shrink-0">
           <div className="flex items-center gap-2 min-w-0">
             <TerminalIcon className="h-4 w-4 text-text-dim shrink-0" />
@@ -461,21 +470,16 @@ export function TerminalPage() {
           </div>
           <div className="flex items-center gap-2 shrink-0">{actions}</div>
         </div>
-        <div className="flex-1 min-h-0">{terminalBody}</div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-col h-full">
-      <PageHeader
-        badge={t("terminal.badge")}
-        title={t("nav.terminal")}
-        subtitle={statusLabel}
-        icon={<TerminalIcon className="h-4 w-4" />}
-        actions={actions}
-      />
-      <div className="flex-1 p-4 min-h-0">
+      ) : (
+        <PageHeader
+          badge={t("terminal.badge")}
+          title={t("nav.terminal")}
+          subtitle={statusLabel}
+          icon={<TerminalIcon className="h-4 w-4" />}
+          actions={actions}
+        />
+      )}
+      <div className={isFullscreen ? "flex-1 min-h-0" : "flex-1 p-4 min-h-0"}>
         <Card className="h-full flex flex-col overflow-hidden" padding="none">
           {terminalBody}
         </Card>
