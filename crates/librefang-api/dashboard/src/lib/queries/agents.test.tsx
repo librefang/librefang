@@ -41,18 +41,16 @@ describe("useAgentDetail", () => {
     expect(httpClient.getAgentDetail).toHaveBeenCalledWith("agent-1");
   });
 
-  it("should use the correct queryKey", async () => {
+  it("should cache under agentKeys.detail(id)", async () => {
+    const mockAgent = { id: "test-id", name: "Test Agent" };
+    vi.mocked(httpClient.getAgentDetail).mockResolvedValue(mockAgent);
     const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => useAgentDetail("test-id"), { wrapper });
 
     await waitFor(() => {
-      expect(queryClient.getQueryCache().find({ queryKey: agentKeys.detail("test-id") })).toBeDefined();
+      expect(queryClient.getQueryData(agentKeys.detail("test-id"))).toEqual(mockAgent);
     });
-
-    const cache = queryClient.getQueryCache().find({ queryKey: agentKeys.detail("test-id") });
-    expect(cache).toBeDefined();
-    expect(cache?.queryKey).toEqual(agentKeys.detail("test-id"));
   });
 });
 
