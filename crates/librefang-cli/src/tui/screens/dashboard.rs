@@ -18,6 +18,17 @@ pub struct AuditRow {
     pub detail: String,
 }
 
+/// Compact summary of a single agent's dream state. Renderable in one line.
+/// Populated by the `DreamsLoaded` event fired from `spawn_fetch_dashboard`.
+#[derive(Clone, Default)]
+pub struct DreamRow {
+    pub agent_name: String,
+    pub status: String,
+    pub phase: String,
+    pub memories_touched: u32,
+    pub tool_use_count: u32,
+}
+
 // ── State ───────────────────────────────────────────────────────────────────
 
 pub struct DashboardState {
@@ -27,6 +38,11 @@ pub struct DashboardState {
     pub provider: String,
     pub model: String,
     pub recent_audit: Vec<AuditRow>,
+    /// Non-empty when auto-dream is enabled and at least one agent has
+    /// progress we can show. Refreshed alongside the other dashboard data
+    /// on the same cadence.
+    pub dreams: Vec<DreamRow>,
+    pub dreams_enabled: bool,
     pub loading: bool,
     pub tick: usize,
     pub audit_scroll: u16,
@@ -47,6 +63,8 @@ impl DashboardState {
             provider: String::new(),
             model: String::new(),
             recent_audit: Vec::new(),
+            dreams: Vec::new(),
+            dreams_enabled: false,
             loading: false,
             tick: 0,
             audit_scroll: 0,
@@ -90,32 +108,110 @@ impl DashboardState {
 pub fn draw(f: &mut Frame, area: Rect, state: &mut DashboardState) {
     let inner = widgets::render_screen_block(f, area, "\u{25a3} Dashboard");
 
+    // The dream strip height is 0 when there's nothing to show so the audit
+    // trail keeps the full screen. 2 + N lines otherwise (header + rows,
+    // capped at 6 rows so it doesn't dominate).
+    let dream_rows = state.dreams.len().min(6);
+    let dream_strip_h = if dream_rows == 0 {
+        0
+    } else {
+        (dream_rows as u16) + 2
+    };
+
     let chunks = Layout::vertical([
-        Constraint::Length(3), // stat row (compact)
-        Constraint::Length(1), // separator
-        Constraint::Length(1), // audit header
-        Constraint::Min(3),    // audit content
-        Constraint::Length(1), // hints
+        Constraint::Length(3),             // stat row
+        Constraint::Length(1),             // separator
+        Constraint::Length(dream_strip_h), // dream strip (0 when empty)
+        Constraint::Length(1),             // audit header
+        Constraint::Min(3),                // audit content
+        Constraint::Length(1),             // hints
     ])
     .split(inner);
 
-    // ── Stat row (inline, no card borders — cleaner) ──
     draw_stat_row(f, chunks[0], state);
-
-    // ── Separator ──
     f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
+    if dream_strip_h > 0 {
+        draw_dream_strip(f, chunks[2], state);
+    }
+    draw_audit_header(f, chunks[3]);
+    draw_audit_body(f, chunks[4], state);
 
-    // ── Audit trail ──
-    draw_audit_header(f, chunks[2]);
-    draw_audit_body(f, chunks[3], state);
-
-    // ── Hints ──
     f.render_widget(
         widgets::hint_bar(
             "  [r] Refresh  [a] Agents  [\u{2191}\u{2193}] Scroll  [PgUp/PgDn] Fast scroll",
         ),
-        chunks[4],
+        chunks[5],
     );
+}
+
+fn draw_dream_strip(f: &mut Frame, area: Rect, state: &DashboardState) {
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+
+    let header_color = if state.dreams_enabled {
+        theme::PURPLE
+    } else {
+        theme::TEXT_TERTIARY
+    };
+    let header = Line::from(vec![
+        Span::styled(
+            "  \u{263d} DREAMS",
+            Style::default()
+                .fg(header_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            if state.dreams_enabled {
+                "auto-dream enabled"
+            } else {
+                "auto-dream disabled"
+            },
+            Style::default().fg(theme::TEXT_TERTIARY),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(header), rows[0]);
+
+    let lines: Vec<Line> = state
+        .dreams
+        .iter()
+        .take(6)
+        .map(|d| {
+            // Status pill colour mirrors the dashboard card.
+            let (status_color, status_glyph) = match d.status.as_str() {
+                "running" => (theme::BLUE, "\u{25cf}"),
+                "completed" => (theme::GREEN, "\u{2713}"),
+                "failed" => (theme::RED, "\u{2717}"),
+                "aborted" => (theme::ACCENT, "\u{25a0}"),
+                _ => (theme::TEXT_TERTIARY, "\u{25cc}"),
+            };
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(status_glyph, Style::default().fg(status_color)),
+                Span::raw(" "),
+                Span::styled(
+                    widgets::truncate(&d.agent_name, 18),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(format!("[{}]", d.status), Style::default().fg(status_color)),
+                Span::raw("  "),
+                Span::styled(
+                    format!(
+                        "phase={}  tools={}  mems={}",
+                        if d.phase.is_empty() {
+                            "\u{2014}"
+                        } else {
+                            d.phase.as_str()
+                        },
+                        d.tool_use_count,
+                        d.memories_touched,
+                    ),
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                ),
+            ])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), rows[1]);
 }
 
 fn draw_stat_row(f: &mut Frame, area: Rect, state: &DashboardState) {

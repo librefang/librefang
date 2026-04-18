@@ -686,6 +686,24 @@ pub struct AgentManifest {
     /// Useful for models that don't support tool/function calling (e.g. Ollama).
     #[serde(default)]
     pub web_search_augmentation: WebSearchAugmentationMode,
+    /// Whether this agent participates in background auto-dream consolidation.
+    /// When true AND the global `[auto_dream] enabled = true` config is set,
+    /// the scheduler periodically asks this agent to reflect on and
+    /// consolidate its own memory. Off by default — opt-in per agent because
+    /// consolidation costs tokens.
+    #[serde(default)]
+    pub auto_dream_enabled: bool,
+    /// Optional override for `[auto_dream] min_hours`. When `Some`, this
+    /// agent's time gate uses this value instead of the global setting —
+    /// useful for heterogeneous fleets where a chatty agent wants shorter
+    /// intervals and a quiet agent wants longer. `None` inherits the global.
+    #[serde(default)]
+    pub auto_dream_min_hours: Option<f64>,
+    /// Optional override for `[auto_dream] min_sessions`. Same semantics as
+    /// `auto_dream_min_hours`. `Some(0)` explicitly disables the session
+    /// gate for this agent (still subject to time / lock gates).
+    #[serde(default)]
+    pub auto_dream_min_sessions: Option<u32>,
 }
 
 fn default_true() -> bool {
@@ -731,6 +749,9 @@ impl Default for AgentManifest {
             context_injection: Vec::new(),
             is_hand: false,
             web_search_augmentation: WebSearchAugmentationMode::default(),
+            auto_dream_enabled: false,
+            auto_dream_min_hours: None,
+            auto_dream_min_sessions: None,
         }
     }
 }

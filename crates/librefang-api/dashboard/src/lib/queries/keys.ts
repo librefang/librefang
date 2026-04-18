@@ -9,6 +9,11 @@
 //
 // All arrays use `as const` for structural stability.
 
+export const autoDreamKeys = {
+  all: ["autoDream"] as const,
+  status: () => [...autoDreamKeys.all, "status"] as const,
+};
+
 export const agentKeys = {
   all: ["agents"] as const,
   lists: () => [...agentKeys.all, "list"] as const,
