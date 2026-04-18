@@ -6,8 +6,7 @@ const { mockListApprovals, mockFetchApprovalCount } = vi.hoisted(() => ({
   mockListApprovals: vi.fn(),
   mockFetchApprovalCount: vi.fn(),
 }));
-const { mockListAvailableIntegrations, mockListPluginRegistries } = vi.hoisted(() => ({
-  mockListAvailableIntegrations: vi.fn(),
+const { mockListPluginRegistries } = vi.hoisted(() => ({
   mockListPluginRegistries: vi.fn(),
 }));
 
@@ -20,16 +19,14 @@ vi.mock("../http/client", async () => {
   const actual = await vi.importActual("../http/client");
   return {
     ...actual,
-    listAvailableIntegrations: mockListAvailableIntegrations,
     listPluginRegistries: mockListPluginRegistries,
   };
 });
 
 // ── Import hooks after mocks are set up ──
 import { useApprovals, useApprovalCount } from "./approvals";
-import { useAvailableIntegrations } from "./mcp";
 import { usePluginRegistries } from "./plugins";
-import { approvalKeys, mcpKeys, pluginKeys } from "./keys";
+import { approvalKeys, pluginKeys } from "./keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 beforeEach(() => {
@@ -87,62 +84,6 @@ describe("useApprovals", () => {
 
     await waitFor(() => {
       expect(queryClient.getQueryData(approvalKeys.lists())).toEqual(mockData);
-    });
-  });
-});
-
-// ── useAvailableIntegrations ──
-
-describe("useAvailableIntegrations", () => {
-  it("should not fetch when enabled is false", async () => {
-    const { result } = renderHook(
-      () => useAvailableIntegrations({ enabled: false }),
-      { wrapper: createQueryClientWrapper().wrapper },
-    );
-
-    expect(result.current.data).toBeUndefined();
-    expect(result.current.isLoading).toBe(false);
-    expect(result.current.fetchStatus).toBe("idle");
-    expect(mockListAvailableIntegrations).not.toHaveBeenCalled();
-  });
-
-  it("should fetch by default when enabled is undefined", async () => {
-    renderHook(() => useAvailableIntegrations(), {
-      wrapper: createQueryClientWrapper().wrapper,
-    });
-
-    // mcpQueries.integrations() sets enabled: opts.enabled which is undefined
-    // useQuery treats undefined enabled as true, so it WILL fetch
-    await vi.waitFor(() => {
-      expect(mockListAvailableIntegrations).toHaveBeenCalled();
-    });
-  });
-
-  it("should fetch when enabled is true", async () => {
-    const mockData = { integrations: [{ id: "slack", name: "Slack" }] };
-    mockListAvailableIntegrations.mockResolvedValue(mockData);
-
-    const { result } = renderHook(
-      () => useAvailableIntegrations({ enabled: true }),
-      { wrapper: createQueryClientWrapper().wrapper },
-    );
-
-    await waitFor(() => expect(result.current.data).toEqual(mockData));
-    expect(result.current.isLoading).toBe(false);
-    expect(result.current.fetchStatus).toBe("idle");
-    expect(mockListAvailableIntegrations).toHaveBeenCalledTimes(1);
-  });
-
-  it("should use mcpKeys.integrations() as queryKey", async () => {
-    const mockData = { integrations: [] };
-    mockListAvailableIntegrations.mockResolvedValue(mockData);
-
-    const { queryClient, wrapper } = createQueryClientWrapper();
-
-    renderHook(() => useAvailableIntegrations({ enabled: true }), { wrapper });
-
-    await waitFor(() => {
-      expect(queryClient.getQueryData(mcpKeys.integrations())).toEqual(mockData);
     });
   });
 });
