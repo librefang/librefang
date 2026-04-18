@@ -504,7 +504,6 @@
     "filter_unreachable": "无法连接",
     "results": "结果",
     "config": "配置",
-    "config_hint": "配置功能即将推出",
     "configure_provider": "配置供应商",
     "key_saved": "API Key 已保存",
     "key_removed": "API Key 已移除",
