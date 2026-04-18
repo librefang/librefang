@@ -2884,6 +2884,30 @@ export async function deleteTerminalWindow(windowId: string): Promise<void> {
 
 // ── Auto-Dream (background memory consolidation) ──────────────────────
 
+export type AutoDreamStatusName =
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted";
+
+export interface AutoDreamTurn {
+  text: string;
+  tool_use_count: number;
+}
+
+export interface AutoDreamProgress {
+  task_id: string;
+  agent_id: string;
+  started_at_ms: number;
+  ended_at_ms: number | null;
+  status: AutoDreamStatusName;
+  phase: string;
+  tool_use_count: number;
+  memories_touched: string[];
+  turns: AutoDreamTurn[];
+  error: string | null;
+}
+
 export interface AutoDreamAgentStatus {
   agent_id: string;
   agent_name: string;
@@ -2893,6 +2917,8 @@ export interface AutoDreamAgentStatus {
   hours_since_last: number;
   sessions_since_last: number;
   lock_path: string;
+  progress: AutoDreamProgress | null;
+  can_abort: boolean;
 }
 
 export interface AutoDreamStatus {
@@ -2907,6 +2933,13 @@ export interface AutoDreamStatus {
 export interface AutoDreamTriggerOutcome {
   fired: boolean;
   agent_id: string;
+  task_id: string | null;
+  reason: string;
+}
+
+export interface AutoDreamAbortOutcome {
+  aborted: boolean;
+  agent_id: string;
   reason: string;
 }
 
@@ -2917,6 +2950,13 @@ export async function getAutoDreamStatus(): Promise<AutoDreamStatus> {
 export async function triggerAutoDream(agentId: string): Promise<AutoDreamTriggerOutcome> {
   return post<AutoDreamTriggerOutcome>(
     `/api/auto-dream/agents/${encodeURIComponent(agentId)}/trigger`,
+    {},
+  );
+}
+
+export async function abortAutoDream(agentId: string): Promise<AutoDreamAbortOutcome> {
+  return post<AutoDreamAbortOutcome>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/abort`,
     {},
   );
 }

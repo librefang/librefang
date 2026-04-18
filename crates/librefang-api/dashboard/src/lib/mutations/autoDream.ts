@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { triggerAutoDream } from "../http/client";
+import { abortAutoDream, triggerAutoDream } from "../http/client";
 import { autoDreamKeys } from "../queries/keys";
 
 /**
@@ -12,6 +12,20 @@ export function useTriggerAutoDream() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (agentId: string) => triggerAutoDream(agentId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: autoDreamKeys.all }),
+  });
+}
+
+/**
+ * Abort an in-flight manually-triggered dream. Scheduled dreams cannot be
+ * aborted — the endpoint returns `{aborted: false}` with a reason in that
+ * case. Invalidate the status query so the progress card transitions from
+ * "running" to "aborted" in one refetch.
+ */
+export function useAbortAutoDream() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (agentId: string) => abortAutoDream(agentId),
     onSuccess: () => qc.invalidateQueries({ queryKey: autoDreamKeys.all }),
   });
 }

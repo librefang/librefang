@@ -1353,6 +1353,15 @@
     "auto_dream_sessions_since": "sessions since",
     "auto_dream_trigger": "Dream now",
     "auto_dream_fired": "Consolidation fired",
+    "auto_dream_abort": "Abort",
+    "auto_dream_aborted": "Abort signalled",
+    "auto_dream_phase": "Phase",
+    "auto_dream_tool_calls": "tool calls",
+    "auto_dream_memories_touched": "memories touched",
+    "auto_dream_status_running": "Running",
+    "auto_dream_status_completed": "Completed",
+    "auto_dream_status_failed": "Failed",
+    "auto_dream_status_aborted": "Aborted",
     "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools."
   },
   "config": {

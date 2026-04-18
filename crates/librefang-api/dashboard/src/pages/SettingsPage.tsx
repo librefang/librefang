@@ -6,12 +6,13 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
   Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Languages, LayoutDashboard,
-  Shield, CheckCircle, XCircle, Download, Play,
+  Shield, CheckCircle, XCircle, Download, Play, Square,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { totpSetup, totpConfirm, totpStatus, totpRevoke } from "../api";
 import { useAutoDreamStatus } from "../lib/queries/autoDream";
-import { useTriggerAutoDream } from "../lib/mutations/autoDream";
+import { useTriggerAutoDream, useAbortAutoDream } from "../lib/mutations/autoDream";
+import type { AutoDreamAgentStatus } from "../api";
 
 interface SegmentOption<T extends string> {
   value: T;
@@ -451,15 +452,132 @@ function formatRelativeMs(ts: number, now: number): string {
   return diff >= 0 ? `in ${h}` : `${h} ago`;
 }
 
+function AutoDreamAgentRow({
+  agent,
+  disabled,
+  onTrigger,
+  onAbort,
+  triggerPending,
+  abortPending,
+}: {
+  agent: AutoDreamAgentStatus;
+  disabled: boolean;
+  onTrigger: (id: string) => void;
+  onAbort: (id: string) => void;
+  triggerPending: boolean;
+  abortPending: boolean;
+}) {
+  const { t } = useTranslation();
+  const now = Date.now();
+  const progress = agent.progress;
+  const running = progress?.status === "running";
+  const lastTurn = progress?.turns[progress.turns.length - 1];
+
+  return (
+    <div className="rounded-lg border border-border-subtle/50 bg-main">
+      <div className="flex items-center justify-between px-3 py-2">
+        <div className="flex items-start gap-2 min-w-0 flex-1">
+          <Moon className={`w-4 h-4 shrink-0 mt-0.5 ${running ? "text-purple-400 animate-pulse" : "text-purple-400"}`} />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-medium truncate">{agent.agent_name}</p>
+              {progress && (
+                <Badge
+                  variant={
+                    progress.status === "running"
+                      ? "info"
+                      : progress.status === "completed"
+                      ? "success"
+                      : progress.status === "aborted"
+                      ? "warning"
+                      : "error"
+                  }
+                >
+                  {t(`settings.auto_dream_status_${progress.status}`, progress.status)}
+                </Badge>
+              )}
+            </div>
+            <p className="text-[11px] text-text-dim">
+              {t("settings.auto_dream_last", "Last")}:{" "}
+              {formatRelativeMs(agent.last_consolidated_at_ms, now)}
+              {" · "}
+              {t("settings.auto_dream_next", "Next")}:{" "}
+              {formatRelativeMs(agent.next_eligible_at_ms, now)}
+              {" · "}
+              {agent.sessions_since_last}{" "}
+              {t("settings.auto_dream_sessions_since", "sessions since")}
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-2 shrink-0">
+          {running && agent.can_abort && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => onAbort(agent.agent_id)}
+              disabled={abortPending}
+            >
+              <Square className="w-3.5 h-3.5 mr-1.5" />
+              {t("settings.auto_dream_abort", "Abort")}
+            </Button>
+          )}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => onTrigger(agent.agent_id)}
+            disabled={triggerPending || disabled || running}
+            title={disabled ? t("settings.auto_dream_off", "Disabled") : undefined}
+          >
+            <Play className="w-3.5 h-3.5 mr-1.5" />
+            {t("settings.auto_dream_trigger", "Dream now")}
+          </Button>
+        </div>
+      </div>
+
+      {progress && (progress.status !== "completed" || progress.memories_touched.length > 0) && (
+        <div className="px-3 pb-2 pt-1 border-t border-border-subtle/30 space-y-1">
+          <p className="text-[10px] text-text-dim">
+            <span className="uppercase tracking-wider">
+              {t("settings.auto_dream_phase", "Phase")}:
+            </span>{" "}
+            <span className="font-mono">{progress.phase}</span>
+            {" · "}
+            {progress.tool_use_count}{" "}
+            {t("settings.auto_dream_tool_calls", "tool calls")}
+            {progress.memories_touched.length > 0 && (
+              <>
+                {" · "}
+                {progress.memories_touched.length}{" "}
+                {t("settings.auto_dream_memories_touched", "memories touched")}
+              </>
+            )}
+          </p>
+          {lastTurn && lastTurn.text && (
+            <p className="text-[11px] text-text-muted line-clamp-2 italic">
+              &ldquo;{lastTurn.text}&rdquo;
+            </p>
+          )}
+          {progress.error && (
+            <p className="text-[11px] text-red-500">
+              <XCircle className="w-3 h-3 inline mr-1" />
+              {progress.error}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AutoDreamSection() {
   const { t } = useTranslation();
   const statusQuery = useAutoDreamStatus();
   const trigger = useTriggerAutoDream();
+  const abort = useAbortAutoDream();
   const [error, setError] = useState<string | null>(null);
   const [lastMsg, setLastMsg] = useState<string | null>(null);
 
   const status = statusQuery.data;
-  const now = Date.now();
 
   const onTrigger = async (agentId: string) => {
     setError(null);
@@ -467,6 +585,17 @@ function AutoDreamSection() {
     try {
       const outcome = await trigger.mutateAsync(agentId);
       setLastMsg(outcome.fired ? t("settings.auto_dream_fired", "Consolidation fired") : outcome.reason);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onAbort = async (agentId: string) => {
+    setError(null);
+    setLastMsg(null);
+    try {
+      const outcome = await abort.mutateAsync(agentId);
+      setLastMsg(outcome.aborted ? t("settings.auto_dream_aborted", "Abort signalled") : outcome.reason);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -515,37 +644,15 @@ function AutoDreamSection() {
         {status && status.agents.length > 0 && (
           <div className="space-y-2">
             {status.agents.map((a) => (
-              <div
+              <AutoDreamAgentRow
                 key={a.agent_id}
-                className="flex items-center justify-between px-3 py-2 rounded-lg border border-border-subtle/50 bg-main"
-              >
-                <div className="flex items-start gap-2 min-w-0 flex-1">
-                  <Moon className="w-4 h-4 text-purple-400 shrink-0 mt-0.5" />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium truncate">{a.agent_name}</p>
-                    <p className="text-[11px] text-text-dim">
-                      {t("settings.auto_dream_last", "Last")}:{" "}
-                      {formatRelativeMs(a.last_consolidated_at_ms, now)}
-                      {" · "}
-                      {t("settings.auto_dream_next", "Next")}:{" "}
-                      {formatRelativeMs(a.next_eligible_at_ms, now)}
-                      {" · "}
-                      {a.sessions_since_last}{" "}
-                      {t("settings.auto_dream_sessions_since", "sessions since")}
-                    </p>
-                  </div>
-                </div>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => onTrigger(a.agent_id)}
-                  disabled={trigger.isPending || !status.enabled}
-                  title={!status.enabled ? t("settings.auto_dream_off", "Disabled") : undefined}
-                >
-                  <Play className="w-3.5 h-3.5 mr-1.5" />
-                  {t("settings.auto_dream_trigger", "Dream now")}
-                </Button>
-              </div>
+                agent={a}
+                disabled={!status.enabled}
+                onTrigger={onTrigger}
+                onAbort={onAbort}
+                triggerPending={trigger.isPending}
+                abortPending={abort.isPending}
+              />
             ))}
           </div>
         )}

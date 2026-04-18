@@ -1328,6 +1328,15 @@
     "auto_dream_sessions_since": "个会话",
     "auto_dream_trigger": "立即梦境",
     "auto_dream_fired": "整合已触发",
+    "auto_dream_abort": "中止",
+    "auto_dream_aborted": "中止信号已发出",
+    "auto_dream_phase": "阶段",
+    "auto_dream_tool_calls": "次工具调用",
+    "auto_dream_memories_touched": "条记忆被修改",
+    "auto_dream_status_running": "运行中",
+    "auto_dream_status_completed": "已完成",
+    "auto_dream_status_failed": "失败",
+    "auto_dream_status_aborted": "已中止",
     "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。"
   },
   "config": {
