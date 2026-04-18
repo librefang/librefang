@@ -31,6 +31,27 @@ pub mod tool_policy;
 pub mod webhook;
 pub mod workflow_template;
 
+/// Check if a response is a NO\_REPLY sentinel. Matches:
+/// - Exact `"NO_REPLY"` (original behaviour)
+/// - Text ending with `NO_REPLY` (model sometimes adds context before it,
+///   either on the same line or on a new line)
+/// - Exact `"[no reply needed]"` — the runtime writes this placeholder back
+///   into the session when the agent chooses silence, so the LLM sometimes
+///   mimics it on later turns.
+/// - Text ending with `"[no reply needed]"` (same reasoning as above)
+/// - Exact `"no reply needed"` — unbracketed variant the model occasionally
+///   emits. Only the exact-match form; `ends_with` is intentionally omitted
+///   because it false-positives on English prose ("I filed the bug; no reply
+///   needed.").
+pub fn is_no_reply_sentinel(text: &str) -> bool {
+    let t = text.trim();
+    t == "NO_REPLY"
+        || t.ends_with("NO_REPLY")
+        || t == "[no reply needed]"
+        || t.ends_with("[no reply needed]")
+        || t == "no reply needed"
+}
+
 /// Safely truncate a string to at most `max_bytes`, never splitting a UTF-8 char.
 pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {

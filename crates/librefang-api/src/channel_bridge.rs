@@ -38,20 +38,9 @@ fn sanitize_channel_error(err: &str) -> String {
     }
 }
 
-/// Check if a response is a NO_REPLY sentinel. Matches:
-/// - Exact `"NO_REPLY"` (original behaviour)
-/// - Text ending with `NO_REPLY` (model sometimes adds context before it)
-/// - Exact `"[no reply needed]"` — the runtime writes this placeholder back
-/// - Text ending with `"[no reply needed]"`
-/// - Unbracketed `"no reply needed"` variant the model occasionally emits
+/// Delegate to the canonical sentinel check in `librefang_types`.
 fn is_no_reply(text: &str) -> bool {
-    let t = text.trim();
-    t == "NO_REPLY"
-        || t.ends_with("NO_REPLY")
-        || t == "[no reply needed]"
-        || t.ends_with("[no reply needed]")
-        || t == "no reply needed"
-        || t.ends_with("no reply needed")
+    librefang_types::is_no_reply_sentinel(text)
 }
 
 /// Check if text looks like a raw tool call leaked as content.

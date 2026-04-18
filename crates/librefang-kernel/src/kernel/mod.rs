@@ -11313,18 +11313,6 @@ async fn cron_deliver_response(
         return;
     }
 
-    // Skip NO_REPLY and [no reply needed] sentinels
-    let trimmed = response.trim();
-    if trimmed == "NO_REPLY"
-        || trimmed.ends_with("NO_REPLY")
-        || trimmed == "[no reply needed]"
-        || trimmed.ends_with("[no reply needed]")
-        || trimmed == "no reply needed"
-        || trimmed.ends_with("no reply needed")
-    {
-        return;
-    }
-
     match delivery {
         CronDelivery::None => {}
         CronDelivery::Channel { channel, to } => {
