@@ -1,17 +1,19 @@
 //! Auto-dream HTTP endpoints.
 //!
-//! * `GET /api/auto-dream/status` — Current enable state, target agent,
-//!   last-consolidated timestamp, and when the next consolidation is
-//!   eligible to fire. Cheap: one stat of the lock file.
-//! * `POST /api/auto-dream/trigger` — Manually fire a consolidation. Bypasses
-//!   the time gate but still respects the process-lock so two triggers
-//!   cannot double-fire. Returns immediately; the dream runs detached.
+//! * `GET /api/auto-dream/status` — Global config + per-enrolled-agent
+//!   status (last-consolidated timestamp, next eligible time, sessions
+//!   touched since). Cheap: one stat + one count per enrolled agent.
+//! * `POST /api/auto-dream/agents/{id}/trigger` — Manually fire a
+//!   consolidation for a specific agent. Bypasses time and session gates
+//!   but still respects the per-agent lock.
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use librefang_types::agent::AgentId;
 
 use super::AppState;
 
@@ -20,12 +22,12 @@ pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/auto-dream/status", axum::routing::get(auto_dream_status))
         .route(
-            "/auto-dream/trigger",
+            "/auto-dream/agents/{id}/trigger",
             axum::routing::post(auto_dream_trigger),
         )
 }
 
-/// GET /api/auto-dream/status — Current auto-dream status.
+/// GET /api/auto-dream/status — Global auto-dream status + per-agent status.
 #[utoipa::path(
     get,
     path = "/api/auto-dream/status",
@@ -37,14 +39,33 @@ pub async fn auto_dream_status(State(state): State<Arc<AppState>>) -> impl IntoR
     Json(status)
 }
 
-/// POST /api/auto-dream/trigger — Manually trigger a consolidation.
+/// POST /api/auto-dream/agents/{id}/trigger — Manually trigger a
+/// consolidation for a specific agent.
 #[utoipa::path(
     post,
-    path = "/api/auto-dream/trigger",
+    path = "/api/auto-dream/agents/{id}/trigger",
     tag = "auto_dream",
-    responses((status = 200, description = "Trigger outcome", body = serde_json::Value))
+    params(("id" = String, Path, description = "Agent UUID")),
+    responses(
+        (status = 200, description = "Trigger outcome", body = serde_json::Value),
+        (status = 400, description = "Invalid agent id"),
+    )
 )]
-pub async fn auto_dream_trigger(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let outcome = librefang_kernel::auto_dream::trigger_manual(Arc::clone(&state.kernel)).await;
-    Json(outcome)
+pub async fn auto_dream_trigger(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id = match id.parse::<AgentId>() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid agent id"})),
+            )
+                .into_response();
+        }
+    };
+    let outcome =
+        librefang_kernel::auto_dream::trigger_manual(Arc::clone(&state.kernel), agent_id).await;
+    Json(outcome).into_response()
 }

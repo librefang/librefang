@@ -255,6 +255,17 @@ impl MemorySubstrate {
         self.sessions.delete_agent_sessions(agent_id)
     }
 
+    /// Count an agent's sessions touched after the given Unix-millis timestamp.
+    /// See [`SessionStore::count_agent_sessions_touched_since`] for semantics.
+    pub fn count_agent_sessions_touched_since(
+        &self,
+        agent_id: AgentId,
+        since_ms: u64,
+    ) -> LibreFangResult<u32> {
+        self.sessions
+            .count_agent_sessions_touched_since(agent_id, since_ms)
+    }
+
     /// Delete the canonical (cross-channel) session for an agent.
     pub fn delete_canonical_session(&self, agent_id: AgentId) -> LibreFangResult<()> {
         self.sessions.delete_canonical_session(agent_id)

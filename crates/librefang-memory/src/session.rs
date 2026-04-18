@@ -268,6 +268,37 @@ impl SessionStore {
         Ok(ids)
     }
 
+    /// Count how many of this agent's sessions were last touched after the
+    /// given Unix-millis timestamp. Used by auto-dream's session-count gate
+    /// as a cheap proxy for "has this agent actually done anything since the
+    /// last consolidation" — a no-activity dream is a waste of tokens.
+    ///
+    /// `since_ms = 0` means "since the epoch" (i.e. count all sessions).
+    pub fn count_agent_sessions_touched_since(
+        &self,
+        agent_id: AgentId,
+        since_ms: u64,
+    ) -> LibreFangResult<u32> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        // `updated_at` is stored as RFC3339 strings, not millis — convert
+        // the timestamp on the Rust side so the comparison is a simple
+        // lexicographic compare (RFC3339 sorts correctly).
+        let since_rfc3339 = chrono::DateTime::<Utc>::from_timestamp_millis(since_ms as i64)
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND updated_at > ?2",
+                rusqlite::params![agent_id.0.to_string(), since_rfc3339],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(count.max(0) as u32)
+    }
+
     /// Delete all sessions belonging to an agent and their FTS5 index entries.
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
         let conn = self

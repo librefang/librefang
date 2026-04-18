@@ -2881,3 +2881,42 @@ export async function deleteTerminalWindow(windowId: string): Promise<void> {
   );
   if (!response.ok) throw await parseError(response);
 }
+
+// ── Auto-Dream (background memory consolidation) ──────────────────────
+
+export interface AutoDreamAgentStatus {
+  agent_id: string;
+  agent_name: string;
+  auto_dream_enabled: boolean;
+  last_consolidated_at_ms: number;
+  next_eligible_at_ms: number;
+  hours_since_last: number;
+  sessions_since_last: number;
+  lock_path: string;
+}
+
+export interface AutoDreamStatus {
+  enabled: boolean;
+  min_hours: number;
+  min_sessions: number;
+  check_interval_secs: number;
+  lock_dir: string;
+  agents: AutoDreamAgentStatus[];
+}
+
+export interface AutoDreamTriggerOutcome {
+  fired: boolean;
+  agent_id: string;
+  reason: string;
+}
+
+export async function getAutoDreamStatus(): Promise<AutoDreamStatus> {
+  return get<AutoDreamStatus>("/api/auto-dream/status");
+}
+
+export async function triggerAutoDream(agentId: string): Promise<AutoDreamTriggerOutcome> {
+  return post<AutoDreamTriggerOutcome>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/trigger`,
+    {},
+  );
+}

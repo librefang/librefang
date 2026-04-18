@@ -686,6 +686,13 @@ pub struct AgentManifest {
     /// Useful for models that don't support tool/function calling (e.g. Ollama).
     #[serde(default)]
     pub web_search_augmentation: WebSearchAugmentationMode,
+    /// Whether this agent participates in background auto-dream consolidation.
+    /// When true AND the global `[auto_dream] enabled = true` config is set,
+    /// the scheduler periodically asks this agent to reflect on and
+    /// consolidate its own memory. Off by default — opt-in per agent because
+    /// consolidation costs tokens.
+    #[serde(default)]
+    pub auto_dream_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -731,6 +738,7 @@ impl Default for AgentManifest {
             context_injection: Vec::new(),
             is_hand: false,
             web_search_augmentation: WebSearchAugmentationMode::default(),
+            auto_dream_enabled: false,
         }
     }
 }

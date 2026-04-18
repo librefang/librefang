@@ -1342,6 +1342,17 @@
     "totp_confirm_revoke": "Confirm Revoke",
     "totp_no_recovery": "No recovery codes remaining. Reset TOTP to generate new ones.",
     "totp_low_recovery": "Only {{count}} recovery code(s) remaining.",
+    "auto_dream": "Auto-Dream",
+    "auto_dream_on": "Enabled",
+    "auto_dream_off": "Disabled",
+    "auto_dream_desc": "Periodically asks opt-in agents to consolidate their memory. Configure in config.toml via [auto_dream] enabled + per-agent auto_dream_enabled.",
+    "auto_dream_load_err": "Failed to load auto-dream status",
+    "auto_dream_no_agents": "No agents have opted in. Set auto_dream_enabled = true on an agent's manifest.",
+    "auto_dream_last": "Last",
+    "auto_dream_next": "Next",
+    "auto_dream_sessions_since": "sessions since",
+    "auto_dream_trigger": "Dream now",
+    "auto_dream_fired": "Consolidation fired",
     "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools."
   },
   "config": {

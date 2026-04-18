@@ -6,10 +6,12 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
   Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Languages, LayoutDashboard,
-  Shield, CheckCircle, XCircle, Download,
+  Shield, CheckCircle, XCircle, Download, Play,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { totpSetup, totpConfirm, totpStatus, totpRevoke } from "../api";
+import { useAutoDreamStatus } from "../lib/queries/autoDream";
+import { useTriggerAutoDream } from "../lib/mutations/autoDream";
 
 interface SegmentOption<T extends string> {
   value: T;
@@ -154,6 +156,9 @@ export function SettingsPage() {
 
       {/* Config Backup */}
       <ConfigBackupSection />
+
+      {/* Auto-Dream (background memory consolidation) */}
+      <AutoDreamSection />
     </div>
   );
 }
@@ -423,6 +428,140 @@ function ConfigBackupSection() {
             </Button>
           </a>
         </SettingRow>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Auto-Dream Section                                                 */
+/* ------------------------------------------------------------------ */
+
+// Format an epoch-ms into a short human-readable "N hours ago" / "in N
+// hours" label. Returns "never" when ts is 0.
+function formatRelativeMs(ts: number, now: number): string {
+  if (ts === 0) return "never";
+  const diff = ts - now;
+  const absHours = Math.abs(diff) / 3_600_000;
+  if (absHours < 1) {
+    const mins = Math.round(Math.abs(diff) / 60_000);
+    return diff >= 0 ? `in ${mins}m` : `${mins}m ago`;
+  }
+  const h = absHours >= 24 ? `${(absHours / 24).toFixed(1)}d` : `${absHours.toFixed(1)}h`;
+  return diff >= 0 ? `in ${h}` : `${h} ago`;
+}
+
+function AutoDreamSection() {
+  const { t } = useTranslation();
+  const statusQuery = useAutoDreamStatus();
+  const trigger = useTriggerAutoDream();
+  const [error, setError] = useState<string | null>(null);
+  const [lastMsg, setLastMsg] = useState<string | null>(null);
+
+  const status = statusQuery.data;
+  const now = Date.now();
+
+  const onTrigger = async (agentId: string) => {
+    setError(null);
+    setLastMsg(null);
+    try {
+      const outcome = await trigger.mutateAsync(agentId);
+      setLastMsg(outcome.fired ? t("settings.auto_dream_fired", "Consolidation fired") : outcome.reason);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="rounded-2xl border border-border-subtle bg-surface">
+      <div className="px-5 py-3 border-b border-border-subtle/50 flex items-center justify-between">
+        <p className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+          {t("settings.auto_dream", "Auto-Dream")}
+        </p>
+        {status && (
+          <Badge variant={status.enabled ? "success" : "default"}>
+            {status.enabled
+              ? t("settings.auto_dream_on", "Enabled")
+              : t("settings.auto_dream_off", "Disabled")}
+          </Badge>
+        )}
+      </div>
+      <div className="px-5 py-3">
+        <p className="text-xs text-text-dim mb-3">
+          {t(
+            "settings.auto_dream_desc",
+            "Periodically asks opt-in agents to consolidate their memory. Configure in config.toml via [auto_dream] enabled + per-agent auto_dream_enabled.",
+          )}
+        </p>
+
+        {statusQuery.isLoading && (
+          <p className="text-xs text-text-dim">{t("common.loading", "Loading…")}</p>
+        )}
+        {statusQuery.isError && (
+          <p className="text-xs text-red-500">
+            {t("settings.auto_dream_load_err", "Failed to load auto-dream status")}
+          </p>
+        )}
+
+        {status && status.agents.length === 0 && (
+          <p className="text-xs text-text-dim italic">
+            {t(
+              "settings.auto_dream_no_agents",
+              "No agents have opted in. Set auto_dream_enabled = true on an agent's manifest.",
+            )}
+          </p>
+        )}
+
+        {status && status.agents.length > 0 && (
+          <div className="space-y-2">
+            {status.agents.map((a) => (
+              <div
+                key={a.agent_id}
+                className="flex items-center justify-between px-3 py-2 rounded-lg border border-border-subtle/50 bg-main"
+              >
+                <div className="flex items-start gap-2 min-w-0 flex-1">
+                  <Moon className="w-4 h-4 text-purple-400 shrink-0 mt-0.5" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium truncate">{a.agent_name}</p>
+                    <p className="text-[11px] text-text-dim">
+                      {t("settings.auto_dream_last", "Last")}:{" "}
+                      {formatRelativeMs(a.last_consolidated_at_ms, now)}
+                      {" · "}
+                      {t("settings.auto_dream_next", "Next")}:{" "}
+                      {formatRelativeMs(a.next_eligible_at_ms, now)}
+                      {" · "}
+                      {a.sessions_since_last}{" "}
+                      {t("settings.auto_dream_sessions_since", "sessions since")}
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onTrigger(a.agent_id)}
+                  disabled={trigger.isPending || !status.enabled}
+                  title={!status.enabled ? t("settings.auto_dream_off", "Disabled") : undefined}
+                >
+                  <Play className="w-3.5 h-3.5 mr-1.5" />
+                  {t("settings.auto_dream_trigger", "Dream now")}
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {lastMsg && (
+          <p className="text-xs text-green-500 mt-2">
+            <CheckCircle className="w-3 h-3 inline mr-1" />
+            {lastMsg}
+          </p>
+        )}
+        {error && (
+          <p className="text-xs text-red-500 mt-2">
+            <XCircle className="w-3 h-3 inline mr-1" />
+            {error}
+          </p>
+        )}
       </div>
     </div>
   );

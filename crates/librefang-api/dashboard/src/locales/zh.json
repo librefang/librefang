@@ -1317,6 +1317,17 @@
     "totp_confirm_revoke": "确认撤销",
     "totp_no_recovery": "恢复码已用完。请重置 TOTP 以生成新恢复码。",
     "totp_low_recovery": "仅剩 {{count}} 个恢复码。",
+    "auto_dream": "梦境模式",
+    "auto_dream_on": "已启用",
+    "auto_dream_off": "已禁用",
+    "auto_dream_desc": "定期让开启选项的 Agent 整合自身记忆。通过 config.toml 中的 [auto_dream] enabled 开关和每个 Agent 的 auto_dream_enabled 配置。",
+    "auto_dream_load_err": "加载梦境模式状态失败",
+    "auto_dream_no_agents": "尚无 Agent 加入。在 Agent manifest 中设置 auto_dream_enabled = true。",
+    "auto_dream_last": "上次",
+    "auto_dream_next": "下次",
+    "auto_dream_sessions_since": "个会话",
+    "auto_dream_trigger": "立即梦境",
+    "auto_dream_fired": "整合已触发",
     "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。"
   },
   "config": {
