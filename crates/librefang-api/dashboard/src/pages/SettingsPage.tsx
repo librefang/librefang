@@ -456,6 +456,17 @@ function formatRelativeMs(ts: number, now: number): string {
   return diff >= 0 ? `in ${h}` : `${h} ago`;
 }
 
+// Human-readable duration for effective_min_hours. Switches between hours,
+// days, and weeks so "every 168h" renders as "every 1w" etc.
+function formatHours(hours: number): string {
+  if (hours < 1) return `${(hours * 60).toFixed(0)}m`;
+  if (hours < 24) return `${hours % 1 === 0 ? hours.toFixed(0) : hours.toFixed(1)}h`;
+  const days = hours / 24;
+  if (days < 7) return `${days % 1 === 0 ? days.toFixed(0) : days.toFixed(1)}d`;
+  const weeks = days / 7;
+  return `${weeks % 1 === 0 ? weeks.toFixed(0) : weeks.toFixed(1)}w`;
+}
+
 function AutoDreamAgentRow({
   agent,
   disabled,
@@ -522,8 +533,32 @@ function AutoDreamAgentRow({
                 {t("settings.auto_dream_next", "Next")}:{" "}
                 {formatRelativeMs(agent.next_eligible_at_ms, now)}
                 {" · "}
-                {agent.sessions_since_last}{" "}
-                {t("settings.auto_dream_sessions_since", "sessions since")}
+                {agent.effective_min_sessions > 0 ? (
+                  <span
+                    title={t(
+                      "settings.auto_dream_sessions_progress_title",
+                      "Sessions touched since last dream / required threshold",
+                    )}
+                  >
+                    {agent.sessions_since_last}/{agent.effective_min_sessions}{" "}
+                    {t("settings.auto_dream_sessions_since", "sessions since")}
+                  </span>
+                ) : (
+                  <>
+                    {agent.sessions_since_last}{" "}
+                    {t("settings.auto_dream_sessions_since", "sessions since")}
+                  </>
+                )}
+                {" · "}
+                <span
+                  title={t(
+                    "settings.auto_dream_effective_title",
+                    "Resolved threshold — manifest override or global default",
+                  )}
+                >
+                  {t("settings.auto_dream_every", "every")}{" "}
+                  {formatHours(agent.effective_min_hours)}
+                </span>
               </p>
             ) : (
               <p className="text-[11px] text-text-dim italic">
