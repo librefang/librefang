@@ -320,42 +320,42 @@ fn apply_stream_event(agent_id: AgentId, ev: &StreamEvent, pending: &mut Pending
         StreamEvent::ToolUseStart { .. } => {
             pending.tool_use_count += 1;
         }
-        StreamEvent::ToolUseEnd { name, input, .. } => {
-            if MEMORY_WRITE_TOOLS.contains(&name.as_str()) {
-                // The `memory_store` tool takes `{key, value}` (see
-                // `librefang-runtime/src/tool_runner.rs`). Prefer the key
-                // as a human-meaningful preview; fall back to a clipped
-                // value when the key is absent, and to the tool name only
-                // if neither is present (shouldn't happen for valid calls,
-                // but we don't want to panic).
-                let preview = input
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        input.get("value").and_then(|v| v.as_str()).map(|s| {
-                            let first_line = s.lines().next().unwrap_or(s);
-                            // char-safe truncation — byte slicing would
-                            // panic on multi-byte characters (CJK, emoji)
-                            // landing on a boundary inside an 80-byte window.
-                            if first_line.chars().count() > 80 {
-                                let clipped: String = first_line.chars().take(80).collect();
-                                format!("{clipped}…")
-                            } else {
-                                first_line.to_string()
-                            }
-                        })
+        StreamEvent::ToolUseEnd { name, input, .. }
+            if MEMORY_WRITE_TOOLS.contains(&name.as_str()) =>
+        {
+            // The `memory_store` tool takes `{key, value}` (see
+            // `librefang-runtime/src/tool_runner.rs`). Prefer the key
+            // as a human-meaningful preview; fall back to a clipped
+            // value when the key is absent, and to the tool name only
+            // if neither is present (shouldn't happen for valid calls,
+            // but we don't want to panic).
+            let preview = input
+                .get("key")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    input.get("value").and_then(|v| v.as_str()).map(|s| {
+                        let first_line = s.lines().next().unwrap_or(s);
+                        // char-safe truncation — byte slicing would
+                        // panic on multi-byte characters (CJK, emoji)
+                        // landing on a boundary inside an 80-byte window.
+                        if first_line.chars().count() > 80 {
+                            let clipped: String = first_line.chars().take(80).collect();
+                            format!("{clipped}…")
+                        } else {
+                            first_line.to_string()
+                        }
                     })
-                    .unwrap_or_else(|| name.clone());
-                mutate_progress(agent_id, |p| {
-                    if !p.memories_touched.iter().any(|m| m == &preview) {
-                        p.memories_touched.push(preview);
-                    }
-                    if p.phase == "starting" || p.phase.is_empty() {
-                        p.phase = "updating".to_string();
-                    }
-                });
-            }
+                })
+                .unwrap_or_else(|| name.clone());
+            mutate_progress(agent_id, |p| {
+                if !p.memories_touched.iter().any(|m| m == &preview) {
+                    p.memories_touched.push(preview);
+                }
+                if p.phase == "starting" || p.phase.is_empty() {
+                    p.phase = "updating".to_string();
+                }
+            });
         }
         StreamEvent::ContentComplete { .. } => {
             // Flush the pending turn. An empty, toolless turn is a no-op —
