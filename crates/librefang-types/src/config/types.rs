@@ -3272,6 +3272,18 @@ fn default_prompt_caching() -> bool {
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
+    /// Catalog template this server was installed from, if any.
+    ///
+    /// Set when the user installs a server via `POST /api/mcp/servers` with
+    /// `{template_id, credentials}` or the CLI `librefang mcp add <id>` flow.
+    /// Stays `None` for manually-authored entries. Used by the dashboard to
+    /// render the catalog badge and by the migrator.
+    // `skip_serializing_if = "Option::is_none"` mirrors the `oauth` field —
+    // `upsert_mcp_server_config` round-trips through serde_json → TOML and
+    // null values would serialize as `template_id = ""`, which fails to
+    // deserialize back into `Option<String>` on reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<String>,
     /// Transport configuration. Optional — entries without transport are skipped at boot.
     pub transport: Option<McpTransportEntry>,
     /// Request timeout in seconds.
