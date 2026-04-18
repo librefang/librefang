@@ -33,6 +33,18 @@ const CATEGORY_SECTIONS: Record<string, string[]> = {
   infra: ["docker", "extensions", "session", "queue", "webhook_triggers", "vertex_ai"],
 };
 
+// Explicit field ordering for sections where the server-side JSON schema
+// ordering is wrong for the user. The API serialises `sec.fields` via
+// serde_json's default BTreeMap, which alphabetises keys — so for sections
+// like `default_model` the user sees `model` before `provider`, even though
+// model is a cascaded filter of the selected provider (ConfigPage:679). The
+// rendering code falls back to the alphabetised order for any section not
+// listed here, so forgetting an entry is a no-op rather than a regression.
+// Closes #2746.
+const SECTION_FIELD_ORDER: Record<string, string[]> = {
+  default_model: ["provider", "model", "api_key_env", "base_url"],
+};
+
 function sectionLabelFallback(key: string): string {
   return key.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
@@ -613,7 +625,20 @@ export function ConfigPage({ category }: { category: string }) {
         )}
         {filteredSections.map(({ sKey, fields: visibleFields }) => {
           const sec = allSections[sKey];
-          const allFields = Object.entries(sec.fields);
+          const rawFields = Object.entries(sec.fields);
+          type FieldEntry = (typeof rawFields)[number];
+          // Apply the per-section override (see SECTION_FIELD_ORDER docstring).
+          // Listed keys come first in the declared order; any un-listed keys
+          // keep their original (alphabetical) position at the tail.
+          const order = SECTION_FIELD_ORDER[sKey];
+          const allFields: FieldEntry[] = order
+            ? [
+                ...order
+                  .map((k) => rawFields.find(([fk]) => fk === k))
+                  .filter((e): e is FieldEntry => e !== undefined),
+                ...rawFields.filter(([fk]) => !order.includes(fk)),
+              ]
+            : rawFields;
           const fieldsToShow = q
             ? allFields.filter(([fKey]) => visibleFields.includes(fKey))
             : allFields;
