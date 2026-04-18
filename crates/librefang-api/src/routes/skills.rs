@@ -4487,15 +4487,22 @@ fn render_catalog_entry(
     )
 )]
 pub async fn list_mcp_catalog(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Build the set of template_ids already installed so the UI can render
-    // "installed" badges without a second roundtrip.
-    let installed_ids: std::collections::HashSet<String> = state
-        .kernel
-        .config_ref()
-        .mcp_servers
-        .iter()
-        .filter_map(|s| s.template_id.clone())
-        .collect();
+    // Build the set of catalog ids that are "blocked" from re-install —
+    // either because a server was installed via the template (matching
+    // `template_id`) OR because a manually-configured server already
+    // occupies the same name. The install path rejects name collisions
+    // with 409, so showing those entries as Available would surface an
+    // Install button that deterministically fails.
+    let mut installed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in state.kernel.config_ref().mcp_servers.iter() {
+        if let Some(tid) = s.template_id.clone() {
+            installed_ids.insert(tid);
+        }
+        // The name may equal a catalog id even without a template_id
+        // (hand-edited `[[mcp_servers]]` entry). Include it so the
+        // catalog view matches the install endpoint's acceptance test.
+        installed_ids.insert(s.name.clone());
+    }
 
     let catalog = state
         .kernel
