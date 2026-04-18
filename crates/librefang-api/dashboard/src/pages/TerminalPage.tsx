@@ -480,9 +480,15 @@ export function TerminalPage() {
         />
       )}
       <div className={isFullscreen ? "flex-1 min-h-0" : "flex-1 p-4 min-h-0"}>
-        <Card className="h-full flex flex-col overflow-hidden" padding="none">
+        <div
+          className={
+            isFullscreen
+              ? "h-full flex flex-col overflow-hidden"
+              : "h-full flex flex-col overflow-hidden rounded-xl sm:rounded-2xl border border-border-subtle bg-surface shadow-sm"
+          }
+        >
           {terminalBody}
-        </Card>
+        </div>
       </div>
     </div>
   );
