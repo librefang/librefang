@@ -79,6 +79,7 @@ export function AgentsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [createMode, setCreateMode] = useState<"form" | "template" | "toml">("form");
   const [templateName, setTemplateName] = useState("");
+  const [templateCustomName, setTemplateCustomName] = useState("");
   const [manifestToml, setManifestToml] = useState("");
   const [templateTomlLoading, setTemplateTomlLoading] = useState(false);
   const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
@@ -331,13 +332,17 @@ export function AgentsPage() {
   const [previewTab, setPreviewTab] = useState<"toml" | "markdown">("toml");
 
   // Single close path for the create modal so the X button, the
-  // Cancel button, and any future "close on success" all clear the
-  // same transient state (validation errors, TOML parse error). Form
-  // and TOML drafts themselves persist by design.
+  // Cancel button, and the onSuccess handler after spawn all clear the
+  // same transient state. Template selection + custom name are cleared
+  // here because they're per-attempt picks; form/TOML drafts persist so
+  // users can reopen the modal and resume where they left off.
   const closeCreateModal = () => {
     setShowCreate(false);
     setFormErrors(new Set());
     setTomlParseError(null);
+    setTemplateName("");
+    setTemplateCustomName("");
+    spawnMutation.reset();
   };
 
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
@@ -1206,42 +1211,90 @@ export function AgentsPage() {
               </div>
             </div>
           ) : createMode === "template" ? (
-            <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
-              <select value={templateName}
-                onChange={async e => {
-                  const selected = e.target.value;
-                  setTemplateName(selected);
-                  if (!selected) return;
+            <div className="space-y-3">
+              <div>
+                <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
+                <select value={templateName}
+                  onChange={e => setTemplateName(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
+                  <option value="">{t("agents.template_placeholder")}</option>
+                  {localizedTemplates.map(tmpl => (
+                    <option key={tmpl.name} value={tmpl.name}>{tmpl.displayName}</option>
+                  ))}
+                </select>
+                {selectedTemplate && (
+                  <div className="mt-2 rounded-xl border border-border-subtle/60 bg-surface/60 px-3 py-2">
+                    <p className="text-xs font-bold text-text">{selectedTemplate.displayName}</p>
+                    <p className="mt-1 text-[11px] leading-relaxed text-text-dim">{selectedTemplate.displayDescription}</p>
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="text-[10px] font-bold text-text-dim uppercase">
+                  {t("agents.template_custom_name", { defaultValue: "Agent Name (optional)" })}
+                </label>
+                <input
+                  type="text"
+                  value={templateCustomName}
+                  onChange={e => setTemplateCustomName(e.target.value)}
+                  placeholder={
+                    selectedTemplate?.name ??
+                    t("agents.template_custom_name_placeholder", {
+                      defaultValue: "Leave blank to use template default",
+                    })
+                  }
+                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand"
+                />
+                <p className="text-[10px] text-text-dim mt-1">
+                  {t("agents.template_custom_name_hint", {
+                    defaultValue: "Override the template's default name so you can run multiple agents from the same template.",
+                  })}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={!templateName || templateTomlLoading}
+                onClick={async () => {
+                  if (!templateName) return;
                   setTemplateTomlLoading(true);
                   try {
-                    const toml = await getAgentTemplateToml(selected);
-                    setManifestToml(toml);
+                    const toml = await getAgentTemplateToml(templateName);
+                    // Carry the user's custom name across when dropping into
+                    // TOML mode — otherwise the input they just typed gets
+                    // silently discarded and the template's original name wins.
+                    const customName = templateCustomName.trim();
+                    const patched = customName
+                      ? toml.replace(
+                          /^name\s*=\s*(?:"[^"]*"|'[^']*')/m,
+                          `name = "${customName.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
+                        )
+                      : toml;
+                    setManifestToml(patched);
                     setCreateMode("toml");
                   } catch {
-                    // Fetch failed — stay on template tab, fall back to template-name submit
+                    addToast(
+                      t("agents.loading_template_toml_failed", {
+                        defaultValue: "Failed to load template TOML",
+                      }),
+                      "error",
+                    );
                   } finally {
                     setTemplateTomlLoading(false);
                   }
                 }}
-                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
-                <option value="">{t("agents.template_placeholder")}</option>
-                {localizedTemplates.map(tmpl => (
-                  <option key={tmpl.name} value={tmpl.name}>{tmpl.displayName}</option>
-                ))}
-              </select>
-              {selectedTemplate && (
-                <div className="mt-2 rounded-xl border border-border-subtle/60 bg-surface/60 px-3 py-2">
-                  <p className="text-xs font-bold text-text">{selectedTemplate.displayName}</p>
-                  <p className="mt-1 text-[11px] leading-relaxed text-text-dim">{selectedTemplate.displayDescription}</p>
-                </div>
-              )}
-              {templateTomlLoading && (
-                <p className="text-[10px] text-text-dim mt-1 flex items-center gap-1">
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  {t("agents.loading_template_toml", { defaultValue: "Loading template…" })}
-                </p>
-              )}
+                className="text-[10px] font-bold text-brand hover:underline disabled:text-text-dim disabled:no-underline disabled:cursor-not-allowed"
+              >
+                {templateTomlLoading ? (
+                  <span className="inline-flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    {t("agents.loading_template_toml", { defaultValue: "Loading template…" })}
+                  </span>
+                ) : (
+                  t("agents.edit_template_toml", {
+                    defaultValue: "Edit TOML for advanced customization →",
+                  })
+                )}
+              </button>
             </div>
           ) : (
             <div>
@@ -1270,17 +1323,36 @@ export function AgentsPage() {
           <div className="flex gap-2 pt-2">
             <Button variant="primary" className="flex-1"
               onClick={() => {
+                const onSuccess = () => {
+                  addToast(
+                    t("agents.agent_created", { defaultValue: "Agent created" }),
+                    "success",
+                  );
+                  closeCreateModal();
+                };
+                const onError = (e: Error) => {
+                  addToast(
+                    e?.message ||
+                      t("agents.create_failed", { defaultValue: "Failed to create agent" }),
+                    "error",
+                  );
+                };
                 if (createMode === "form") {
                   const errors = validateManifestForm(formState);
                   setFormErrors(new Set(errors));
                   if (errors.length > 0) return;
-                  spawnMutation.mutate({ manifest_toml: serializedFormToml });
+                  spawnMutation.mutate(
+                    { manifest_toml: serializedFormToml },
+                    { onSuccess, onError },
+                  );
                   return;
                 }
+                const customName = templateCustomName.trim();
                 spawnMutation.mutate(
                   createMode === "template"
-                    ? { template: templateName }
+                    ? { template: templateName, ...(customName ? { name: customName } : {}) }
                     : { manifest_toml: manifestToml },
+                  { onSuccess, onError },
                 );
               }}
               disabled={
