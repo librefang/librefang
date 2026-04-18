@@ -2049,6 +2049,9 @@ pub struct KernelConfig {
     /// Proactive memory (mem0-style) configuration.
     #[serde(default)]
     pub proactive_memory: crate::memory::ProactiveMemoryConfig,
+    /// Auto-dream (background memory consolidation) configuration.
+    #[serde(default)]
+    pub auto_dream: AutoDreamConfig,
     /// Pluggable context engine configuration.
     #[serde(default)]
     pub context_engine: ContextEngineTomlConfig,
@@ -3202,6 +3205,71 @@ impl Default for HeartbeatTomlConfig {
     }
 }
 
+/// Auto-dream (background memory consolidation) configuration.
+///
+/// Periodically fires a "dream" message to a designated agent, asking it to
+/// reflect on and consolidate its memory. Gated by a time threshold so it
+/// runs at most once every `min_hours` hours per host.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [auto_dream]
+/// enabled = false
+/// target_agent = "<uuid-of-memory-caretaker-agent>"
+/// min_hours = 24
+/// check_interval_secs = 600
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoDreamConfig {
+    /// Master toggle. Default: disabled — users must explicitly opt in and
+    /// designate a target agent.
+    pub enabled: bool,
+    /// UUID string of the agent that should receive the dream message.
+    /// Empty means "not configured"; the scheduler is inert until set.
+    pub target_agent: String,
+    /// Minimum hours since last consolidation before the next one fires.
+    /// Default: 24.
+    #[serde(default = "default_auto_dream_min_hours")]
+    pub min_hours: f64,
+    /// How often the scheduler loop wakes up to check gates, in seconds.
+    /// Default: 600 (10 min). Cheap — one stat per tick when idle.
+    #[serde(default = "default_auto_dream_check_interval_secs")]
+    pub check_interval_secs: u64,
+    /// Optional override for the lock file path. When empty, defaults to
+    /// `<data_dir>/auto_dream.lock`.
+    #[serde(default)]
+    pub lock_path: String,
+    /// Timeout for a single dream invocation in seconds. Default: 600.
+    #[serde(default = "default_auto_dream_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_auto_dream_min_hours() -> f64 {
+    24.0
+}
+
+fn default_auto_dream_check_interval_secs() -> u64 {
+    600
+}
+
+fn default_auto_dream_timeout_secs() -> u64 {
+    600
+}
+
+impl Default for AutoDreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_agent: String::new(),
+            min_hours: default_auto_dream_min_hours(),
+            check_interval_secs: default_auto_dream_check_interval_secs(),
+            lock_path: String::new(),
+            timeout_secs: default_auto_dream_timeout_secs(),
+        }
+    }
+}
+
 /// Registry sync configuration.
 ///
 /// Configure in config.toml:
@@ -3584,6 +3652,7 @@ impl Default for KernelConfig {
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),
             proactive_memory: crate::memory::ProactiveMemoryConfig::default(),
+            auto_dream: AutoDreamConfig::default(),
             context_engine: ContextEngineTomlConfig::default(),
             audit: AuditConfig::default(),
             health_check: HealthCheckConfig::default(),

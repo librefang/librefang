@@ -216,6 +216,10 @@ use crate::types;
         routes::usage_by_model,
         routes::usage_daily,
 
+        // ── Auto-Dream (background memory consolidation) ──
+        routes::auto_dream_status,
+        routes::auto_dream_trigger,
+
         // ── Memory (KV) ──
         routes::get_agent_kv,
         routes::get_agent_kv_key,

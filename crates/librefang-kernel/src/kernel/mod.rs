@@ -8597,6 +8597,11 @@ system_prompt = "You are a helpful assistant."
             });
         }
 
+        // Auto-dream scheduler (background memory consolidation). Inert when
+        // disabled in config — the spawned task checks on every tick and
+        // bails cheaply.
+        crate::auto_dream::spawn_scheduler(Arc::clone(self));
+
         // Cron scheduler tick loop — fires due jobs every 15 seconds
         {
             let kernel = Arc::clone(self);
