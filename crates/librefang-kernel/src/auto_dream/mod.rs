@@ -83,6 +83,15 @@ const MEMORY_WRITE_TOOLS: &[&str] = &["memory_store"];
 /// Matches libre-code's `createAutoMemCanUseTool(memoryRoot)` restriction.
 pub const DREAM_ALLOWED_TOOLS: &[&str] = &["memory_store", "memory_recall", "memory_list"];
 
+/// Minimum spacing between event-driven gate scans for the same agent.
+/// Mirrors libre-code's `SESSION_SCAN_INTERVAL_MS`. Without this, an
+/// agent taking 100 turns/hour past the time gate would run 100 lock-stat
+/// + session-count SQL probes before one of them actually fires a dream —
+/// the scan is cheap per call but pointless at that cadence. This does
+/// NOT apply to the scheduler (already sparse at `check_interval_secs`)
+/// or to manual triggers (operators explicitly asked for a check).
+const EVENT_SCAN_INTERVAL_MS: u64 = 10 * 60 * 1000;
+
 // ---------------------------------------------------------------------------
 // Progress types
 // ---------------------------------------------------------------------------
@@ -169,6 +178,37 @@ type AbortSlot = Mutex<Option<oneshot::Sender<()>>>;
 /// a reliable "a manual dream is still running" signal for `can_abort` in
 /// the status endpoint.
 static ABORT_HANDLES: LazyLock<DashMap<AgentId, Arc<AbortSlot>>> = LazyLock::new(DashMap::new);
+
+/// Per-agent last-scan timestamp (Unix-ms). Entries are written under
+/// DashMap's per-shard lock, so concurrent racers for the same agent
+/// serialise naturally and only one wins the "first scan" slot.
+/// See `should_throttle_event_scan` for the read-and-update logic.
+static LAST_EVENT_SCAN_AT: LazyLock<DashMap<AgentId, u64>> = LazyLock::new(DashMap::new);
+
+/// Returns `true` if the event-driven path should skip this turn because
+/// we already evaluated this agent's gates within `EVENT_SCAN_INTERVAL_MS`.
+/// On a miss (or on first call for this agent), records `now` and returns
+/// `false` so the caller proceeds with the full gate check.
+///
+/// Uses DashMap's per-shard lock via `entry()` so two concurrent turns on
+/// the same agent cannot both see a fresh slot — one wins, the other is
+/// throttled. Scheduler and manual-trigger paths bypass this — they're
+/// sparse enough or explicitly user-intended, respectively.
+fn should_throttle_event_scan(agent_id: AgentId) -> bool {
+    let now = now_ms();
+    let mut throttled = false;
+    LAST_EVENT_SCAN_AT
+        .entry(agent_id)
+        .and_modify(|last| {
+            if now.saturating_sub(*last) < EVENT_SCAN_INTERVAL_MS {
+                throttled = true;
+            } else {
+                *last = now;
+            }
+        })
+        .or_insert(now);
+    throttled
+}
 
 fn insert_progress(agent_id: AgentId, progress: DreamProgress) {
     DREAM_PROGRESS.insert(agent_id, progress);
@@ -775,6 +815,17 @@ pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
             tracing::debug!(agent = %agent_id, "auto_dream: agent toggled off between hook and spawn, skipping");
             return;
         }
+        // Scan throttle: a chatty agent can push dozens of turns per minute
+        // past the three pre-filters. Each of those would otherwise run a
+        // full `check_agent_gates` (lock stat + sessions-touched SQL).
+        // Cheap individually but pointless at that rate — by design, at
+        // most one dream fires per `min_hours`, so scanning more often
+        // than every ~10 minutes is pure noise. Matches libre-code's
+        // `SESSION_SCAN_INTERVAL_MS = 10 min`.
+        if should_throttle_event_scan(agent_id) {
+            tracing::trace!(agent = %agent_id, "auto_dream: turn-end scan throttled (within 10 min of last scan)");
+            return;
+        }
         match check_agent_gates(&kernel, agent_id, false).await {
             AgentGateResult::Fire { prior_mtime } => {
                 tracing::debug!(agent = %agent_id, "auto_dream: turn-end triggered dream");
@@ -1241,6 +1292,39 @@ mod hook_tests {
             data: serde_json::json!({}),
         };
         assert!(hook.on_event(&ctx).is_ok());
+    }
+
+    /// First call for an agent must not throttle (nothing to compare
+    /// against); second call within the window must throttle; third call
+    /// after manually aging the stamp past the window must pass again.
+    #[test]
+    fn scan_throttle_rate_limits_same_agent() {
+        let agent = AgentId::new();
+        // First scan always proceeds.
+        assert!(!should_throttle_event_scan(agent));
+        // Immediate second scan should be throttled.
+        assert!(should_throttle_event_scan(agent));
+        // Age the stored timestamp past the interval to simulate elapsed
+        // time without sleeping.
+        LAST_EVENT_SCAN_AT.insert(agent, now_ms().saturating_sub(EVENT_SCAN_INTERVAL_MS + 1));
+        assert!(!should_throttle_event_scan(agent));
+        // And now throttled again until it ages out.
+        assert!(should_throttle_event_scan(agent));
+        LAST_EVENT_SCAN_AT.remove(&agent);
+    }
+
+    /// Throttle is per-agent — two agents racing with back-to-back turns
+    /// must each get their own first pass without starving each other.
+    #[test]
+    fn scan_throttle_is_per_agent() {
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+        assert!(!should_throttle_event_scan(agent_a));
+        assert!(!should_throttle_event_scan(agent_b));
+        assert!(should_throttle_event_scan(agent_a));
+        assert!(should_throttle_event_scan(agent_b));
+        LAST_EVENT_SCAN_AT.remove(&agent_a);
+        LAST_EVENT_SCAN_AT.remove(&agent_b);
     }
 
     /// Other hook events (BeforeToolCall, etc.) must be silent no-ops —
