@@ -116,7 +116,19 @@ timeout_secs = 600
 | `timeout_secs` | u64 | `600` | Timeout for a single dream invocation in seconds. |
 | `lock_dir` | string | `""` | Optional override for the lock directory. Empty = `<data_dir>/auto_dream/`. Per-agent locks are stored as `<dir>/<agent_id>.lock`. |
 
-A dream fires for an agent when all gates hold: `enabled = true`, the agent's manifest has `auto_dream_enabled = true`, `min_hours` have elapsed since its last dream, `min_sessions` have been touched since then, and the per-agent lock can be acquired. Manual triggers via `POST /api/auto-dream/agents/{id}/trigger` bypass the time and session gates but still respect the lock. Live status and abort control are exposed at `GET /api/auto-dream/status` and `POST /api/auto-dream/agents/{id}/abort`, and surfaced on the web dashboard Settings page and the CLI TUI Dashboard tab.
+A dream fires for an agent when all gates hold: `enabled = true`, the agent's manifest has `auto_dream_enabled = true`, `min_hours` have elapsed since its last dream, `min_sessions` have been touched since then, and the per-agent lock can be acquired.
+
+**Per-agent opt-in** can be toggled at runtime without restarting the agent:
+
+- **Web dashboard**: Settings → Auto-Dream card → checkbox next to each agent.
+- **API**: `PUT /api/auto-dream/agents/{id}/enabled` with body `{"enabled": true | false}`. The scheduler picks up the new state on its next tick.
+- **Manifest**: set `auto_dream_enabled = true` in the agent's `.toml` for a persistent opt-in that survives restarts.
+
+**Runtime tool restriction**: inside a dream, the kernel clamps the tool allowlist to `memory_store` / `memory_recall` / `memory_list` only, regardless of what the agent's manifest normally permits. This is defence-in-depth against prompt-injected dreams calling shell or network-mutating tools.
+
+**Manual controls**: `POST /api/auto-dream/agents/{id}/trigger` bypasses the time and session gates but still respects the lock and the opt-in flag. `POST /api/auto-dream/agents/{id}/abort` cancels an in-flight manual dream and rolls the lock mtime back so the time gate reopens. `GET /api/auto-dream/status` returns live progress, including token usage and cost for completed dreams.
+
+**Audit trail**: every dream lifecycle transition (start / complete / fail / abort) is recorded as a `DreamConsolidation` audit event. The completion entry carries input/output/cache token counts and `cost_usd` so spend is answerable from `/api/audit`.
 
 ---
 

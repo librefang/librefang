@@ -588,7 +588,9 @@ timeout_secs = 600
 | `timeout_secs` | u64 | `600` | 单次梦境调用的超时时间（秒）。 |
 | `lock_dir` | string | `""` | 锁目录的可选覆盖路径。为空则使用 `<data_dir>/auto_dream/`，每个 agent 的锁存储为 `<dir>/<agent_id>.lock`。 |
 
-当所有闸门同时满足时才会触发：`enabled = true`、agent manifest 中 `auto_dream_enabled = true`、距离上次梦境至少 `min_hours` 小时、至少触及 `min_sessions` 个会话、以及能获取到该 agent 的文件锁。通过 `POST /api/auto-dream/agents/{id}/trigger` 手动触发可绕过时间和会话闸门，但仍须获取锁。
+当所有闸门同时满足时才会触发：`enabled = true`、agent manifest 中 `auto_dream_enabled = true`、距离上次梦境至少 `min_hours` 小时、至少触及 `min_sessions` 个会话、以及能获取到该 agent 的文件锁。
+
+每个 agent 的 opt-in 状态可在运行时通过 `PUT /api/auto-dream/agents/{id}/enabled`（请求体 `{"enabled": bool}`）或 Web Dashboard 的设置页 → 梦境模式卡片切换 —— 调度器在下次 tick 读取新状态。完整参考（包含运行时工具限制、手动控制、审计事件）见 `/zh/configuration/core#auto_dream`。
 
 ---
 

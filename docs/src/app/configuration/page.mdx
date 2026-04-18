@@ -589,7 +589,9 @@ timeout_secs = 600
 | `timeout_secs` | u64 | `600` | Timeout for a single dream invocation in seconds. |
 | `lock_dir` | string | `""` | Optional override for the lock directory. Empty = `<data_dir>/auto_dream/`. Per-agent locks are stored as `<dir>/<agent_id>.lock`. |
 
-A dream fires for an agent when all gates hold: `enabled = true`, the agent's manifest has `auto_dream_enabled = true`, `min_hours` have elapsed since its last dream, `min_sessions` have been touched since then, and the per-agent lock can be acquired. Manual triggers via `POST /api/auto-dream/agents/{id}/trigger` bypass the time and session gates but still respect the lock.
+A dream fires for an agent when all gates hold: `enabled = true`, the agent's manifest has `auto_dream_enabled = true`, `min_hours` have elapsed since its last dream, `min_sessions` have been touched since then, and the per-agent lock can be acquired.
+
+Per-agent opt-in can be toggled at runtime via `PUT /api/auto-dream/agents/{id}/enabled` (body `{"enabled": bool}`) or via the Settings → Auto-Dream card on the web dashboard — the scheduler picks up the change on its next tick. See `/configuration/core#auto_dream` for the full reference including runtime tool restriction, manual controls, and audit events.
 
 ---
 

@@ -116,7 +116,19 @@ timeout_secs = 600
 | `timeout_secs` | u64 | `600` | 单次梦境调用的超时时间（秒）。 |
 | `lock_dir` | string | `""` | 锁目录的可选覆盖路径。为空则使用 `<data_dir>/auto_dream/`，每个 agent 的锁存储为 `<dir>/<agent_id>.lock`。 |
 
-当所有闸门同时满足时才会触发：`enabled = true`、agent manifest 中 `auto_dream_enabled = true`、距离上次梦境至少 `min_hours` 小时、至少触及 `min_sessions` 个会话、以及能获取到该 agent 的文件锁。通过 `POST /api/auto-dream/agents/{id}/trigger` 手动触发可绕过时间和会话闸门，但仍须获取锁。实时状态与中止控制通过 `GET /api/auto-dream/status` 和 `POST /api/auto-dream/agents/{id}/abort` 暴露，并在 Web Dashboard 设置页及 CLI TUI Dashboard 标签页呈现。
+当所有闸门同时满足时才会触发：`enabled = true`、agent manifest 中 `auto_dream_enabled = true`、距离上次梦境至少 `min_hours` 小时、至少触及 `min_sessions` 个会话、以及能获取到该 agent 的文件锁。
+
+**每个 Agent 的加入状态** 可以无需重启在运行时切换：
+
+- **Web Dashboard**：设置页 → 梦境模式卡片 → 每个 agent 旁的勾选框。
+- **API**：`PUT /api/auto-dream/agents/{id}/enabled`，请求体 `{"enabled": true | false}`。调度器会在下一次 tick 读取新状态。
+- **Manifest**：在 agent 的 `.toml` 里设置 `auto_dream_enabled = true`，获得重启后仍生效的持久加入状态。
+
+**运行时工具限制**：dream 运行时，无论 agent manifest 原本允许什么，kernel 会把可调用工具列表收窄到仅 `memory_store` / `memory_recall` / `memory_list`。这是针对 prompt 注入攻击的纵深防御层（即便模型被诱骗，shell 和网络类工具也不在其 schema 里）。
+
+**手动控制**：`POST /api/auto-dream/agents/{id}/trigger` 绕过时间和会话闸门，但仍须获取锁并尊重 opt-in 开关。`POST /api/auto-dream/agents/{id}/abort` 取消手动触发的进行中梦境，回滚锁 mtime 使时间门重新打开。`GET /api/auto-dream/status` 返回实时进度，完成后的梦境会包含 token 用量和成本字段。
+
+**审计记录**：每次梦境生命周期转换（start / complete / fail / abort）都以 `DreamConsolidation` 审计事件记录。completion 条目附带 input/output/cache token 数和 `cost_usd`，便于从 `/api/audit` 回答"这周 auto-dream 花了多少钱"。
 
 ---
 

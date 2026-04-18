@@ -220,6 +220,7 @@ use crate::types;
         routes::auto_dream_status,
         routes::auto_dream_trigger,
         routes::auto_dream_abort,
+        routes::auto_dream_set_enabled,
 
         // ── Memory (KV) ──
         routes::get_agent_kv,
@@ -340,6 +341,7 @@ use crate::types;
         types::BulkActionResult,
         types::ExtensionInstallRequest,
         types::ExtensionUninstallRequest,
+        routes::auto_dream::SetEnabledRequest,
     )),
     tags(
         (name = "system", description = "Health checks, status, version, config, and system management"),
