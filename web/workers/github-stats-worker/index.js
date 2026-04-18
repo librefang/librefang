@@ -581,6 +581,22 @@ async function handleRegistryCommit(env, cors, rawPath) {
 const CATEGORIES = ['hands', 'channels', 'providers', 'workflows', 'agents', 'plugins', 'skills', 'mcp']
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i
 
+// Click counts are persisted in N shard blobs per category
+// (`registry_clicks:<cat>:<shard>`). Each POST picks a random shard so
+// concurrent writers only collide when they land on the same shard —
+// collision probability drops from ~1 (single blob) to ~1/N, which is
+// enough to make dropped-click telemetry rare without introducing a
+// Durable Object binding. Reads union all shards.
+//
+// KV still has no CAS, so a true zero-loss counter would need a
+// Durable Object or a queued aggregator; that's deferred until we
+// outgrow the shard-plus-retry model here.
+const CLICK_SHARDS = 8
+
+function shardClickKey(category, shard) {
+  return `registry_clicks:${category}:${shard}`
+}
+
 async function handleRegistryClick(env, cors, request, ctx) {
   let body
   try { body = await request.json() }
@@ -589,7 +605,8 @@ async function handleRegistryClick(env, cors, request, ctx) {
   if (!CATEGORIES.includes(category) || !ID_RE.test(id)) {
     return new Response('invalid payload', { status: 400, headers: cors })
   }
-  const key = `registry_clicks:${category}`
+  const shard = Math.floor(Math.random() * CLICK_SHARDS)
+  const key = shardClickKey(category, shard)
   // Use waitUntil so we don't block the response on the KV write.
   const doUpdate = async () => {
     let counts = {}
@@ -598,7 +615,8 @@ async function handleRegistryClick(env, cors, request, ctx) {
       if (raw) counts = JSON.parse(raw)
     } catch (_) { counts = {} }
     counts[id] = (counts[id] || 0) + 1
-    // Cap the map so a registry with thousands of ids can't grow unbounded.
+    // Cap each shard so one category's id space can't balloon any
+    // single blob beyond KV's value-size comfort zone.
     const entries = Object.entries(counts)
     if (entries.length > 500) {
       entries.sort((a, b) => b[1] - a[1])
@@ -613,18 +631,32 @@ async function handleRegistryClick(env, cors, request, ctx) {
   })
 }
 
+// Union all per-category shards into a single {id: total} map.
+async function loadClickTotalsForCategory(env, category) {
+  const shardReads = await Promise.all(
+    Array.from({ length: CLICK_SHARDS }, (_, i) =>
+      env.KV.get(shardClickKey(category, i)).catch(() => null),
+    ),
+  )
+  const totals = {}
+  for (const raw of shardReads) {
+    if (!raw) continue
+    let counts = {}
+    try { counts = JSON.parse(raw) } catch (_) { continue }
+    for (const [id, n] of Object.entries(counts)) {
+      totals[id] = (totals[id] || 0) + (typeof n === 'number' ? n : 0)
+    }
+  }
+  return totals
+}
+
 async function handleRegistryTrending(env, cors, category) {
   if (!CATEGORIES.includes(category)) {
     return new Response(JSON.stringify({ error: 'invalid category' }), {
       status: 400, headers: { 'Content-Type': 'application/json', ...cors }
     })
   }
-  const key = `registry_clicks:${category}`
-  let counts = {}
-  try {
-    const raw = await env.KV.get(key)
-    if (raw) counts = JSON.parse(raw)
-  } catch (_) { counts = {} }
+  const counts = await loadClickTotalsForCategory(env, category)
   const top = Object.entries(counts)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10)
@@ -641,21 +673,15 @@ async function handleRegistryMetrics(env, cors) {
   const perCategory = {}
   const allItems = []
   for (const cat of CATEGORIES) {
-    const raw = await env.KV.get(`registry_clicks:${cat}`)
-    if (!raw) { perCategory[cat] = { total: 0, items: 0 }; continue }
-    try {
-      const counts = JSON.parse(raw)
-      let total = 0
-      let items = 0
-      for (const [id, n] of Object.entries(counts)) {
-        total += n
-        items++
-        allItems.push({ category: cat, id, clicks: n })
-      }
-      perCategory[cat] = { total, items }
-    } catch (_) {
-      perCategory[cat] = { total: 0, items: 0 }
+    const counts = await loadClickTotalsForCategory(env, cat)
+    let total = 0
+    let items = 0
+    for (const [id, n] of Object.entries(counts)) {
+      total += n
+      items++
+      allItems.push({ category: cat, id, clicks: n })
     }
+    perCategory[cat] = { total, items }
   }
   allItems.sort((a, b) => b.clicks - a.clicks)
   const result = {
@@ -673,8 +699,42 @@ async function handleRegistryMetrics(env, cors) {
 // The web app's ErrorBoundary POSTs here when a React subtree throws so we
 // can see what's breaking without instrumenting a full error-tracking SaaS.
 // We store the most recent 100 reports as a single JSON blob (cheap KV ops).
-const ERRORS_KEY = 'ui_errors'
-const ERRORS_MAX = 100
+// Errors are persisted across N shard blobs (`ui_errors:<shard>`). Each
+// POST picks a random shard so concurrent reports only collide when they
+// land on the same one — collision probability drops from ~1 on the old
+// single-blob layout to ~1/N. True zero-loss queuing would need a
+// Durable Object or upstream aggregator; the shard model is a pragmatic
+// middle ground that keeps low-traffic error telemetry usable.
+const ERRORS_KEY_LEGACY = 'ui_errors' // still read so historical data isn't lost
+const ERROR_SHARDS = 4
+const ERRORS_MAX_TOTAL = 100
+const ERRORS_MAX_PER_SHARD = Math.ceil(ERRORS_MAX_TOTAL / ERROR_SHARDS)
+
+function shardErrorKey(shard) {
+  return `ui_errors:${shard}`
+}
+
+async function loadAllErrors(env) {
+  const shardReads = await Promise.all([
+    ...Array.from({ length: ERROR_SHARDS }, (_, i) =>
+      env.KV.get(shardErrorKey(i)).catch(() => null),
+    ),
+    env.KV.get(ERRORS_KEY_LEGACY).catch(() => null),
+  ])
+  const merged = []
+  for (const raw of shardReads) {
+    if (!raw) continue
+    try {
+      const arr = JSON.parse(raw)
+      if (Array.isArray(arr)) merged.push(...arr)
+    } catch (_) { /* skip unparseable shard */ }
+  }
+  // Entries are `{at: ISO, ...}`. Sort newest first, then truncate to the
+  // total cap so the response shape stays stable for the dashboard.
+  merged.sort((a, b) => String(b?.at || '').localeCompare(String(a?.at || '')))
+  if (merged.length > ERRORS_MAX_TOTAL) merged.length = ERRORS_MAX_TOTAL
+  return merged
+}
 
 async function handleErrorReport(env, cors, request, ctx) {
   let body
@@ -692,15 +752,17 @@ async function handleErrorReport(env, cors, request, ctx) {
     lang: typeof lang === 'string' ? String(lang).slice(0, 16) : undefined,
     ua: typeof ua === 'string' ? String(ua).slice(0, 256) : undefined,
   }
+  const shard = Math.floor(Math.random() * ERROR_SHARDS)
+  const shardKey = shardErrorKey(shard)
   const doUpdate = async () => {
     let errors = []
     try {
-      const raw = await env.KV.get(ERRORS_KEY)
+      const raw = await env.KV.get(shardKey)
       if (raw) errors = JSON.parse(raw)
     } catch (_) { errors = [] }
     errors.unshift(entry)
-    if (errors.length > ERRORS_MAX) errors.length = ERRORS_MAX
-    await env.KV.put(ERRORS_KEY, JSON.stringify(errors))
+    if (errors.length > ERRORS_MAX_PER_SHARD) errors.length = ERRORS_MAX_PER_SHARD
+    await env.KV.put(shardKey, JSON.stringify(errors))
   }
   if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(doUpdate())
   else await doUpdate()
@@ -710,11 +772,7 @@ async function handleErrorReport(env, cors, request, ctx) {
 }
 
 async function handleErrorList(env, cors) {
-  let errors = []
-  try {
-    const raw = await env.KV.get(ERRORS_KEY)
-    if (raw) errors = JSON.parse(raw)
-  } catch (_) { errors = [] }
+  const errors = await loadAllErrors(env)
   return new Response(JSON.stringify({ errors }), {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...cors }
   })

@@ -3643,17 +3643,46 @@ system_prompt = "You are a helpful assistant."
                     && self.try_claim_skill_review_slot(&agent_id_str, now_epoch);
                 if claimed {
                     let permit = permit_opt.expect("permit was acquired before claim");
-                    let driver = self.default_driver.clone();
+                    // Prefer the driver the agent's own turn resolved to.
+                    // When an agent is pinned to a provider the global
+                    // default isn't configured for (or vice versa), using
+                    // `self.default_driver` meant reviews failed with
+                    // "unknown provider" while the task itself had
+                    // succeeded — so complex workflows from those agents
+                    // never got distilled into skills. Fall back to the
+                    // default only if manifest resolution fails.
+                    let driver = self
+                        .resolve_driver(&entry.manifest)
+                        .unwrap_or_else(|_| self.default_driver.clone());
                     let skills_dir = self.home_dir_boot.join("skills");
                     let trace_summary = Self::summarize_traces_for_review(&result.decision_traces);
                     let response_summary = result.response.chars().take(2000).collect::<String>();
                     let kernel_weak = self.self_handle.get().cloned();
                     let audit_log = self.audit_log.clone();
                     let agent_id_for_task = agent_id_str.clone();
-                    // Capture defaults for cost attribution — the review
-                    // uses `default_driver` so its cost rolls up under the
-                    // default model in the user's dashboards.
-                    let default_model = self.default_model();
+                    // Cost-attribution model: use the agent's own model
+                    // so review spend rolls up under the same line the
+                    // main turn did (matches the driver choice above).
+                    // Falls back to the global default when the agent
+                    // didn't pin a provider/model pair.
+                    let default_model = if entry.manifest.model.provider.is_empty()
+                        || entry.manifest.model.model.is_empty()
+                    {
+                        self.default_model()
+                    } else {
+                        librefang_types::config::DefaultModelConfig {
+                            provider: entry.manifest.model.provider.clone(),
+                            model: entry.manifest.model.model.clone(),
+                            api_key_env: entry
+                                .manifest
+                                .model
+                                .api_key_env
+                                .clone()
+                                .unwrap_or_default(),
+                            base_url: entry.manifest.model.base_url.clone(),
+                            ..self.default_model()
+                        }
+                    };
                     let review_agent_id = agent_id;
                     let audit_log_success = audit_log.clone();
                     let agent_id_for_success = agent_id_str.clone();
@@ -10753,47 +10782,63 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Strategy 2: Balanced brace matching — find the first '{' and track
-        // nesting depth to find the matching '}', handling strings correctly.
+        // Strategy 2: Balanced brace matching — find a '{' and track
+        // nesting depth to find the matching '}', handling strings
+        // correctly. Try every candidate opening brace in the text so a
+        // valid JSON object later in the response still matches after
+        // leading prose (`"here's the answer: {example} ... {actual}"`).
+        // The old implementation bailed out after the first `{` failed
+        // to parse, causing the background skill review to silently
+        // skip any response where the model preceded its JSON with
+        // braces in free-form prose.
         let chars: Vec<char> = text.chars().collect();
-        let start = chars.iter().position(|&c| c == '{')?;
-        let mut depth = 0i32;
-        let mut in_string = false;
-        let mut escape_next = false;
-        let mut end = None;
+        let mut search_from = 0;
+        while let Some(start_rel) = chars.iter().skip(search_from).position(|&c| c == '{') {
+            let start = search_from + start_rel;
+            let mut depth = 0i32;
+            let mut in_string = false;
+            let mut escape_next = false;
+            let mut end = None;
 
-        for (i, &ch) in chars.iter().enumerate().skip(start) {
-            if escape_next {
-                escape_next = false;
-                continue;
-            }
-            if ch == '\\' && in_string {
-                escape_next = true;
-                continue;
-            }
-            if ch == '"' {
-                in_string = !in_string;
-                continue;
-            }
-            if !in_string {
-                match ch {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = Some(i);
-                            break;
+            for (i, &ch) in chars.iter().enumerate().skip(start) {
+                if escape_next {
+                    escape_next = false;
+                    continue;
+                }
+                if ch == '\\' && in_string {
+                    escape_next = true;
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = !in_string;
+                    continue;
+                }
+                if !in_string {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = Some(i);
+                                break;
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
-        }
 
-        if let Some(end_idx) = end {
-            let candidate: String = chars[start..=end_idx].iter().collect();
-            if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
-                return Some(candidate);
+            if let Some(end_idx) = end {
+                let candidate: String = chars[start..=end_idx].iter().collect();
+                if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
+                    return Some(candidate);
+                }
+                // Try the next '{' after the one we just rejected.
+                search_from = start + 1;
+            } else {
+                // Unbalanced braces from `start` to EOF — nothing later
+                // can match either, so stop.
+                return None;
             }
         }
 
@@ -10993,7 +11038,14 @@ system_prompt = "You are a helpful assistant."
 
         let mut summary = String::new();
         for (category, cat_skills) in &categories {
-            summary.push_str(&format!("{category}:\n"));
+            // Category derives from a skill's first non-platform tag via
+            // `derive_category`, and tags are third-party-authored data.
+            // A malicious tag containing newlines or pseudo-section
+            // markers (`[SYSTEM]`, `---`) would otherwise forge a trust
+            // boundary inside the system prompt. Sanitize the same way
+            // we do for name/description/tool slots below.
+            let safe_category = sanitize_for_prompt(category, 64);
+            summary.push_str(&format!("{safe_category}:\n"));
             for skill in cat_skills {
                 // Sanitize third-party-authored fields before interpolation —
                 // a malicious skill author could otherwise smuggle newlines or

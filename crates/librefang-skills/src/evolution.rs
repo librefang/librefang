@@ -352,6 +352,18 @@ pub fn fuzzy_find_and_replace(
     new_str: &str,
     replace_all: bool,
 ) -> Result<FuzzyReplaceResult, SkillError> {
+    // Reject empty `old_str` up front. `"".contains("") == true` and
+    // `content.replace("", new_str)` would insert `new_str` at every
+    // character boundary — catastrophic corruption with replace_all=true,
+    // and a spurious "multiple matches" error when false. The guard has to
+    // run before any strategy because every strategy funnels through the
+    // same substring primitives.
+    if old_str.is_empty() {
+        return Err(SkillError::InvalidManifest(
+            "old_string cannot be empty — provide the exact text to replace".to_string(),
+        ));
+    }
+
     // Strategy 1: Exact match
     if content.contains(old_str) {
         let count = content.matches(old_str).count();
@@ -1058,6 +1070,15 @@ pub fn update_skill(
     // Acquire exclusive lock to prevent concurrent updates
     let _lock = acquire_skill_lock(skill_dir)?;
 
+    // Re-verify the skill directory still exists under the lock. Between
+    // the caller reading `skill` and us acquiring the lock, a concurrent
+    // `delete_skill` (which also holds this lock) may have removed it.
+    // Without the check we would `create_dir_all` via save_rollback_snapshot
+    // and resurrect a skill the operator just deleted.
+    if !skill_dir.exists() {
+        return Err(SkillError::NotFound(name.to_string()));
+    }
+
     // RE-READ skill.toml under the lock to get the current on-disk
     // version. The caller passed a snapshot taken before the lock was
     // acquired, which is stale under concurrent writers — without this,
@@ -1136,6 +1157,14 @@ pub fn patch_skill(
 
     // Acquire exclusive lock to prevent concurrent patches
     let _lock = acquire_skill_lock(skill_dir)?;
+
+    // Re-verify skill still exists — a concurrent delete could have
+    // removed the directory after the caller snapshot. Without this,
+    // save_rollback_snapshot would recreate the directory and we'd
+    // resurrect a deleted skill.
+    if !skill_dir.exists() {
+        return Err(SkillError::NotFound(name.to_string()));
+    }
 
     // Read current prompt_context FROM DISK first (under the lock) —
     // the caller's cached snapshot could be multiple patches stale if
@@ -1272,6 +1301,14 @@ pub fn uninstall_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult,
 }
 
 pub fn delete_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult, SkillError> {
+    // Reject path-traversal attempts in the skill name before constructing
+    // the filesystem path. Without this, `name = "../etc"` would resolve
+    // `skills_dir/../etc` and (subject to source-field checks below) let an
+    // agent delete directories outside the skills root. `validate_name` is
+    // the same guard used on create, so any name we accept here was writable
+    // via create_skill too.
+    validate_name(name)?;
+
     let skill_dir = skills_dir.join(name);
     if !skill_dir.exists() {
         return Err(SkillError::NotFound(name.to_string()));
@@ -1439,16 +1476,14 @@ pub fn write_supporting_file(
         )));
     }
 
-    atomic_write(&target, content)?;
-
-    // Security scan the new content
+    // Security scan BEFORE writing. Scanning after the write means a
+    // rejected update wipes the pre-existing file via `remove_file` —
+    // a non-destructive failure should leave prior valid content intact.
     let warnings = SkillVerifier::scan_prompt_content(content);
     let has_critical = warnings
         .iter()
         .any(|w| matches!(w.severity, crate::verify::WarningSeverity::Critical));
     if has_critical {
-        // Rollback
-        let _ = std::fs::remove_file(&target);
         let details: Vec<String> = warnings
             .iter()
             .filter(|w| matches!(w.severity, crate::verify::WarningSeverity::Critical))
@@ -1459,6 +1494,8 @@ pub fn write_supporting_file(
             details.join("; ")
         )));
     }
+
+    atomic_write(&target, content)?;
 
     info!(skill = %name, path = rel_path, "Wrote supporting file");
 
@@ -1490,6 +1527,23 @@ pub fn remove_supporting_file(
     // Serialize against concurrent mutations (delete/patch/update) on
     // the same skill.
     let _lock = acquire_skill_lock(&skill.path)?;
+
+    // Belt-and-suspenders containment check: if a symlink inside the
+    // skill's `references/`/`scripts/` etc. points outside the skill
+    // directory, resolving `rel_path` via join + canonicalize must stay
+    // under the skill root. Without this, `references -> /home/user`
+    // could let `remove_supporting_file` delete files outside the skill
+    // — `write_supporting_file` has the same check; this mirrors it.
+    let skill_dir_canonical =
+        std::fs::canonicalize(&skill.path).unwrap_or_else(|_| skill.path.clone());
+    if let Ok(target_canonical) = std::fs::canonicalize(&target) {
+        if !target_canonical.starts_with(&skill_dir_canonical) {
+            return Err(SkillError::SecurityBlocked(format!(
+                "Resolved path escapes skill directory: {}",
+                target_canonical.display()
+            )));
+        }
+    }
 
     if !target.exists() {
         // List available files (recursively) as a hint.
