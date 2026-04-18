@@ -27,17 +27,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Corepack must be enabled BEFORE setup-node: setup-node's
+      # `cache: pnpm` feature runs `pnpm --version` to compute the cache
+      # key, and that fails if pnpm isn't on PATH yet. Modern setup-node
+      # (v6 + Node ≥22, which bundles corepack) preserves corepack shims
+      # across the Node swap, so running `enable` once up front is
+      # sufficient.
+      - name: Enable corepack (activates pnpm from packageManager field)
+        run: corepack enable
+
       - uses: actions/setup-node@v6
         with:
           node-version-file: "web/.nvmrc"
           cache: "pnpm"
           cache-dependency-path: web/pnpm-lock.yaml
-
-      # corepack must run AFTER setup-node so shims land in the Node install
-      # actually on PATH. Running it earlier adds shims to a Node installation
-      # that setup-node then replaces, leaving `pnpm: command not found`.
-      - name: Enable corepack (activates pnpm from packageManager field)
-        run: corepack enable
 
       - name: Install web deps
         run: cd web && pnpm install --frozen-lockfile
