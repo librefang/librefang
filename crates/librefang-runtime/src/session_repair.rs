@@ -2308,4 +2308,35 @@ mod tests {
             _ => unreachable!(),
         }
     }
+
+    #[test]
+    fn test_phase_2a1_basic_orphaned_tool_use() {
+        // Single assistant turn with a ToolUse, followed by a user turn with
+        // plain text (no ToolResult). Phase 2a1 should insert a synthetic
+        // ToolResult for the orphaned call.
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![tool_use_block("call_1")]),
+                pinned: false,
+            },
+            Message::user("plain text, no tool result"),
+        ];
+
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+
+        // Phase 2a1 must insert exactly one synthetic ToolResult for "call_1".
+        assert_eq!(
+            stats.positional_synthetic_inserted, 1,
+            "Phase 2a1 should insert one synthetic for the orphaned call_1"
+        );
+
+        // The user message following the assistant must now contain the synthetic.
+        let after_assistant = &repaired[1];
+        assert_eq!(after_assistant.role, Role::User);
+        assert!(
+            has_synthetic_result_for(after_assistant, "call_1"),
+            "user message after assistant must contain synthetic ToolResult for call_1"
+        );
+    }
 }
