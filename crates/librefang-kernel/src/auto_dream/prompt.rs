@@ -10,63 +10,168 @@
 //!     Pruning focuses on duplicate, stale, and contradicted fragments.
 //!
 //! The wording intentionally keeps the four-phase structure so users who've
-//! seen libre-code's dream output recognise the pattern.
+//! seen libre-code's dream output recognise the pattern. Session IDs and
+//! tool-constraint guidance are injected at build time (matching the source's
+//! `buildConsolidationPrompt(memoryRoot, transcriptDir, extra)` signature)
+//! so the model gets concrete targets to narrow its gather phase against.
 
-/// Build the dream message delivered to the target agent. The result is a
-/// plain user message — no tool constraints baked in, because tool allowlists
-/// are controlled by the agent manifest, not the prompt.
-pub fn build_consolidation_prompt() -> String {
-    r#"# Dream: Memory Consolidation
+/// Input to [`build_consolidation_prompt`]. Keeps the signature typed so
+/// callers can't confuse positional arguments and forgetting a field is
+/// caught at compile time.
+pub struct ConsolidationPromptInput<'a> {
+    /// Session IDs that were touched since this agent's last dream, newest
+    /// first. Capped to a sensible size by the caller; the prompt just
+    /// renders whatever it gets.
+    pub session_ids: &'a [String],
+    /// Total count of touched sessions. May exceed `session_ids.len()` when
+    /// the caller truncated — we print this verbatim so the model sees the
+    /// real workload.
+    pub total_sessions: u32,
+    /// Free-form agent-specific context the scheduler wants to inject
+    /// (e.g. "agent prefers Chinese responses"). Passed through unchanged,
+    /// empty string omits the section entirely.
+    pub extra: &'a str,
+}
 
-You are performing a dream — a reflective pass over your memory store. Synthesize what you've learned recently into durable, well-organized memories so future sessions can orient quickly.
+/// Build the dream message delivered to the target agent. The prompt
+/// concludes with tool-use guidance matching libre-code's constraint note
+/// (which it enforces via a restricted `canUseTool` hook). librefang can't
+/// enforce the restriction at runtime yet — documenting it here is a
+/// defence-in-depth signal to the model while the kernel-level enforcement
+/// lands as a follow-up.
+pub fn build_consolidation_prompt(input: ConsolidationPromptInput<'_>) -> String {
+    let mut out = String::with_capacity(2048);
+    out.push_str(
+        "# Dream: Memory Consolidation\n\
+\n\
+You are performing a dream — a reflective pass over your memory store. \
+Synthesize what you've learned recently into durable, well-organized \
+memories so future sessions can orient quickly.\n\
+\n\
+---\n\
+\n\
+## Phase 1 — Orient\n\
+\n\
+- Use `memory_search` or `memory_list` to see what's already stored.\n\
+- Note which topics are well-covered and which are thin or missing.\n\
+- Skim categories so you improve existing memories rather than duplicating them.\n\
+\n\
+## Phase 2 — Gather recent signal\n\
+\n\
+Look for new information worth persisting. Sources in rough priority order:\n\
+\n\
+1. **Recent sessions** — facts, preferences, and decisions from the sessions listed below.\n\
+2. **Drifted memories** — stored facts that contradict something you know to be true now (the user corrected you, the code changed, the project pivoted).\n\
+3. **Implicit patterns** — recurring user preferences you've noticed but never explicitly recorded.\n\
+\n\
+Don't exhaustively trawl — look for things you already suspect matter.\n\
+\n\
+## Phase 3 — Consolidate\n\
+\n\
+For each thing worth remembering:\n\
+\n\
+- **Merge** into an existing memory if one covers the same topic — prefer updating over creating near-duplicates.\n\
+- **Convert relative dates** (\"yesterday\", \"last week\") to absolute dates so the memory stays interpretable after time passes.\n\
+- **Delete contradicted facts** — if today's investigation disproves an old memory, fix it at the source rather than adding a contradiction.\n\
+\n\
+Focus on durable, actionable knowledge: preferences, non-obvious constraints, recurring pitfalls, project-specific vocabulary. Skip ephemeral task state.\n\
+\n\
+## Phase 4 — Prune\n\
+\n\
+- Remove memories that are stale, wrong, or superseded by a newer fragment.\n\
+- Collapse near-duplicates into a single canonical entry.\n\
+- Resolve contradictions — if two memories disagree, fix the wrong one.\n\
+\n\
+---\n\
+\n",
+    );
 
----
+    // Session list — matches libre-code's
+    //   Sessions since last consolidation (N):
+    //   - id1
+    //   - id2
+    // The model uses these as concrete grep targets rather than guessing.
+    //
+    // Three cases:
+    //   total=0              → skip the section entirely
+    //   total>0, ids non-empty → render header + bulleted list
+    //   total>0, ids empty   → render header only (graceful fallback when
+    //                          the ID lookup failed but the count succeeded)
+    if input.total_sessions > 0 {
+        out.push_str(&format!(
+            "## Sessions to review\n\n{} session(s) touched since your last dream",
+            input.total_sessions
+        ));
+        if !input.session_ids.is_empty() && input.session_ids.len() < input.total_sessions as usize
+        {
+            out.push_str(&format!(
+                " (showing the {} most recent)",
+                input.session_ids.len()
+            ));
+        }
+        if input.session_ids.is_empty() {
+            out.push_str(
+                ". Use `memory_search` to browse them — the IDs weren't available \
+at prompt-build time.\n\n",
+            );
+        } else {
+            out.push_str(":\n\n");
+            for id in input.session_ids {
+                out.push_str(&format!("- `{id}`\n"));
+            }
+            out.push('\n');
+        }
+    }
 
-## Phase 1 — Orient
+    // Tool constraints — mirrors libre-code's injected `extra` block. Note
+    // the model is currently trusted to self-enforce; kernel-level
+    // allowlisting for the `auto_dream` channel is a follow-up.
+    out.push_str(
+        "## Tool constraints\n\
+\n\
+- **Writes** are restricted to the memory tools (`memory_save`, `memory_update`, \
+`memory_delete`, etc.). Do not call file-edit, shell, or network-mutating tools.\n\
+- **Reads** are free: `memory_search`, `memory_list`, and any read-only shell \
+commands (`ls`, `grep`, `cat`, `wc`) are fine for exploring context.\n\
+- Your session transcripts live in the memory substrate — use `memory_search` \
+rather than trying to open files directly.\n\
+\n",
+    );
 
-- List or search your existing memories to see what's already there.
-- Note which topics are well-covered and which are thin or missing.
-- Skim categories so you improve existing memories rather than duplicating them.
+    if !input.extra.is_empty() {
+        out.push_str("## Additional context\n\n");
+        out.push_str(input.extra);
+        if !input.extra.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
 
-## Phase 2 — Gather recent signal
+    out.push_str(
+        "---\n\
+\n\
+Return a brief summary of what you consolidated, updated, or pruned. If \
+nothing changed (your memory is already tight), say so.\n",
+    );
 
-Look for new information worth persisting. Sources in rough priority order:
-
-1. **Recent conversations** — facts, preferences, and decisions from the last few sessions.
-2. **Drifted memories** — stored facts that contradict something you know to be true now (the user corrected you, the code changed, the project pivoted).
-3. **Implicit patterns** — recurring user preferences you've noticed but never explicitly recorded.
-
-Don't exhaustively trawl — look for things you already suspect matter.
-
-## Phase 3 — Consolidate
-
-For each thing worth remembering:
-
-- **Merge** into an existing memory if one covers the same topic — prefer updating over creating near-duplicates.
-- **Convert relative dates** ("yesterday", "last week") to absolute dates so the memory stays interpretable after time passes.
-- **Delete contradicted facts** — if today's investigation disproves an old memory, fix it at the source rather than adding a contradiction.
-
-Focus on durable, actionable knowledge: preferences, non-obvious constraints, recurring pitfalls, project-specific vocabulary. Skip ephemeral task state.
-
-## Phase 4 — Prune
-
-- Remove memories that are stale, wrong, or superseded by a newer fragment.
-- Collapse near-duplicates into a single canonical entry.
-- Resolve contradictions — if two memories disagree, fix the wrong one.
-
----
-
-Return a brief summary of what you consolidated, updated, or pruned. If nothing changed (your memory is already tight), say so.
-"#.to_string()
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn empty_input() -> ConsolidationPromptInput<'static> {
+        ConsolidationPromptInput {
+            session_ids: &[],
+            total_sessions: 0,
+            extra: "",
+        }
+    }
+
     #[test]
     fn prompt_contains_four_phases() {
-        let p = build_consolidation_prompt();
+        let p = build_consolidation_prompt(empty_input());
         assert!(p.contains("Phase 1 — Orient"));
         assert!(p.contains("Phase 2 — Gather"));
         assert!(p.contains("Phase 3 — Consolidate"));
@@ -74,7 +179,68 @@ mod tests {
     }
 
     #[test]
-    fn prompt_is_nonempty() {
-        assert!(build_consolidation_prompt().len() > 200);
+    fn prompt_includes_tool_constraints() {
+        let p = build_consolidation_prompt(empty_input());
+        assert!(p.contains("Tool constraints"));
+        assert!(p.contains("memory_save"));
+    }
+
+    #[test]
+    fn prompt_omits_session_list_when_zero() {
+        let p = build_consolidation_prompt(empty_input());
+        assert!(!p.contains("Sessions to review"));
+    }
+
+    #[test]
+    fn prompt_renders_session_ids() {
+        let ids = vec!["sess-a".to_string(), "sess-b".to_string()];
+        let p = build_consolidation_prompt(ConsolidationPromptInput {
+            session_ids: &ids,
+            total_sessions: 2,
+            extra: "",
+        });
+        assert!(p.contains("2 session(s)"));
+        assert!(p.contains("sess-a"));
+        assert!(p.contains("sess-b"));
+        assert!(!p.contains("most recent"));
+    }
+
+    #[test]
+    fn prompt_flags_truncation_when_list_shorter_than_total() {
+        let ids = vec!["sess-1".to_string()];
+        let p = build_consolidation_prompt(ConsolidationPromptInput {
+            session_ids: &ids,
+            total_sessions: 50,
+            extra: "",
+        });
+        assert!(p.contains("50 session(s)"));
+        assert!(p.contains("showing the 1 most recent"));
+    }
+
+    #[test]
+    fn prompt_falls_back_to_prose_when_total_positive_but_ids_empty() {
+        // Mimics list_agent_sessions_touched_since failing while the count
+        // query succeeded — render the count as a hint, don't emit an empty
+        // bulleted list.
+        let p = build_consolidation_prompt(ConsolidationPromptInput {
+            session_ids: &[],
+            total_sessions: 7,
+            extra: "",
+        });
+        assert!(p.contains("7 session(s)"));
+        assert!(p.contains("memory_search"));
+        assert!(!p.contains("- `"));
+        assert!(!p.contains("most recent"));
+    }
+
+    #[test]
+    fn prompt_appends_extra_section() {
+        let p = build_consolidation_prompt(ConsolidationPromptInput {
+            session_ids: &[],
+            total_sessions: 0,
+            extra: "Favour concise bullet points.",
+        });
+        assert!(p.contains("Additional context"));
+        assert!(p.contains("Favour concise bullet points."));
     }
 }

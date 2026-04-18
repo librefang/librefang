@@ -2960,3 +2960,13 @@ export async function abortAutoDream(agentId: string): Promise<AutoDreamAbortOut
     {},
   );
 }
+
+export async function setAutoDreamEnabled(
+  agentId: string,
+  enabled: boolean,
+): Promise<{ agent_id: string; enabled: boolean }> {
+  return put<{ agent_id: string; enabled: boolean }>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/enabled`,
+    { enabled },
+  );
+}

@@ -11,7 +11,11 @@ import {
 import { useUIStore } from "../lib/store";
 import { totpSetup, totpConfirm, totpStatus, totpRevoke } from "../api";
 import { useAutoDreamStatus } from "../lib/queries/autoDream";
-import { useTriggerAutoDream, useAbortAutoDream } from "../lib/mutations/autoDream";
+import {
+  useTriggerAutoDream,
+  useAbortAutoDream,
+  useSetAutoDreamEnabled,
+} from "../lib/mutations/autoDream";
 import type { AutoDreamAgentStatus } from "../api";
 
 interface SegmentOption<T extends string> {
@@ -457,31 +461,44 @@ function AutoDreamAgentRow({
   disabled,
   onTrigger,
   onAbort,
+  onToggle,
   triggerPending,
   abortPending,
+  togglePending,
 }: {
   agent: AutoDreamAgentStatus;
   disabled: boolean;
   onTrigger: (id: string) => void;
   onAbort: (id: string) => void;
+  onToggle: (id: string, enabled: boolean) => void;
   triggerPending: boolean;
   abortPending: boolean;
+  togglePending: boolean;
 }) {
   const { t } = useTranslation();
   const now = Date.now();
   const progress = agent.progress;
   const running = progress?.status === "running";
   const lastTurn = progress?.turns[progress.turns.length - 1];
+  const optedIn = agent.auto_dream_enabled;
 
   return (
     <div className="rounded-lg border border-border-subtle/50 bg-main">
       <div className="flex items-center justify-between px-3 py-2">
         <div className="flex items-start gap-2 min-w-0 flex-1">
-          <Moon className={`w-4 h-4 shrink-0 mt-0.5 ${running ? "text-purple-400 animate-pulse" : "text-purple-400"}`} />
+          <Moon
+            className={`w-4 h-4 shrink-0 mt-0.5 ${
+              optedIn
+                ? running
+                  ? "text-purple-400 animate-pulse"
+                  : "text-purple-400"
+                : "text-text-dim"
+            }`}
+          />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <p className="text-sm font-medium truncate">{agent.agent_name}</p>
-              {progress && (
+              {progress && optedIn && (
                 <Badge
                   variant={
                     progress.status === "running"
@@ -497,20 +514,46 @@ function AutoDreamAgentRow({
                 </Badge>
               )}
             </div>
-            <p className="text-[11px] text-text-dim">
-              {t("settings.auto_dream_last", "Last")}:{" "}
-              {formatRelativeMs(agent.last_consolidated_at_ms, now)}
-              {" · "}
-              {t("settings.auto_dream_next", "Next")}:{" "}
-              {formatRelativeMs(agent.next_eligible_at_ms, now)}
-              {" · "}
-              {agent.sessions_since_last}{" "}
-              {t("settings.auto_dream_sessions_since", "sessions since")}
-            </p>
+            {optedIn ? (
+              <p className="text-[11px] text-text-dim">
+                {t("settings.auto_dream_last", "Last")}:{" "}
+                {formatRelativeMs(agent.last_consolidated_at_ms, now)}
+                {" · "}
+                {t("settings.auto_dream_next", "Next")}:{" "}
+                {formatRelativeMs(agent.next_eligible_at_ms, now)}
+                {" · "}
+                {agent.sessions_since_last}{" "}
+                {t("settings.auto_dream_sessions_since", "sessions since")}
+              </p>
+            ) : (
+              <p className="text-[11px] text-text-dim italic">
+                {t(
+                  "settings.auto_dream_opt_in_hint",
+                  "Not enrolled — toggle on to include in the scheduler.",
+                )}
+              </p>
+            )}
           </div>
         </div>
-        <div className="flex gap-2 shrink-0">
-          {running && agent.can_abort && (
+        <div className="flex gap-2 shrink-0 items-center">
+          <label
+            className="flex items-center gap-1.5 cursor-pointer select-none"
+            title={t("settings.auto_dream_toggle_title", "Opt this agent in or out")}
+          >
+            <input
+              type="checkbox"
+              checked={optedIn}
+              disabled={togglePending}
+              onChange={(e) => onToggle(agent.agent_id, e.target.checked)}
+              className="w-3.5 h-3.5 accent-purple-500"
+            />
+            <span className="text-[11px] text-text-dim">
+              {optedIn
+                ? t("settings.auto_dream_enrolled", "Enrolled")
+                : t("settings.auto_dream_not_enrolled", "Off")}
+            </span>
+          </label>
+          {optedIn && running && agent.can_abort && (
             <Button
               variant="secondary"
               size="sm"
@@ -521,16 +564,18 @@ function AutoDreamAgentRow({
               {t("settings.auto_dream_abort", "Abort")}
             </Button>
           )}
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => onTrigger(agent.agent_id)}
-            disabled={triggerPending || disabled || running}
-            title={disabled ? t("settings.auto_dream_off", "Disabled") : undefined}
-          >
-            <Play className="w-3.5 h-3.5 mr-1.5" />
-            {t("settings.auto_dream_trigger", "Dream now")}
-          </Button>
+          {optedIn && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => onTrigger(agent.agent_id)}
+              disabled={triggerPending || disabled || running}
+              title={disabled ? t("settings.auto_dream_off", "Disabled") : undefined}
+            >
+              <Play className="w-3.5 h-3.5 mr-1.5" />
+              {t("settings.auto_dream_trigger", "Dream now")}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -574,6 +619,7 @@ function AutoDreamSection() {
   const statusQuery = useAutoDreamStatus();
   const trigger = useTriggerAutoDream();
   const abort = useAbortAutoDream();
+  const setEnabled = useSetAutoDreamEnabled();
   const [error, setError] = useState<string | null>(null);
   const [lastMsg, setLastMsg] = useState<string | null>(null);
 
@@ -596,6 +642,21 @@ function AutoDreamSection() {
     try {
       const outcome = await abort.mutateAsync(agentId);
       setLastMsg(outcome.aborted ? t("settings.auto_dream_aborted", "Abort signalled") : outcome.reason);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onToggle = async (agentId: string, enabled: boolean) => {
+    setError(null);
+    setLastMsg(null);
+    try {
+      await setEnabled.mutateAsync({ agentId, enabled });
+      setLastMsg(
+        enabled
+          ? t("settings.auto_dream_enrolled_ok", "Agent enrolled")
+          : t("settings.auto_dream_unenrolled_ok", "Agent unenrolled"),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -635,8 +696,8 @@ function AutoDreamSection() {
         {status && status.agents.length === 0 && (
           <p className="text-xs text-text-dim italic">
             {t(
-              "settings.auto_dream_no_agents",
-              "No agents have opted in. Set auto_dream_enabled = true on an agent's manifest.",
+              "settings.auto_dream_no_agents_registered",
+              "No agents registered yet. Create an agent first, then toggle it on here.",
             )}
           </p>
         )}
@@ -650,8 +711,10 @@ function AutoDreamSection() {
                 disabled={!status.enabled}
                 onTrigger={onTrigger}
                 onAbort={onAbort}
+                onToggle={onToggle}
                 triggerPending={trigger.isPending}
                 abortPending={abort.isPending}
+                togglePending={setEnabled.isPending}
               />
             ))}
           </div>

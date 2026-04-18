@@ -299,6 +299,43 @@ impl SessionStore {
         Ok(count.max(0) as u32)
     }
 
+    /// Like [`Self::count_agent_sessions_touched_since`], but returns session
+    /// IDs (most-recently-touched first, capped at `limit`). Used by
+    /// auto-dream to list concrete sessions in the consolidation prompt so
+    /// the model can narrow its gather phase — matches libre-code's
+    /// `listSessionsTouchedSince`.
+    pub fn list_agent_sessions_touched_since(
+        &self,
+        agent_id: AgentId,
+        since_ms: u64,
+        limit: u32,
+    ) -> LibreFangResult<Vec<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let since_rfc3339 = chrono::DateTime::<Utc>::from_timestamp_millis(since_ms as i64)
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM sessions WHERE agent_id = ?1 AND updated_at > ?2 \
+                 ORDER BY updated_at DESC LIMIT ?3",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![agent_id.0.to_string(), since_rfc3339, limit as i64],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+        }
+        Ok(ids)
+    }
+
     /// Delete all sessions belonging to an agent and their FTS5 index entries.
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
         let conn = self

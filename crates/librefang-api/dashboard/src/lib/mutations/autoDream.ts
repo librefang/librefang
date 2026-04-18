@@ -1,5 +1,9 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { abortAutoDream, triggerAutoDream } from "../http/client";
+import {
+  abortAutoDream,
+  setAutoDreamEnabled,
+  triggerAutoDream,
+} from "../http/client";
 import { autoDreamKeys } from "../queries/keys";
 
 /**
@@ -26,6 +30,20 @@ export function useAbortAutoDream() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (agentId: string) => abortAutoDream(agentId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: autoDreamKeys.all }),
+  });
+}
+
+/**
+ * Toggle an agent's `auto_dream_enabled` opt-in flag. In-memory update —
+ * the scheduler picks it up on the next tick. Invalidate so the settings
+ * card reflects the new toggle state.
+ */
+export function useSetAutoDreamEnabled() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ agentId, enabled }: { agentId: string; enabled: boolean }) =>
+      setAutoDreamEnabled(agentId, enabled),
     onSuccess: () => qc.invalidateQueries({ queryKey: autoDreamKeys.all }),
   });
 }

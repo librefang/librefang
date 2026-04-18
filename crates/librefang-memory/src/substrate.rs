@@ -266,6 +266,19 @@ impl MemorySubstrate {
             .count_agent_sessions_touched_since(agent_id, since_ms)
     }
 
+    /// List an agent's session IDs touched after the given timestamp, newest
+    /// first, capped at `limit`. See
+    /// [`SessionStore::list_agent_sessions_touched_since`] for semantics.
+    pub fn list_agent_sessions_touched_since(
+        &self,
+        agent_id: AgentId,
+        since_ms: u64,
+        limit: u32,
+    ) -> LibreFangResult<Vec<String>> {
+        self.sessions
+            .list_agent_sessions_touched_since(agent_id, since_ms, limit)
+    }
+
     /// Delete the canonical (cross-channel) session for an agent.
     pub fn delete_canonical_session(&self, agent_id: AgentId) -> LibreFangResult<()> {
         self.sessions.delete_canonical_session(agent_id)

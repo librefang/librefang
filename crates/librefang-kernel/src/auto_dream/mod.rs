@@ -36,6 +36,7 @@ use dashmap::DashMap;
 use librefang_channels::types::SenderContext;
 use librefang_llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
+use librefang_types::error::LibreFangResult;
 use tokio::task::JoinHandle;
 
 use crate::kernel::LibreFangKernel;
@@ -105,6 +106,25 @@ pub struct DreamProgress {
     pub turns: Vec<DreamTurn>,
     /// Last error or abort reason, if any.
     pub error: Option<String>,
+    /// Token usage for the completed dream. Populated on `Completed` status;
+    /// remains `None` while `Running` and for `Failed` / `Aborted` dreams
+    /// where the loop result isn't available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<DreamUsage>,
+}
+
+/// Snapshot of token / cost / latency for a completed dream. Mirrors the
+/// fields libre-code logs via `tengu_auto_dream_completed`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DreamUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub iterations: u32,
+    pub latency_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 /// Process-local progress registry. Keyed by agent since only one dream per
@@ -317,10 +337,37 @@ async fn run_dream(kernel: Arc<LibreFangKernel>, target: AgentId, prior_mtime: u
             memories_touched: Vec::new(),
             turns: Vec::new(),
             error: None,
+            usage: None,
         },
     );
+    kernel.audit().record(
+        target.to_string(),
+        librefang_runtime::audit::AuditAction::DreamConsolidation,
+        format!("phase=start task_id={task_id}"),
+        "ok",
+    );
 
-    let prompt_text = prompt::build_consolidation_prompt();
+    // Query the sessions touched since the prior dream so we can embed their
+    // IDs in the prompt, letting the model narrow its gather phase instead
+    // of cold-searching the memory substrate. Match libre-code's behaviour
+    // of surfacing concrete IDs. Capped to a reasonable list length — the
+    // scheduler's session-count gate already capped the number of eligible
+    // dreams, but a very-active agent could touch hundreds of sessions.
+    const MAX_SESSION_IDS_IN_PROMPT: u32 = 50;
+    let session_ids = kernel
+        .memory_substrate()
+        .list_agent_sessions_touched_since(target, prior_mtime, MAX_SESSION_IDS_IN_PROMPT)
+        .unwrap_or_default();
+    let total_sessions = kernel
+        .memory_substrate()
+        .count_agent_sessions_touched_since(target, prior_mtime)
+        .unwrap_or(session_ids.len() as u32);
+
+    let prompt_text = prompt::build_consolidation_prompt(prompt::ConsolidationPromptInput {
+        session_ids: &session_ids,
+        total_sessions,
+        extra: "",
+    });
     let sender = SenderContext {
         channel: AUTO_DREAM_CHANNEL.to_string(),
         user_id: String::new(),
@@ -380,13 +427,52 @@ async fn run_dream(kernel: Arc<LibreFangKernel>, target: AgentId, prior_mtime: u
 
     // Channel closed — wait for the join handle to surface the final result.
     match join_handle.await {
-        Ok(Ok(_result)) => {
+        Ok(Ok(result)) => {
+            let usage = DreamUsage {
+                input_tokens: result.total_usage.input_tokens,
+                output_tokens: result.total_usage.output_tokens,
+                cache_read_input_tokens: result.total_usage.cache_read_input_tokens,
+                cache_creation_input_tokens: result.total_usage.cache_creation_input_tokens,
+                iterations: result.iterations,
+                latency_ms: result.latency_ms,
+                cost_usd: result.cost_usd,
+            };
             mutate_progress(target, |p| {
                 p.status = DreamStatus::Completed;
                 p.ended_at_ms = Some(now_ms());
                 p.phase = "completed".to_string();
+                p.usage = Some(usage.clone());
             });
-            tracing::info!(agent = %target, task_id = %task_id, "auto_dream: consolidation completed");
+            let memories_touched_count = get_progress(target)
+                .map(|p| p.memories_touched.len())
+                .unwrap_or(0);
+            tracing::info!(
+                agent = %target,
+                task_id = %task_id,
+                iterations = usage.iterations,
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                cache_read = usage.cache_read_input_tokens,
+                cost_usd = ?usage.cost_usd,
+                "auto_dream: consolidation completed",
+            );
+            kernel.audit().record(
+                target.to_string(),
+                librefang_runtime::audit::AuditAction::DreamConsolidation,
+                format!(
+                    "phase=complete task_id={task_id} memories_touched={memories_touched_count} \
+                     input_tokens={input} output_tokens={output} cache_read={cache_read} \
+                     cost_usd={cost}",
+                    input = usage.input_tokens,
+                    output = usage.output_tokens,
+                    cache_read = usage.cache_read_input_tokens,
+                    cost = usage
+                        .cost_usd
+                        .map(|c| format!("{c:.6}"))
+                        .unwrap_or_else(|| "null".to_string()),
+                ),
+                "ok",
+            );
         }
         Ok(Err(e)) => {
             finalize_failure(
@@ -414,12 +500,19 @@ async fn finalize_failure(
     reason: String,
 ) {
     tracing::warn!(agent = %target, reason = %reason, "auto_dream: dream failed, rolling back lock");
+    let task_id = get_progress(target).map(|p| p.task_id).unwrap_or_default();
     mutate_progress(target, |p| {
         p.status = DreamStatus::Failed;
         p.ended_at_ms = Some(now_ms());
         p.phase = "failed".to_string();
-        p.error = Some(reason);
+        p.error = Some(reason.clone());
     });
+    kernel.audit().record(
+        target.to_string(),
+        librefang_runtime::audit::AuditAction::DreamConsolidation,
+        format!("phase=fail task_id={task_id} reason={reason}"),
+        "fail",
+    );
     let lock = lock_for_agent(kernel, target);
     if let Err(e) = lock.rollback(prior_mtime).await {
         tracing::warn!(error = %e, "auto_dream: rollback after failure also failed");
@@ -429,12 +522,19 @@ async fn finalize_failure(
 
 async fn finalize_abort(kernel: &LibreFangKernel, target: AgentId, prior_mtime: u64) {
     tracing::info!(agent = %target, "auto_dream: dream aborted, rolling back lock");
+    let task_id = get_progress(target).map(|p| p.task_id).unwrap_or_default();
     mutate_progress(target, |p| {
         p.status = DreamStatus::Aborted;
         p.ended_at_ms = Some(now_ms());
         p.phase = "aborted".to_string();
         p.error.get_or_insert_with(|| "aborted by user".to_string());
     });
+    kernel.audit().record(
+        target.to_string(),
+        librefang_runtime::audit::AuditAction::DreamConsolidation,
+        format!("phase=abort task_id={task_id}"),
+        "aborted",
+    );
     let lock = lock_for_agent(kernel, target);
     if let Err(e) = lock.rollback(prior_mtime).await {
         tracing::warn!(error = %e, "auto_dream: rollback after abort also failed");
@@ -454,6 +554,36 @@ fn enrolled_agents(kernel: &LibreFangKernel) -> Vec<(AgentId, String)> {
         .filter(|e| e.manifest.auto_dream_enabled)
         .map(|e| (e.id, e.name))
         .collect()
+}
+
+/// All agents with their current opt-in state, for the settings UI toggle
+/// list. The scheduler uses `enrolled_agents` — this is UI-only.
+fn all_agents_dream_state(kernel: &LibreFangKernel) -> Vec<(AgentId, String, bool)> {
+    kernel
+        .agent_registry()
+        .list()
+        .into_iter()
+        .map(|e| (e.id, e.name, e.manifest.auto_dream_enabled))
+        .collect()
+}
+
+/// Toggle an agent's auto-dream opt-in. Returns `Err` if the agent doesn't
+/// exist. The scheduler picks up the change on its next tick.
+pub fn set_agent_enabled(
+    kernel: &LibreFangKernel,
+    agent_id: AgentId,
+    enabled: bool,
+) -> LibreFangResult<()> {
+    kernel
+        .agent_registry()
+        .update_auto_dream_enabled(agent_id, enabled)?;
+    kernel.audit().record(
+        agent_id.to_string(),
+        librefang_runtime::audit::AuditAction::ConfigChange,
+        format!("auto_dream_enabled={enabled}"),
+        "ok",
+    );
+    Ok(())
 }
 
 pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
@@ -555,33 +685,49 @@ pub async fn current_status(kernel: &LibreFangKernel) -> AutoDreamStatus {
     let progress_map = all_progress();
 
     let mut agents = Vec::new();
-    for (agent_id, name) in enrolled_agents(kernel) {
-        let lock = lock_for_agent(kernel, agent_id);
-        let last = lock.read_last_consolidated_at().await.unwrap_or(0);
+    for (agent_id, name, enabled) in all_agents_dream_state(kernel) {
+        // Runtime stats (lock, sessions-since) only matter for opted-in
+        // agents. For opt-out agents we still return a row so the settings
+        // UI can render a toggle — but fields stay at zero/defaults.
+        let (last, sessions_since, lock_path, progress, can_abort) = if enabled {
+            let lock = lock_for_agent(kernel, agent_id);
+            let last = lock.read_last_consolidated_at().await.unwrap_or(0);
+            let sessions_since = kernel
+                .memory_substrate()
+                .count_agent_sessions_touched_since(agent_id, last)
+                .unwrap_or(0);
+            let progress = progress_map.get(&agent_id).cloned();
+            let can_abort = ABORT_HANDLES.contains_key(&agent_id)
+                && progress
+                    .as_ref()
+                    .map(|p| p.status == DreamStatus::Running)
+                    .unwrap_or(false);
+            (
+                last,
+                sessions_since,
+                lock.path().display().to_string(),
+                progress,
+                can_abort,
+            )
+        } else {
+            (0, 0, String::new(), None, false)
+        };
+
         let hours_since = if last == 0 {
             f64::INFINITY
         } else {
             ((now.saturating_sub(last)) as f64) / 3_600_000.0
         };
-        let sessions_since = kernel
-            .memory_substrate()
-            .count_agent_sessions_touched_since(agent_id, last)
-            .unwrap_or(0);
-        let progress = progress_map.get(&agent_id).cloned();
-        let can_abort = ABORT_HANDLES.contains_key(&agent_id)
-            && progress
-                .as_ref()
-                .map(|p| p.status == DreamStatus::Running)
-                .unwrap_or(false);
+
         agents.push(AutoDreamAgentStatus {
             agent_id: agent_id.to_string(),
             agent_name: name,
-            auto_dream_enabled: true,
+            auto_dream_enabled: enabled,
             last_consolidated_at_ms: last,
             next_eligible_at_ms: last.saturating_add(min_ms),
             hours_since_last: hours_since,
             sessions_since_last: sessions_since,
-            lock_path: lock.path().display().to_string(),
+            lock_path,
             progress,
             can_abort,
         });
@@ -617,13 +763,28 @@ pub async fn trigger_manual(kernel: Arc<LibreFangKernel>, agent_id: AgentId) -> 
         };
     }
 
-    if kernel.agent_registry().get(agent_id).is_none() {
-        return TriggerOutcome {
-            fired: false,
-            agent_id: id_str,
-            task_id: None,
-            reason: "agent not found".to_string(),
-        };
+    match kernel.agent_registry().get(agent_id) {
+        None => {
+            return TriggerOutcome {
+                fired: false,
+                agent_id: id_str,
+                task_id: None,
+                reason: "agent not found".to_string(),
+            };
+        }
+        Some(entry) if !entry.manifest.auto_dream_enabled => {
+            // Matches the UI: the `Dream now` button only renders for
+            // opted-in agents. A direct API caller hitting this path
+            // probably forgot to toggle; returning `fired=false` with a
+            // specific reason is clearer than firing silently.
+            return TriggerOutcome {
+                fired: false,
+                agent_id: id_str,
+                task_id: None,
+                reason: "agent is not enrolled (auto_dream_enabled=false on manifest)".to_string(),
+            };
+        }
+        Some(_) => {}
     }
 
     match check_agent_gates(&kernel, agent_id, true).await {

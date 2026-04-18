@@ -200,6 +200,7 @@ export {
   // auto-dream
   triggerAutoDream,
   abortAutoDream,
+  setAutoDreamEnabled,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
