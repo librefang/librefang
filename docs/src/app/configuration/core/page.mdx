@@ -93,6 +93,55 @@ decay_rate = 0.1
 
 ---
 
+### `[auto_dream]`
+
+Background memory consolidation ("dreams") — a time-gated scheduler that periodically asks opt-in agents to reflect on and consolidate their own memory via a 4-phase prompt (Orient / Gather / Consolidate / Prune). Disabled by default; individual agents still opt in via `auto_dream_enabled = true` on their manifest.
+
+```toml
+[auto_dream]
+enabled = false
+min_hours = 24
+min_sessions = 5
+check_interval_secs = 600
+timeout_secs = 600
+# lock_dir = ""   # defaults to <data_dir>/auto_dream/
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Master toggle. When `false`, no dream fires regardless of per-agent opt-in. |
+| `min_hours` | f64 | `24.0` | Minimum hours since that agent's last consolidation before the next one fires. |
+| `min_sessions` | u32 | `5` | Minimum sessions touched since that agent's last consolidation before the next one fires. Set to `0` to disable the session-count gate. |
+| `check_interval_secs` | u64 | `600` | How often the scheduler wakes up to check gates, in seconds. |
+| `timeout_secs` | u64 | `600` | Timeout for a single dream invocation in seconds. |
+| `lock_dir` | string | `""` | Optional override for the lock directory. Empty = `<data_dir>/auto_dream/`. Per-agent locks are stored as `<dir>/<agent_id>.lock`. |
+
+A dream fires for an agent when all gates hold: `enabled = true`, the agent's manifest has `auto_dream_enabled = true`, `min_hours` have elapsed since its last dream, `min_sessions` have been touched since then, and the per-agent lock can be acquired.
+
+**Per-agent opt-in** can be toggled at runtime without restarting the agent:
+
+- **Web dashboard**: Settings → Auto-Dream card → checkbox next to each agent.
+- **API**: `PUT /api/auto-dream/agents/{id}/enabled` with body `{"enabled": true | false}`. The scheduler picks up the new state on its next tick.
+- **Manifest**: set `auto_dream_enabled = true` in the agent's `.toml` for a persistent opt-in that survives restarts.
+
+**Per-agent threshold overrides** (optional) let you tune the schedule heterogeneously. Set either field on the agent's manifest to override the global `[auto_dream]` default — `None` (the default) inherits the global:
+
+```toml
+auto_dream_enabled = true
+auto_dream_min_hours = 168    # weekly, for quiet agents
+auto_dream_min_sessions = 1   # fire after every session, for chatty ones
+```
+
+The status endpoint returns the resolved `effective_min_hours` / `effective_min_sessions` per agent so the dashboard can show what is actually in force.
+
+**Runtime tool restriction**: inside a dream, the kernel clamps the tool allowlist to `memory_store` / `memory_recall` / `memory_list` only, regardless of what the agent's manifest normally permits. This is defence-in-depth against prompt-injected dreams calling shell or network-mutating tools.
+
+**Manual controls**: `POST /api/auto-dream/agents/{id}/trigger` bypasses the time and session gates but still respects the lock and the opt-in flag. `POST /api/auto-dream/agents/{id}/abort` cancels an in-flight manual dream and rolls the lock mtime back so the time gate reopens. `GET /api/auto-dream/status` returns live progress, including token usage and cost for completed dreams.
+
+**Audit trail**: every dream lifecycle transition (start / complete / fail / abort) is recorded as a `DreamConsolidation` audit event. The completion entry carries input/output/cache token counts and `cost_usd` so spend is answerable from `/api/audit`.
+
+---
+
 ### `[network]`
 
 Configures the OFP (LibreFang Protocol) peer-to-peer networking layer with HMAC-SHA256 mutual authentication.
