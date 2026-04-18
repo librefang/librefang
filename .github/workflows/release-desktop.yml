@@ -93,7 +93,7 @@ jobs:
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
         run: |
-          pnpm install --frozen-lockfile
+          pnpm install --frozen-lockfile --config.strict-dep-builds=false
           pnpm run build
 
       - name: Import macOS signing certificate
