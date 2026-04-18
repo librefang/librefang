@@ -726,31 +726,55 @@ pub fn set_agent_enabled(
 }
 
 /// Event-driven trigger: called from the `AgentLoopEnd` hook whenever any
-/// agent finishes a turn. Cheap early-exits for the globally-disabled and
-/// not-opted-in cases so the hot path (every turn for every agent) stays
-/// near-free. The actual gate check + dream invocation run on a detached
-/// tokio task so we never block the agent loop's return path on a lock
-/// stat or SQL query.
+/// agent finishes a turn. Cheap early-exits for the globally-disabled,
+/// not-opted-in, and shutting-down cases so the hot path (every turn for
+/// every agent) stays near-free. The actual gate check + dream invocation
+/// run on a detached tokio task so we never block the agent loop's return
+/// path on a lock stat or SQL query.
 ///
 /// This is the primary trigger path. `spawn_scheduler` below is a sparse
 /// backstop for agents that may sit opted-in without ever turning.
 pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
+    // Gate 1 (cheapest): kernel shutdown. The daemon is unwinding; no point
+    // spawning a new dream that the runtime will immediately have to cancel.
+    // Matches the same check at the head of the scheduler loop body.
+    if kernel.supervisor.is_shutting_down() {
+        return;
+    }
+    // Gate 2: global auto-dream toggle. `config_snapshot` is an ArcSwap
+    // load_full — lock-free, nanoseconds uncontested.
     {
         let cfg = kernel.config_snapshot();
         if !cfg.auto_dream.enabled {
             return;
         }
     }
-    let enrolled = kernel
-        .agent_registry()
-        .get(agent_id)
-        .map(|e| e.manifest.auto_dream_enabled)
-        .unwrap_or(false);
-    if !enrolled {
+    // Gate 3: per-agent opt-in. Use the lightweight bool-only accessor to
+    // avoid cloning the full AgentEntry (manifest Strings/Vecs) on the hot
+    // path. A missing agent returns false so freshly-deleted agents don't
+    // attempt a dream.
+    if !kernel.agent_registry().is_auto_dream_enabled(agent_id) {
         return;
     }
 
     tokio::spawn(async move {
+        // Re-check all three gates inside the task. The operator could have
+        // flipped the global switch, toggled this agent off, or started a
+        // shutdown in the microseconds between the synchronous pre-filter
+        // above and this task actually being scheduled. Re-checking all
+        // three (rather than just two) keeps the guarantees symmetrical —
+        // no gate is "best effort" relative to the others.
+        if kernel.supervisor.is_shutting_down() {
+            return;
+        }
+        if !kernel.config_snapshot().auto_dream.enabled {
+            tracing::debug!(agent = %agent_id, "auto_dream: global toggled off between hook and spawn, skipping");
+            return;
+        }
+        if !kernel.agent_registry().is_auto_dream_enabled(agent_id) {
+            tracing::debug!(agent = %agent_id, "auto_dream: agent toggled off between hook and spawn, skipping");
+            return;
+        }
         match check_agent_gates(&kernel, agent_id, false).await {
             AgentGateResult::Fire { prior_mtime } => {
                 tracing::debug!(agent = %agent_id, "auto_dream: turn-end triggered dream");

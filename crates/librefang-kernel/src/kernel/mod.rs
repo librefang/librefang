@@ -7469,17 +7469,23 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Must be called once after the kernel is wrapped in `Arc`.
     pub fn set_self_handle(self: &Arc<Self>) {
-        let _ = self.self_handle.set(Arc::downgrade(self));
-        // Register auto-dream's AgentLoopEnd hook now that the Arc exists so
-        // the hook can hold a Weak<Self> and fire when a turn actually ends.
-        // Event-driven is the primary trigger; the scheduler loop is a
-        // sparse (1-day) backstop for agents that never finish a turn.
-        self.hooks.register(
-            librefang_types::agent::HookEvent::AgentLoopEnd,
-            std::sync::Arc::new(crate::auto_dream::AutoDreamTurnEndHook::new(
-                Arc::downgrade(self),
-            )),
-        );
+        // The `self_handle` slot is a `OnceLock` — calling `set()` twice is
+        // a silent no-op. Gate hook registration on the same first-call
+        // signal so a defensive double-invocation doesn't register the
+        // auto-dream hook twice (which would make every `AgentLoopEnd`
+        // fire two spawned gate-check tasks that race on the file lock).
+        if self.self_handle.set(Arc::downgrade(self)).is_ok() {
+            // First call — wire up the AgentLoopEnd hook now that the Arc
+            // exists so the handler can hold a Weak<Self>. Event-driven is
+            // the primary trigger; the scheduler loop is a sparse (1-day)
+            // backstop for agents that never finish a turn.
+            self.hooks.register(
+                librefang_types::agent::HookEvent::AgentLoopEnd,
+                std::sync::Arc::new(crate::auto_dream::AutoDreamTurnEndHook::new(
+                    Arc::downgrade(self),
+                )),
+            );
+        }
     }
 
     // ─── Agent Binding management ──────────────────────────────────────
