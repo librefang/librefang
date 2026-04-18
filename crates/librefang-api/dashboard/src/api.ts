@@ -2881,3 +2881,98 @@ export async function deleteTerminalWindow(windowId: string): Promise<void> {
   );
   if (!response.ok) throw await parseError(response);
 }
+
+// ── Auto-Dream (background memory consolidation) ──────────────────────
+
+export type AutoDreamStatusName =
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted";
+
+export interface AutoDreamTurn {
+  text: string;
+  tool_use_count: number;
+}
+
+export interface AutoDreamProgress {
+  task_id: string;
+  agent_id: string;
+  started_at_ms: number;
+  ended_at_ms: number | null;
+  status: AutoDreamStatusName;
+  phase: string;
+  tool_use_count: number;
+  memories_touched: string[];
+  turns: AutoDreamTurn[];
+  error: string | null;
+}
+
+export interface AutoDreamAgentStatus {
+  agent_id: string;
+  agent_name: string;
+  auto_dream_enabled: boolean;
+  last_consolidated_at_ms: number;
+  /** Unix-ms when the time gate reopens. Omitted when the agent has never been dreamed. */
+  next_eligible_at_ms?: number;
+  /** Hours since last consolidation. Omitted when the agent has never been dreamed. */
+  hours_since_last?: number;
+  sessions_since_last: number;
+  /** Resolved min_hours (manifest override or global default). */
+  effective_min_hours: number;
+  /** Resolved min_sessions (manifest override or global default; 0 = gate disabled). */
+  effective_min_sessions: number;
+  lock_path: string;
+  progress: AutoDreamProgress | null;
+  can_abort: boolean;
+}
+
+export interface AutoDreamStatus {
+  enabled: boolean;
+  min_hours: number;
+  min_sessions: number;
+  check_interval_secs: number;
+  lock_dir: string;
+  agents: AutoDreamAgentStatus[];
+}
+
+export interface AutoDreamTriggerOutcome {
+  fired: boolean;
+  agent_id: string;
+  task_id: string | null;
+  reason: string;
+}
+
+export interface AutoDreamAbortOutcome {
+  aborted: boolean;
+  agent_id: string;
+  reason: string;
+}
+
+export async function getAutoDreamStatus(): Promise<AutoDreamStatus> {
+  return get<AutoDreamStatus>("/api/auto-dream/status");
+}
+
+export async function triggerAutoDream(agentId: string): Promise<AutoDreamTriggerOutcome> {
+  return post<AutoDreamTriggerOutcome>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/trigger`,
+    {},
+  );
+}
+
+export async function abortAutoDream(agentId: string): Promise<AutoDreamAbortOutcome> {
+  return post<AutoDreamAbortOutcome>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/abort`,
+    {},
+  );
+}
+
+export async function setAutoDreamEnabled(
+  agentId: string,
+  enabled: boolean,
+): Promise<{ agent_id: string; enabled: boolean }> {
+  return put<{ agent_id: string; enabled: boolean }>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/enabled`,
+    { enabled },
+  );
+}
