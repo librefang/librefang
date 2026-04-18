@@ -5,20 +5,18 @@ import {
   useEffect,
   type RefObject,
 } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Plus, X } from "lucide-react";
-import { authHeader } from "../api";
 import { useUIStore } from "../lib/store";
+import { useTerminalWindows } from "../lib/queries/terminal";
+import {
+  useCreateTerminalWindow,
+  useRenameTerminalWindow,
+  useDeleteTerminalWindow,
+} from "../lib/mutations/terminal";
+import { ApiError, type TerminalWindow } from "../lib/http/client";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
-
-interface WindowInfo {
-  id: string;
-  index: number;
-  name: string;
-  active: boolean;
-}
 
 interface TerminalTabsProps {
   ws: WebSocket | null;
@@ -32,19 +30,6 @@ interface TerminalTabsProps {
 
 const WINDOW_NAME_RE = /^[A-Za-z0-9 ._-]{1,64}$/;
 
-function useTmuxWindows(tmuxAvailable: boolean) {
-  return useQuery<WindowInfo[]>({
-    queryKey: ["terminal-windows"],
-    queryFn: async () => {
-      const res = await fetch("/api/terminal/windows", { headers: authHeader() });
-      if (!res.ok) throw new Error("Failed to fetch windows");
-      return res.json();
-    },
-    refetchInterval: 10000,
-    enabled: tmuxAvailable,
-  });
-}
-
 export function TerminalTabs({
   ws,
   tmuxAvailable,
@@ -55,14 +40,15 @@ export function TerminalTabs({
   fitAddonRef,
 }: TerminalTabsProps) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
-  const { data: windows = [] } = useTmuxWindows(tmuxAvailable);
-  const [creating, setCreating] = useState(false);
+  const { data: windows = [] } = useTerminalWindows({ enabled: tmuxAvailable });
+  const createMutation = useCreateTerminalWindow();
+  const renameMutation = useRenameTerminalWindow();
+  const deleteMutation = useDeleteTerminalWindow();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const editInputRef = useRef<HTMLInputElement>(null);
   const settleTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
-  const windowsRef = useRef<WindowInfo[]>([]);
+  const windowsRef = useRef<TerminalWindow[]>([]);
 
   useEffect(() => {
     windowsRef.current = windows;
@@ -115,31 +101,19 @@ export function TerminalTabs({
   }, [editingId]);
 
   const handleCreate = useCallback(async () => {
-    if (creating) return;
-    setCreating(true);
+    if (createMutation.isPending) return;
     try {
-      const res = await fetch("/api/terminal/windows", {
-        method: "POST",
-        headers: { ...authHeader(), "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (res.status === 429) {
+      await createMutation.mutateAsync({});
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 429) {
         addToast(t("terminal.tabs.limit_reached"), "error");
-        return;
-      }
-      if (!res.ok) {
+      } else {
         addToast(t("terminal.tabs.create_failed"), "error");
-        return;
       }
-      queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
-    } catch {
-      addToast(t("terminal.tabs.create_failed"), "error");
-    } finally {
-      setCreating(false);
     }
-  }, [creating, queryClient, addToast, t]);
+  }, [createMutation, addToast, t]);
 
-  const startRename = useCallback((w: WindowInfo) => {
+  const startRename = useCallback((w: TerminalWindow) => {
     setEditingId(w.id);
     setEditValue(w.name);
   }, []);
@@ -149,7 +123,7 @@ export function TerminalTabs({
     setEditValue("");
   }, []);
 
-  const commitRename = useCallback(async () => {
+  const commitRename = useCallback(() => {
     if (!editingId) return;
     const name = editValue.trim();
     const current = windowsRef.current.find((w) => w.id === editingId);
@@ -162,31 +136,15 @@ export function TerminalTabs({
       addToast(t("terminal.tabs.name_invalid"), "error");
       return;
     }
-    // Optimistically update the cache so the tab label swaps instantly; we
-    // revert by re-fetching if the request fails.
-    queryClient.setQueryData<WindowInfo[]>(["terminal-windows"], (prev) =>
-      prev?.map((w) => (w.id === editingId ? { ...w, name } : w))
-    );
     const idToRename = editingId;
     cancelRename();
-    try {
-      const res = await fetch(
-        `/api/terminal/windows/${encodeURIComponent(idToRename)}`,
-        {
-          method: "PATCH",
-          headers: { ...authHeader(), "Content-Type": "application/json" },
-          body: JSON.stringify({ name }),
-        }
-      );
-      if (!res.ok) {
-        addToast(t("terminal.tabs.rename_failed"), "error");
-      }
-    } catch {
-      addToast(t("terminal.tabs.rename_failed"), "error");
-    } finally {
-      queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
-    }
-  }, [editingId, editValue, queryClient, cancelRename, addToast, t]);
+    renameMutation.mutate(
+      { windowId: idToRename, name },
+      {
+        onError: () => addToast(t("terminal.tabs.rename_failed"), "error"),
+      },
+    );
+  }, [editingId, editValue, renameMutation, cancelRename, addToast, t]);
 
   const handleCloseTab = useCallback(
     async (windowId: string, e: React.MouseEvent | React.KeyboardEvent) => {
@@ -194,35 +152,25 @@ export function TerminalTabs({
       const currentWindows = windowsRef.current;
       if (currentWindows.length <= 1) return;
       try {
-        const res = await fetch(
-          `/api/terminal/windows/${encodeURIComponent(windowId)}`,
-          { method: "DELETE", headers: authHeader() }
-        );
-        if (res.ok) {
-          const isActive = activeWindowId === windowId;
-          if (isActive) {
-            const remaining = currentWindows.filter((w) => w.id !== windowId);
-            if (remaining.length > 0) {
-              const next = remaining[0];
-              if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "switch_window", window: next.id }));
-              }
-              onSwitchWindow(next.id);
-            } else {
-              onSwitchWindow("");
+        await deleteMutation.mutateAsync(windowId);
+        if (activeWindowId === windowId) {
+          const remaining = currentWindows.filter((w) => w.id !== windowId);
+          if (remaining.length > 0) {
+            const next = remaining[0];
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "switch_window", window: next.id }));
             }
+            onSwitchWindow(next.id);
+          } else {
+            onSwitchWindow("");
           }
-          queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
-        } else {
-          console.error("Failed to delete terminal window", res.status);
-          addToast(t("terminal.tabs.delete_failed"), "error");
         }
       } catch (err) {
         console.error("Failed to delete terminal window", err);
         addToast(t("terminal.tabs.delete_failed"), "error");
       }
     },
-    [queryClient, activeWindowId, ws, onSwitchWindow, addToast, t]
+    [deleteMutation, activeWindowId, ws, onSwitchWindow, addToast, t]
   );
 
   if (!tmuxAvailable) return null;
@@ -302,7 +250,7 @@ export function TerminalTabs({
       })}
       <button
         onClick={() => void handleCreate()}
-        disabled={atLimit || creating}
+        disabled={atLimit || createMutation.isPending}
         aria-label={t("terminal.tabs.new")}
         className="p-1 text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-500"
         title={

@@ -91,6 +91,8 @@ export {
   listWorkflowRuns,
   getWorkflowRun,
   listWorkflowTemplates,
+  // terminal
+  listTerminalWindows,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -184,6 +186,10 @@ export {
   updateWorkflow,
   instantiateTemplate,
   saveWorkflowAsTemplate,
+  // terminal
+  createTerminalWindow,
+  renameTerminalWindow,
+  deleteTerminalWindow,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -198,4 +204,5 @@ export type {
   HandStatsResponse,
   MemoryItem,
   ModelOverrides,
+  TerminalWindow,
 } from "../../api";

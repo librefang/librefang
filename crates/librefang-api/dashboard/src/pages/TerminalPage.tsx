@@ -6,6 +6,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
+import { terminalKeys } from "../lib/queries/keys";
 import {
   Terminal as TerminalIcon,
   Maximize2,
@@ -175,7 +176,7 @@ export function TerminalPage() {
         case "active_window":
           if (msg.window_id) {
             setActiveWindowId(msg.window_id);
-            queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
+            queryClient.invalidateQueries({ queryKey: terminalKeys.all });
           }
           break;
       }

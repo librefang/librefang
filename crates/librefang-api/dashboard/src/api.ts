@@ -2765,3 +2765,52 @@ export async function changePassword(
     },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Terminal (tmux windows)
+// ---------------------------------------------------------------------------
+
+export interface TerminalWindow {
+  id: string;
+  index: number;
+  name: string;
+  active: boolean;
+}
+
+export async function listTerminalWindows(): Promise<TerminalWindow[]> {
+  const response = await fetch("/api/terminal/windows", {
+    headers: buildHeaders(),
+  });
+  if (!response.ok) throw await parseError(response);
+  const data = (await response.json()) as { windows?: TerminalWindow[] } | TerminalWindow[];
+  return Array.isArray(data) ? data : (data.windows ?? []);
+}
+
+export async function createTerminalWindow(body: { name?: string } = {}): Promise<void> {
+  const response = await fetch("/api/terminal/windows", {
+    method: "POST",
+    headers: buildHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw await parseError(response);
+}
+
+export async function renameTerminalWindow(windowId: string, name: string): Promise<void> {
+  const response = await fetch(
+    `/api/terminal/windows/${encodeURIComponent(windowId)}`,
+    {
+      method: "PATCH",
+      headers: buildHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name }),
+    },
+  );
+  if (!response.ok) throw await parseError(response);
+}
+
+export async function deleteTerminalWindow(windowId: string): Promise<void> {
+  const response = await fetch(
+    `/api/terminal/windows/${encodeURIComponent(windowId)}`,
+    { method: "DELETE", headers: buildHeaders() },
+  );
+  if (!response.ok) throw await parseError(response);
+}
