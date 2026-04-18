@@ -4,7 +4,7 @@
 //! librefang memory model. Differences from the source:
 //!
 //!   * No file system — memories live in the SQLite substrate, so the prompt
-//!     directs the agent at its `memory_search` / `memory_save` tools rather
+//!     directs the agent at its `memory_recall` / `memory_store` tools rather
 //!     than at `ls` / grepping transcript files.
 //!   * No entrypoint file / MEMORY.md — librefang has no equivalent index.
 //!     Pruning focuses on duplicate, stale, and contradicted fragments.
@@ -52,7 +52,7 @@ memories so future sessions can orient quickly.\n\
 \n\
 ## Phase 1 — Orient\n\
 \n\
-- Use `memory_search` or `memory_list` to see what's already stored.\n\
+- Use `memory_recall` or `memory_list` to see what's already stored.\n\
 - Note which topics are well-covered and which are thin or missing.\n\
 - Skim categories so you improve existing memories rather than duplicating them.\n\
 \n\
@@ -111,7 +111,7 @@ Focus on durable, actionable knowledge: preferences, non-obvious constraints, re
         }
         if input.session_ids.is_empty() {
             out.push_str(
-                ". Use `memory_search` to browse them — the IDs weren't available \
+                ". Use `memory_recall` to browse them — the IDs weren't available \
 at prompt-build time.\n\n",
             );
         } else {
@@ -129,11 +129,15 @@ at prompt-build time.\n\n",
     out.push_str(
         "## Tool constraints\n\
 \n\
-- **Writes** are restricted to the memory tools (`memory_save`, `memory_update`, \
-`memory_delete`, etc.). Do not call file-edit, shell, or network-mutating tools.\n\
-- **Reads** are free: `memory_search`, `memory_list`, and any read-only shell \
-commands (`ls`, `grep`, `cat`, `wc`) are fine for exploring context.\n\
-- Your session transcripts live in the memory substrate — use `memory_search` \
+The kernel restricts this session to memory tools only — attempts to call \
+shell, file-edit, or network-mutating tools will be refused before the \
+driver sees them. Stick to:\n\
+\n\
+- `memory_store` — write a new memory.\n\
+- `memory_recall` — search existing memories.\n\
+- `memory_list` — enumerate stored keys.\n\
+\n\
+Session transcripts live in the memory substrate — use `memory_recall` \
 rather than trying to open files directly.\n\
 \n",
     );
@@ -182,7 +186,11 @@ mod tests {
     fn prompt_includes_tool_constraints() {
         let p = build_consolidation_prompt(empty_input());
         assert!(p.contains("Tool constraints"));
-        assert!(p.contains("memory_save"));
+        // Real tool names from librefang-runtime/src/tool_runner.rs, not
+        // libre-code's `memory_save` / `memory_delete` which don't exist here.
+        assert!(p.contains("memory_store"));
+        assert!(p.contains("memory_recall"));
+        assert!(p.contains("memory_list"));
     }
 
     #[test]
@@ -228,9 +236,22 @@ mod tests {
             extra: "",
         });
         assert!(p.contains("7 session(s)"));
-        assert!(p.contains("memory_search"));
-        assert!(!p.contains("- `"));
+        assert!(p.contains("memory_recall"));
+        // The fallback sentence is the positive signal. The negative
+        // signal is that "most recent" (the truncation marker) does not
+        // appear — we can't assert "no bullets" because the tool-constraints
+        // section legitimately uses bulleted list items.
         assert!(!p.contains("most recent"));
+        // And no session header bullet renders when the IDs are empty:
+        // the "Sessions to review" section ends with the fallback prose,
+        // not a list.
+        let sessions_start = p.find("## Sessions to review").unwrap();
+        let tool_start = p.find("## Tool constraints").unwrap();
+        let sessions_block = &p[sessions_start..tool_start];
+        assert!(
+            !sessions_block.contains("- `"),
+            "sessions block should contain the fallback prose, not bullets; got:\n{sessions_block}"
+        );
     }
 
     #[test]

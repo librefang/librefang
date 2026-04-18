@@ -4043,7 +4043,19 @@ system_prompt = "You are a helpful assistant."
         };
 
         let tools = self.available_tools(agent_id);
-        let tools = entry.mode.filter_tools((*tools).clone());
+        let mut tools = entry.mode.filter_tools((*tools).clone());
+        // Auto-dream tool constraint: when the sender channel indicates a
+        // dream invocation, clamp the tool list to memory-only. This is the
+        // runtime enforcement that backs the prompt's tool-constraint
+        // section — a prompt-injected dream that ignores the warning would
+        // still find shell and network tools absent from its tool schema.
+        if sender_context
+            .map(|s| s.channel.as_str() == crate::auto_dream::AUTO_DREAM_CHANNEL)
+            .unwrap_or(false)
+        {
+            let allowed = crate::auto_dream::DREAM_ALLOWED_TOOLS;
+            tools.retain(|t| allowed.iter().any(|a| *a == t.name));
+        }
         let driver = self.resolve_driver(&entry.manifest)?;
 
         // Look up model's actual context window from the catalog

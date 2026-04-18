@@ -61,8 +61,17 @@ const MAX_TURNS: usize = 30;
 /// Tool names whose invocation should be counted as "memory was modified"
 /// for the filesTouched-equivalent tracking. librefang's memory is in a
 /// SQLite substrate, not files — but we still want to show the user "the
-/// dream wrote N memories" as progress signal.
-const MEMORY_WRITE_TOOLS: &[&str] = &["memory_store", "memory_update", "memory_save", "memory_add"];
+/// dream wrote N memories" as progress signal. Keep this list aligned with
+/// the tools actually registered in `librefang_runtime::tool_runner` —
+/// listing ghost names here just makes the counter under-report.
+const MEMORY_WRITE_TOOLS: &[&str] = &["memory_store"];
+
+/// Tools the dream loop is allowed to call. Used to post-filter
+/// `available_tools` when `sender.channel == AUTO_DREAM_CHANNEL` so a
+/// prompt-injected dream can't escape into shell / file-edit / network
+/// tools even if the target agent's manifest would otherwise permit them.
+/// Matches libre-code's `createAutoMemCanUseTool(memoryRoot)` restriction.
+pub const DREAM_ALLOWED_TOOLS: &[&str] = &["memory_store", "memory_recall", "memory_list"];
 
 // ---------------------------------------------------------------------------
 // Progress types
