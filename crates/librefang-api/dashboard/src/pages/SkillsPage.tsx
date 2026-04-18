@@ -18,6 +18,7 @@ import {
   type HandDefinitionItem,
 } from "../api";
 import { useSkills, skillQueries } from "../lib/queries/skills";
+import { skillKeys } from "../lib/queries/keys";
 import { useHands } from "../lib/queries/hands";
 import { useUninstallSkill, useClawHubInstall, useSkillHubInstall, useInstallSkill } from "../lib/mutations/skills";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -544,7 +545,11 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
   const queryClient = useQueryClient();
   const { addToast } = useUIStore();
   const { data: detail, isLoading, refetch } = useQuery({
-    queryKey: ["skill-detail", skillName],
+    // Use the shared factory so mutations' `invalidateQueries(skillKeys.all)`
+    // also refresh open detail modals. The old `['skill-detail', name]`
+    // namespace lived outside `skillKeys.all` and was never invalidated, so
+    // users would see stale metadata after install/update/delete.
+    queryKey: skillKeys.detail(skillName ?? ""),
     queryFn: () => getSkillDetail(skillName!),
     enabled: isOpen && !!skillName,
   });
@@ -1205,6 +1210,23 @@ export function SkillsPage() {
           <span className="hidden sm:inline-block px-2.5 py-1 rounded-full border border-border-subtle bg-surface text-[10px] font-bold uppercase text-text-dim">
             {t("skills.installed_count", { count: installedSkills.length })}
           </span>
+          <a
+            href="https://librefang.ai/skills"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hidden md:flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-colors"
+            title={t("skills.browse_registry_title", { defaultValue: "Browse the full skill registry on librefang.ai" })}
+          >
+            <Globe className="h-3.5 w-3.5" />
+            <span>{t("skills.browse_registry", { defaultValue: "Registry" })}</span>
+          </a>
+          <button
+            className="flex h-8 items-center gap-1.5 rounded-xl border border-brand/30 bg-brand/10 px-3 text-xs font-bold text-brand hover:bg-brand/20 transition-colors"
+            onClick={() => setShowCreateModal(true)}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">{t("skills.evo_create", { defaultValue: "Create Skill" })}</span>
+          </button>
           <button
             className="flex h-8 items-center gap-1.5 rounded-xl border border-brand/30 bg-brand/10 px-3 text-xs font-bold text-brand hover:bg-brand/20 transition-colors"
             onClick={() => setShowCreateModal(true)}

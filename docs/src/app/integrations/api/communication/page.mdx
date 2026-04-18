@@ -567,51 +567,68 @@ Webhook trigger endpoint (unversioned). Sends a message to an agent from an exte
 
 ---
 
-## Integrations Endpoints
+## MCP Server Endpoints
 
-Connect LibreFang to external services (GitHub, Jira, Notion, Google Drive, etc.).
+Manage every MCP (Model Context Protocol) server — whether installed from
+the catalog (GitHub, Jira, Notion, Google Drive, etc.) or configured manually.
 
-### GET /api/integrations
+### GET /api/mcp/servers
 
-List all connected integrations and their status.
+List all configured MCP servers with their status and `template_id` (if installed from the catalog).
 
-### GET /api/integrations/available
+### POST /api/mcp/servers
 
-List all integrations available for installation.
+Add a new MCP server. The body can be either shape:
 
-### GET /api/integrations/health
-
-Get health status for all connected integrations.
-
-### POST /api/integrations/add
-
-Add and connect a new integration.
-
-**Request Body**:
+**Install from catalog**:
 
 ```json
 {
-  "type": "github",
-  "token": "ghp_...",
-  "name": "my-github"
+  "template_id": "github",
+  "credentials": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..." }
 }
 ```
 
-### POST /api/integrations/reload
+**Raw spec**:
 
-Reload all integrations from config.
+```json
+{
+  "name": "my-local-mcp",
+  "transport": { "type": "stdio", "command": "/path/to/server" }
+}
+```
 
-### GET /api/integrations/&lbrace;id&rbrace;
+### GET /api/mcp/servers/&lbrace;id&rbrace;
 
-Get details for a specific integration.
+Get details for one MCP server.
 
-### DELETE /api/integrations/&lbrace;id&rbrace;
+### PUT /api/mcp/servers/&lbrace;id&rbrace;
 
-Remove an integration.
+Replace the configuration for one MCP server.
 
-### POST /api/integrations/&lbrace;id&rbrace;/reconnect
+### DELETE /api/mcp/servers/&lbrace;id&rbrace;
 
-Re-authenticate and reconnect a disconnected integration.
+Remove an MCP server.
+
+### POST /api/mcp/servers/&lbrace;id&rbrace;/reconnect
+
+Re-authenticate and reconnect a disconnected MCP server.
+
+### GET /api/mcp/catalog
+
+List all installable catalog entries (read-only snapshot of the upstream registry).
+
+### GET /api/mcp/catalog/&lbrace;id&rbrace;
+
+Get details for a single catalog entry.
+
+### GET /api/mcp/health
+
+Aggregate health status for every configured MCP server.
+
+### POST /api/mcp/reload
+
+Hot-reload the catalog from disk and reconnect any servers that moved.
 
 ---
 

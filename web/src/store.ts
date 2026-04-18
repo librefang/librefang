@@ -39,23 +39,42 @@ interface AppState {
   toggleTheme: () => void
 }
 
+const LOCALE_PREFIXES = ['zh-TW', 'zh', 'de', 'ja', 'ko', 'es']
+
+// Strip any locale prefix from a pathname so we can re-attach the new one.
+// `/zh/skills/foo` → `/skills/foo`, `/skills` → `/skills`, `/` → `/`.
+function stripLocalePrefix(pathname: string): string {
+  for (const prefix of LOCALE_PREFIXES) {
+    if (pathname === `/${prefix}`) return '/'
+    if (pathname.startsWith(`/${prefix}/`)) return pathname.slice(prefix.length + 1)
+  }
+  return pathname
+}
+
 export const useAppStore = create<AppState>((set) => ({
   lang: detectLang(),
   switchLang: (code: string) => {
     set({ lang: code })
-    const url = code === 'en' ? '/' : `/${code}`
-    window.history.pushState(null, '', url)
+    const bare = typeof window === 'undefined' ? '/' : stripLocalePrefix(window.location.pathname)
+    const url = code === 'en' ? bare : `/${code}${bare === '/' ? '' : bare}`
+    window.history.pushState(null, '', url + window.location.search + window.location.hash)
     document.documentElement.lang = code
     loadCJKFont(code)
   },
   theme: (typeof window !== 'undefined' && localStorage.getItem('theme') as 'dark' | 'light') || 'dark',
   toggleTheme: () => {
-    set((state) => {
+    // Wrap the class swap in document.startViewTransition when the browser
+    // supports it, so dark↔light cross-fades instead of popping. Falls back
+    // to the direct swap on Safari / Firefox stable (as of early 2026).
+    const apply = () => set((state) => {
       const next = state.theme === 'dark' ? 'light' : 'dark'
       localStorage.setItem('theme', next)
       document.documentElement.classList.toggle('dark', next === 'dark')
       document.documentElement.classList.toggle('light', next === 'light')
       return { theme: next }
     })
+    const start = typeof document !== 'undefined' && (document as Document & { startViewTransition?: (cb: () => void) => void }).startViewTransition
+    if (start) start.call(document, apply)
+    else apply()
   },
 }))

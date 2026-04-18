@@ -42,7 +42,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         )
         .route(
             "/terminal/windows/{window_id}",
-            axum::routing::delete(delete_window),
+            axum::routing::delete(delete_window).patch(rename_window),
         )
         .route("/terminal/ws", axum::routing::get(terminal_ws))
 }
@@ -612,6 +612,64 @@ async fn delete_window(
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "kill_window_failed"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RenameWindowRequest {
+    name: String,
+}
+
+async fn rename_window(
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(window_id): axum::extract::Path<String>,
+    Json(body): Json<RenameWindowRequest>,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+
+    if !crate::terminal_tmux::validate_window_id(&window_id) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid_window_id"})),
+        )
+            .into_response();
+    }
+
+    if !validate_window_name(&body.name) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid_window_name"})),
+        )
+            .into_response();
+    }
+
+    if let Err(resp) = authorize_terminal_request(&headers, &uri, addr, &state).await {
+        return resp;
+    }
+
+    let ctrl = match tmux_controller(&state).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
+    if let Err(e) = ctrl.ensure_session().await {
+        warn!(error = %e, "tmux ensure_session failed in rename_window");
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
+    match ctrl.rename_window(&window_id, &body.name).await {
+        Ok(()) => axum::http::StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            warn!(error = %e, %window_id, "tmux rename_window failed");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "rename_window_failed"})),
             )
                 .into_response()
         }
