@@ -61,6 +61,7 @@ result
 .vscode/
 .claude/
 .codex
+.omc/
 .qwen/
 *.swp
 *.swo

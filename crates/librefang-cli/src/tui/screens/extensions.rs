@@ -1,4 +1,4 @@
-//! Extensions screen: browse, install/remove integrations, view MCP health.
+//! Extensions screen: browse MCP catalog, install/remove MCP servers, view health.
 
 use crate::tui::theme;
 use crate::tui::widgets;
@@ -373,7 +373,7 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
     if state.loading {
         f.render_widget(
-            widgets::spinner(state.tick, "Loading integrations\u{2026}"),
+            widgets::spinner(state.tick, "Loading MCP servers\u{2026}"),
             chunks[1],
         );
     } else if state.all_extensions.is_empty() {

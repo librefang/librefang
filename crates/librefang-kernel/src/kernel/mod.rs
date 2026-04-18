@@ -362,12 +362,16 @@ pub struct LibreFangKernel {
         Option<Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>>,
     /// Hand registry — curated autonomous capability packages.
     pub(crate) hand_registry: librefang_hands::registry::HandRegistry,
-    /// Extension/integration registry (bundled MCP templates + install state).
-    pub(crate) extension_registry:
-        std::sync::RwLock<librefang_extensions::registry::IntegrationRegistry>,
-    /// Integration health monitor.
-    pub(crate) extension_health: librefang_extensions::health::HealthMonitor,
-    /// Effective MCP server list (manual config + extension-installed, merged at boot).
+    /// MCP catalog — read-only set of server templates shipped by the
+    /// registry. Refreshed by `registry_sync` and re-read on
+    /// `POST /api/mcp/reload`.
+    pub(crate) mcp_catalog: std::sync::RwLock<librefang_extensions::catalog::McpCatalog>,
+    /// MCP server health monitor.
+    pub(crate) mcp_health: librefang_extensions::health::HealthMonitor,
+    /// Effective MCP server list — mirrors `config.mcp_servers`.
+    ///
+    /// Kept as its own field (instead of always reading `config.load()`) so
+    /// hot-reload and tests can snapshot the list atomically.
     pub(crate) effective_mcp_servers:
         std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>>,
     /// Delivery receipt tracker (bounded LRU, max 10K entries).
@@ -836,18 +840,16 @@ impl LibreFangKernel {
         &self.hand_registry
     }
 
-    /// Extension/integration registry (RwLock — hot-reload).
+    /// MCP catalog (RwLock — hot-reload from `mcp/catalog/` on disk).
     #[inline]
-    pub fn extensions(
-        &self,
-    ) -> &std::sync::RwLock<librefang_extensions::registry::IntegrationRegistry> {
-        &self.extension_registry
+    pub fn mcp_catalog(&self) -> &std::sync::RwLock<librefang_extensions::catalog::McpCatalog> {
+        &self.mcp_catalog
     }
 
-    /// Integration health monitor.
+    /// MCP server health monitor.
     #[inline]
-    pub fn extension_monitor(&self) -> &librefang_extensions::health::HealthMonitor {
-        &self.extension_health
+    pub fn mcp_health(&self) -> &librefang_extensions::health::HealthMonitor {
+        &self.mcp_health
     }
 
     /// Cron job scheduler.
@@ -1848,36 +1850,53 @@ impl LibreFangKernel {
             info!("Loaded {hand_count} hand(s)");
         }
 
-        // Initialize extension/integration registry
-        let mut extension_registry =
-            librefang_extensions::registry::IntegrationRegistry::new(&config.home_dir);
-        let ext_templates = extension_registry.load_templates(&config.home_dir);
-        match extension_registry.load_installed() {
-            Ok(count) => {
-                if count > 0 {
-                    info!("Loaded {count} installed integration(s)");
-                }
+        // Run the one-time migration from the legacy two-store layout
+        // (`integrations.toml` + `integrations/`) into the unified
+        // `config.toml` + `mcp/catalog/` layout. This is a no-op after the
+        // first successful run.
+        //
+        // We reload `config.toml` ONLY when the migrator reports it actually
+        // wrote something (`Ok(Some(_))`). Reloading unconditionally would
+        // silently replace the caller's in-memory config with whatever is on
+        // disk, which is wrong when the caller started the kernel with a
+        // non-default config path or a programmatically-built config.
+        let migrated = match librefang_runtime::mcp_migrate::migrate_if_needed(&config.home_dir) {
+            Ok(Some(summary)) => {
+                info!("MCP migration: {summary}");
+                true
             }
+            Ok(None) => false,
             Err(e) => {
-                warn!("Failed to load installed integrations: {e}");
+                warn!("MCP migration skipped due to error: {e}");
+                false
             }
-        }
-        info!(
-            "Extension registry: {ext_templates} templates available, {} installed",
-            extension_registry.installed_count()
-        );
+        };
 
-        // Merge installed integrations into MCP server list
-        let ext_mcp_configs = extension_registry.to_mcp_configs();
-        let mut all_mcp_servers = config.mcp_servers.clone();
-        for ext_cfg in ext_mcp_configs {
-            // Avoid duplicates — don't add if a manual config already exists with same name
-            if !all_mcp_servers.iter().any(|s| s.name == ext_cfg.name) {
-                all_mcp_servers.push(ext_cfg);
+        // Load the MCP catalog from `~/.librefang/mcp/catalog/`.
+        let mut mcp_catalog = librefang_extensions::catalog::McpCatalog::new(&config.home_dir);
+        let catalog_count = mcp_catalog.load(&config.home_dir);
+        info!("MCP catalog: {catalog_count} template(s) available");
+
+        let config = if migrated {
+            let cfg_path = config.home_dir.join("config.toml");
+            if cfg_path.is_file() {
+                let reloaded = load_config(Some(&cfg_path));
+                // Defensive: only accept the reloaded view if it didn't drop
+                // any `[[mcp_servers]]` entries the caller already had.
+                if reloaded.mcp_servers.len() >= config.mcp_servers.len() {
+                    reloaded
+                } else {
+                    config
+                }
+            } else {
+                config
             }
-        }
+        } else {
+            config
+        };
+        let all_mcp_servers = config.mcp_servers.clone();
 
-        // Initialize integration health monitor.
+        // Initialize MCP health monitor.
         // [health_check] section overrides [extensions] when explicitly set (non-default).
         let hc_interval = if config.health_check.health_check_interval_secs != 60 {
             config.health_check.health_check_interval_secs
@@ -1890,10 +1909,10 @@ impl LibreFangKernel {
             max_backoff_secs: config.extensions.reconnect_max_backoff_secs,
             check_interval_secs: hc_interval,
         };
-        let extension_health = librefang_extensions::health::HealthMonitor::new(health_config);
-        // Register all installed integrations for health monitoring
-        for inst in extension_registry.to_mcp_configs() {
-            extension_health.register(&inst.name);
+        let mcp_health = librefang_extensions::health::HealthMonitor::new(health_config);
+        // Register every configured MCP server for health monitoring.
+        for srv in &all_mcp_servers {
+            mcp_health.register(&srv.name);
         }
 
         // Initialize web tools (multi-provider search + SSRF-protected fetch + caching)
@@ -2228,8 +2247,8 @@ impl LibreFangKernel {
             pairing,
             embedding_driver,
             hand_registry,
-            extension_registry: std::sync::RwLock::new(extension_registry),
-            extension_health,
+            mcp_catalog: std::sync::RwLock::new(mcp_catalog),
+            mcp_health,
             effective_mcp_servers: std::sync::RwLock::new(all_mcp_servers),
             delivery_tracker: DeliveryTracker::new(),
             cron_scheduler,
@@ -3624,17 +3643,46 @@ system_prompt = "You are a helpful assistant."
                     && self.try_claim_skill_review_slot(&agent_id_str, now_epoch);
                 if claimed {
                     let permit = permit_opt.expect("permit was acquired before claim");
-                    let driver = self.default_driver.clone();
+                    // Prefer the driver the agent's own turn resolved to.
+                    // When an agent is pinned to a provider the global
+                    // default isn't configured for (or vice versa), using
+                    // `self.default_driver` meant reviews failed with
+                    // "unknown provider" while the task itself had
+                    // succeeded — so complex workflows from those agents
+                    // never got distilled into skills. Fall back to the
+                    // default only if manifest resolution fails.
+                    let driver = self
+                        .resolve_driver(&entry.manifest)
+                        .unwrap_or_else(|_| self.default_driver.clone());
                     let skills_dir = self.home_dir_boot.join("skills");
                     let trace_summary = Self::summarize_traces_for_review(&result.decision_traces);
                     let response_summary = result.response.chars().take(2000).collect::<String>();
                     let kernel_weak = self.self_handle.get().cloned();
                     let audit_log = self.audit_log.clone();
                     let agent_id_for_task = agent_id_str.clone();
-                    // Capture defaults for cost attribution — the review
-                    // uses `default_driver` so its cost rolls up under the
-                    // default model in the user's dashboards.
-                    let default_model = self.default_model();
+                    // Cost-attribution model: use the agent's own model
+                    // so review spend rolls up under the same line the
+                    // main turn did (matches the driver choice above).
+                    // Falls back to the global default when the agent
+                    // didn't pin a provider/model pair.
+                    let default_model = if entry.manifest.model.provider.is_empty()
+                        || entry.manifest.model.model.is_empty()
+                    {
+                        self.default_model()
+                    } else {
+                        librefang_types::config::DefaultModelConfig {
+                            provider: entry.manifest.model.provider.clone(),
+                            model: entry.manifest.model.model.clone(),
+                            api_key_env: entry
+                                .manifest
+                                .model
+                                .api_key_env
+                                .clone()
+                                .unwrap_or_default(),
+                            base_url: entry.manifest.model.base_url.clone(),
+                            ..self.default_model()
+                        }
+                    };
                     let review_agent_id = agent_id;
                     let audit_log_success = audit_log.clone();
                     let agent_id_for_success = agent_id_str.clone();
@@ -7629,35 +7677,19 @@ system_prompt = "You are a helpful assistant."
                     info!("Hot-reload: webhook trigger config updated (enabled={enabled})");
                 }
                 HotAction::ReloadExtensions => {
-                    info!("Hot-reload: reloading extension registry");
-                    let mut reg = self
-                        .extension_registry
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    // Re-scan installed integrations from disk
-                    match reg.load_installed() {
-                        Ok(n) => {
-                            info!("Hot-reload: reloaded {n} installed extension(s)");
-                        }
-                        Err(e) => {
-                            warn!("Hot-reload: failed to reload extensions: {e}");
-                        }
-                    }
-                    // Rebuild effective MCP server list: manual config + extension-sourced
-                    let ext_mcp_configs = reg.to_mcp_configs();
-                    drop(reg); // release extension_registry lock before acquiring effective_mcp_servers
-                    let mut all_mcp = new_config.mcp_servers.clone();
-                    for ext_cfg in ext_mcp_configs {
-                        // Avoid duplicates — don't add if a manual config already has same name
-                        if !all_mcp.iter().any(|s| s.name == ext_cfg.name) {
-                            all_mcp.push(ext_cfg);
-                        }
-                    }
+                    info!("Hot-reload: reloading MCP catalog");
+                    let mut cat = self.mcp_catalog.write().unwrap_or_else(|e| e.into_inner());
+                    // Re-read template files from `mcp/catalog/` on disk.
+                    let count = cat.load(&new_config.home_dir);
+                    info!("Hot-reload: reloaded {count} MCP catalog entry/entries");
+                    drop(cat);
+                    // Effective MCP server list now == config.mcp_servers directly.
+                    let new_mcp = new_config.mcp_servers.clone();
                     let mut effective = self
                         .effective_mcp_servers
                         .write()
                         .unwrap_or_else(|e| e.into_inner());
-                    *effective = all_mcp;
+                    *effective = new_mcp;
                     info!(
                         "Hot-reload: effective MCP server list updated ({} total)",
                         effective.len()
@@ -7668,26 +7700,28 @@ system_prompt = "You are a helpful assistant."
                 }
                 HotAction::ReloadMcpServers => {
                     info!("Hot-reload: MCP server config updated");
-                    // Rebuild effective MCP servers: new manual config + extension-sourced
-                    let ext_mcp_configs = {
-                        let reg = self
-                            .extension_registry
-                            .read()
-                            .unwrap_or_else(|e| e.into_inner());
-                        reg.to_mcp_configs()
-                    };
-                    let mut all_mcp = new_config.mcp_servers.clone();
-                    for ext_cfg in ext_mcp_configs {
-                        if !all_mcp.iter().any(|s| s.name == ext_cfg.name) {
-                            all_mcp.push(ext_cfg);
-                        }
-                    }
+                    let new_mcp = new_config.mcp_servers.clone();
                     let mut effective = self
                         .effective_mcp_servers
                         .write()
                         .unwrap_or_else(|e| e.into_inner());
-                    let count = all_mcp.len();
-                    *effective = all_mcp;
+                    // Diff the health registry against the new server set so
+                    // removed servers stop being tracked and newly added ones
+                    // enter the map immediately — otherwise `report_ok` /
+                    // `report_error` are silent no-ops for those IDs and
+                    // `/api/mcp/health` under-reports until a full restart.
+                    let old_names: std::collections::HashSet<String> =
+                        effective.iter().map(|s| s.name.clone()).collect();
+                    let new_names: std::collections::HashSet<String> =
+                        new_mcp.iter().map(|s| s.name.clone()).collect();
+                    for name in old_names.difference(&new_names) {
+                        self.mcp_health.unregister(name);
+                    }
+                    for name in new_names.difference(&old_names) {
+                        self.mcp_health.register(name);
+                    }
+                    let count = new_mcp.len();
+                    *effective = new_mcp;
                     info!(
                         "Hot-reload: effective MCP server list rebuilt ({count} total, \
                          connections will be re-established on next agent message)"
@@ -8559,7 +8593,7 @@ system_prompt = "You are a helpful assistant."
         {
             let kernel = Arc::clone(self);
             tokio::spawn(async move {
-                kernel.run_extension_health_loop().await;
+                kernel.run_mcp_health_loop().await;
             });
         }
 
@@ -9361,8 +9395,7 @@ system_prompt = "You are a helpful assistant."
                         "MCP server connected"
                     );
                     // Update extension health if this is an extension-provided server
-                    self.extension_health
-                        .report_ok(&server_config.name, tool_count);
+                    self.mcp_health.report_ok(&server_config.name, tool_count);
                     self.mcp_connections.lock().await.push(conn);
                 }
                 Err(e) => {
@@ -9388,8 +9421,7 @@ system_prompt = "You are a helpful assistant."
                             "Failed to connect to MCP server"
                         );
                     }
-                    self.extension_health
-                        .report_error(&server_config.name, err_str);
+                    self.mcp_health.report_error(&server_config.name, err_str);
                 }
             }
         }
@@ -9508,8 +9540,7 @@ system_prompt = "You are a helpful assistant."
                     tools = tool_count,
                     "MCP server connected after OAuth"
                 );
-                self.extension_health
-                    .report_ok(&server_config.name, tool_count);
+                self.mcp_health.report_ok(&server_config.name, tool_count);
                 self.mcp_connections.lock().await.push(conn);
 
                 // Update auth state to Authorized
@@ -9527,7 +9558,7 @@ system_prompt = "You are a helpful assistant."
                     error = %e,
                     "MCP server retry after OAuth failed"
                 );
-                self.extension_health
+                self.mcp_health
                     .report_error(&server_config.name, e.to_string());
                 self.mcp_auth_states.lock().await.insert(
                     server_name.to_string(),
@@ -9539,38 +9570,26 @@ system_prompt = "You are a helpful assistant."
         }
     }
 
-    /// Reload extension configs and connect any new MCP servers.
+    /// Reload MCP server configs and (re)connect every server in config.toml.
     ///
-    /// Called by the API reload endpoint after CLI installs/removes integrations.
-    pub async fn reload_extension_mcps(self: &Arc<Self>) -> Result<usize, String> {
+    /// Called by `POST /api/mcp/reload` and by the API handlers for
+    /// `POST/PUT/DELETE /api/mcp/servers[/{id}]` after they mutate config.toml.
+    ///
+    /// Returns the number of *newly connected* servers (not the total count).
+    pub async fn reload_mcp_servers(self: &Arc<Self>) -> Result<usize, String> {
         let cfg = self.config.load_full();
         use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
         use librefang_types::config::McpTransportEntry;
 
-        // 1. Reload installed integrations from disk
-        let installed_count = {
-            let mut registry = self
-                .extension_registry
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            registry.load_installed().map_err(|e| e.to_string())?
+        // 1. Reload the MCP catalog from disk (new templates may have landed
+        //    after `registry_sync`).
+        let catalog_count = {
+            let mut cat = self.mcp_catalog.write().unwrap_or_else(|e| e.into_inner());
+            cat.load(&cfg.home_dir)
         };
 
-        // 2. Rebuild effective MCP server list
-        let new_configs = {
-            let registry = self
-                .extension_registry
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            let ext_mcp_configs = registry.to_mcp_configs();
-            let mut all = cfg.mcp_servers.clone();
-            for ext_cfg in ext_mcp_configs {
-                if !all.iter().any(|s| s.name == ext_cfg.name) {
-                    all.push(ext_cfg);
-                }
-            }
-            all
-        };
+        // 2. Effective server list == config.mcp_servers (no merge needed).
+        let new_configs = cfg.mcp_servers.clone();
 
         // 3. Find servers that aren't already connected
         let already_connected: Vec<String> = self
@@ -9630,7 +9649,7 @@ system_prompt = "You are a helpful assistant."
                 taint_scanning: server_config.taint_scanning,
             };
 
-            self.extension_health.register(&server_config.name);
+            self.mcp_health.register(&server_config.name);
 
             match McpConnection::connect(mcp_config).await {
                 Ok(conn) => {
@@ -9640,29 +9659,28 @@ system_prompt = "You are a helpful assistant."
                         self.mcp_generation
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
-                    self.extension_health
-                        .report_ok(&server_config.name, tool_count);
+                    self.mcp_health.report_ok(&server_config.name, tool_count);
                     info!(
                         server = %server_config.name,
                         tools = tool_count,
-                        "Extension MCP server connected (hot-reload)"
+                        "MCP server connected (hot-reload)"
                     );
                     self.mcp_connections.lock().await.push(conn);
                     connected_count += 1;
                 }
                 Err(e) => {
-                    self.extension_health
+                    self.mcp_health
                         .report_error(&server_config.name, e.to_string());
                     warn!(
                         server = %server_config.name,
                         error = %e,
-                        "Failed to connect extension MCP server"
+                        "Failed to connect MCP server"
                     );
                 }
             }
         }
 
-        // 6. Remove connections for uninstalled integrations
+        // 6. Remove connections for servers no longer in config
         let removed: Vec<String> = already_connected
             .iter()
             .filter(|name| {
@@ -9688,22 +9706,20 @@ system_prompt = "You are a helpful assistant."
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             for name in &removed {
-                self.extension_health.unregister(name);
-                info!(server = %name, "Extension MCP server disconnected (removed)");
+                self.mcp_health.unregister(name);
+                info!(server = %name, "MCP server disconnected (removed)");
             }
         }
 
         info!(
-            "Extension reload: {} installed, {} new connections, {} removed",
-            installed_count,
-            connected_count,
+            "MCP reload: catalog={catalog_count}, {connected_count} new connections, {} removed",
             removed.len()
         );
         Ok(connected_count)
     }
 
-    /// Reconnect a single extension MCP server by ID.
-    pub async fn reconnect_extension_mcp(self: &Arc<Self>, id: &str) -> Result<usize, String> {
+    /// Reconnect a single MCP server by id.
+    pub async fn reconnect_mcp_server(self: &Arc<Self>, id: &str) -> Result<usize, String> {
         use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
         use librefang_types::config::McpTransportEntry;
 
@@ -9717,7 +9733,7 @@ system_prompt = "You are a helpful assistant."
         };
 
         let server_config =
-            server_config.ok_or_else(|| format!("No MCP config found for integration '{id}'"))?;
+            server_config.ok_or_else(|| format!("No MCP config found for server '{id}'"))?;
 
         // Disconnect existing connection if any
         {
@@ -9737,7 +9753,7 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        self.extension_health.mark_reconnecting(id);
+        self.mcp_health.mark_reconnecting(id);
 
         let transport_entry = match &server_config.transport {
             Some(t) => t,
@@ -9785,25 +9801,25 @@ system_prompt = "You are a helpful assistant."
                     self.mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                self.extension_health.report_ok(id, tool_count);
+                self.mcp_health.report_ok(id, tool_count);
                 info!(
                     server = %id,
                     tools = tool_count,
-                    "Extension MCP server reconnected"
+                    "MCP server reconnected"
                 );
                 self.mcp_connections.lock().await.push(conn);
                 Ok(tool_count)
             }
             Err(e) => {
-                self.extension_health.report_error(id, e.to_string());
+                self.mcp_health.report_error(id, e.to_string());
                 Err(format!("Reconnect failed for '{id}': {e}"))
             }
         }
     }
 
-    /// Background loop that checks extension MCP health and auto-reconnects.
-    async fn run_extension_health_loop(self: &Arc<Self>) {
-        let interval_secs = self.extension_health.config().check_interval_secs;
+    /// Background loop that checks MCP server health and auto-reconnects.
+    async fn run_mcp_health_loop(self: &Arc<Self>) {
+        let interval_secs = self.mcp_health.config().check_interval_secs;
         if interval_secs == 0 {
             return;
         }
@@ -9814,23 +9830,21 @@ system_prompt = "You are a helpful assistant."
         loop {
             interval.tick().await;
 
-            // Check each registered integration
-            let health_entries = self.extension_health.all_health();
+            // Check each registered server
+            let health_entries = self.mcp_health.all_health();
             for entry in health_entries {
-                // Try reconnect for errored integrations
-                if self.extension_health.should_reconnect(&entry.id) {
-                    let backoff = self
-                        .extension_health
-                        .backoff_duration(entry.reconnect_attempts);
+                // Try reconnect for errored servers
+                if self.mcp_health.should_reconnect(&entry.id) {
+                    let backoff = self.mcp_health.backoff_duration(entry.reconnect_attempts);
                     debug!(
                         server = %entry.id,
                         attempt = entry.reconnect_attempts + 1,
                         backoff_secs = backoff.as_secs(),
-                        "Auto-reconnecting extension MCP server"
+                        "Auto-reconnecting MCP server"
                     );
                     tokio::time::sleep(backoff).await;
 
-                    if let Err(e) = self.reconnect_extension_mcp(&entry.id).await {
+                    if let Err(e) = self.reconnect_mcp_server(&entry.id).await {
                         debug!(server = %entry.id, error = %e, "Auto-reconnect failed");
                     }
                 }
@@ -10775,47 +10789,63 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Strategy 2: Balanced brace matching — find the first '{' and track
-        // nesting depth to find the matching '}', handling strings correctly.
+        // Strategy 2: Balanced brace matching — find a '{' and track
+        // nesting depth to find the matching '}', handling strings
+        // correctly. Try every candidate opening brace in the text so a
+        // valid JSON object later in the response still matches after
+        // leading prose (`"here's the answer: {example} ... {actual}"`).
+        // The old implementation bailed out after the first `{` failed
+        // to parse, causing the background skill review to silently
+        // skip any response where the model preceded its JSON with
+        // braces in free-form prose.
         let chars: Vec<char> = text.chars().collect();
-        let start = chars.iter().position(|&c| c == '{')?;
-        let mut depth = 0i32;
-        let mut in_string = false;
-        let mut escape_next = false;
-        let mut end = None;
+        let mut search_from = 0;
+        while let Some(start_rel) = chars.iter().skip(search_from).position(|&c| c == '{') {
+            let start = search_from + start_rel;
+            let mut depth = 0i32;
+            let mut in_string = false;
+            let mut escape_next = false;
+            let mut end = None;
 
-        for (i, &ch) in chars.iter().enumerate().skip(start) {
-            if escape_next {
-                escape_next = false;
-                continue;
-            }
-            if ch == '\\' && in_string {
-                escape_next = true;
-                continue;
-            }
-            if ch == '"' {
-                in_string = !in_string;
-                continue;
-            }
-            if !in_string {
-                match ch {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = Some(i);
-                            break;
+            for (i, &ch) in chars.iter().enumerate().skip(start) {
+                if escape_next {
+                    escape_next = false;
+                    continue;
+                }
+                if ch == '\\' && in_string {
+                    escape_next = true;
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = !in_string;
+                    continue;
+                }
+                if !in_string {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = Some(i);
+                                break;
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
-        }
 
-        if let Some(end_idx) = end {
-            let candidate: String = chars[start..=end_idx].iter().collect();
-            if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
-                return Some(candidate);
+            if let Some(end_idx) = end {
+                let candidate: String = chars[start..=end_idx].iter().collect();
+                if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
+                    return Some(candidate);
+                }
+                // Try the next '{' after the one we just rejected.
+                search_from = start + 1;
+            } else {
+                // Unbalanced braces from `start` to EOF — nothing later
+                // can match either, so stop.
+                return None;
             }
         }
 
@@ -11015,7 +11045,14 @@ system_prompt = "You are a helpful assistant."
 
         let mut summary = String::new();
         for (category, cat_skills) in &categories {
-            summary.push_str(&format!("{category}:\n"));
+            // Category derives from a skill's first non-platform tag via
+            // `derive_category`, and tags are third-party-authored data.
+            // A malicious tag containing newlines or pseudo-section
+            // markers (`[SYSTEM]`, `---`) would otherwise forge a trust
+            // boundary inside the system prompt. Sanitize the same way
+            // we do for name/description/tool slots below.
+            let safe_category = sanitize_for_prompt(category, 64);
+            summary.push_str(&format!("{safe_category}:\n"));
             for skill in cat_skills {
                 // Sanitize third-party-authored fields before interpolation —
                 // a malicious skill author could otherwise smuggle newlines or

@@ -2401,33 +2401,15 @@ pub fn spawn_fetch_extensions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
             let client = daemon_client();
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/integrations/available"))
-                .send()
-            {
+            if let Ok(resp) = client.get(format!("{base_url}/api/mcp/catalog")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                    // Also fetch installed to merge status
-                    let installed_ids: Vec<String> = client
-                        .get(format!("{base_url}/api/integrations"))
-                        .send()
-                        .ok()
-                        .and_then(|r| r.json::<serde_json::Value>().ok())
-                        .and_then(|b| {
-                            b["installed"].as_array().map(|arr| {
-                                arr.iter()
-                                    .filter_map(|i| i["id"].as_str().map(String::from))
-                                    .collect()
-                            })
-                        })
-                        .unwrap_or_default();
-
-                    let extensions: Vec<ExtensionInfo> = body["integrations"]
+                    let extensions: Vec<ExtensionInfo> = body["entries"]
                         .as_array()
                         .map(|arr| {
                             arr.iter()
                                 .map(|e| {
                                     let id = e["id"].as_str().unwrap_or("").to_string();
-                                    let installed = installed_ids.contains(&id);
+                                    let installed = e["installed"].as_bool().unwrap_or(false);
                                     ExtensionInfo {
                                         id: id.clone(),
                                         name: e["name"].as_str().unwrap_or("").to_string(),
@@ -2462,15 +2444,21 @@ pub fn spawn_fetch_extensions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             }
         }
         BackendRef::InProcess(kernel) => {
-            let registry = kernel
-                .extensions()
+            let installed_ids: std::collections::HashSet<String> = kernel
+                .config_ref()
+                .mcp_servers
+                .iter()
+                .filter_map(|s| s.template_id.clone())
+                .collect();
+            let catalog = kernel
+                .mcp_catalog()
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
-            let extensions: Vec<ExtensionInfo> = registry
-                .list_templates()
+            let extensions: Vec<ExtensionInfo> = catalog
+                .list()
                 .iter()
                 .map(|t| {
-                    let installed = registry.is_installed(&t.id);
+                    let installed = installed_ids.contains(&t.id);
                     ExtensionInfo {
                         id: t.id.clone(),
                         name: t.name.clone(),
@@ -2498,10 +2486,7 @@ pub fn spawn_fetch_extension_health(backend: BackendRef, tx: mpsc::Sender<AppEve
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
             let client = daemon_client();
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/integrations/health"))
-                .send()
-            {
+            if let Ok(resp) = client.get(format!("{base_url}/api/mcp/health")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let entries: Vec<ExtensionHealthInfo> = body["health"]
                         .as_array()
@@ -2531,7 +2516,7 @@ pub fn spawn_fetch_extension_health(backend: BackendRef, tx: mpsc::Sender<AppEve
             }
         }
         BackendRef::InProcess(kernel) => {
-            let health = kernel.extension_monitor().all_health();
+            let health = kernel.mcp_health().all_health();
             let entries: Vec<ExtensionHealthInfo> = health
                 .iter()
                 .map(|h| ExtensionHealthInfo {
@@ -2559,8 +2544,8 @@ pub fn spawn_install_extension(backend: BackendRef, id: String, tx: mpsc::Sender
         BackendRef::Daemon(base_url) => {
             let client = daemon_client();
             match client
-                .post(format!("{base_url}/api/integrations/add"))
-                .json(&serde_json::json!({"id": id}))
+                .post(format!("{base_url}/api/mcp/servers"))
+                .json(&serde_json::json!({"template_id": id}))
                 .send()
             {
                 Ok(resp) if resp.status().is_success() => {
@@ -2587,12 +2572,20 @@ pub fn spawn_install_extension(backend: BackendRef, id: String, tx: mpsc::Sender
 }
 
 /// Remove an extension.
+///
+/// Routes through `/api/extensions/uninstall` rather than
+/// `DELETE /api/mcp/servers/{name}` because the UI list carries the
+/// catalog `entry.id` (template_id), and that can diverge from the
+/// configured server name (user renamed it, or the catalog entry id
+/// doesn't match the final server name). The extensions endpoint
+/// resolves either form; the MCP endpoint only accepts the exact name.
 pub fn spawn_remove_extension(backend: BackendRef, id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
             let client = daemon_client();
             match client
-                .delete(format!("{base_url}/api/integrations/{id}"))
+                .post(format!("{base_url}/api/extensions/uninstall"))
+                .json(&serde_json::json!({ "name": id }))
                 .send()
             {
                 Ok(resp) if resp.status().is_success() => {
@@ -2617,7 +2610,7 @@ pub fn spawn_reconnect_extension(backend: BackendRef, id: String, tx: mpsc::Send
         BackendRef::Daemon(base_url) => {
             let client = daemon_client();
             match client
-                .post(format!("{base_url}/api/integrations/{id}/reconnect"))
+                .post(format!("{base_url}/api/mcp/servers/{id}/reconnect"))
                 .send()
             {
                 Ok(resp) if resp.status().is_success() => {
