@@ -35,10 +35,13 @@ pub struct ConsolidationPromptInput<'a> {
 
 /// Build the dream message delivered to the target agent. The prompt
 /// concludes with tool-use guidance matching libre-code's constraint note
-/// (which it enforces via a restricted `canUseTool` hook). librefang can't
-/// enforce the restriction at runtime yet — documenting it here is a
-/// defence-in-depth signal to the model while the kernel-level enforcement
-/// lands as a follow-up.
+/// (which it enforces via a restricted `canUseTool` hook). librefang
+/// enforces the same restriction in the kernel — `available_tools` is
+/// filtered against [`super::DREAM_ALLOWED_TOOLS`] whenever the sender
+/// channel is [`super::AUTO_DREAM_CHANNEL`] (see the filter in
+/// `kernel/mod.rs`). The prompt mirrors that constraint as defence in
+/// depth so the model doesn't try to call tools that were pre-stripped
+/// from its schema.
 pub fn build_consolidation_prompt(input: ConsolidationPromptInput<'_>) -> String {
     let mut out = String::with_capacity(2048);
     out.push_str(

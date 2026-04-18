@@ -286,8 +286,16 @@ impl SessionStore {
         // `updated_at` is stored as RFC3339 strings, not millis — convert
         // the timestamp on the Rust side so the comparison is a simple
         // lexicographic compare (RFC3339 sorts correctly).
+        // Fall back to the epoch (not "now") if the i64 cast somehow
+        // produced an out-of-range millis value — the doc comment says
+        // `since_ms = 0` means "count all sessions", and an out-of-range
+        // input is closer to that intent than silently returning zero
+        // sessions via a "now" threshold.
         let since_rfc3339 = chrono::DateTime::<Utc>::from_timestamp_millis(since_ms as i64)
-            .unwrap_or_else(Utc::now)
+            .unwrap_or_else(|| {
+                chrono::DateTime::<Utc>::from_timestamp_millis(0)
+                    .expect("epoch is always a valid millis timestamp")
+            })
             .to_rfc3339();
         let count: i64 = conn
             .query_row(
@@ -314,8 +322,16 @@ impl SessionStore {
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        // Fall back to the epoch (not "now") if the i64 cast somehow
+        // produced an out-of-range millis value — the doc comment says
+        // `since_ms = 0` means "count all sessions", and an out-of-range
+        // input is closer to that intent than silently returning zero
+        // sessions via a "now" threshold.
         let since_rfc3339 = chrono::DateTime::<Utc>::from_timestamp_millis(since_ms as i64)
-            .unwrap_or_else(Utc::now)
+            .unwrap_or_else(|| {
+                chrono::DateTime::<Utc>::from_timestamp_millis(0)
+                    .expect("epoch is always a valid millis timestamp")
+            })
             .to_rfc3339();
         let mut stmt = conn
             .prepare(

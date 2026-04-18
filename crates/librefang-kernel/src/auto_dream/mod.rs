@@ -37,7 +37,7 @@ use librefang_channels::types::SenderContext;
 use librefang_llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use librefang_types::error::LibreFangResult;
-use tokio::task::JoinHandle;
+use tokio::sync::oneshot;
 
 use crate::kernel::LibreFangKernel;
 
@@ -140,12 +140,25 @@ pub struct DreamUsage {
 /// agent can be in flight (the file lock enforces that).
 static DREAM_PROGRESS: LazyLock<DashMap<AgentId, DreamProgress>> = LazyLock::new(DashMap::new);
 
-/// Abort-capable join handles, keyed by agent. Only populated for
-/// manually-triggered dreams — scheduled dreams run inline inside the
-/// scheduler loop to keep token spend serial, and aborting them would
-/// violate that invariant.
-static ABORT_HANDLES: LazyLock<DashMap<AgentId, Arc<Mutex<Option<JoinHandle<()>>>>>> =
-    LazyLock::new(DashMap::new);
+/// Interior of an abort slot — the oneshot sender is taken out on abort
+/// so a second call can distinguish "already signalled" from "nothing in
+/// flight". Wrapped in a `std::sync::Mutex` because DashMap entries are
+/// accessed through shared references and `Sender::send` consumes self.
+type AbortSlot = Mutex<Option<oneshot::Sender<()>>>;
+
+/// Abort channels for in-flight manually-triggered dreams. Sending on the
+/// oneshot notifies `run_dream`'s drain loop to break out and run the
+/// `finalize_abort` cleanup path (lock rollback + inner-LLM-task abort).
+///
+/// Scheduled dreams run inline inside the scheduler loop to keep token
+/// spend serial and don't install an abort channel — the scheduler can't
+/// be interrupted without disrupting other agents' turn in the queue.
+///
+/// Entries are removed by the owning `run_dream` on any terminal state
+/// (complete / fail / abort / timeout) so `ABORT_HANDLES.contains_key` is
+/// a reliable "a manual dream is still running" signal for `can_abort` in
+/// the status endpoint.
+static ABORT_HANDLES: LazyLock<DashMap<AgentId, Arc<AbortSlot>>> = LazyLock::new(DashMap::new);
 
 fn insert_progress(agent_id: AgentId, progress: DreamProgress) {
     DREAM_PROGRESS.insert(agent_id, progress);
@@ -296,17 +309,25 @@ fn apply_stream_event(agent_id: AgentId, ev: &StreamEvent, pending: &mut Pending
         }
         StreamEvent::ToolUseEnd { name, input, .. } => {
             if MEMORY_WRITE_TOOLS.contains(&name.as_str()) {
-                // Pick a small, human-meaningful preview. Memory tools
-                // typically take `{content: "..."}` or `{id: "..."}`.
+                // The `memory_store` tool takes `{key, value}` (see
+                // `librefang-runtime/src/tool_runner.rs`). Prefer the key
+                // as a human-meaningful preview; fall back to a clipped
+                // value when the key is absent, and to the tool name only
+                // if neither is present (shouldn't happen for valid calls,
+                // but we don't want to panic).
                 let preview = input
-                    .get("id")
+                    .get("key")
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
                     .or_else(|| {
-                        input.get("content").and_then(|v| v.as_str()).map(|s| {
+                        input.get("value").and_then(|v| v.as_str()).map(|s| {
                             let first_line = s.lines().next().unwrap_or(s);
-                            if first_line.len() > 80 {
-                                format!("{}…", &first_line[..80])
+                            // char-safe truncation — byte slicing would
+                            // panic on multi-byte characters (CJK, emoji)
+                            // landing on a boundary inside an 80-byte window.
+                            if first_line.chars().count() > 80 {
+                                let clipped: String = first_line.chars().take(80).collect();
+                                format!("{clipped}…")
                             } else {
                                 first_line.to_string()
                             }
@@ -355,9 +376,16 @@ struct PendingTurn {
 }
 
 /// Run one dream for one agent end-to-end. This is the body shared by both
-/// the scheduler (awaits inline) and the manual-trigger path (spawned so
-/// abort works).
-async fn run_dream(kernel: Arc<LibreFangKernel>, target: AgentId, prior_mtime: u64) {
+/// the scheduler (awaits inline, `abort_rx = None`) and the manual-trigger
+/// path (spawned with an abort channel). When `abort_rx` is `Some` and
+/// fires, the drain loop exits, the inner LLM task is aborted, and the
+/// finalizer rolls the lock mtime back so the time gate reopens.
+async fn run_dream(
+    kernel: Arc<LibreFangKernel>,
+    target: AgentId,
+    prior_mtime: u64,
+    abort_rx: Option<oneshot::Receiver<()>>,
+) {
     let task_id = uuid::Uuid::new_v4().to_string();
     insert_progress(
         target,
@@ -417,6 +445,11 @@ async fn run_dream(kernel: Arc<LibreFangKernel>, target: AgentId, prior_mtime: u
     let timeout_secs = kernel.config_snapshot().auto_dream.timeout_secs;
     let timeout = Duration::from_secs(timeout_secs.max(30));
 
+    // Hold the abort receiver owned from here on so we can drop it before
+    // every finalizer — preventing `abort_dream` from reporting
+    // `aborted=true` while the dream is already on its way out.
+    let mut abort_rx = abort_rx;
+
     // Kick off streaming.
     let (mut rx, join_handle) = match kernel
         .send_message_streaming_with_sender_context_and_routing(target, &prompt_text, None, &sender)
@@ -424,6 +457,7 @@ async fn run_dream(kernel: Arc<LibreFangKernel>, target: AgentId, prior_mtime: u
     {
         Ok(pair) => pair,
         Err(e) => {
+            abort_rx.take();
             finalize_failure(
                 &kernel,
                 target,
@@ -435,8 +469,12 @@ async fn run_dream(kernel: Arc<LibreFangKernel>, target: AgentId, prior_mtime: u
         }
     };
 
-    // Drain events, applying to progress. The loop exits when either the
-    // channel closes OR the overall timeout elapses.
+    // Drain events, applying to progress. The loop exits when the channel
+    // closes (natural completion), the overall timeout elapses, OR the
+    // abort signal fires (manual trigger only). For the abort case we
+    // need to both tear down the inner LLM task (so it stops burning
+    // tokens) and run `finalize_abort` to roll the lock back — neither
+    // of which would happen if the outer spawn were aborted directly.
     let deadline = tokio::time::Instant::now() + timeout;
     let mut pending = PendingTurn::default();
     loop {
@@ -444,21 +482,54 @@ async fn run_dream(kernel: Arc<LibreFangKernel>, target: AgentId, prior_mtime: u
         if remaining.is_zero() {
             tracing::warn!(agent = %target, "auto_dream: deadline exceeded during stream");
             join_handle.abort();
+            abort_rx.take();
             finalize_failure(&kernel, target, prior_mtime, "timed out".to_string()).await;
             return;
         }
-        match tokio::time::timeout(remaining, rx.recv()).await {
+
+        // With an abort channel: race the event stream against the abort
+        // signal. Without one (scheduler path): just drain events.
+        let recv_result = if let Some(rx_abort) = abort_rx.as_mut() {
+            tokio::select! {
+                // biased: if both arms are ready, prefer honouring the
+                // abort so a rapidly-firing dream can still be cancelled.
+                biased;
+                _ = rx_abort => {
+                    join_handle.abort();
+                    // The receiver already resolved inside this select arm;
+                    // dropping it via `take` is defensive — a second abort
+                    // attempt should report "already signalled" rather than
+                    // hitting a resolved receiver.
+                    abort_rx.take();
+                    finalize_abort(&kernel, target, prior_mtime).await;
+                    return;
+                }
+                result = tokio::time::timeout(remaining, rx.recv()) => result,
+            }
+        } else {
+            tokio::time::timeout(remaining, rx.recv()).await
+        };
+
+        match recv_result {
             Ok(Some(ev)) => {
                 apply_stream_event(target, &ev, &mut pending);
             }
             Ok(None) => break, // channel closed — stream finished
             Err(_) => {
                 join_handle.abort();
+                abort_rx.take();
                 finalize_failure(&kernel, target, prior_mtime, "timed out".to_string()).await;
                 return;
             }
         }
     }
+
+    // Drain loop exited naturally. Drop the abort receiver before we move
+    // into the finalizer path so any abort signal arriving from here on
+    // fails `oneshot::Sender::send` — `abort_dream` surfaces that as
+    // "dream already finished before abort landed" instead of falsely
+    // claiming a running dream was cancelled.
+    abort_rx.take();
 
     // Channel closed — wait for the join handle to surface the final result.
     match join_handle.await {
@@ -508,6 +579,10 @@ async fn run_dream(kernel: Arc<LibreFangKernel>, target: AgentId, prior_mtime: u
                 ),
                 "ok",
             );
+            // Success cleanup — removes the abort entry so the status
+            // endpoint stops advertising `can_abort: true` for a dream
+            // that's already done.
+            ABORT_HANDLES.remove(&target);
         }
         Ok(Err(e)) => {
             finalize_failure(
@@ -640,7 +715,10 @@ pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
         loop {
             let interval_s = {
                 let cfg = kernel.config_snapshot();
-                cfg.auto_dream.check_interval_secs.max(30)
+                // Floor matches the config-schema minimum (see
+                // `routes/config.rs`), so a direct TOML edit can't sneak
+                // a shorter cadence past the UI's validation.
+                cfg.auto_dream.check_interval_secs.max(60)
             };
             tokio::time::sleep(Duration::from_secs(interval_s)).await;
 
@@ -658,7 +736,11 @@ pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
                 match check_agent_gates(&kernel, agent_id, false).await {
                     AgentGateResult::Fire { prior_mtime } => {
                         // Scheduled dreams run inline — serial token spend.
-                        run_dream(Arc::clone(&kernel), agent_id, prior_mtime).await;
+                        // `None` for abort_rx: scheduled dreams can't be
+                        // cancelled individually without stalling the
+                        // queue; users who want to interrupt wait for the
+                        // dream's own timeout or disable auto-dream.
+                        run_dream(Arc::clone(&kernel), agent_id, prior_mtime, None).await;
                     }
                     AgentGateResult::TooSoon { hours_remaining } => {
                         tracing::trace!(agent = %agent_id, hours_remaining, "auto_dream: time gate not yet open");
@@ -837,12 +919,17 @@ pub async fn trigger_manual(kernel: Arc<LibreFangKernel>, agent_id: AgentId) -> 
 
     match check_agent_gates(&kernel, agent_id, true).await {
         AgentGateResult::Fire { prior_mtime } => {
-            let k = Arc::clone(&kernel);
-            let handle = tokio::spawn(async move {
-                run_dream(k, agent_id, prior_mtime).await;
-            });
-            let slot = Arc::new(Mutex::new(Some(handle)));
+            // Install the abort channel *before* spawning so a racing
+            // abort call sees the slot. The slot is removed by
+            // `run_dream` on any terminal state; aborting after that is
+            // a no-op with a "nothing in flight" reason.
+            let (abort_tx, abort_rx) = oneshot::channel::<()>();
+            let slot = Arc::new(Mutex::new(Some(abort_tx)));
             ABORT_HANDLES.insert(agent_id, slot);
+            let k = Arc::clone(&kernel);
+            tokio::spawn(async move {
+                run_dream(k, agent_id, prior_mtime, Some(abort_rx)).await;
+            });
             // task_id becomes available once run_dream installs the
             // progress entry; in practice insert_progress runs on the very
             // first await point. Read it back for the response.
@@ -888,35 +975,57 @@ pub struct AbortOutcome {
 /// that down would disrupt other agents' turn in the queue. Users who want
 /// to cancel a scheduled dream should wait (dreams have a configurable
 /// timeout) or disable auto-dream globally.
+///
+/// Signals `run_dream` via the oneshot channel installed by
+/// `trigger_manual`. `run_dream`'s drain loop notices, aborts the inner
+/// LLM task, and runs `finalize_abort` (progress → Aborted, lock mtime
+/// rolled back, `ABORT_HANDLES` entry removed).
+///
+/// We intentionally do NOT abort the outer spawn directly — doing so
+/// would drop `run_dream`'s future mid-await, leaking the inner LLM task
+/// and leaving the lock mtime at "now" so the time gate stays closed.
 pub async fn abort_dream(agent_id: AgentId) -> AbortOutcome {
     let id_str = agent_id.to_string();
-    let Some((_, slot)) = ABORT_HANDLES.remove(&agent_id) else {
+    // Don't `remove` here — `run_dream`'s finalizer is the single owner
+    // of cleanup. Removing now would cause a racing `run_dream` that's
+    // already mid-finalize to `remove` a different entry (a new one
+    // installed by the next `trigger_manual`).
+    let Some(slot_ref) = ABORT_HANDLES.get(&agent_id).map(|r| Arc::clone(r.value())) else {
         return AbortOutcome {
             aborted: false,
             agent_id: id_str,
             reason: "no abort-capable dream in flight for this agent".to_string(),
         };
     };
-    // SAFETY: the slot is exclusively held by this module — a lock failure
-    // here would indicate the mutex was poisoned, which is not recoverable
-    // and we surface it as an error rather than silently ignore.
-    let mut guard = match slot.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
+    let sender = match slot_ref.lock() {
+        Ok(mut g) => g.take(),
+        // A poisoned mutex would mean a prior panic while the sender was
+        // held; recover the inner data and continue rather than deadlock.
+        Err(poisoned) => poisoned.into_inner().take(),
     };
-    if let Some(handle) = guard.take() {
-        handle.abort();
-        AbortOutcome {
-            aborted: true,
-            agent_id: id_str,
-            reason: "abort signalled; lock will roll back shortly".to_string(),
-        }
-    } else {
-        AbortOutcome {
+    let Some(tx) = sender else {
+        return AbortOutcome {
             aborted: false,
             agent_id: id_str,
-            reason: "handle already consumed".to_string(),
-        }
+            reason: "abort already signalled for this dream".to_string(),
+        };
+    };
+    // `send` fails only if the receiver dropped — which means `run_dream`
+    // already finished or its future was dropped. Either way there's
+    // nothing to abort and the finalizer ran (or is about to run) on its
+    // own. Treat this as aborted=false with a descriptive reason rather
+    // than pretending the signal landed.
+    if tx.send(()).is_err() {
+        return AbortOutcome {
+            aborted: false,
+            agent_id: id_str,
+            reason: "dream already finished before abort landed".to_string(),
+        };
+    }
+    AbortOutcome {
+        aborted: true,
+        agent_id: id_str,
+        reason: "abort signalled; lock will roll back shortly".to_string(),
     }
 }
 
