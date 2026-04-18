@@ -96,6 +96,8 @@ export {
   listWorkflowTemplates,
   // terminal
   listTerminalWindows,
+  // auto-dream
+  getAutoDreamStatus,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -195,12 +197,23 @@ export {
   createTerminalWindow,
   renameTerminalWindow,
   deleteTerminalWindow,
+  // auto-dream
+  triggerAutoDream,
+  abortAutoDream,
+  setAutoDreamEnabled,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
 // Type re-exports used by hooks and pages
 // ---------------------------------------------------------------------------
 export type {
+  AutoDreamAbortOutcome,
+  AutoDreamAgentStatus,
+  AutoDreamProgress,
+  AutoDreamStatus,
+  AutoDreamStatusName,
+  AutoDreamTriggerOutcome,
+  AutoDreamTurn,
   CronJobItem,
   HandDefinitionItem,
   HandInstanceItem,

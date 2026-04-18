@@ -93,6 +93,55 @@ decay_rate = 0.1
 
 ---
 
+### `[auto_dream]`
+
+后台记忆整固（"梦境"）—— 一个时间门控的调度器，周期性地让选择开启的 agent 通过 4 阶段提示词（定位 / 收集 / 整固 / 修剪）反思并整理自己的记忆。默认关闭；每个 agent 还需在 manifest 中通过 `auto_dream_enabled = true` 单独开启。
+
+```toml
+[auto_dream]
+enabled = false
+min_hours = 24
+min_sessions = 5
+check_interval_secs = 600
+timeout_secs = 600
+# lock_dir = ""   # 默认为 <data_dir>/auto_dream/
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | 全局开关。为 `false` 时即使单个 agent 已开启也不会触发。 |
+| `min_hours` | f64 | `24.0` | 距离该 agent 上次整固的最小小时数，满足后才会再次触发。 |
+| `min_sessions` | u32 | `5` | 距离该 agent 上次整固之后，被触及的最少会话数，满足后才会再次触发。设为 `0` 则禁用该闸门。 |
+| `check_interval_secs` | u64 | `600` | 调度器检查闸门的唤醒间隔（秒）。 |
+| `timeout_secs` | u64 | `600` | 单次梦境调用的超时时间（秒）。 |
+| `lock_dir` | string | `""` | 锁目录的可选覆盖路径。为空则使用 `<data_dir>/auto_dream/`，每个 agent 的锁存储为 `<dir>/<agent_id>.lock`。 |
+
+当所有闸门同时满足时才会触发：`enabled = true`、agent manifest 中 `auto_dream_enabled = true`、距离上次梦境至少 `min_hours` 小时、至少触及 `min_sessions` 个会话、以及能获取到该 agent 的文件锁。
+
+**每个 Agent 的加入状态** 可以无需重启在运行时切换：
+
+- **Web Dashboard**：设置页 → 梦境模式卡片 → 每个 agent 旁的勾选框。
+- **API**：`PUT /api/auto-dream/agents/{id}/enabled`，请求体 `{"enabled": true | false}`。调度器会在下一次 tick 读取新状态。
+- **Manifest**：在 agent 的 `.toml` 里设置 `auto_dream_enabled = true`，获得重启后仍生效的持久加入状态。
+
+**每个 Agent 的阈值覆盖**（可选）允许异构调度。在 agent manifest 里任一字段不填（`None`）就继承全局默认：
+
+```toml
+auto_dream_enabled = true
+auto_dream_min_hours = 168    # 每周一次，适合不活跃的 agent
+auto_dream_min_sessions = 1   # 每次会话后触发，适合高频 agent
+```
+
+status 接口会返回每个 agent 的 `effective_min_hours` / `effective_min_sessions`，Dashboard 可以据此展示实际生效值。
+
+**运行时工具限制**：dream 运行时，无论 agent manifest 原本允许什么，kernel 会把可调用工具列表收窄到仅 `memory_store` / `memory_recall` / `memory_list`。这是针对 prompt 注入攻击的纵深防御层（即便模型被诱骗，shell 和网络类工具也不在其 schema 里）。
+
+**手动控制**：`POST /api/auto-dream/agents/{id}/trigger` 绕过时间和会话闸门，但仍须获取锁并尊重 opt-in 开关。`POST /api/auto-dream/agents/{id}/abort` 取消手动触发的进行中梦境，回滚锁 mtime 使时间门重新打开。`GET /api/auto-dream/status` 返回实时进度，完成后的梦境会包含 token 用量和成本字段。
+
+**审计记录**：每次梦境生命周期转换（start / complete / fail / abort）都以 `DreamConsolidation` 审计事件记录。completion 条目附带 input/output/cache token 数和 `cost_usd`，便于从 `/api/audit` 回答"这周 auto-dream 花了多少钱"。
+
+---
+
 ### `[network]`
 
 配置 OFP（LibreFang 协议）点对点网络层，使用 HMAC-SHA256 双向认证。
