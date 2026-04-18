@@ -14,6 +14,7 @@ Complete reference for `config.toml`, covering every configurable field in the L
   - [Top-Level Fields](#top-level-fields)
   - [\[default\_model\]](#default_model)
   - [\[memory\]](#memory)
+  - [\[auto\_dream\]](#auto_dream)
   - [\[network\]](#network)
   - [\[web\]](#web)
   - [\[media\]](#media)
@@ -562,6 +563,33 @@ decay_rate = 0.1
 | `consolidation_threshold` | u64 | `10000` | Number of stored memories before automatic consolidation is triggered to merge and prune old entries. |
 | `consolidation_interval_hours` | u64 | `24` | How often memory consolidation runs (hours). `0` = disabled. |
 | `decay_rate` | f32 | `0.1` | Memory confidence decay rate. `0.0` = no decay (memories never fade), `1.0` = aggressive decay. Values between 0.0 and 1.0. |
+
+---
+
+### `[auto_dream]`
+
+Background memory consolidation ("dreams") — a time-gated scheduler that periodically asks opt-in agents to reflect on and consolidate their own memory via a 4-phase prompt (Orient / Gather / Consolidate / Prune). Disabled by default; individual agents still opt in via `auto_dream_enabled = true` on their manifest.
+
+```toml
+[auto_dream]
+enabled = false
+min_hours = 24
+min_sessions = 5
+check_interval_secs = 600
+timeout_secs = 600
+# lock_dir = ""   # defaults to <data_dir>/auto_dream/
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Master toggle. When `false`, no dream fires regardless of per-agent opt-in. |
+| `min_hours` | f64 | `24.0` | Minimum hours since that agent's last consolidation before the next one fires. |
+| `min_sessions` | u32 | `5` | Minimum sessions touched since that agent's last consolidation before the next one fires. Set to `0` to disable the session-count gate. |
+| `check_interval_secs` | u64 | `600` | How often the scheduler wakes up to check gates, in seconds. |
+| `timeout_secs` | u64 | `600` | Timeout for a single dream invocation in seconds. |
+| `lock_dir` | string | `""` | Optional override for the lock directory. Empty = `<data_dir>/auto_dream/`. Per-agent locks are stored as `<dir>/<agent_id>.lock`. |
+
+A dream fires for an agent when all gates hold: `enabled = true`, the agent's manifest has `auto_dream_enabled = true`, `min_hours` have elapsed since its last dream, `min_sessions` have been touched since then, and the per-agent lock can be acquired. Manual triggers via `POST /api/auto-dream/agents/{id}/trigger` bypass the time and session gates but still respect the lock.
 
 ---
 

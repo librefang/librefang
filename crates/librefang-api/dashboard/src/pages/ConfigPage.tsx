@@ -25,7 +25,7 @@ import { TomlViewer } from "../components/TomlViewer";
 
 const CATEGORY_SECTIONS: Record<string, string[]> = {
   general: ["general", "default_model", "thinking", "budget", "reload"],
-  memory: ["memory", "proactive_memory"],
+  memory: ["memory", "proactive_memory", "auto_dream"],
   tools: ["web", "browser", "links", "media", "tts", "canvas"],
   channels: ["channels", "broadcast", "auto_reply"],
   security: ["approval", "exec_policy", "vault", "oauth", "external_auth", "terminal"],
