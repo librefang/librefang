@@ -35,7 +35,7 @@ use std::time::Duration;
 use dashmap::DashMap;
 use librefang_channels::types::SenderContext;
 use librefang_llm_driver::StreamEvent;
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::LibreFangResult;
 use tokio::sync::oneshot;
 
@@ -52,6 +52,16 @@ pub const AUTO_DREAM_CHANNEL: &str = "auto_dream";
 
 /// Default subdirectory under `data_dir` holding per-agent lock files.
 const DEFAULT_LOCK_DIR: &str = "auto_dream";
+
+/// Deterministic session id used by every dream invocation for an agent.
+/// Must match the id derived in `kernel::send_message_streaming_with_sender_context_and_routing`
+/// from `SenderContext { channel: AUTO_DREAM_CHANNEL, chat_id: None, .. }`
+/// — any drift here would mean the session-gate exclusion misses the dream
+/// session and we'd fall back to the repeated-re-dream loop this guards
+/// against.
+fn dream_session_id(agent_id: AgentId) -> SessionId {
+    SessionId::for_channel(agent_id, AUTO_DREAM_CHANNEL)
+}
 
 /// Cap on turns retained in the progress entry. Matches libre-code's
 /// `MAX_TURNS = 30` — enough to scroll through the reasoning without
@@ -265,9 +275,12 @@ async fn check_agent_gates(
     }
 
     if effective_min_sessions > 0 && !bypass_time_gate {
+        // Exclude the synthetic dream session itself — otherwise the
+        // previous dream's own turn registers as post-dream activity and
+        // the gate re-opens with nothing new to consolidate.
         match kernel
             .memory_substrate()
-            .count_agent_sessions_touched_since(agent_id, last_at)
+            .count_agent_sessions_touched_since(agent_id, last_at, Some(dream_session_id(agent_id)))
         {
             Ok(count) if count < effective_min_sessions => {
                 return AgentGateResult::NoActivity {
@@ -417,13 +430,19 @@ async fn run_dream(
     // scheduler's session-count gate already capped the number of eligible
     // dreams, but a very-active agent could touch hundreds of sessions.
     const MAX_SESSION_IDS_IN_PROMPT: u32 = 50;
+    let dream_sid = dream_session_id(target);
     let session_ids = kernel
         .memory_substrate()
-        .list_agent_sessions_touched_since(target, prior_mtime, MAX_SESSION_IDS_IN_PROMPT)
+        .list_agent_sessions_touched_since(
+            target,
+            prior_mtime,
+            MAX_SESSION_IDS_IN_PROMPT,
+            Some(dream_sid),
+        )
         .unwrap_or_default();
     let total_sessions = kernel
         .memory_substrate()
-        .count_agent_sessions_touched_since(target, prior_mtime)
+        .count_agent_sessions_touched_since(target, prior_mtime, Some(dream_sid))
         .unwrap_or(session_ids.len() as u32);
 
     let prompt_text = prompt::build_consolidation_prompt(prompt::ConsolidationPromptInput {
@@ -579,6 +598,16 @@ async fn run_dream(
                 ),
                 "ok",
             );
+            // Release the lock: clear the PID body so the next acquire
+            // doesn't see a live holder, and bump mtime to now so the time
+            // gate is measured from completion. Without this a completed
+            // dream's PID stays in the body and blocks every subsequent
+            // acquire for up to `HOLDER_STALE_MS` (60 min), breaking
+            // `min_hours < 1` configs and back-to-back manual triggers.
+            let lock = lock_for_agent(&kernel, target);
+            if let Err(e) = lock.release().await {
+                tracing::warn!(agent = %target, error = %e, "auto_dream: release lock after success failed");
+            }
             // Success cleanup — removes the abort entry so the status
             // endpoint stops advertising `can_abort: true` for a dream
             // that's already done.
@@ -773,8 +802,19 @@ pub struct AutoDreamAgentStatus {
     pub agent_name: String,
     pub auto_dream_enabled: bool,
     pub last_consolidated_at_ms: u64,
-    pub next_eligible_at_ms: u64,
-    pub hours_since_last: f64,
+    /// Unix-millis timestamp when the time gate reopens. `None` when the
+    /// agent has never been dreamed — using `last.saturating_add(min_ms)`
+    /// would return a 1970-era timestamp that the UI renders as "eligible
+    /// centuries ago" instead of "eligible now / never run".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_eligible_at_ms: Option<u64>,
+    /// Hours elapsed since the last consolidation. `None` when the agent has
+    /// never been consolidated (no lock file yet). Modelled as `Option`
+    /// rather than a sentinel float because `serde_json` rejects non-finite
+    /// floats, so `f64::INFINITY` would bubble up as a 500 from the status
+    /// endpoint on every fresh install.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hours_since_last: Option<f64>,
     pub sessions_since_last: u32,
     /// Resolved `min_hours` for this agent — manifest override if set,
     /// otherwise the global `[auto_dream] min_hours`.
@@ -815,36 +855,47 @@ pub async fn current_status(kernel: &LibreFangKernel) -> AutoDreamStatus {
         let min_ms = (eff_hours * 3_600_000.0) as u64;
 
         // Runtime stats (lock, sessions-since) only matter for opted-in
-        // agents. For opt-out agents we still return a row so the settings
-        // UI can render a toggle — but fields stay at zero/defaults.
-        let (last, sessions_since, lock_path, progress, can_abort) = if enabled {
+        // agents. Progress / can_abort must be surfaced even for opted-out
+        // rows: an operator toggling an agent off while a manual dream is
+        // still running would otherwise see the in-flight operation vanish
+        // from the dashboard and lose the abort affordance.
+        let (last, sessions_since, lock_path) = if enabled {
             let lock = lock_for_agent(kernel, agent_id);
             let last = lock.read_last_consolidated_at().await.unwrap_or(0);
             let sessions_since = kernel
                 .memory_substrate()
-                .count_agent_sessions_touched_since(agent_id, last)
+                .count_agent_sessions_touched_since(
+                    agent_id,
+                    last,
+                    Some(dream_session_id(agent_id)),
+                )
                 .unwrap_or(0);
-            let progress = progress_map.get(&agent_id).cloned();
-            let can_abort = ABORT_HANDLES.contains_key(&agent_id)
-                && progress
-                    .as_ref()
-                    .map(|p| p.status == DreamStatus::Running)
-                    .unwrap_or(false);
-            (
-                last,
-                sessions_since,
-                lock.path().display().to_string(),
-                progress,
-                can_abort,
-            )
+            (last, sessions_since, lock.path().display().to_string())
         } else {
-            (0, 0, String::new(), None, false)
+            (0, 0, String::new())
         };
 
+        let progress = progress_map.get(&agent_id).cloned();
+        let can_abort = ABORT_HANDLES.contains_key(&agent_id)
+            && progress
+                .as_ref()
+                .map(|p| p.status == DreamStatus::Running)
+                .unwrap_or(false);
+
         let hours_since = if last == 0 {
-            f64::INFINITY
+            None
         } else {
-            ((now.saturating_sub(last)) as f64) / 3_600_000.0
+            Some(((now.saturating_sub(last)) as f64) / 3_600_000.0)
+        };
+
+        // `next_eligible_at_ms` only makes sense when we have a reference
+        // point (`last > 0`). For never-dreamed agents, emitting `None`
+        // signals "eligible now / never run" to the UI instead of a
+        // 1970-based epoch-relative timestamp.
+        let next_eligible_at_ms = if last == 0 {
+            None
+        } else {
+            Some(last.saturating_add(min_ms))
         };
 
         agents.push(AutoDreamAgentStatus {
@@ -852,7 +903,7 @@ pub async fn current_status(kernel: &LibreFangKernel) -> AutoDreamStatus {
             agent_name: name,
             auto_dream_enabled: enabled,
             last_consolidated_at_ms: last,
-            next_eligible_at_ms: last.saturating_add(min_ms),
+            next_eligible_at_ms,
             hours_since_last: hours_since,
             sessions_since_last: sessions_since,
             effective_min_hours: eff_hours,

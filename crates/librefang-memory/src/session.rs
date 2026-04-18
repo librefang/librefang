@@ -274,10 +274,17 @@ impl SessionStore {
     /// last consolidation" — a no-activity dream is a waste of tokens.
     ///
     /// `since_ms = 0` means "since the epoch" (i.e. count all sessions).
+    ///
+    /// `exclude_session` filters out a specific session id from the count.
+    /// auto-dream passes the synthetic `auto_dream` channel session id here
+    /// — otherwise the dream's own turn would count as "activity" and the
+    /// gate would re-open immediately, causing repeated autonomous re-dreams
+    /// even when the agent has had no user or channel traffic.
     pub fn count_agent_sessions_touched_since(
         &self,
         agent_id: AgentId,
         since_ms: u64,
+        exclude_session: Option<SessionId>,
     ) -> LibreFangResult<u32> {
         let conn = self
             .conn
@@ -297,13 +304,23 @@ impl SessionStore {
                     .expect("epoch is always a valid millis timestamp")
             })
             .to_rfc3339();
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND updated_at > ?2",
-                rusqlite::params![agent_id.0.to_string(), since_rfc3339],
-                |row| row.get(0),
-            )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let count: i64 = match exclude_session {
+            Some(sid) => conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions \
+                     WHERE agent_id = ?1 AND updated_at > ?2 AND id != ?3",
+                    rusqlite::params![agent_id.0.to_string(), since_rfc3339, sid.0.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?,
+            None => conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND updated_at > ?2",
+                    rusqlite::params![agent_id.0.to_string(), since_rfc3339],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?,
+        };
         Ok(count.max(0) as u32)
     }
 
@@ -317,6 +334,7 @@ impl SessionStore {
         agent_id: AgentId,
         since_ms: u64,
         limit: u32,
+        exclude_session: Option<SessionId>,
     ) -> LibreFangResult<Vec<String>> {
         let conn = self
             .conn
@@ -333,23 +351,53 @@ impl SessionStore {
                     .expect("epoch is always a valid millis timestamp")
             })
             .to_rfc3339();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id FROM sessions WHERE agent_id = ?1 AND updated_at > ?2 \
-                 ORDER BY updated_at DESC LIMIT ?3",
-            )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![agent_id.0.to_string(), since_rfc3339, limit as i64],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        let mut ids = Vec::new();
-        for row in rows {
-            ids.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
-        }
-        Ok(ids)
+        let rows: Vec<String> = match exclude_session {
+            Some(sid) => {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id FROM sessions \
+                         WHERE agent_id = ?1 AND updated_at > ?2 AND id != ?3 \
+                         ORDER BY updated_at DESC LIMIT ?4",
+                    )
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let mapped = stmt
+                    .query_map(
+                        rusqlite::params![
+                            agent_id.0.to_string(),
+                            since_rfc3339,
+                            sid.0.to_string(),
+                            limit as i64
+                        ],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let mut ids = Vec::new();
+                for row in mapped {
+                    ids.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+                }
+                ids
+            }
+            None => {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id FROM sessions WHERE agent_id = ?1 AND updated_at > ?2 \
+                         ORDER BY updated_at DESC LIMIT ?3",
+                    )
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let mapped = stmt
+                    .query_map(
+                        rusqlite::params![agent_id.0.to_string(), since_rfc3339, limit as i64],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let mut ids = Vec::new();
+                for row in mapped {
+                    ids.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+                }
+                ids
+            }
+        };
+        Ok(rows)
     }
 
     /// Delete all sessions belonging to an agent and their FTS5 index entries.

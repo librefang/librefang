@@ -261,9 +261,10 @@ impl MemorySubstrate {
         &self,
         agent_id: AgentId,
         since_ms: u64,
+        exclude_session: Option<SessionId>,
     ) -> LibreFangResult<u32> {
         self.sessions
-            .count_agent_sessions_touched_since(agent_id, since_ms)
+            .count_agent_sessions_touched_since(agent_id, since_ms, exclude_session)
     }
 
     /// List an agent's session IDs touched after the given timestamp, newest
@@ -274,9 +275,10 @@ impl MemorySubstrate {
         agent_id: AgentId,
         since_ms: u64,
         limit: u32,
+        exclude_session: Option<SessionId>,
     ) -> LibreFangResult<Vec<String>> {
         self.sessions
-            .list_agent_sessions_touched_since(agent_id, since_ms, limit)
+            .list_agent_sessions_touched_since(agent_id, since_ms, limit, exclude_session)
     }
 
     /// Delete the canonical (cross-channel) session for an agent.

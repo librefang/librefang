@@ -1325,6 +1325,7 @@
     "auto_dream_no_agents": "尚无 Agent 加入。在 Agent manifest 中设置 auto_dream_enabled = true。",
     "auto_dream_no_agents_registered": "尚未注册任何 Agent。请先创建 Agent，再在此处开启。",
     "auto_dream_opt_in_hint": "未加入 —— 打开开关以纳入调度器。",
+    "auto_dream_opt_out_running": "梦境运行中被关闭 —— 当前任务会完成或可手动中止。",
     "auto_dream_enrolled": "已加入",
     "auto_dream_not_enrolled": "关闭",
     "auto_dream_enrolled_ok": "Agent 已加入",

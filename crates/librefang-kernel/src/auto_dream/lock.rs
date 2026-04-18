@@ -62,13 +62,20 @@ impl ConsolidationLock {
     /// Returns `Ok(None)` if the lock is held by a live process (not an
     /// error — a competing process already owns the turn). Returns `Err` for
     /// genuine filesystem problems.
+    ///
+    /// Body format is `"<pid>:<uuid>"`. The PID drives the liveness check
+    /// (`kill(0)`); the UUID is a per-acquire unique token so the
+    /// last-writer-wins race check can distinguish two concurrent
+    /// acquirers in the *same* process (e.g. two rapid manual triggers).
+    /// Writing only the PID would leave same-daemon races unprotected —
+    /// both writers write the same string and both "win" verification.
     pub async fn try_acquire(&self) -> LibreFangResult<Option<u64>> {
         // Probe existing holder, if any.
         let (prior_mtime, holder_pid) = match fs::metadata(&self.path).await {
             Ok(meta) => {
                 let mtime = mtime_ms(&meta)?;
                 let body = fs::read_to_string(&self.path).await.unwrap_or_default();
-                let pid: Option<u32> = body.trim().parse().ok();
+                let pid = parse_pid_from_body(&body);
                 (Some(mtime), pid)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
@@ -104,20 +111,22 @@ impl ConsolidationLock {
             })?;
         }
 
-        let our_pid = std::process::id().to_string();
-        fs::write(&self.path, our_pid.as_bytes())
-            .await
-            .map_err(|e| {
-                LibreFangError::Internal(format!("auto_dream: write lock file failed: {e}"))
-            })?;
+        // Per-acquire token — makes "did our write win?" a real check even
+        // when two acquirers are in the same process and thus share a PID.
+        let token = format!("{}:{}", std::process::id(), uuid::Uuid::new_v4());
+        fs::write(&self.path, token.as_bytes()).await.map_err(|e| {
+            LibreFangError::Internal(format!("auto_dream: write lock file failed: {e}"))
+        })?;
 
-        // Verify our write won the race. If two reclaimers both wrote, the
-        // loser's last-writer-wins semantics give them a body that is not
-        // their PID — they bail and retry next tick.
+        // Verify our write won the race. Last-writer-wins semantics mean
+        // the loser sees a body that is not their unique token — they bail
+        // and retry next tick. Without the UUID this check would falsely
+        // succeed for same-PID racers because their bodies would be
+        // identical.
         let verify = fs::read_to_string(&self.path).await.map_err(|e| {
             LibreFangError::Internal(format!("auto_dream: verify lock file failed: {e}"))
         })?;
-        if verify.trim() != our_pid {
+        if verify.trim() != token {
             return Ok(None);
         }
 
@@ -164,10 +173,28 @@ impl ConsolidationLock {
                 LibreFangError::Internal(format!("auto_dream: create lock parent dir failed: {e}"))
             })?;
         }
-        let our_pid = std::process::id().to_string();
-        fs::write(&self.path, our_pid.as_bytes())
+        let token = format!("{}:{}", std::process::id(), uuid::Uuid::new_v4());
+        fs::write(&self.path, token.as_bytes())
             .await
             .map_err(|e| LibreFangError::Internal(format!("auto_dream: touch lock failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Release the lock after a successful dream. Clears the PID body so the
+    /// next `try_acquire` doesn't see a live holder, and refreshes mtime to
+    /// now so `last_consolidated_at` reflects completion time (not acquire
+    /// time). Without this, a completed dream keeps its own PID in the body
+    /// and every subsequent acquire within `HOLDER_STALE_MS` sees a live
+    /// holder, breaking `min_hours < 1` configs and blocking quick re-dreams.
+    pub async fn release(&self) -> LibreFangResult<()> {
+        fs::write(&self.path, b"").await.map_err(|e| {
+            LibreFangError::Internal(format!("auto_dream: release lock failed: {e}"))
+        })?;
+        // Explicitly refresh mtime — coarse-resolution filesystems may leave
+        // it unchanged if the previous write was within the same tick.
+        set_mtime_ms(&self.path, now_ms()).map_err(|e| {
+            LibreFangError::Internal(format!("auto_dream: refresh mtime on release failed: {e}"))
+        })?;
         Ok(())
     }
 }
@@ -227,6 +254,19 @@ fn set_mtime_ms(path: &Path, mtime_ms: u64) -> std::io::Result<()> {
     }
 }
 
+/// Extract the PID from a lock body. Current bodies look like `"<pid>:<uuid>"`;
+/// older daemons wrote bare `"<pid>"`, so we fall back to parsing the entire
+/// trimmed string. Returns `None` for empty / unparseable bodies (treated as
+/// "no holder" upstream — e.g. after `release()` clears the body on success).
+fn parse_pid_from_body(body: &str) -> Option<u32> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let head = trimmed.split(':').next().unwrap_or(trimmed);
+    head.parse::<u32>().ok()
+}
+
 fn is_process_running(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -282,8 +322,33 @@ mod tests {
         let prior = lock.try_acquire().await.unwrap();
         assert_eq!(prior, Some(0));
         let body = tokio::fs::read_to_string(&path).await.unwrap();
-        assert_eq!(body.trim(), std::process::id().to_string());
+        // Body is "<pid>:<uuid>" so same-process racers don't both "win"
+        // verification. Check the PID prefix rather than the full token.
+        assert_eq!(
+            parse_pid_from_body(&body),
+            Some(std::process::id()),
+            "body should start with our PID",
+        );
+        assert!(
+            body.trim().contains(':'),
+            "body should include uuid suffix, got {body:?}",
+        );
         let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn parse_pid_from_body_handles_legacy_and_new_formats() {
+        // Legacy bare-PID format — daemons built before the token change.
+        assert_eq!(parse_pid_from_body("4242"), Some(4242));
+        // Current "<pid>:<uuid>" format.
+        assert_eq!(
+            parse_pid_from_body("4242:123e4567-e89b-12d3-a456-426614174000"),
+            Some(4242)
+        );
+        // Empty / whitespace / garbage bodies ⇒ no holder.
+        assert_eq!(parse_pid_from_body(""), None);
+        assert_eq!(parse_pid_from_body("   "), None);
+        assert_eq!(parse_pid_from_body(":abc"), None);
     }
 
     #[tokio::test]
@@ -326,6 +391,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn release_clears_body_so_next_acquire_succeeds() {
+        let path = tmpfile("release");
+        let lock = ConsolidationLock::new(path.clone());
+        // First dream: acquire, then release on success.
+        lock.try_acquire().await.unwrap();
+        let body = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(
+            parse_pid_from_body(&body),
+            Some(std::process::id()),
+            "acquire should stamp our PID",
+        );
+        lock.release().await.unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap().trim(),
+            "",
+            "release should clear the PID body"
+        );
+        // Second dream should be able to acquire immediately — the previous
+        // PID is gone so `try_acquire` does not see a live holder.
+        let prior = lock.try_acquire().await.unwrap();
+        assert!(
+            prior.is_some(),
+            "expected Some after release (live-holder gate should not trip)",
+        );
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
     async fn acquire_reclaims_stale_pid() {
         let path = tmpfile("stale-pid");
         // Write a definitely-dead PID (process 1 may be alive on unix; use a
@@ -340,7 +433,28 @@ mod tests {
         let prior = lock.try_acquire().await.unwrap();
         assert!(prior.is_some(), "should reclaim from dead PID");
         let body = tokio::fs::read_to_string(&path).await.unwrap();
-        assert_eq!(body.trim(), std::process::id().to_string());
+        assert_eq!(
+            parse_pid_from_body(&body),
+            Some(std::process::id()),
+            "reclaim should stamp our PID",
+        );
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn same_process_concurrent_acquire_single_winner() {
+        // Two in-process acquirers share the same PID, so the legacy
+        // bare-PID body would let both verification checks pass. The
+        // UUID-tagged body should give exactly one winner.
+        let path = tmpfile("same-process-race");
+        let lock_a = ConsolidationLock::new(path.clone());
+        let lock_b = ConsolidationLock::new(path.clone());
+        let (ra, rb) = tokio::join!(lock_a.try_acquire(), lock_b.try_acquire());
+        let winners = [ra.unwrap(), rb.unwrap()]
+            .iter()
+            .filter(|r| r.is_some())
+            .count();
+        assert_eq!(winners, 1, "exactly one racer should win the lock");
         let _ = tokio::fs::remove_file(&path).await;
     }
 }

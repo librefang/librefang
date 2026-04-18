@@ -1350,6 +1350,7 @@
     "auto_dream_no_agents": "No agents have opted in. Set auto_dream_enabled = true on an agent's manifest.",
     "auto_dream_no_agents_registered": "No agents registered yet. Create an agent first, then toggle it on here.",
     "auto_dream_opt_in_hint": "Not enrolled — toggle on to include in the scheduler.",
+    "auto_dream_opt_out_running": "Disabled mid-dream — the current run will finish or can be aborted.",
     "auto_dream_enrolled": "Enrolled",
     "auto_dream_not_enrolled": "Off",
     "auto_dream_enrolled_ok": "Agent enrolled",

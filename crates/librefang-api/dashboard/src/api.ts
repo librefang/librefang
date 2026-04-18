@@ -2913,8 +2913,10 @@ export interface AutoDreamAgentStatus {
   agent_name: string;
   auto_dream_enabled: boolean;
   last_consolidated_at_ms: number;
-  next_eligible_at_ms: number;
-  hours_since_last: number;
+  /** Unix-ms when the time gate reopens. Omitted when the agent has never been dreamed. */
+  next_eligible_at_ms?: number;
+  /** Hours since last consolidation. Omitted when the agent has never been dreamed. */
+  hours_since_last?: number;
   sessions_since_last: number;
   /** Resolved min_hours (manifest override or global default). */
   effective_min_hours: number;

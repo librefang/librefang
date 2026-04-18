@@ -443,9 +443,11 @@ function ConfigBackupSection() {
 /* ------------------------------------------------------------------ */
 
 // Format an epoch-ms into a short human-readable "N hours ago" / "in N
-// hours" label. Returns "never" when ts is 0.
-function formatRelativeMs(ts: number, now: number): string {
-  if (ts === 0) return "never";
+// hours" label. Returns "never" when ts is 0 or undefined — the status
+// endpoint omits `next_eligible_at_ms` for never-dreamed agents, and
+// `last_consolidated_at_ms` is 0 in the same case.
+function formatRelativeMs(ts: number | undefined, now: number): string {
+  if (ts === undefined || ts === 0) return "never";
   const diff = ts - now;
   const absHours = Math.abs(diff) / 3_600_000;
   if (absHours < 1) {
@@ -509,7 +511,7 @@ function AutoDreamAgentRow({
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <p className="text-sm font-medium truncate">{agent.agent_name}</p>
-              {progress && optedIn && (
+              {progress && (
                 <Badge
                   variant={
                     progress.status === "running"
@@ -560,6 +562,16 @@ function AutoDreamAgentRow({
                   {formatHours(agent.effective_min_hours)}
                 </span>
               </p>
+            ) : running ? (
+              // Agent was toggled off while a manual dream was already in
+              // flight. Keep the operator informed — the run continues to
+              // completion or abort, and the abort button above stays live.
+              <p className="text-[11px] text-text-dim italic">
+                {t(
+                  "settings.auto_dream_opt_out_running",
+                  "Disabled mid-dream — the current run will finish or can be aborted.",
+                )}
+              </p>
             ) : (
               <p className="text-[11px] text-text-dim italic">
                 {t(
@@ -588,7 +600,10 @@ function AutoDreamAgentRow({
                 : t("settings.auto_dream_not_enrolled", "Off")}
             </span>
           </label>
-          {optedIn && running && agent.can_abort && (
+          {running && agent.can_abort && (
+            // Surface the abort affordance even when the agent has been
+            // toggled off mid-dream — otherwise the in-flight operation
+            // keeps spending tokens with no UI to stop it.
             <Button
               variant="secondary"
               size="sm"
