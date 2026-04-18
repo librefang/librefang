@@ -390,6 +390,20 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Toggle the agent's auto-dream opt-in flag. The auto-dream scheduler
+    /// reads this on every tick, so the change takes effect without restart.
+    /// In-memory only — persisting to the agent manifest file is a separate
+    /// concern (matches the pattern of `update_system_prompt`).
+    pub fn update_auto_dream_enabled(&self, id: AgentId, enabled: bool) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.manifest.auto_dream_enabled = enabled;
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
+
     /// Update an agent's resource quota (budget limits).
     pub fn update_resources(
         &self,
@@ -580,5 +594,33 @@ mod tests {
         let after = registry.get(id).unwrap();
         assert!((after.manifest.model.temperature - 1.5).abs() < f32::EPSILON);
         assert!(after.last_active > old_active);
+    }
+
+    #[test]
+    fn test_update_auto_dream_enabled_toggles_flag() {
+        let registry = AgentRegistry::new();
+        let entry = test_entry("dreamer");
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        // Starts false (manifest default).
+        assert!(!registry.get(id).unwrap().manifest.auto_dream_enabled);
+
+        registry.update_auto_dream_enabled(id, true).unwrap();
+        assert!(registry.get(id).unwrap().manifest.auto_dream_enabled);
+
+        registry.update_auto_dream_enabled(id, false).unwrap();
+        assert!(!registry.get(id).unwrap().manifest.auto_dream_enabled);
+    }
+
+    #[test]
+    fn test_update_auto_dream_enabled_missing_agent_errors() {
+        let registry = AgentRegistry::new();
+        let bogus = AgentId::new();
+        let result = registry.update_auto_dream_enabled(bogus, true);
+        assert!(matches!(
+            result,
+            Err(librefang_types::error::LibreFangError::AgentNotFound(_))
+        ));
     }
 }

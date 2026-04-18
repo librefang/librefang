@@ -5,6 +5,7 @@
 
 pub mod approval;
 pub mod auth;
+pub mod auto_dream;
 pub mod auto_reply;
 pub mod background;
 pub mod capabilities;
