@@ -16,14 +16,23 @@
 //! guard against PID reuse.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use dashmap::DashSet;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use tokio::fs;
 
 /// A PID that has held the lock longer than this is presumed dead regardless
 /// of whether the OS still shows it running (guards against PID reuse).
 const HOLDER_STALE_MS: u64 = 60 * 60 * 1000;
+
+/// Process-local claims close the same-daemon race that the on-disk token
+/// alone cannot eliminate: one caller can write+verify before another caller
+/// overwrites the file, allowing both to "win" in sequence. We still need
+/// the filesystem lock for cross-process coherence; this only serializes
+/// concurrent acquirers targeting the same path inside one process.
+static IN_PROCESS_CLAIMS: LazyLock<DashSet<PathBuf>> = LazyLock::new(DashSet::new);
 
 /// Handle onto the lock file. Stateless — every operation re-reads from disk
 /// so multiple processes racing on the same path stay coherent.
@@ -111,10 +120,18 @@ impl ConsolidationLock {
             })?;
         }
 
+        // Same-process racers must lose before touching the file. The
+        // token-based verify below only proves "my write was visible when I
+        // re-read", not "nobody overwrote me later".
+        if !IN_PROCESS_CLAIMS.insert(self.path.clone()) {
+            return Ok(None);
+        }
+
         // Per-acquire token — makes "did our write win?" a real check even
         // when two acquirers are in the same process and thus share a PID.
         let token = format!("{}:{}", std::process::id(), uuid::Uuid::new_v4());
         fs::write(&self.path, token.as_bytes()).await.map_err(|e| {
+            IN_PROCESS_CLAIMS.remove(&self.path);
             LibreFangError::Internal(format!("auto_dream: write lock file failed: {e}"))
         })?;
 
@@ -124,9 +141,11 @@ impl ConsolidationLock {
         // succeed for same-PID racers because their bodies would be
         // identical.
         let verify = fs::read_to_string(&self.path).await.map_err(|e| {
+            IN_PROCESS_CLAIMS.remove(&self.path);
             LibreFangError::Internal(format!("auto_dream: verify lock file failed: {e}"))
         })?;
         if verify.trim() != token {
+            IN_PROCESS_CLAIMS.remove(&self.path);
             return Ok(None);
         }
 
@@ -140,6 +159,7 @@ impl ConsolidationLock {
     /// is `0` (no lock existed before), the file is unlinked to restore the
     /// "never consolidated" state.
     pub async fn rollback(&self, prior_mtime: u64) -> LibreFangResult<()> {
+        IN_PROCESS_CLAIMS.remove(&self.path);
         if prior_mtime == 0 {
             match fs::remove_file(&self.path).await {
                 Ok(()) => return Ok(()),
@@ -187,6 +207,7 @@ impl ConsolidationLock {
     /// and every subsequent acquire within `HOLDER_STALE_MS` sees a live
     /// holder, breaking `min_hours < 1` configs and blocking quick re-dreams.
     pub async fn release(&self) -> LibreFangResult<()> {
+        IN_PROCESS_CLAIMS.remove(&self.path);
         fs::write(&self.path, b"").await.map_err(|e| {
             LibreFangError::Internal(format!("auto_dream: release lock failed: {e}"))
         })?;
