@@ -1,8 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import * as http from "../http/client";
 import { renderHook } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
+import type { HandMessageResponse } from "../../api";
 import {
   useActivateHand,
   useDeactivateHand,
@@ -14,6 +13,10 @@ import {
   useSendHandMessage,
 } from "./hands";
 import { agentKeys, handKeys, overviewKeys } from "../queries/keys";
+import { createQueryClientWrapper } from "../test/query-client";
+
+type SetHandSecretInput = Parameters<ReturnType<typeof useSetHandSecret>["mutateAsync"]>[0];
+type UpdateHandSettingsInput = Parameters<ReturnType<typeof useUpdateHandSettings>["mutateAsync"]>[0];
 
 vi.mock("../http/client", () => ({
   activateHand: vi.fn(() => Promise.resolve({})),
@@ -28,25 +31,20 @@ vi.mock("../http/client", () => ({
 
 describe("useActivateHand", () => {
   it("invalidates handKeys.all, agentKeys.all, and overviewKeys.snapshot()", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useActivateHand(), { wrapper });
 
     await result.current.mutateAsync("hand-1");
 
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: handKeys.all,
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.all,
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: overviewKeys.snapshot(),
     });
   });
@@ -54,25 +52,20 @@ describe("useActivateHand", () => {
 
 describe("useDeactivateHand", () => {
   it("invalidates handKeys.all, agentKeys.all, and overviewKeys.snapshot()", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useDeactivateHand(), { wrapper });
 
     await result.current.mutateAsync("hand-1");
 
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: handKeys.all,
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.all,
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: overviewKeys.snapshot(),
     });
   });
@@ -80,25 +73,20 @@ describe("useDeactivateHand", () => {
 
 describe("usePauseHand", () => {
   it("invalidates handKeys.all, agentKeys.all, and overviewKeys.snapshot()", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => usePauseHand(), { wrapper });
 
     await result.current.mutateAsync("hand-1");
 
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: handKeys.all,
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.all,
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: overviewKeys.snapshot(),
     });
   });
@@ -106,25 +94,20 @@ describe("usePauseHand", () => {
 
 describe("useResumeHand", () => {
   it("invalidates handKeys.all, agentKeys.all, and overviewKeys.snapshot()", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useResumeHand(), { wrapper });
 
     await result.current.mutateAsync("hand-1");
 
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: handKeys.all,
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.all,
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: overviewKeys.snapshot(),
     });
   });
@@ -132,49 +115,59 @@ describe("useResumeHand", () => {
 
 describe("useUninstallHand", () => {
   it("invalidates handKeys.all, agentKeys.all, and overviewKeys.snapshot()", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useUninstallHand(), { wrapper });
 
     await result.current.mutateAsync("hand-1");
 
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: handKeys.all,
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.all,
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: overviewKeys.snapshot(),
     });
   });
 });
 
-describe.each([
-  { name: "useSetHandSecret", hook: useSetHandSecret, args: { handId: "h1", key: "k", value: "v" } },
-  { name: "useUpdateHandSettings", hook: useUpdateHandSettings, args: { handId: "h1", config: { foo: 1 } } },
-])("$name", ({ name, hook, args }) => {
+describe("useSetHandSecret", () => {
   it("invalidates handKeys.all", async () => {
-    vi.mocked(http[name === "useSetHandSecret" ? "setHandSecret" : "updateHandSettings"]).mockResolvedValue({} as any);
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
+    const args: SetHandSecretInput = { handId: "h1", key: "k", value: "v" };
+    vi.mocked(http.setHandSecret).mockResolvedValue({ ok: true });
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useSetHandSecret(), { wrapper });
+
+    await result.current.mutateAsync(args);
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: handKeys.all,
     });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+  });
+});
 
-    const { result } = renderHook(() => hook(), { wrapper });
+describe("useUpdateHandSettings", () => {
+  it("invalidates handKeys.all", async () => {
+    const args: UpdateHandSettingsInput = { handId: "h1", config: { foo: 1 } };
+    vi.mocked(http.updateHandSettings).mockResolvedValue({
+      status: "ok",
+      hand_id: "h1",
+      instance_id: "inst-1",
+      config: { foo: 1 },
+    });
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
-    await result.current.mutateAsync(args as any);
+    const { result } = renderHook(() => useUpdateHandSettings(), { wrapper });
 
-    expect(spy).toHaveBeenCalledWith({
+    await result.current.mutateAsync(args);
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: handKeys.all,
     });
   });
@@ -182,20 +175,16 @@ describe.each([
 
 describe("useSendHandMessage", () => {
   it("does not invalidate queries and calls mutationFn with correct args", async () => {
-    vi.mocked(http.sendHandMessage).mockResolvedValue({} as any);
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const response: HandMessageResponse = { response: "ok" };
+    vi.mocked(http.sendHandMessage).mockResolvedValue(response);
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useSendHandMessage(), { wrapper });
 
     await result.current.mutateAsync({ instanceId: "inst-1", message: "hello" });
 
-    expect(spy).not.toHaveBeenCalled();
+    expect(invalidateSpy).not.toHaveBeenCalled();
     expect(http.sendHandMessage).toHaveBeenCalledWith("inst-1", "hello");
   });
 });

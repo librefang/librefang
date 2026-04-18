@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import * as http from "../http/client";
+import type { ApiActionResponse, ScheduleItem } from "../../api";
 import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule, useUpdateTrigger, useDeleteTrigger } from "./schedules";
 import { cronKeys, scheduleKeys, triggerKeys } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
@@ -13,9 +14,18 @@ vi.mock("../http/client", () => ({
   deleteTrigger: vi.fn(),
 }));
 
+const actionResponse: ApiActionResponse = { status: "ok" };
+const scheduleResponse: ScheduleItem = {
+  id: "sched-1",
+  name: "test schedule",
+  cron: "0 * * * *",
+  agent_id: "agent-1",
+  enabled: true,
+};
+
 describe("useCreateSchedule", () => {
   beforeEach(() => {
-    vi.mocked(http.createSchedule).mockResolvedValue({} as any);
+    vi.mocked(http.createSchedule).mockResolvedValue(scheduleResponse);
   });
 
   it("invalidates scheduleKeys.all and cronKeys.all", async () => {
@@ -40,7 +50,7 @@ describe("useCreateSchedule", () => {
 
 describe("useUpdateSchedule", () => {
   beforeEach(() => {
-    vi.mocked(http.updateSchedule).mockResolvedValue({} as any);
+    vi.mocked(http.updateSchedule).mockResolvedValue(actionResponse);
   });
 
   it("invalidates scheduleKeys.all and cronKeys.all", async () => {
@@ -65,7 +75,7 @@ describe("useUpdateSchedule", () => {
 
 describe("useDeleteSchedule", () => {
   beforeEach(() => {
-    vi.mocked(http.deleteSchedule).mockResolvedValue({} as any);
+    vi.mocked(http.deleteSchedule).mockResolvedValue(actionResponse);
   });
 
   it("invalidates scheduleKeys.all and cronKeys.all", async () => {
@@ -90,7 +100,7 @@ describe("useDeleteSchedule", () => {
 
 describe("useUpdateTrigger", () => {
   beforeEach(() => {
-    vi.mocked(http.updateTrigger).mockResolvedValue({} as any);
+    vi.mocked(http.updateTrigger).mockResolvedValue(actionResponse);
   });
 
   it("invalidates triggerKeys.all", async () => {
@@ -109,7 +119,7 @@ describe("useUpdateTrigger", () => {
 
 describe("useDeleteTrigger", () => {
   beforeEach(() => {
-    vi.mocked(http.deleteTrigger).mockResolvedValue({} as any);
+    vi.mocked(http.deleteTrigger).mockResolvedValue(actionResponse);
   });
 
   it("invalidates triggerKeys.all", async () => {

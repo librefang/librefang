@@ -1,7 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 import type { HandInstanceItem, HandInstanceStatus } from "../../api";
 import {
   useHandStats,
@@ -13,13 +11,7 @@ import {
 } from "./hands";
 import * as client from "../http/client";
 import { handKeys } from "./keys";
-
-function createWrapper() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  };
-}
+import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
   getHandStats: vi.fn(),
@@ -36,7 +28,7 @@ beforeEach(() => {
 describe("useHandStats", () => {
   it("should be disabled when instanceId is empty string", () => {
     const { result } = renderHook(() => useHandStats(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -54,7 +46,7 @@ describe("useHandStats", () => {
     vi.mocked(client.getHandStats).mockResolvedValue(mockStats);
 
     const { result } = renderHook(() => useHandStats("hand-1"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.isLoading).toBe(true);
@@ -69,17 +61,14 @@ describe("useHandStats", () => {
   });
 
   it("should use handKeys.stats(instanceId) as queryKey", async () => {
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const mockStats = { instance_id: "hand-2" };
     vi.mocked(client.getHandStats).mockResolvedValue(mockStats);
 
     renderHook(() => useHandStats("hand-2"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryData(handKeys.stats("hand-2"))).toEqual(mockStats);
+      expect(queryClient.getQueryData(handKeys.stats("hand-2"))).toEqual(mockStats);
     });
   });
 });
@@ -87,7 +76,7 @@ describe("useHandStats", () => {
 describe("useHandStatsBatch", () => {
   it("should be disabled when instanceIds is empty array", () => {
     const { result } = renderHook(() => useHandStatsBatch([]), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -106,7 +95,7 @@ describe("useHandStatsBatch", () => {
     });
 
     const { result } = renderHook(() => useHandStatsBatch(["h1", "h2"]), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.isLoading).toBe(true);
@@ -119,20 +108,17 @@ describe("useHandStatsBatch", () => {
   });
 
   it("should use handKeys.statsBatch(instanceIds) as queryKey", async () => {
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
     vi.mocked(client.getHandStats).mockResolvedValue({});
 
     const ids = ["h1", "h2"] as const;
     renderHook(() => useHandStatsBatch(ids), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryData(handKeys.statsBatch(ids))).toBeDefined();
+      expect(queryClient.getQueryData(handKeys.statsBatch(ids))).toBeDefined();
     });
 
-    expect(qc.getQueryData(handKeys.statsBatch(ids))).toEqual({ h1: {}, h2: {} });
+    expect(queryClient.getQueryData(handKeys.statsBatch(ids))).toEqual({ h1: {}, h2: {} });
   });
 
   it("should skip failed requests gracefully", async () => {
@@ -143,7 +129,7 @@ describe("useHandStatsBatch", () => {
     });
 
     const { result } = renderHook(() => useHandStatsBatch(["h1", "h2"]), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => {
@@ -163,7 +149,7 @@ describe("useHandStatsBatch", () => {
     });
 
     const { result } = renderHook(() => useHandStatsBatch(["a", "b", "c"]), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => {
@@ -178,7 +164,7 @@ describe("useHandStatsBatch", () => {
 describe("useHandSession", () => {
   it("should be disabled when instanceId is empty string", () => {
     const { result } = renderHook(() => useHandSession(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -196,7 +182,7 @@ describe("useHandSession", () => {
     vi.mocked(client.getHandSession).mockResolvedValue(mockSession);
 
     const { result } = renderHook(() => useHandSession("hand-1"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.isLoading).toBe(true);
@@ -211,17 +197,14 @@ describe("useHandSession", () => {
   });
 
   it("should use handKeys.session(instanceId) as queryKey", async () => {
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const mockSession = { instance_id: "hand-3", messages: [] };
     vi.mocked(client.getHandSession).mockResolvedValue(mockSession);
 
     renderHook(() => useHandSession("hand-3"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryData(handKeys.session("hand-3"))).toEqual(mockSession);
+      expect(queryClient.getQueryData(handKeys.session("hand-3"))).toEqual(mockSession);
     });
   });
 });
@@ -229,7 +212,7 @@ describe("useHandSession", () => {
 describe("useHandInstanceStatus", () => {
   it("should be disabled when instanceId is empty string", () => {
     const { result } = renderHook(() => useHandInstanceStatus(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -249,7 +232,7 @@ describe("useHandInstanceStatus", () => {
     vi.mocked(client.getHandInstanceStatus).mockResolvedValue(mockStatus);
 
     const { result } = renderHook(() => useHandInstanceStatus("inst-1"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.isLoading).toBe(true);
@@ -264,10 +247,7 @@ describe("useHandInstanceStatus", () => {
   });
 
   it("should use handKeys.instanceStatus(instanceId) as queryKey", async () => {
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const mockStatus: HandInstanceStatus = { instance_id: "inst-2", hand_id: "hand-2", status: "running", activated_at: "2024-01-01T00:00:00Z", config: {} };
     vi.mocked(client.getHandInstanceStatus).mockResolvedValue(mockStatus);
 
@@ -279,7 +259,7 @@ describe("useHandInstanceStatus", () => {
       expect(result.current.data).toEqual(mockStatus);
     });
 
-    expect(qc.getQueryData(handKeys.instanceStatus("inst-2"))).toEqual(
+    expect(queryClient.getQueryData(handKeys.instanceStatus("inst-2"))).toEqual(
       mockStatus,
     );
   });
@@ -288,7 +268,7 @@ describe("useHandInstanceStatus", () => {
 describe("useHandManifestToml", () => {
   it("should be disabled when handId is empty and enabled is true", () => {
     const { result } = renderHook(() => useHandManifestToml("", true), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -300,7 +280,7 @@ describe("useHandManifestToml", () => {
   it("should be disabled when handId is valid and enabled is false", () => {
     const { result } = renderHook(
       () => useHandManifestToml("hand-x", false),
-      { wrapper: createWrapper() },
+      { wrapper: createQueryClientWrapper().wrapper },
     );
 
     expect(result.current.data).toBeUndefined();
@@ -312,7 +292,7 @@ describe("useHandManifestToml", () => {
   it("should be disabled when handId is empty and enabled is false", () => {
     const { result } = renderHook(
       () => useHandManifestToml("", false),
-      { wrapper: createWrapper() },
+      { wrapper: createQueryClientWrapper().wrapper },
     );
 
     expect(result.current.data).toBeUndefined();
@@ -327,7 +307,7 @@ describe("useHandManifestToml", () => {
 
     const { result } = renderHook(
       () => useHandManifestToml("hand-x", true),
-      { wrapper: createWrapper() },
+      { wrapper: createQueryClientWrapper().wrapper },
     );
 
     expect(result.current.isLoading).toBe(true);
@@ -342,10 +322,7 @@ describe("useHandManifestToml", () => {
   });
 
   it("should use handKeys.manifest(handId) as queryKey", async () => {
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const mockToml = "name = 'y'";
     vi.mocked(client.getHandManifestToml).mockResolvedValue(mockToml);
 
@@ -358,14 +335,14 @@ describe("useHandManifestToml", () => {
       expect(result.current.data).toEqual(mockToml);
     });
 
-    expect(qc.getQueryData(handKeys.manifest("hand-k"))).toEqual(mockToml);
+    expect(queryClient.getQueryData(handKeys.manifest("hand-k"))).toEqual(mockToml);
   });
 });
 
 describe("useActiveHandsWhen", () => {
   it("should be disabled when enabled is false", () => {
     const { result } = renderHook(() => useActiveHandsWhen(false), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -382,7 +359,7 @@ describe("useActiveHandsWhen", () => {
     vi.mocked(client.listActiveHands).mockResolvedValue(mockHands);
 
     const { result } = renderHook(() => useActiveHandsWhen(true), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.isLoading).toBe(true);
@@ -397,10 +374,7 @@ describe("useActiveHandsWhen", () => {
   });
 
   it("should use handKeys.active() as queryKey", async () => {
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
     const mockHands: HandInstanceItem[] = [{ instance_id: "inst-1", hand_id: "h1" }];
     vi.mocked(client.listActiveHands).mockResolvedValue(mockHands);
 
@@ -412,6 +386,6 @@ describe("useActiveHandsWhen", () => {
       expect(result.current.data).toEqual(mockHands);
     });
 
-    expect(qc.getQueryData(handKeys.active())).toEqual(mockHands);
+    expect(queryClient.getQueryData(handKeys.active())).toEqual(mockHands);
   });
 });

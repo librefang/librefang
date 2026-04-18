@@ -57,17 +57,15 @@ describe("useCommsEvents", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    vi.mocked(httpClient.listCommsEvents).mockResolvedValue([]);
+    const mockEvents: Array<{ id: string; kind: string }> = [];
+    vi.mocked(httpClient.listCommsEvents).mockResolvedValue(mockEvents);
 
     const { queryClient, wrapper } = createQueryClientWrapper();
     renderHook(() => useCommsEvents(100, { enabled: true }), { wrapper });
 
     await waitFor(() => {
-      expect(queryClient.getQueryCache().find({ queryKey: commsKeys.events(100) })).toBeDefined();
+      expect(queryClient.getQueryData(commsKeys.events(100))).toEqual(mockEvents);
     });
-    expect(
-      queryClient.getQueryCache().find({ queryKey: commsKeys.events(100) })?.queryKey,
-    ).toEqual(commsKeys.events(100));
   });
 });
 
@@ -126,18 +124,16 @@ describe("useModels", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    vi.mocked(httpClient.listModels).mockResolvedValue({ models: [], total: 0, available: 0 });
+    const mockResponse = { models: [], total: 0, available: 0 };
+    vi.mocked(httpClient.listModels).mockResolvedValue(mockResponse);
 
     const filters = { provider: "openai" };
     const { queryClient, wrapper } = createQueryClientWrapper();
     renderHook(() => useModels(filters, { enabled: true }), { wrapper });
 
     await waitFor(() => {
-      expect(queryClient.getQueryCache().find({ queryKey: modelKeys.list(filters) })).toBeDefined();
+      expect(queryClient.getQueryData(modelKeys.list(filters))).toEqual(mockResponse);
     });
-    expect(
-      queryClient.getQueryCache().find({ queryKey: modelKeys.list(filters) })?.queryKey,
-    ).toEqual(modelKeys.list(filters));
   });
 });
 
@@ -168,16 +164,14 @@ describe("useModelOverrides", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    vi.mocked(httpClient.getModelOverrides).mockResolvedValue({});
+    const mockOverrides = {};
+    vi.mocked(httpClient.getModelOverrides).mockResolvedValue(mockOverrides);
 
     const { queryClient, wrapper } = createQueryClientWrapper();
     renderHook(() => useModelOverrides("claude-3"), { wrapper });
 
     await waitFor(() => {
-      expect(queryClient.getQueryCache().find({ queryKey: modelKeys.overrides("claude-3") })).toBeDefined();
+      expect(queryClient.getQueryData(modelKeys.overrides("claude-3"))).toEqual(mockOverrides);
     });
-    expect(
-      queryClient.getQueryCache().find({ queryKey: modelKeys.overrides("claude-3") })?.queryKey,
-    ).toEqual(modelKeys.overrides("claude-3"));
   });
 });

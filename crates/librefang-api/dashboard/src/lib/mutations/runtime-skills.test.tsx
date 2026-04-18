@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, type MockedFunction } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import {
   useRestoreBackup,
@@ -96,25 +96,35 @@ describe("useFangHubInstall", () => {
   });
 });
 
-describe.each([
-  { name: "useCreateBackup", hook: useCreateBackup, mutator: () => undefined, invalidateKeys: [runtimeKeys.backups()] },
-  { name: "useDeleteBackup", hook: useDeleteBackup, mutator: () => "backup-1", invalidateKeys: [runtimeKeys.backups()] },
-] as const)("$name", ({ hook, mutator, invalidateKeys }) => {
+describe("useCreateBackup", () => {
   it("invalidates correct keys", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
-    const typedHook = hook as MockedFunction<typeof hook>;
-    const { result } = renderHook(() => typedHook(), { wrapper });
+    const { result } = renderHook(() => useCreateBackup(), { wrapper });
 
-    result.current.mutate(mutator() as never);
+    result.current.mutate();
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
 
-    for (const key of invalidateKeys) {
-      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: key });
-    }
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: runtimeKeys.backups() });
+  });
+});
+
+describe("useDeleteBackup", () => {
+  it("invalidates correct keys", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useDeleteBackup(), { wrapper });
+
+    result.current.mutate("backup-1");
+    await vi.waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalled();
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: runtimeKeys.backups() });
   });
 });
 
@@ -173,18 +183,50 @@ describe("useShutdownServer", () => {
   });
 });
 
-describe.each([
-  { name: "useUninstallSkill", hook: useUninstallSkill, input: "skill-1" },
-  { name: "useClawHubInstall", hook: useClawHubInstall, input: { slug: "test-skill", version: "1.0.0", hand: "test-hand" } },
-  { name: "useSkillHubInstall", hook: useSkillHubInstall, input: { slug: "test-skill", hand: "test-hand" } },
-] as const)("$name", ({ hook, input }) => {
+describe("useUninstallSkill", () => {
   it("invalidates skillKeys.all", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
-    const { result } = renderHook(() => hook(), { wrapper });
+    const { result } = renderHook(() => useUninstallSkill(), { wrapper });
 
-    result.current.mutate(input as any);
+    result.current.mutate("skill-1");
+    await vi.waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalled();
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: skillKeys.all,
+    });
+  });
+});
+
+describe("useClawHubInstall", () => {
+  it("invalidates skillKeys.all", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useClawHubInstall(), { wrapper });
+
+    result.current.mutate({ slug: "test-skill", version: "1.0.0", hand: "test-hand" });
+    await vi.waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalled();
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: skillKeys.all,
+    });
+  });
+});
+
+describe("useSkillHubInstall", () => {
+  it("invalidates skillKeys.all", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useSkillHubInstall(), { wrapper });
+
+    result.current.mutate({ slug: "test-skill", hand: "test-hand" });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });

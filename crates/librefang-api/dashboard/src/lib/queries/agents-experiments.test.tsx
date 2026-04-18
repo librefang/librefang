@@ -61,17 +61,28 @@ describe("usePromptVersions", () => {
   });
 
   it("should use the correct queryKey", async () => {
+    const mockData = [
+      {
+        id: "v1",
+        agent_id: "test-agent",
+        version: 1,
+        content_hash: "hash-1",
+        system_prompt: "system",
+        tools: [],
+        variables: [],
+        created_at: "2024-01-01T00:00:00Z",
+        created_by: "tester",
+        is_active: true,
+      },
+    ];
+    vi.mocked(http.listPromptVersions).mockResolvedValue(mockData);
     const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => usePromptVersions("test-agent"), { wrapper });
 
     await waitFor(() => {
-      expect(queryClient.getQueryCache().find({ queryKey: agentKeys.promptVersions("test-agent") })).toBeDefined();
+      expect(queryClient.getQueryData(agentKeys.promptVersions("test-agent"))).toEqual(mockData);
     });
-
-    const cache = queryClient.getQueryCache().find({ queryKey: agentKeys.promptVersions("test-agent") });
-    expect(cache).toBeDefined();
-    expect(cache?.queryKey).toEqual(agentKeys.promptVersions("test-agent"));
   });
 });
 
@@ -126,17 +137,30 @@ describe("useExperiments", () => {
   });
 
   it("should use the correct queryKey", async () => {
+    const mockData = [
+      {
+        id: "exp-1",
+        agent_id: "test-agent",
+        name: "Test Experiment",
+        status: "running" as const,
+        traffic_split: [100],
+        success_criteria: {
+          require_user_helpful: true,
+          require_no_tool_errors: true,
+          require_non_empty: true,
+        },
+        created_at: "2024-01-01T00:00:00Z",
+        variants: [{ name: "A", prompt_version_id: "v1" }],
+      },
+    ];
+    vi.mocked(http.listExperiments).mockResolvedValue(mockData);
     const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => useExperiments("test-agent"), { wrapper });
 
     await waitFor(() => {
-      expect(queryClient.getQueryCache().find({ queryKey: agentKeys.experiments("test-agent") })).toBeDefined();
+      expect(queryClient.getQueryData(agentKeys.experiments("test-agent"))).toEqual(mockData);
     });
-
-    const cache = queryClient.getQueryCache().find({ queryKey: agentKeys.experiments("test-agent") });
-    expect(cache).toBeDefined();
-    expect(cache?.queryKey).toEqual(agentKeys.experiments("test-agent"));
   });
 });
 
@@ -196,11 +220,7 @@ describe("useExperimentMetrics", () => {
     renderHook(() => useExperimentMetrics("test-exp"), { wrapper });
 
     await waitFor(() => {
-      expect(queryClient.getQueryCache().find({ queryKey: agentKeys.experimentMetrics("test-exp") })).toBeDefined();
+      expect(queryClient.getQueryData(agentKeys.experimentMetrics("test-exp"))).toEqual(mockData);
     });
-
-    expect(
-      queryClient.getQueryCache().find({ queryKey: agentKeys.experimentMetrics("test-exp") })?.queryKey,
-    ).toEqual(agentKeys.experimentMetrics("test-exp"));
   });
 });

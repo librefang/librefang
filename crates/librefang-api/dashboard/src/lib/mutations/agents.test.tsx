@@ -1,7 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 import {
   useSwitchAgentSession,
   useDeleteAgentSession,
@@ -15,6 +13,7 @@ import {
   useResolveApproval,
 } from "./agents";
 import { agentKeys, sessionKeys, overviewKeys, approvalKeys } from "../queries/keys";
+import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
   switchAgentSession: vi.fn().mockResolvedValue({}),
@@ -31,16 +30,11 @@ vi.mock("../http/client", () => ({
 
 describe("useSwitchAgentSession", () => {
   it("invalidates agent detail, agent sessions, and session lists", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useSwitchAgentSession(), {
-      wrapper: Wrapper,
+      wrapper,
     });
 
     await result.current.mutateAsync({
@@ -48,13 +42,13 @@ describe("useSwitchAgentSession", () => {
       sessionId: "session-1",
     });
 
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.detail("agent-1"),
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.sessions("agent-1"),
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: sessionKeys.lists(),
     });
   });
@@ -62,16 +56,11 @@ describe("useSwitchAgentSession", () => {
 
 describe("useDeleteAgentSession", () => {
   it("with agentId invalidates agent sessions, agent detail, and session lists", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useDeleteAgentSession(), {
-      wrapper: Wrapper,
+      wrapper,
     });
 
     await result.current.mutateAsync({
@@ -79,38 +68,33 @@ describe("useDeleteAgentSession", () => {
       agentId: "agent-1",
     });
 
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.sessions("agent-1"),
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.detail("agent-1"),
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: sessionKeys.lists(),
     });
   });
 
   it("without agentId invalidates agentKeys.all and session lists", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useDeleteAgentSession(), {
-      wrapper: Wrapper,
+      wrapper,
     });
 
     await result.current.mutateAsync({
       sessionId: "session-1",
     });
 
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.all,
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: sessionKeys.lists(),
     });
   });
@@ -118,16 +102,11 @@ describe("useDeleteAgentSession", () => {
 
 describe("usePatchAgentConfig", () => {
   it("invalidates agent lists and agent detail", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => usePatchAgentConfig(), {
-      wrapper: Wrapper,
+      wrapper,
     });
 
     await result.current.mutateAsync({
@@ -135,10 +114,10 @@ describe("usePatchAgentConfig", () => {
       config: { max_tokens: 4096 },
     });
 
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.lists(),
     });
-    expect(spy).toHaveBeenCalledWith({
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.detail("agent-1"),
     });
   });
@@ -152,59 +131,44 @@ describe.each([
   { name: "useResumeAgent", hook: useResumeAgent, arg: "agent-1" },
 ])("$name invalidates agentKeys.all and overviewKeys.snapshot", ({ hook, arg }) => {
   it("invalidates both keys", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
-    const { result } = renderHook(() => hook(), { wrapper: Wrapper });
+    const { result } = renderHook(() => hook(), { wrapper });
 
     await result.current.mutateAsync(arg);
 
-    expect(spy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
-    expect(spy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 });
 
 describe("useCreateAgentSession", () => {
   it("invalidates agentKeys.all", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useCreateAgentSession(), {
-      wrapper: Wrapper,
+      wrapper,
     });
 
     await result.current.mutateAsync({ agentId: "agent-1", label: "test" });
 
-    expect(spy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
   });
 });
 
 describe("useResolveApproval", () => {
   it("invalidates approvalKeys.all", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useResolveApproval(), {
-      wrapper: Wrapper,
+      wrapper,
     });
 
     await result.current.mutateAsync({ id: "approval-1", approved: true });
 
-    expect(spy).toHaveBeenCalledWith({ queryKey: approvalKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: approvalKeys.all });
   });
 });

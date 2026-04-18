@@ -1,21 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 import { useCronJobs } from "./runtime";
 import * as api from "../../api";
 import { cronKeys } from "./keys";
+import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../../api", () => ({
   listCronJobs: vi.fn(),
 }));
-
-function createWrapper() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  };
-}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -24,7 +16,7 @@ beforeEach(() => {
 describe("useCronJobs", () => {
   it("should be disabled when agentId is undefined", () => {
     const { result } = renderHook(() => useCronJobs(), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -35,7 +27,7 @@ describe("useCronJobs", () => {
 
   it("should be disabled when agentId is empty string", () => {
     const { result } = renderHook(() => useCronJobs(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -51,7 +43,7 @@ describe("useCronJobs", () => {
     vi.mocked(api.listCronJobs).mockResolvedValue(mockJobs);
 
     const { result } = renderHook(() => useCronJobs("agent-1"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -61,17 +53,12 @@ describe("useCronJobs", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    vi.mocked(api.listCronJobs).mockResolvedValue([]);
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const mockJobs: Array<{ id: string; enabled: boolean; name: string; schedule: string }> = [];
+    vi.mocked(api.listCronJobs).mockResolvedValue(mockJobs);
+    const { queryClient, wrapper } = createQueryClientWrapper();
     renderHook(() => useCronJobs("test-agent"), { wrapper });
     await waitFor(() => {
-      expect(qc.getQueryCache().find({ queryKey: cronKeys.jobs("test-agent") })).toBeDefined();
+      expect(queryClient.getQueryData(cronKeys.jobs("test-agent"))).toEqual(mockJobs);
     });
-    expect(
-      qc.getQueryCache().find({ queryKey: cronKeys.jobs("test-agent") })?.queryKey,
-    ).toEqual(cronKeys.jobs("test-agent"));
   });
 });

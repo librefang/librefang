@@ -78,18 +78,16 @@ describe("useApprovals", () => {
   });
 
   it("should use approvalKeys.lists() as queryKey", async () => {
-    mockListApprovals.mockResolvedValue([]);
+    const mockData: Array<{ id: string; tool_name: string }> = [];
+    mockListApprovals.mockResolvedValue(mockData);
 
     const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => useApprovals({ enabled: true }), { wrapper });
 
     await waitFor(() => {
-      expect(queryClient.getQueryCache().find({ queryKey: approvalKeys.lists() })).toBeDefined();
+      expect(queryClient.getQueryData(approvalKeys.lists())).toEqual(mockData);
     });
-    expect(
-      queryClient.getQueryCache().find({ queryKey: approvalKeys.lists() })?.queryKey,
-    ).toEqual(approvalKeys.lists());
   });
 });
 
@@ -136,18 +134,16 @@ describe("useAvailableIntegrations", () => {
   });
 
   it("should use mcpKeys.integrations() as queryKey", async () => {
-    mockListAvailableIntegrations.mockResolvedValue({ integrations: [] });
+    const mockData = { integrations: [] };
+    mockListAvailableIntegrations.mockResolvedValue(mockData);
 
     const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => useAvailableIntegrations({ enabled: true }), { wrapper });
 
     await waitFor(() => {
-      expect(queryClient.getQueryCache().find({ queryKey: mcpKeys.integrations() })).toBeDefined();
+      expect(queryClient.getQueryData(mcpKeys.integrations())).toEqual(mockData);
     });
-    expect(
-      queryClient.getQueryCache().find({ queryKey: mcpKeys.integrations() })?.queryKey,
-    ).toEqual(mcpKeys.integrations());
   });
 });
 
@@ -191,18 +187,16 @@ describe("usePluginRegistries", () => {
   });
 
   it("should use pluginKeys.registries() as queryKey", async () => {
-    mockListPluginRegistries.mockResolvedValue({ registries: [] });
+    const mockData = { registries: [] };
+    mockListPluginRegistries.mockResolvedValue(mockData);
 
     const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => usePluginRegistries(true), { wrapper });
 
     await waitFor(() => {
-      expect(queryClient.getQueryCache().find({ queryKey: pluginKeys.registries() })).toBeDefined();
+      expect(queryClient.getQueryData(pluginKeys.registries())).toEqual(mockData);
     });
-    expect(
-      queryClient.getQueryCache().find({ queryKey: pluginKeys.registries() })?.queryKey,
-    ).toEqual(pluginKeys.registries());
   });
 });
 
@@ -253,17 +247,14 @@ describe("useApprovalCount", () => {
   });
 
   it("should use approvalKeys.count() as queryKey", async () => {
-    mockFetchApprovalCount.mockResolvedValue({ count: 0 });
+    const mockData = { count: 0 };
+    mockFetchApprovalCount.mockResolvedValue(mockData);
 
     const { wrapper, queryClient } = createQueryClientWrapper();
     renderHook(() => useApprovalCount(), { wrapper });
 
     await vi.waitFor(() => {
-      const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.count() });
-      expect(query).toBeDefined();
+      expect(queryClient.getQueryData(approvalKeys.count())).toEqual(mockData);
     });
-
-    const query = queryClient.getQueryCache().find({ queryKey: approvalKeys.count() })!;
-    expect(query.queryKey).toEqual(approvalKeys.count());
   });
 });

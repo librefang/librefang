@@ -1,18 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 import type { RegistrySchema } from "../../api";
 import { useRegistrySchema, useRawConfigToml } from "./config";
 import * as client from "../http/client";
 import { registryKeys, configKeys } from "./keys";
-
-function createWrapper() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  };
-}
+import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
   fetchRegistrySchema: vi.fn(),
@@ -26,7 +18,7 @@ beforeEach(() => {
 describe("useRegistrySchema", () => {
   it("should be disabled when contentType is empty string", () => {
     const { result } = renderHook(() => useRegistrySchema(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -40,7 +32,7 @@ describe("useRegistrySchema", () => {
     vi.mocked(client.fetchRegistrySchema).mockResolvedValue(mockSchema);
 
     const { result } = renderHook(() => useRegistrySchema("application/json"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.isLoading).toBe(true);
@@ -58,27 +50,20 @@ describe("useRegistrySchema", () => {
     const mockSchema: RegistrySchema = { sections: {} };
     vi.mocked(client.fetchRegistrySchema).mockResolvedValue(mockSchema);
 
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => useRegistrySchema("text/plain"), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find({ queryKey: registryKeys.schema("text/plain") })).toBeDefined();
+      expect(queryClient.getQueryData(registryKeys.schema("text/plain"))).toEqual(mockSchema);
     });
-
-    expect(
-      qc.getQueryCache().find({ queryKey: registryKeys.schema("text/plain") })?.queryKey,
-    ).toEqual(registryKeys.schema("text/plain"));
   });
 });
 
 describe("useRawConfigToml", () => {
   it("should not fetch when enabled is false", () => {
     const { result } = renderHook(() => useRawConfigToml(false), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -92,7 +77,7 @@ describe("useRawConfigToml", () => {
     vi.mocked(client.getRawConfigToml).mockResolvedValue(mockToml);
 
     const { result } = renderHook(() => useRawConfigToml(true), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.isLoading).toBe(true);
@@ -107,21 +92,15 @@ describe("useRawConfigToml", () => {
   });
 
   it("should use configKeys.rawToml() as queryKey", async () => {
-    vi.mocked(client.getRawConfigToml).mockResolvedValue("toml content");
+    const mockToml = "toml content";
+    vi.mocked(client.getRawConfigToml).mockResolvedValue(mockToml);
 
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = createQueryClientWrapper();
 
     renderHook(() => useRawConfigToml(true), { wrapper });
 
     await waitFor(() => {
-      expect(qc.getQueryCache().find({ queryKey: configKeys.rawToml() })).toBeDefined();
+      expect(queryClient.getQueryData(configKeys.rawToml())).toEqual(mockToml);
     });
-
-    expect(
-      qc.getQueryCache().find({ queryKey: configKeys.rawToml() })?.queryKey,
-    ).toEqual(configKeys.rawToml());
   });
 });

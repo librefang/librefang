@@ -1,23 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 import type { WorkflowRunDetail } from "../../api";
-import { useWorkflowRuns, useWorkflowRunDetail, workflowQueries } from "./workflows";
+import { useWorkflowRuns, useWorkflowRunDetail } from "./workflows";
 import * as httpClient from "../http/client";
 import { workflowKeys } from "./keys";
+import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
   listWorkflowRuns: vi.fn(),
   getWorkflowRun: vi.fn(),
 }));
-
-function createWrapper() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  };
-}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -26,7 +18,7 @@ beforeEach(() => {
 describe("useWorkflowRuns", () => {
   it("should be disabled when workflowId is empty string", () => {
     const { result } = renderHook(() => useWorkflowRuns(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -40,7 +32,7 @@ describe("useWorkflowRuns", () => {
     vi.mocked(httpClient.listWorkflowRuns).mockResolvedValue(mockRuns);
 
     const { result } = renderHook(() => useWorkflowRuns("wf-123"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -50,16 +42,22 @@ describe("useWorkflowRuns", () => {
   });
 
   it("should use the correct queryKey", () => {
-    expect(workflowQueries.runs("wf-456").queryKey).toEqual(
-      workflowKeys.runs("wf-456"),
-    );
+    const mockRuns = [{ id: "run-2", status: "queued" }];
+    vi.mocked(httpClient.listWorkflowRuns).mockResolvedValue(mockRuns);
+
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    renderHook(() => useWorkflowRuns("wf-456"), { wrapper });
+
+    return waitFor(() => {
+      expect(queryClient.getQueryData(workflowKeys.runs("wf-456"))).toEqual(mockRuns);
+    });
   });
 });
 
 describe("useWorkflowRunDetail", () => {
   it("should be disabled when runId is empty string", () => {
     const { result } = renderHook(() => useWorkflowRunDetail(""), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -73,7 +71,7 @@ describe("useWorkflowRunDetail", () => {
     vi.mocked(httpClient.getWorkflowRun).mockResolvedValue(mockRun);
 
     const { result } = renderHook(() => useWorkflowRunDetail("run-1"), {
-      wrapper: createWrapper(),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -83,8 +81,22 @@ describe("useWorkflowRunDetail", () => {
   });
 
   it("should use the correct queryKey", () => {
-    expect(workflowQueries.runDetail("run-2").queryKey).toEqual(
-      workflowKeys.runDetail("run-2"),
-    );
+    const mockRun: WorkflowRunDetail = {
+      id: "run-2",
+      workflow_id: "wf-2",
+      workflow_name: "Queued Workflow",
+      input: "{}",
+      state: "queued",
+      started_at: "2024-01-01T00:00:00Z",
+      step_results: [],
+    };
+    vi.mocked(httpClient.getWorkflowRun).mockResolvedValue(mockRun);
+
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    renderHook(() => useWorkflowRunDetail("run-2"), { wrapper });
+
+    return waitFor(() => {
+      expect(queryClient.getQueryData(workflowKeys.runDetail("run-2"))).toEqual(mockRun);
+    });
   });
 });

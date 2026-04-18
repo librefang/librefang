@@ -1,7 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactNode } from "react";
 import type { ClawHubBrowseResponse, ClawHubSkillDetail } from "../../api";
 import {
   useClawHubSearch,
@@ -11,6 +9,7 @@ import {
 } from "./skills";
 import * as httpClient from "../http/client";
 import { clawhubKeys, skillhubKeys } from "./keys";
+import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
   clawhubSearch: vi.fn(),
@@ -19,16 +18,6 @@ vi.mock("../http/client", () => ({
   skillhubGetSkill: vi.fn(),
 }));
 
-function createQueryClient() {
-  return new QueryClient({ defaultOptions: { queries: { retry: false } } });
-}
-
-function createWrapper(qc: QueryClient) {
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  };
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -36,7 +25,7 @@ beforeEach(() => {
 describe("useClawHubSearch", () => {
   it("should be disabled when query is empty string", () => {
     const { result } = renderHook(() => useClawHubSearch(""), {
-      wrapper: createWrapper(createQueryClient()),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -50,7 +39,7 @@ describe("useClawHubSearch", () => {
     vi.mocked(httpClient.clawhubSearch).mockResolvedValue(mockResults);
 
     const { result } = renderHook(() => useClawHubSearch("test"), {
-      wrapper: createWrapper(createQueryClient()),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -60,24 +49,24 @@ describe("useClawHubSearch", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    const qc = createQueryClient();
-    vi.mocked(httpClient.clawhubSearch).mockResolvedValue({ items: [] });
+    const mockResults: ClawHubBrowseResponse = { items: [] };
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    vi.mocked(httpClient.clawhubSearch).mockResolvedValue(mockResults);
 
     const { result } = renderHook(() => useClawHubSearch("test"), {
-      wrapper: createWrapper(qc),
+      wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    const cached = qc.getQueryCache().find({ queryKey: clawhubKeys.search("test") });
-    expect(cached).toBeDefined();
+    expect(queryClient.getQueryData(clawhubKeys.search("test"))).toEqual(mockResults);
   });
 });
 
 describe("useClawHubSkill", () => {
   it("should be disabled when slug is empty string", () => {
     const { result } = renderHook(() => useClawHubSkill(""), {
-      wrapper: createWrapper(createQueryClient()),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -91,7 +80,7 @@ describe("useClawHubSkill", () => {
     vi.mocked(httpClient.clawhubGetSkill).mockResolvedValue(mockSkill);
 
     const { result } = renderHook(() => useClawHubSkill("my-skill"), {
-      wrapper: createWrapper(createQueryClient()),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -101,24 +90,24 @@ describe("useClawHubSkill", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    const qc = createQueryClient();
-    vi.mocked(httpClient.clawhubGetSkill).mockResolvedValue({ slug: "my-skill", name: "My Skill", description: "desc", version: "1.0.0", author: "tester", stars: 0, downloads: 0, tags: [], readme: "# My Skill" });
+    const mockSkill: ClawHubSkillDetail = { slug: "my-skill", name: "My Skill", description: "desc", version: "1.0.0", author: "tester", stars: 0, downloads: 0, tags: [], readme: "# My Skill" };
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    vi.mocked(httpClient.clawhubGetSkill).mockResolvedValue(mockSkill);
 
     const { result } = renderHook(() => useClawHubSkill("my-skill"), {
-      wrapper: createWrapper(qc),
+      wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    const cached = qc.getQueryCache().find({ queryKey: clawhubKeys.detail("my-skill") });
-    expect(cached).toBeDefined();
+    expect(queryClient.getQueryData(clawhubKeys.detail("my-skill"))).toEqual(mockSkill);
   });
 });
 
 describe("useSkillHubSearch", () => {
   it("should be disabled when query is empty string", () => {
     const { result } = renderHook(() => useSkillHubSearch(""), {
-      wrapper: createWrapper(createQueryClient()),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -132,7 +121,7 @@ describe("useSkillHubSearch", () => {
     vi.mocked(httpClient.skillhubSearch).mockResolvedValue(mockResults);
 
     const { result } = renderHook(() => useSkillHubSearch("test"), {
-      wrapper: createWrapper(createQueryClient()),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -142,24 +131,24 @@ describe("useSkillHubSearch", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    const qc = createQueryClient();
-    vi.mocked(httpClient.skillhubSearch).mockResolvedValue({ items: [] });
+    const mockResults: ClawHubBrowseResponse = { items: [] };
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    vi.mocked(httpClient.skillhubSearch).mockResolvedValue(mockResults);
 
     const { result } = renderHook(() => useSkillHubSearch("test"), {
-      wrapper: createWrapper(qc),
+      wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    const cached = qc.getQueryCache().find({ queryKey: skillhubKeys.search("test") });
-    expect(cached).toBeDefined();
+    expect(queryClient.getQueryData(skillhubKeys.search("test"))).toEqual(mockResults);
   });
 });
 
 describe("useSkillHubSkill", () => {
   it("should be disabled when slug is empty string", () => {
     const { result } = renderHook(() => useSkillHubSkill(""), {
-      wrapper: createWrapper(createQueryClient()),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     expect(result.current.data).toBeUndefined();
@@ -173,7 +162,7 @@ describe("useSkillHubSkill", () => {
     vi.mocked(httpClient.skillhubGetSkill).mockResolvedValue(mockSkill);
 
     const { result } = renderHook(() => useSkillHubSkill("my-skill"), {
-      wrapper: createWrapper(createQueryClient()),
+      wrapper: createQueryClientWrapper().wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -183,16 +172,16 @@ describe("useSkillHubSkill", () => {
   });
 
   it("should use the correct queryKey", async () => {
-    const qc = createQueryClient();
-    vi.mocked(httpClient.skillhubGetSkill).mockResolvedValue({ slug: "my-skill", name: "My Skill", description: "desc", version: "1.0.0", author: "tester", stars: 0, downloads: 0, tags: [], readme: "# My Skill" });
+    const mockSkill: ClawHubSkillDetail = { slug: "my-skill", name: "My Skill", description: "desc", version: "1.0.0", author: "tester", stars: 0, downloads: 0, tags: [], readme: "# My Skill" };
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    vi.mocked(httpClient.skillhubGetSkill).mockResolvedValue(mockSkill);
 
     const { result } = renderHook(() => useSkillHubSkill("my-skill"), {
-      wrapper: createWrapper(qc),
+      wrapper,
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    const cached = qc.getQueryCache().find({ queryKey: skillhubKeys.detail("my-skill") });
-    expect(cached).toBeDefined();
+    expect(queryClient.getQueryData(skillhubKeys.detail("my-skill"))).toEqual(mockSkill);
   });
 });

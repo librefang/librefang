@@ -1,71 +1,57 @@
 import { describe, it, expect } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useMemoryHealth } from "./memory";
 import { healthDetailQueryOptions } from "./runtime";
 import { runtimeKeys } from "./keys";
-
-function createWrapper(queryClient: QueryClient) {
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
-  };
-}
+import { createQueryClientWrapper } from "../test/query-client";
 
 describe("useMemoryHealth", () => {
   it("should return true when data.memory.embedding_available is true", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    qc.setQueryData(runtimeKeys.healthDetail(), {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    queryClient.setQueryData(runtimeKeys.healthDetail(), {
       memory: { embedding_available: true },
     });
 
     const { result } = renderHook(() => useMemoryHealth(), {
-      wrapper: createWrapper(qc),
+      wrapper,
     });
 
     await waitFor(() => expect(result.current.data).toBe(true));
   });
 
   it("should return false when data.memory.embedding_available is false", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    qc.setQueryData(runtimeKeys.healthDetail(), {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    queryClient.setQueryData(runtimeKeys.healthDetail(), {
       memory: { embedding_available: false },
     });
 
     const { result } = renderHook(() => useMemoryHealth(), {
-      wrapper: createWrapper(qc),
+      wrapper,
     });
 
     await waitFor(() => expect(result.current.data).toBe(false));
   });
 
   it("should return false when data.memory is undefined (default fallback)", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    qc.setQueryData(runtimeKeys.healthDetail(), {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    queryClient.setQueryData(runtimeKeys.healthDetail(), {
       status: "ok",
     });
 
     const { result } = renderHook(() => useMemoryHealth(), {
-      wrapper: createWrapper(qc),
+      wrapper,
     });
 
     await waitFor(() => expect(result.current.data).toBe(false));
   });
 
   it("should respect enabled option (not fetch when enabled: false)", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const { wrapper } = createQueryClientWrapper();
 
     const { result } = renderHook(
       () => useMemoryHealth({ enabled: false }),
-      { wrapper: createWrapper(qc) },
+      { wrapper },
     );
 
     expect(result.current.data).toBeUndefined();
@@ -73,30 +59,27 @@ describe("useMemoryHealth", () => {
   });
 
   it("should share the same queryKey as healthDetailQueryOptions (cache sharing)", async () => {
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-
-    qc.setQueryData(runtimeKeys.healthDetail(), {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const sharedQueryState = {
       memory: { embedding_available: true },
-    });
+    };
+
+    queryClient.setQueryData(runtimeKeys.healthDetail(), sharedQueryState);
 
     const { result: healthResult } = renderHook(
       () => useQuery(healthDetailQueryOptions()),
-      { wrapper: createWrapper(qc) },
+      { wrapper },
     );
 
     const { result: memoryResult } = renderHook(
       () => useMemoryHealth(),
-      { wrapper: createWrapper(qc) },
+      { wrapper },
     );
 
     await waitFor(() => expect(healthResult.current.data).toBeDefined());
     await waitFor(() => expect(memoryResult.current.data).toBe(true));
 
-    expect(healthDetailQueryOptions().queryKey).toEqual(runtimeKeys.healthDetail());
-    expect(qc.getQueryData(runtimeKeys.healthDetail())).toEqual({
-      memory: { embedding_available: true },
-    });
+    expect(healthResult.current.data).toBe(sharedQueryState);
+    expect(queryClient.getQueryData(runtimeKeys.healthDetail())).toBe(sharedQueryState);
   });
 });
