@@ -12,6 +12,8 @@ LibreFang 内存系统包含：
 - **向量嵌入** - 语义搜索能力
 - **知识图谱** - 实体和关系
 - **会话管理** - 跨通道记忆
+- **会话压缩** - 当单个会话体量过大时自动收缩
+- **梦境模式（Auto-Dream）** - 可选的后台整固机制，让加入的 agent 定期反思并整理自己的长期记忆，详见 [后台整固（梦境模式）](#后台整固梦境模式)
 - **使用追踪** - 成本和使用统计
 
 <Note>
@@ -248,6 +250,59 @@ librefang session compaction-status
 2. **提取关键信息**
 3. **生成摘要**
 4. **保留工具调用历史**
+
+---
+
+## 后台整固（梦境模式）
+
+会话压缩只处理 **单个会话** 不溢出。梦境模式是更长时间尺度上的互补机制：定期唤醒已加入的 agent，把一份四阶段提示词（定位 / 收集 / 整固 / 修剪）交给它，让它自己跨会话地整理长期记忆 —— 通过 `memory_store` 写入持久见解、修剪过时条目。
+
+<Note>
+**默认关闭。** 梦境模式会按计划消耗真实 token，因此全局开关和每个 agent 的加入开关默认都是 `false`，必须显式开启。完整参考见 [`[auto_dream]`](/zh/configuration/core#auto_dream)。
+</Note>
+
+### 开启方式
+
+两个开关必须同时为 `true`：
+
+```toml
+# ~/.librefang/config.toml
+[auto_dream]
+enabled = true
+min_hours = 24         # 同一 agent 再次梦境的最短间隔
+min_sessions = 5       # 上次梦境之后至少触及这么多会话才会触发
+```
+
+```toml
+# agent manifest (.toml)
+auto_dream_enabled = true
+
+# 可选：用 per-agent 覆盖全局阈值
+auto_dream_min_hours = 168      # 每周一次，适合低频 agent
+auto_dream_min_sessions = 1     # 每个会话之后都触发，适合高频 agent
+```
+
+### 一次梦境的流程
+
+1. 调度器按 `check_interval_secs`（默认 10 分钟）唤醒一次，依次检查每个已加入 agent 的四道闸门：全局启用 → 时间间隔 → 会话活跃数 → 文件锁。任一不通过即跳过本次。
+2. 闸门通过后，agent 会以合成的 `auto_dream` 通道被调用，工具白名单收缩到 `memory_store` / `memory_recall` / `memory_list` —— 即使提示被注入，梦境也无法越权调用 shell 或网络工具。
+3. 流式进度（phase、工具调用次数、涉及的记忆条目、最近一 turn 预览、token / 费用）存入每 agent 的进度注册表，通过状态端点对外暴露。
+4. 成功后锁的 mtime 前进到 "现在"（作为时间闸门的基准）；失败或中止后会回滚 mtime，下次 tick 会重试。
+
+### 使用入口
+
+- **Web Dashboard** — 设置页 → 梦境模式卡片，每个 agent 一行：加入开关、运行中/完成/失败 badge、"立即梦境" / "中止" 按钮、运行中时的进度预览。
+- **TUI** — `librefang` → Dashboard tab 顶部会出现 DREAMS 条，每 agent 一行状态字符；未发生过梦境时自动隐藏。
+- **HTTP API** — `GET /api/auto-dream/status`、`POST /api/auto-dream/agents/{id}/trigger`、`POST /api/auto-dream/agents/{id}/abort`、`PUT /api/auto-dream/agents/{id}/enabled`。
+- **审计日志** — 每次梦境都会发出一条 `DreamConsolidation` 审计事件，附带 phase、token 使用量和美元成本。
+
+### 手动控制
+
+- `POST /api/auto-dream/agents/{id}/trigger` 绕过时间和会话闸门（仍需满足文件锁和加入开关）。
+- `POST /api/auto-dream/agents/{id}/abort` 中止手动触发的梦境，并回滚 mtime 让时间闸门重新打开。
+- 调度器触发的梦境是顺序串行执行，不支持单独中止 —— 只能等它完成或命中 `timeout_secs`（默认 600 秒）。
+
+完整字段、默认值、manifest 覆盖和 runtime 工具白名单的强制逻辑见 [`[auto_dream]`](/zh/configuration/core#auto_dream)。
 
 ---
 
