@@ -1595,7 +1595,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "session_mode": {
                         "type": "string",
                         "enum": ["persistent", "new"],
-                        "description": "Session mode for AgentTurn actions. USE 'new' for simple repeated tasks (e.g., 'send reminder', 'check status', 'post update') that don't need conversation history. USE 'persistent' (default) only if the cron needs to remember previous executions (e.g., 'summarize what we discussed yesterday'). WARNING: 'persistent' sessions grow indefinitely and will eventually fail with token limit exceeded after many executions. When in doubt, use 'new'."
+                        "description": "Session mode for AgentTurn actions. USE 'new' (default) for simple repeated tasks (e.g., 'send reminder', 'check status', 'post update') that don't need conversation history. USE 'persistent' only if the cron needs to remember previous executions (e.g., 'summarize what we discussed yesterday'). WARNING: 'persistent' sessions grow indefinitely and will eventually fail with token limit exceeded after many executions. When in doubt, use 'new'."
                     },
                     "one_shot": { "type": "boolean", "description": "If true, auto-delete after execution. Default: false" }
                 },

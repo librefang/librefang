@@ -2106,11 +2106,6 @@ pub struct KernelConfig {
     /// API and WebSocket rate limiting configuration.
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
-    /// Maximum tokens allowed in a cron session before it's reset.
-    /// When a cron's accumulated session exceeds this limit, the session
-    /// is cleared to prevent token exhaustion. `None` disables the limit.
-    #[serde(default = "default_cron_session_max_tokens")]
-    pub cron_session_max_tokens: Option<usize>,
     /// Timeout for individual tool executions in seconds.
     /// Increase for browser automation or long-running builds.
     #[serde(default = "default_tool_timeout_secs")]
@@ -3041,12 +3036,6 @@ fn default_max_cron_jobs() -> usize {
     500
 }
 
-/// Default maximum tokens in a cron session before reset (100k tokens).
-/// This prevents cron sessions from growing indefinitely and exhausting
-/// the token limit for long-running AgentTurn crons.
-fn default_cron_session_max_tokens() -> Option<usize> {
-    Some(100_000)
-}
 
 /// Default tool execution timeout in seconds (120s).
 fn default_tool_timeout_secs() -> u64 {
@@ -3568,7 +3557,6 @@ impl Default for KernelConfig {
             approval: crate::approval::ApprovalPolicy::default(),
             notification: crate::approval::NotificationConfig::default(),
             max_cron_jobs: default_max_cron_jobs(),
-            cron_session_max_tokens: default_cron_session_max_tokens(),
             include: Vec::new(),
             exec_policy: ExecPolicy::default(),
             bindings: Vec::new(),
