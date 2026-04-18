@@ -256,6 +256,10 @@ impl App {
                 self.dashboard.recent_audit = rows;
                 self.dashboard.loading = false;
             }
+            AppEvent::DreamsLoaded { enabled, rows } => {
+                self.dashboard.dreams_enabled = enabled;
+                self.dashboard.dreams = rows;
+            }
             AppEvent::ChannelListLoaded(list) => {
                 if !list.is_empty() {
                     self.channels.channels = list;

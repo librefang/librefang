@@ -74,6 +74,11 @@ pub enum AppEvent {
     },
     /// Audit trail loaded.
     AuditLoaded(Vec<AuditRow>),
+    /// Auto-dream status loaded. Surfaces on the Dashboard's dream strip.
+    DreamsLoaded {
+        enabled: bool,
+        rows: Vec<crate::tui::screens::dashboard::DreamRow>,
+    },
     /// Channel list loaded.
     ChannelListLoaded(Vec<ChannelInfo>),
     /// Channel test result.
@@ -586,6 +591,63 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                         })
                         .unwrap_or_default();
                     let _ = tx.send(AppEvent::AuditLoaded(rows));
+                }
+            }
+
+            // Try to fetch auto-dream status. Silent skip on any failure —
+            // this endpoint is optional and the dashboard should keep
+            // working if auto-dream is not wired up.
+            if let Ok(resp) = client
+                .get(format!("{base_url}/api/auto-dream/status"))
+                .send()
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let enabled = body
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let rows: Vec<crate::tui::screens::dashboard::DreamRow> = body
+                        .get("agents")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|a| {
+                                    let progress = a.get("progress")?;
+                                    if progress.is_null() {
+                                        return None;
+                                    }
+                                    Some(crate::tui::screens::dashboard::DreamRow {
+                                        agent_name: a
+                                            .get("agent_name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("?")
+                                            .to_string(),
+                                        status: progress
+                                            .get("status")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("?")
+                                            .to_string(),
+                                        phase: progress
+                                            .get("phase")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        memories_touched: progress
+                                            .get("memories_touched")
+                                            .and_then(|v| v.as_array())
+                                            .map(|a| a.len() as u32)
+                                            .unwrap_or(0),
+                                        tool_use_count: progress
+                                            .get("tool_use_count")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as u32,
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::DreamsLoaded { enabled, rows });
                 }
             }
         }
