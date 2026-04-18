@@ -2037,7 +2037,11 @@ export async function resumeAgent(agentId: string): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/resume`, {});
 }
 
-export async function spawnAgent(req: { manifest_toml?: string; template?: string }): Promise<ApiActionResponse> {
+export async function spawnAgent(req: {
+  manifest_toml?: string;
+  template?: string;
+  name?: string;
+}): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/agents", req);
 }
 
