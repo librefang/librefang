@@ -3223,7 +3223,7 @@ impl Default for HeartbeatTomlConfig {
 /// enabled = false
 /// min_hours = 24
 /// min_sessions = 5
-/// check_interval_secs = 600
+/// check_interval_secs = 86400
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -3240,8 +3240,14 @@ pub struct AutoDreamConfig {
     /// disable the session-count gate entirely.
     #[serde(default = "default_auto_dream_min_sessions")]
     pub min_sessions: u32,
-    /// How often the scheduler loop wakes up to check gates, in seconds.
-    /// Default: 600 (10 min). Cheap — one stat per enabled agent per tick.
+    /// How often the *backstop* scheduler loop wakes up to check gates, in
+    /// seconds. Default: 86400 (1 day). The primary trigger is the
+    /// `AgentLoopEnd` hook that fires the moment a turn completes — the
+    /// scheduler only catches opted-in agents that may go a long time
+    /// without any turn (e.g., a channel bot waiting for inbound traffic).
+    /// Lowering this just increases the rate of stat/SQL probes that mostly
+    /// find nothing to do; raising it delays dreams only for the idle
+    /// never-turned case.
     #[serde(default = "default_auto_dream_check_interval_secs")]
     pub check_interval_secs: u64,
     /// Optional override for the lock directory. When empty, defaults to
@@ -3263,7 +3269,12 @@ fn default_auto_dream_min_sessions() -> u32 {
 }
 
 fn default_auto_dream_check_interval_secs() -> u64 {
-    600
+    // 1 day. Dreams are primarily triggered by the AgentLoopEnd hook the
+    // moment a turn ends, not by this scheduler. The scheduler exists to
+    // catch the "agent is opted-in but has no activity" edge case (e.g.
+    // channel bots) where no turn ever fires. 1 day is frequent enough for
+    // that fallback without wasting 144× more stat calls per day.
+    86_400
 }
 
 fn default_auto_dream_timeout_secs() -> u64 {

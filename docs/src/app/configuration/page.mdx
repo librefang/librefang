@@ -568,14 +568,14 @@ decay_rate = 0.1
 
 ### `[auto_dream]`
 
-Background memory consolidation ("dreams") — a time-gated scheduler that periodically asks opt-in agents to reflect on and consolidate their own memory via a 4-phase prompt (Orient / Gather / Consolidate / Prune). Disabled by default; individual agents still opt in via `auto_dream_enabled = true` on their manifest.
+Background memory consolidation ("dreams") — asks opt-in agents to reflect on and consolidate their own memory via a 4-phase prompt (Orient / Gather / Consolidate / Prune). Dreams trigger **event-driven** the moment an agent finishes a turn; a sparse backstop scheduler (default 1 day) catches opted-in agents that never turn. Disabled by default; individual agents still opt in via `auto_dream_enabled = true` on their manifest.
 
 ```toml
 [auto_dream]
 enabled = false
 min_hours = 24
 min_sessions = 5
-check_interval_secs = 600
+check_interval_secs = 86400
 timeout_secs = 600
 # lock_dir = ""   # defaults to <data_dir>/auto_dream/
 ```
@@ -585,13 +585,13 @@ timeout_secs = 600
 | `enabled` | bool | `false` | Master toggle. When `false`, no dream fires regardless of per-agent opt-in. |
 | `min_hours` | f64 | `24.0` | Minimum hours since that agent's last consolidation before the next one fires. |
 | `min_sessions` | u32 | `5` | Minimum sessions touched since that agent's last consolidation before the next one fires. Set to `0` to disable the session-count gate. |
-| `check_interval_secs` | u64 | `600` | How often the scheduler wakes up to check gates, in seconds. |
+| `check_interval_secs` | u64 | `86400` | Backstop scheduler cadence, in seconds. Primary trigger is the `AgentLoopEnd` hook; this only controls the fallback for agents that never turn. |
 | `timeout_secs` | u64 | `600` | Timeout for a single dream invocation in seconds. |
 | `lock_dir` | string | `""` | Optional override for the lock directory. Empty = `<data_dir>/auto_dream/`. Per-agent locks are stored as `<dir>/<agent_id>.lock`. |
 
 A dream fires for an agent when all gates hold: `enabled = true`, the agent's manifest has `auto_dream_enabled = true`, `min_hours` have elapsed since its last dream, `min_sessions` have been touched since then, and the per-agent lock can be acquired.
 
-Per-agent opt-in can be toggled at runtime via `PUT /api/auto-dream/agents/{id}/enabled` (body `{"enabled": bool}`) or via the Settings → Auto-Dream card on the web dashboard — the scheduler picks up the change on its next tick. See `/configuration/core#auto_dream` for the full reference including runtime tool restriction, manual controls, and audit events.
+Per-agent opt-in can be toggled at runtime via `PUT /api/auto-dream/agents/{id}/enabled` (body `{"enabled": bool}`) or via the Settings → Auto-Dream card on the web dashboard — the new state takes effect at the next turn end (event-driven) or the next backstop tick, whichever comes first. See `/configuration/core#auto_dream` for the full reference including runtime tool restriction, manual controls, and audit events.
 
 ---
 
