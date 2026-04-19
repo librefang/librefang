@@ -2844,6 +2844,17 @@ export interface TerminalWindow {
   active: boolean;
 }
 
+export interface TerminalHealth {
+  ok: boolean;
+  tmux: boolean;
+  max_windows: number;
+  os: string;
+}
+
+export async function getTerminalHealth(): Promise<TerminalHealth> {
+  return get<TerminalHealth>("/api/terminal/health");
+}
+
 export async function listTerminalWindows(): Promise<TerminalWindow[]> {
   const response = await fetch("/api/terminal/windows", {
     headers: buildHeaders(),

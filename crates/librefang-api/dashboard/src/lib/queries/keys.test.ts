@@ -304,4 +304,12 @@ describe("query key factories", () => {
       }
     });
   });
+
+  describe("terminalKeys anchoring", () => {
+    it("health and windows are prefixed with terminalKeys.all", () => {
+      const prefix = terminalKeys.all;
+      expect(terminalKeys.health().slice(0, prefix.length)).toEqual(prefix);
+      expect(terminalKeys.windows().slice(0, prefix.length)).toEqual(prefix);
+    });
+  });
 });
