@@ -172,13 +172,14 @@ export function TerminalPage() {
           setError(typeof msg.content === "string" && msg.content
             ? msg.content
             : t("terminal.error_unknown"));
+          setPendingWindowId(null);
           break;
         case "active_window":
           if (msg.window_id) {
             desiredWindowIdRef.current = msg.window_id;
             setActiveWindowId(msg.window_id);
             setPendingWindowId(null);
-            queryClient.invalidateQueries({ queryKey: terminalKeys.all });
+            queryClient.invalidateQueries({ queryKey: terminalKeys.windows() });
           }
           break;
       }
@@ -237,7 +238,9 @@ export function TerminalPage() {
       wsRef.current.close();
       wsRef.current = null;
     }
-    desiredWindowIdRef.current = activeWindowId;
+    if (activeWindowId) {
+      desiredWindowIdRef.current = activeWindowId;
+    }
     setPendingWindowId(null);
     setIsConnected(false);
     setIsConnecting(false);
