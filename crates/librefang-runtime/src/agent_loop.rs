@@ -577,6 +577,7 @@ struct ToolExecutionContext<'a> {
     iteration: u32,
     streaming: bool,
     agent_id_str: &'a str,
+    opts: &'a LoopOptions,
 }
 
 async fn execute_single_tool_call(
@@ -591,8 +592,10 @@ async fn execute_single_tool_call(
             } else {
                 warn!(tool = %tool_call.name, "Circuit breaker triggered");
             }
-            if let Err(e) = ctx.memory.save_session_async(ctx.session).await {
-                warn!("Failed to save session on circuit break: {e}");
+            if !ctx.opts.is_fork {
+                if let Err(e) = ctx.memory.save_session_async(ctx.session).await {
+                    warn!("Failed to save session on circuit break: {e}");
+                }
             }
             let hook_ctx = crate::hooks::HookContext {
                 agent_name: &ctx.manifest.name,
@@ -601,6 +604,7 @@ async fn execute_single_tool_call(
                 data: serde_json::json!({
                     "reason": "circuit_break",
                     "error": msg.as_str(),
+                    "is_fork": ctx.opts.is_fork,
                 }),
             };
             fire_hook_best_effort(ctx.hooks, &hook_ctx);
@@ -624,6 +628,38 @@ async fn execute_single_tool_call(
             });
         }
         _ => {}
+    }
+
+    // Fork-mode runtime tool allowlist (from LoopOptions::allowed_tools).
+    // The request schema wasn't filtered — that would break Anthropic prompt
+    // cache alignment — so the model may try any tool in its manifest. We
+    // reject non-allowed calls here with a synthetic error result so the
+    // model can see the rejection and adapt. Defense-in-depth for derivative
+    // calls like auto-dream, which only want `memory_*` but share the full
+    // tool prefix with the parent turn for cache alignment.
+    if let Some(allow) = ctx.opts.allowed_tools.as_ref() {
+        if !allow.iter().any(|t| t == &tool_call.name) {
+            let msg = format!(
+                "Tool `{}` is not permitted in this fork invocation. Allowed: {}",
+                tool_call.name,
+                allow.join(", ")
+            );
+            warn!(
+                tool = %tool_call.name,
+                is_fork = ctx.opts.is_fork,
+                "Tool call outside fork allowlist — denied"
+            );
+            return Ok(ExecutedToolCall {
+                result: librefang_types::tool::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    content: msg.clone(),
+                    is_error: true,
+                    status: librefang_types::tool::ToolExecutionStatus::Error,
+                    ..Default::default()
+                },
+                final_content: msg,
+            });
+        }
     }
 
     if ctx.streaming {
@@ -1098,6 +1134,49 @@ pub enum LoopPhase {
 /// Implementations should be non-blocking (fire-and-forget) to avoid slowing the loop.
 pub type PhaseCallback = Arc<dyn Fn(LoopPhase) + Send + Sync>;
 
+/// Options that modify how `run_agent_loop` / `run_agent_loop_streaming`
+/// behave for non-standard invocations.
+///
+/// Passed by reference because callers typically hold one `LoopOptions` per
+/// kernel streaming entry; a clone-per-call would allocate unnecessarily.
+///
+/// `Default::default()` corresponds to a normal user-initiated main turn:
+/// session gets saved, AgentLoopEnd hooks fire with `is_fork: false`, and
+/// there's no extra runtime tool allowlist beyond the manifest's.
+#[derive(Debug, Clone, Default)]
+pub struct LoopOptions {
+    /// When true, this invocation is a *derivative* turn (a "fork") rather
+    /// than a user-initiated main turn. Semantically:
+    ///
+    /// - The working session's new messages are **not** persisted to disk.
+    ///   Derivative calls are ephemeral by design; they must not pollute
+    ///   the agent's canonical conversation history.
+    /// - The `AgentLoopEnd` hook context's `data` payload gets `is_fork:
+    ///   true`, so subscribers that should only react to real turns (like
+    ///   the auto-dream trigger) can filter themselves out and avoid
+    ///   recursion.
+    ///
+    /// Cache alignment: fork turns share the parent's session messages
+    /// as a prefix (caller prepares the session), so the Anthropic
+    /// prompt cache can hit. Setting `is_fork = true` does *not* change
+    /// what gets sent to the provider — only what happens at the
+    /// post-response persistence boundary.
+    pub is_fork: bool,
+    /// Runtime tool allowlist. When `Some`, any `tool_use` the model
+    /// emits that names a tool outside this list is denied at execute
+    /// time (a synthetic error result is returned to the model so it can
+    /// adapt). When `None`, no extra filter beyond the agent manifest's
+    /// built-in `capabilities.tools` is applied.
+    ///
+    /// This is enforced at *execute* time rather than by stripping tools
+    /// from the request schema, so the request body stays byte-identical
+    /// to the parent turn and the Anthropic prompt cache keeps hitting.
+    /// The model may "try" a disallowed tool (wasting a few tokens on
+    /// the `tool_use` block) but cannot actually invoke it — same
+    /// defense-in-depth as libre-code's `createAutoMemCanUseTool`.
+    pub allowed_tools: Option<Vec<String>>,
+}
+
 /// Result of an agent loop execution.
 #[derive(Debug, Default)]
 pub struct AgentLoopResult {
@@ -1469,6 +1548,7 @@ struct RecallSetupContext<'a> {
     sender_user_id: Option<&'a str>,
     stable_prefix_mode: bool,
     streaming: bool,
+    opts: &'a LoopOptions,
 }
 
 struct PromptSetup {
@@ -1506,6 +1586,7 @@ struct FinalizeEndTurnContext<'a> {
     messages: &'a [Message],
     sender_user_id: Option<&'a str>,
     streaming: bool,
+    opts: &'a LoopOptions,
 }
 
 struct FinalizeEndTurnResultData {
@@ -1681,7 +1762,13 @@ async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> RecallSetup {
         )
     };
 
-    if !ctx.stable_prefix_mode {
+    // Fork turns skip auto_retrieve: (a) it would add memory fragments
+    // to the prompt that the parent turn didn't have, breaking byte-
+    // alignment with the cached prefix and missing the Anthropic cache
+    // entirely; (b) the fork is by definition a short derivative task
+    // (dream / memory extraction) whose context should be exactly the
+    // parent's, not a fresh retrieval.
+    if !ctx.stable_prefix_mode && !ctx.opts.is_fork {
         if let Some(pm_store_arc) = ctx.proactive_memory {
             let user_id = ctx.session.agent_id.0.to_string();
             match pm_store_arc
@@ -2149,27 +2236,45 @@ async fn finalize_successful_end_turn(
         .unwrap_or(10);
     crate::session_repair::prune_heartbeat_turns(&mut ctx.session.messages, keep_recent);
 
-    ctx.memory
-        .save_session_async(ctx.session)
-        .await
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+    // Fork turns are ephemeral — skip the persist so the parent agent's
+    // canonical session history isn't polluted by derivative calls like
+    // auto-dream consolidation. The LLM already ran and we have its
+    // response in memory; we just don't write messages back to disk.
+    if !ctx.opts.is_fork {
+        ctx.memory
+            .save_session_async(ctx.session)
+            .await
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+    }
 
-    let interaction_text = format!(
-        "User asked: {}\nI responded: {}",
-        ctx.user_message, end_turn.final_response
-    );
-    remember_interaction_best_effort(
-        ctx.memory,
-        ctx.embedding_driver,
-        ctx.session.agent_id,
-        &interaction_text,
-        ctx.streaming,
-    )
-    .await;
+    // Post-turn memory writes and context-engine updates are skipped for
+    // fork turns. Three reasons: (1) the fork's conversation is ephemeral
+    // by design — persisting its content to the memory bank would leak
+    // derivative artefacts into long-term memory; (2) `context_engine`
+    // state tracked across real turns (summary chains, token budgets)
+    // shouldn't be advanced by a fork that doesn't count as a real user
+    // interaction; (3) critical — `auto_memorize` below would fire
+    // `run_forked_agent_oneshot` again on the fork's own completion,
+    // recursing into another fork, ad infinitum. Gating here is what
+    // stops that cycle.
+    if !ctx.opts.is_fork {
+        let interaction_text = format!(
+            "User asked: {}\nI responded: {}",
+            ctx.user_message, end_turn.final_response
+        );
+        remember_interaction_best_effort(
+            ctx.memory,
+            ctx.embedding_driver,
+            ctx.session.agent_id,
+            &interaction_text,
+            ctx.streaming,
+        )
+        .await;
 
-    if let Some(engine) = ctx.context_engine {
-        if let Err(e) = engine.after_turn(ctx.session.agent_id, ctx.messages).await {
-            warn!("Context engine after_turn failed: {e}");
+        if let Some(engine) = ctx.context_engine {
+            if let Err(e) = engine.after_turn(ctx.session.agent_id, ctx.messages).await {
+                warn!("Context engine after_turn failed: {e}");
+            }
         }
     }
 
@@ -2181,6 +2286,7 @@ async fn finalize_successful_end_turn(
         agent = %ctx.manifest.name,
         iterations = end_turn.iteration + 1,
         tokens = end_turn.total_usage.total(),
+        is_fork = ctx.opts.is_fork,
         "{}",
         if ctx.streaming {
             "Streaming agent loop completed"
@@ -2189,36 +2295,38 @@ async fn finalize_successful_end_turn(
         }
     );
 
-    if let Some(pm_store) = ctx.proactive_memory {
-        let user_id = ctx.session.agent_id.0.to_string();
-        let new_messages = &ctx.session.messages[end_turn.new_messages_start..];
-        let messages_json = serialize_session_messages(new_messages);
-        match pm_store
-            .auto_memorize(&user_id, &messages_json, ctx.sender_user_id)
-            .await
-        {
-            Ok(result) if result.has_content => {
-                debug!(
-                    memories = result.memories.len(),
-                    relations = result.relations.len(),
-                    "{}",
+    if !ctx.opts.is_fork {
+        if let Some(pm_store) = ctx.proactive_memory {
+            let user_id = ctx.session.agent_id.0.to_string();
+            let new_messages = &ctx.session.messages[end_turn.new_messages_start..];
+            let messages_json = serialize_session_messages(new_messages);
+            match pm_store
+                .auto_memorize(&user_id, &messages_json, ctx.sender_user_id)
+                .await
+            {
+                Ok(result) if result.has_content => {
+                    debug!(
+                        memories = result.memories.len(),
+                        relations = result.relations.len(),
+                        "{}",
+                        if ctx.streaming {
+                            "Proactive memory (streaming): stored {} memories, {} relations"
+                        } else {
+                            "Proactive memory: stored {} memories, {} relations"
+                        }
+                    );
+                    end_turn
+                        .memories_saved
+                        .extend(result.memories.iter().map(|m| m.content.clone()));
+                    end_turn.memory_conflicts.extend(result.conflicts);
+                }
+                Ok(_) => {}
+                Err(e) => {
                     if ctx.streaming {
-                        "Proactive memory (streaming): stored {} memories, {} relations"
+                        warn!("Proactive memory auto_memorize failed (streaming): {e}");
                     } else {
-                        "Proactive memory: stored {} memories, {} relations"
+                        warn!("Proactive memory auto_memorize failed: {e}");
                     }
-                );
-                end_turn
-                    .memories_saved
-                    .extend(result.memories.iter().map(|m| m.content.clone()));
-                end_turn.memory_conflicts.extend(result.conflicts);
-            }
-            Ok(_) => {}
-            Err(e) => {
-                if ctx.streaming {
-                    warn!("Proactive memory auto_memorize failed (streaming): {e}");
-                } else {
-                    warn!("Proactive memory auto_memorize failed: {e}");
                 }
             }
         }
@@ -2231,6 +2339,7 @@ async fn finalize_successful_end_turn(
         data: serde_json::json!({
             "iterations": end_turn.iteration + 1,
             "response_length": end_turn.final_response.len(),
+            "is_fork": ctx.opts.is_fork,
         }),
     };
     fire_hook_best_effort(ctx.hooks, &hook_ctx);
@@ -2289,6 +2398,7 @@ pub async fn run_agent_loop(
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
+    opts: &LoopOptions,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
@@ -2350,6 +2460,7 @@ pub async fn run_agent_loop(
         sender_user_id: sender_user_id.as_deref(),
         stable_prefix_mode,
         streaming: false,
+        opts,
     })
     .await;
 
@@ -2607,10 +2718,12 @@ pub async fn run_agent_loop(
                     session
                         .messages
                         .push(Message::assistant("[no reply needed]".to_string()));
-                    memory
-                        .save_session_async(session)
-                        .await
-                        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    if !opts.is_fork {
+                        memory
+                            .save_session_async(session)
+                            .await
+                            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    }
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
@@ -2705,6 +2818,7 @@ pub async fn run_agent_loop(
                         messages: &messages,
                         sender_user_id: sender_user_id.as_deref(),
                         streaming: false,
+                        opts,
                     },
                     FinalizeEndTurnResultData {
                         final_response,
@@ -2772,6 +2886,7 @@ pub async fn run_agent_loop(
                         iteration,
                         streaming: false,
                         agent_id_str: agent_id_str.as_str(),
+                        opts,
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
@@ -2843,9 +2958,13 @@ pub async fn run_agent_loop(
                     iteration_outcomes.accumulate(staged.commit(session, &mut messages));
                 }
 
-                // Interim save after tool execution to prevent data loss on crash
-                if let Err(e) = memory.save_session_async(session).await {
-                    warn!("Failed to interim-save session: {e}");
+                // Interim save after tool execution to prevent data loss on crash.
+                // Skipped for fork turns — forks are ephemeral and must not
+                // pollute the canonical session even on mid-turn crashes.
+                if !opts.is_fork {
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to interim-save session: {e}");
+                    }
                 }
                 // Track consecutive all-failed iterations to cap wasted retries.
                 // (soft errors — approval denials, sandbox rejections, truncation —
@@ -2874,6 +2993,7 @@ pub async fn run_agent_loop(
                             "reason": "tool_failure",
                             "error_count": hard_error_count,
                             "consecutive_all_failed": consecutive_all_failed,
+                            "is_fork": opts.is_fork,
                         }),
                     };
                     fire_hook_best_effort(hooks, &ctx);
@@ -2899,8 +3019,10 @@ pub async fn run_agent_loop(
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
                     session.messages.push(Message::assistant(&text));
-                    if let Err(e) = memory.save_session_async(session).await {
-                        warn!("Failed to save session on max continuations: {e}");
+                    if !opts.is_fork {
+                        if let Err(e) = memory.save_session_async(session).await {
+                            warn!("Failed to save session on max continuations: {e}");
+                        }
                     }
                     if pure_text_overflow {
                         warn!(
@@ -2924,6 +3046,7 @@ pub async fn run_agent_loop(
                         data: serde_json::json!({
                             "iterations": iteration + 1,
                             "reason": "max_continuations",
+                            "is_fork": opts.is_fork,
                         }),
                     };
                     fire_hook_best_effort(hooks, &ctx);
@@ -2956,9 +3079,13 @@ pub async fn run_agent_loop(
         }
     }
 
-    // Save session before failing so conversation history is preserved
-    if let Err(e) = memory.save_session_async(session).await {
-        warn!("Failed to save session on max iterations: {e}");
+    // Save session before failing so conversation history is preserved.
+    // Fork turns skip — they're ephemeral and must not pollute canonical
+    // session history even when the loop bailed out.
+    if !opts.is_fork {
+        if let Err(e) = memory.save_session_async(session).await {
+            warn!("Failed to save session on max iterations: {e}");
+        }
     }
 
     // Fire AgentLoopEnd hook on max iterations exceeded
@@ -2969,6 +3096,7 @@ pub async fn run_agent_loop(
         data: serde_json::json!({
             "reason": "max_iterations_exceeded",
             "iterations": max_iterations,
+            "is_fork": opts.is_fork,
         }),
     };
     fire_hook_best_effort(hooks, &ctx);
@@ -3249,6 +3377,7 @@ pub async fn run_agent_loop_streaming(
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
+    opts: &LoopOptions,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
@@ -3309,6 +3438,7 @@ pub async fn run_agent_loop_streaming(
         sender_user_id: sender_user_id.as_deref(),
         stable_prefix_mode,
         streaming: true,
+        opts,
     })
     .await;
 
@@ -3574,11 +3704,13 @@ pub async fn run_agent_loop_streaming(
                          Any partial output was already sent to the user.]"
                     );
                     session.messages.push(Message::assistant(note));
-                    if let Err(save_err) = memory.save_session_async(session).await {
-                        warn!(
-                            "Failed to persist timeout note to session: {save_err}. \
-                             The timeout marker will not appear on next session load."
-                        );
+                    if !opts.is_fork {
+                        if let Err(save_err) = memory.save_session_async(session).await {
+                            warn!(
+                                "Failed to persist timeout note to session: {save_err}. \
+                                 The timeout marker will not appear on next session load."
+                            );
+                        }
                     }
                 }
                 return Err(e);
@@ -3626,10 +3758,12 @@ pub async fn run_agent_loop_streaming(
                     session
                         .messages
                         .push(Message::assistant("[no reply needed]".to_string()));
-                    memory
-                        .save_session_async(session)
-                        .await
-                        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    if !opts.is_fork {
+                        memory
+                            .save_session_async(session)
+                            .await
+                            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    }
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
@@ -3726,6 +3860,7 @@ pub async fn run_agent_loop_streaming(
                         messages: &messages,
                         sender_user_id: sender_user_id.as_deref(),
                         streaming: true,
+                        opts,
                     },
                     FinalizeEndTurnResultData {
                         final_response,
@@ -3789,6 +3924,7 @@ pub async fn run_agent_loop_streaming(
                         iteration,
                         streaming: true,
                         agent_id_str: agent_id_str.as_str(),
+                        opts,
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
@@ -3864,8 +4000,10 @@ pub async fn run_agent_loop_streaming(
                     iteration_outcomes.accumulate(staged.commit(session, &mut messages));
                 }
 
-                if let Err(e) = memory.save_session_async(session).await {
-                    warn!("Failed to interim-save session: {e}");
+                if !opts.is_fork {
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to interim-save session: {e}");
+                    }
                 }
                 // Track consecutive all-failed iterations to cap wasted retries.
                 // (soft errors — approval denials, sandbox rejections, truncation —
@@ -3894,6 +4032,7 @@ pub async fn run_agent_loop_streaming(
                             "reason": "tool_failure",
                             "error_count": hard_error_count,
                             "consecutive_all_failed": consecutive_all_failed,
+                            "is_fork": opts.is_fork,
                         }),
                     };
                     fire_hook_best_effort(hooks, &ctx);
@@ -3913,8 +4052,10 @@ pub async fn run_agent_loop_streaming(
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
                     session.messages.push(Message::assistant(&text));
-                    if let Err(e) = memory.save_session_async(session).await {
-                        warn!("Failed to save session on max continuations: {e}");
+                    if !opts.is_fork {
+                        if let Err(e) = memory.save_session_async(session).await {
+                            warn!("Failed to save session on max continuations: {e}");
+                        }
                     }
                     if pure_text_overflow {
                         warn!(
@@ -3938,6 +4079,7 @@ pub async fn run_agent_loop_streaming(
                         data: serde_json::json!({
                             "iterations": iteration + 1,
                             "reason": "max_continuations",
+                            "is_fork": opts.is_fork,
                         }),
                     };
                     fire_hook_best_effort(hooks, &ctx);
@@ -3970,8 +4112,10 @@ pub async fn run_agent_loop_streaming(
         }
     }
 
-    if let Err(e) = memory.save_session_async(session).await {
-        warn!("Failed to save session on max iterations: {e}");
+    if !opts.is_fork {
+        if let Err(e) = memory.save_session_async(session).await {
+            warn!("Failed to save session on max iterations: {e}");
+        }
     }
 
     // Fire AgentLoopEnd hook on max iterations exceeded
@@ -3982,6 +4126,7 @@ pub async fn run_agent_loop_streaming(
         data: serde_json::json!({
             "reason": "max_iterations_exceeded",
             "iterations": max_iterations,
+            "is_fork": opts.is_fork,
         }),
     };
     fire_hook_best_effort(hooks, &ctx);
@@ -6046,6 +6191,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Loop should complete without error");
@@ -6104,6 +6250,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Loop should complete without error");
@@ -6161,6 +6308,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Loop should complete without error");
@@ -6212,6 +6360,7 @@ mod tests {
             None,
             None,
             None,
+            &LoopOptions::default(),
         )
         .await
         .expect("Loop should complete without error");
@@ -6265,6 +6414,7 @@ mod tests {
             None,
             None,
             None,
+            &LoopOptions::default(),
         )
         .await
         .expect("Loop should complete without error");
@@ -6319,6 +6469,7 @@ mod tests {
             None,
             None,
             None,
+            &LoopOptions::default(),
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -6379,6 +6530,7 @@ mod tests {
             None,
             None,
             None,
+            &LoopOptions::default(),
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -6433,6 +6585,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -6565,6 +6718,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Loop should recover via retry");
@@ -6616,6 +6770,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Loop should complete with fallback");
@@ -6675,6 +6830,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -7456,6 +7612,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Agent loop should complete");
@@ -7527,6 +7684,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Normal loop should complete");
@@ -7594,6 +7752,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Streaming loop should complete");
@@ -7891,6 +8050,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Loop should complete after retry");
@@ -7947,6 +8107,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect_err("Loop must exit with RepeatedToolFailures");
@@ -8004,6 +8165,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect("Streaming loop should complete after retry");
@@ -8062,6 +8224,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &LoopOptions::default(),
         )
         .await
         .expect_err("Streaming loop must exit with RepeatedToolFailures");

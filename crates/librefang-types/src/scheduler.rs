@@ -185,6 +185,12 @@ pub struct CronJob {
     pub action: CronAction,
     /// Where to deliver the result.
     pub delivery: CronDelivery,
+    /// Optional peer/user ID to use as the `SenderContext.user_id` when the
+    /// job fires. When set, memory lookups keyed by peer (e.g.
+    /// `peer:{user_id}:KEY`) will resolve correctly. Defaults to `None`
+    /// (empty user_id — backward-compatible behaviour).
+    #[serde(default)]
+    pub peer_id: Option<String>,
     /// When the job was created.
     pub created_at: DateTime<Utc>,
     /// When the job last fired (if ever).
@@ -424,6 +430,7 @@ mod tests {
                 text: "ping".into(),
             },
             delivery: CronDelivery::None,
+            peer_id: None,
             created_at: Utc::now(),
             last_run: None,
             next_run: None,
