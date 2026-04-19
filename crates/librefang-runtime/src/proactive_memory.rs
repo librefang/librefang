@@ -75,17 +75,59 @@ pub fn init_proactive_memory_full(
     llm: Option<(Arc<dyn crate::llm_driver::LlmDriver>, String)>,
     embedding: Option<Arc<dyn crate::embedding::EmbeddingDriver + Send + Sync>>,
 ) -> Option<Arc<ProactiveMemoryStore>> {
+    // Legacy callers (tests, external) can't pass prompt_caching — default
+    // to true to match the behaviour shipped before the global-toggle fix.
+    let (store, _extractor) =
+        init_proactive_memory_full_with_extractor(memory, config, llm, embedding, true)?;
+    Some(store)
+}
+
+/// Like [`init_proactive_memory_full`] but also returns the concrete
+/// `LlmMemoryExtractor` (when one was configured). The kernel needs the
+/// concrete handle so it can call `install_kernel_handle` once
+/// `Arc<LibreFangKernel>` exists — the fork-based extraction path needs
+/// a `Weak<dyn KernelHandle>` which can't be formed before the kernel
+/// is in an Arc.
+///
+/// `prompt_caching` controls whether the extractor's fallback
+/// `driver.complete()` path stamps `cache_control` markers. Should be
+/// threaded from `KernelConfig.prompt_caching` so operators who disable
+/// caching globally see proactive memory also skip it. The fork path
+/// inherits caching from the agent's own manifest metadata, which the
+/// kernel derives from the same global — so this flag only gates the
+/// fallback.
+pub fn init_proactive_memory_full_with_extractor(
+    memory: Arc<librefang_memory::MemorySubstrate>,
+    config: ProactiveMemoryConfig,
+    llm: Option<(Arc<dyn crate::llm_driver::LlmDriver>, String)>,
+    embedding: Option<Arc<dyn crate::embedding::EmbeddingDriver + Send + Sync>>,
+    prompt_caching: bool,
+) -> Option<(Arc<ProactiveMemoryStore>, Option<Arc<LlmMemoryExtractor>>)> {
     if !config.auto_retrieve && !config.auto_memorize {
         tracing::debug!("Proactive memory is disabled");
         return None;
     }
 
-    let mut store = if let Some((driver, model)) = llm {
-        let extractor = Arc::new(LlmMemoryExtractor::new(driver, model));
-        ProactiveMemoryStore::with_extractor(memory, config, extractor)
-    } else {
-        ProactiveMemoryStore::new(memory, config)
-    };
+    let (mut store, llm_extractor): (_, Option<Arc<LlmMemoryExtractor>>) =
+        if let Some((driver, model)) = llm {
+            // Hold two handles to the same extractor: one as the concrete
+            // type (so the kernel can install its weak self-ref on it
+            // later), one as the trait object (so the store can invoke it
+            // via `MemoryExtractor`).
+            let extractor_concrete = Arc::new(LlmMemoryExtractor::with_prompt_caching(
+                driver,
+                model,
+                prompt_caching,
+            ));
+            let extractor_dyn: Arc<dyn librefang_types::memory::MemoryExtractor> =
+                Arc::clone(&extractor_concrete) as _;
+            (
+                ProactiveMemoryStore::with_extractor(memory, config, extractor_dyn),
+                Some(extractor_concrete),
+            )
+        } else {
+            (ProactiveMemoryStore::new(memory, config), None)
+        };
 
     if let Some(emb) = embedding {
         store = store.with_embedding(Arc::new(EmbeddingBridge(emb)));
@@ -94,7 +136,7 @@ pub fn init_proactive_memory_full(
         tracing::info!("Proactive memory system initialized (text search fallback)");
     }
 
-    Some(Arc::new(store))
+    Some((Arc::new(store), llm_extractor))
 }
 
 /// Initialize proactive memory with default configuration.
@@ -191,14 +233,118 @@ If nothing matches, default to ADD."#;
 
 /// LLM-powered memory extractor that uses a language model to identify
 /// important information from conversations.
+///
+/// When `kernel_handle` is set and `extract_memories_with_agent_id` is
+/// called (auto_memorize's path), extraction runs through
+/// `KernelHandle::run_forked_agent_oneshot`. The fork shares the parent
+/// agent's `(system + tools + messages)` prefix, so Anthropic's prompt
+/// cache hits on the full conversation history instead of being rebuilt
+/// for every auto_memorize call. The extraction-specific system prompt
+/// (`EXTRACTION_SYSTEM_PROMPT`) is embedded into the fork's user message
+/// rather than replacing the agent's system — keeping the cache key
+/// intact at the cost of a few hundred tokens added to the (uncached)
+/// fork user message. Net positive when the agent's own system prompt is
+/// large enough that caching it outweighs the extra user-message tokens.
+///
+/// Without `kernel_handle` (or when the fork call fails), falls back to
+/// the original standalone `driver.complete()` path with
+/// `prompt_caching = true` so at least the extractor's own system prompt
+/// caches across back-to-back calls.
 pub struct LlmMemoryExtractor {
     driver: Arc<dyn crate::llm_driver::LlmDriver>,
     model: String,
+    /// Late-bound kernel handle — populated after the kernel is wrapped
+    /// in `Arc` (in `LibreFangKernel::set_self_handle`). Before that
+    /// point, the extractor falls back to the standalone `driver.complete()`
+    /// path. `RwLock` (not `Mutex`) because reads dominate — one write at
+    /// kernel init, many reads during `extract_memories_with_agent_id`.
+    kernel_handle:
+        std::sync::RwLock<Option<std::sync::Weak<dyn crate::kernel_handle::KernelHandle>>>,
+    /// Whether to stamp `prompt_caching = true` on the standalone
+    /// fallback `driver.complete()` request. Mirrors the global
+    /// `KernelConfig.prompt_caching` toggle — operators who disable
+    /// caching at the kernel level (compatibility, cost accounting,
+    /// debugging) should see proactive-memory requests also skip
+    /// `cache_control`. The fork path inherits this automatically
+    /// because it runs through agent_loop which reads the per-agent
+    /// manifest metadata that the kernel derives from the same global.
+    prompt_caching: bool,
 }
 
 impl LlmMemoryExtractor {
     pub fn new(driver: Arc<dyn crate::llm_driver::LlmDriver>, model: String) -> Self {
-        Self { driver, model }
+        Self::with_prompt_caching(driver, model, true)
+    }
+
+    /// Explicit variant for callers that want to control the
+    /// fallback-path `prompt_caching` flag — typically the kernel,
+    /// which passes `KernelConfig.prompt_caching` through so the
+    /// extractor honours the same global toggle as the main loop.
+    pub fn with_prompt_caching(
+        driver: Arc<dyn crate::llm_driver::LlmDriver>,
+        model: String,
+        prompt_caching: bool,
+    ) -> Self {
+        Self {
+            driver,
+            model,
+            kernel_handle: std::sync::RwLock::new(None),
+            prompt_caching,
+        }
+    }
+
+    /// Install the kernel handle used for fork-based extraction. Called
+    /// by `LibreFangKernel::set_self_handle` — by then `Arc<LibreFangKernel>`
+    /// exists so the weak ref can actually be formed. Idempotent: a second
+    /// install overwrites the first (harmless; the upgrade path handles
+    /// stale weaks gracefully).
+    pub fn install_kernel_handle(
+        &self,
+        handle: std::sync::Weak<dyn crate::kernel_handle::KernelHandle>,
+    ) {
+        if let Ok(mut slot) = self.kernel_handle.write() {
+            *slot = Some(handle);
+        }
+    }
+
+    /// Attempt the fork path: embed the extraction instructions into a
+    /// fork user message and invoke `run_forked_agent_oneshot`. Returns
+    /// `Ok(Some(text))` on success, `Ok(None)` when no kernel handle is
+    /// configured (caller falls back to direct driver call), or
+    /// `Ok(Some(""))` when the kernel Arc is stale (shutting down).
+    async fn try_forked_extract(
+        &self,
+        conversation_text: &str,
+        agent_id: &str,
+    ) -> Result<Option<String>, LibreFangError> {
+        let weak = {
+            let guard = self
+                .kernel_handle
+                .read()
+                .map_err(|e| LibreFangError::Internal(format!("kernel_handle lock: {e}")))?;
+            guard.clone()
+        };
+        let Some(weak) = weak else {
+            return Ok(None);
+        };
+        let Some(kernel) = weak.upgrade() else {
+            tracing::debug!("LlmMemoryExtractor: kernel Arc stale during extract, skipping");
+            return Ok(Some(String::new()));
+        };
+        let prompt = format!(
+            "{EXTRACTION_SYSTEM_PROMPT}\n\nExtract memories from this conversation. \
+             Return JSON only, no commentary.\n\n{conversation_text}"
+        );
+        match kernel
+            .run_forked_agent_oneshot(agent_id, &prompt, Some(Vec::new()))
+            .await
+        {
+            Ok(text) => Ok(Some(text)),
+            Err(e) => {
+                tracing::warn!(error = %e, "LlmMemoryExtractor fork extract failed, falling back to direct driver call");
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -271,7 +417,26 @@ impl MemoryExtractor for LlmMemoryExtractor {
             });
         }
 
-        // Build the LLM request
+        // NOTE: the fork-based path lives in `extract_memories_with_agent_id`
+        // — `extract_memories` has no agent_id and therefore can't target
+        // a fork. When auto_memorize wants the fork benefits it must call
+        // the _with_agent_id variant (it does, via the trait).
+        //
+        // Build the LLM request. `prompt_caching: true` lets Anthropic
+        // cache the ~1KB `EXTRACTION_SYSTEM_PROMPT` across back-to-back
+        // auto_memorize calls — the user message (conversation text)
+        // differs every call, but the system prompt is stable, so the
+        // driver stamps a `cache_control` marker on the system block and
+        // subsequent calls within the 5-min TTL hit cache. Non-Anthropic
+        // providers ignore the flag (OpenAI caches automatically; others
+        // no-op), so enabling it is safe cross-provider.
+        //
+        // NOTE: this does NOT share cache with the main agent's turn —
+        // LlmMemoryExtractor deliberately uses its own `EXTRACTION_SYSTEM_PROMPT`
+        // (not the agent's system prompt) for better extraction quality.
+        // Cross-call parent-child cache sharing would require rewriting
+        // the extractor to use the forkedAgent pattern + tool calls
+        // (libre-code's `extractMemories` shape); that's a separate PR.
         let request = crate::llm_driver::CompletionRequest {
             model: self.model.clone(),
             messages: vec![librefang_types::message::Message::user(format!(
@@ -282,7 +447,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             temperature: 0.1,
             system: Some(EXTRACTION_SYSTEM_PROMPT.to_string()),
             thinking: None,
-            prompt_caching: false,
+            prompt_caching: self.prompt_caching,
             response_format: Some(ResponseFormat::Json),
             timeout_secs: Some(30),
             extra_body: None,
@@ -296,6 +461,101 @@ impl MemoryExtractor for LlmMemoryExtractor {
 
         let text = response.text();
         parse_llm_extraction_response(&text)
+    }
+
+    /// Fork-aware extraction path. When a kernel handle is configured,
+    /// routes the extraction LLM call through `run_forked_agent_oneshot`
+    /// so it shares the parent agent's cache key. Falls back to the
+    /// standalone `extract_memories` path on any fork failure or when
+    /// no kernel handle was wired.
+    async fn extract_memories_with_agent_id(
+        &self,
+        messages: &[serde_json::Value],
+        agent_id: &str,
+    ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
+        // Re-run the conversation-text builder from `extract_memories`
+        // so the fork prompt gets the same truncation / role filtering.
+        // Duplicating ~40 lines here keeps each method independently
+        // auditable — factoring into a helper would tangle the fork
+        // path with the direct path's truncation quirks (the LLM's
+        // ~8000-char cap is specific to the standalone extractor's
+        // model context; a forked agent inherits its own limits from
+        // the parent manifest).
+        const MAX_EXTRACTION_CHARS: usize = 8000;
+        let mut conversation_text = String::new();
+        for msg in messages {
+            let role = msg
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            if role == "system" || role == "unknown" {
+                continue;
+            }
+            let content = match msg.get("content") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Array(arr)) => arr
+                    .iter()
+                    .filter_map(|v| {
+                        v.get("text")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
+                            .or_else(|| v.as_str().map(|s| s.to_string()))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                _ => String::new(),
+            };
+            if !content.is_empty() {
+                conversation_text.push_str(&format!("{role}: {content}\n"));
+                if conversation_text.len() > MAX_EXTRACTION_CHARS {
+                    if let Some(last_newline) =
+                        conversation_text[..MAX_EXTRACTION_CHARS].rfind('\n')
+                    {
+                        conversation_text.truncate(last_newline);
+                    } else {
+                        let mut safe = MAX_EXTRACTION_CHARS;
+                        while safe > 0 && !conversation_text.is_char_boundary(safe) {
+                            safe -= 1;
+                        }
+                        conversation_text.truncate(safe);
+                    }
+                    break;
+                }
+            }
+        }
+
+        if conversation_text.is_empty() {
+            return Ok(ExtractionResult {
+                has_content: false,
+                memories: Vec::new(),
+                relations: Vec::new(),
+                trigger: "llm_extractor_forked_empty".to_string(),
+                conflicts: Vec::new(),
+            });
+        }
+
+        // Try the fork path. Falls back to standalone if no kernel
+        // handle is configured or the fork call fails (transient provider
+        // error, rate limit, etc). Standalone path has `prompt_caching =
+        // true` so the system prompt still caches across calls.
+        match self.try_forked_extract(&conversation_text, agent_id).await {
+            Ok(Some(text)) if text.is_empty() => Ok(ExtractionResult {
+                has_content: false,
+                memories: Vec::new(),
+                relations: Vec::new(),
+                trigger: "llm_extractor_fork_skipped".to_string(),
+                conflicts: Vec::new(),
+            }),
+            Ok(Some(text)) => {
+                let mut parsed = parse_llm_extraction_response(&text)?;
+                parsed.trigger = "llm_extractor_forked".to_string();
+                Ok(parsed)
+            }
+            // No kernel handle configured (init didn't wire it) or fork
+            // call failed — fall back to the standalone path so we still
+            // get extraction, just without cache alignment.
+            Ok(None) | Err(_) => self.extract_memories(messages).await,
+        }
     }
 
     /// LLM-powered conflict resolution: decide ADD/UPDATE/NOOP.
@@ -328,6 +588,13 @@ impl MemoryExtractor for LlmMemoryExtractor {
             new_memory.content, existing_text
         );
 
+        // Same caching rationale as `extract_memories` above — the
+        // `DECISION_SYSTEM_PROMPT` is stable across calls, so enabling
+        // prompt caching lets Anthropic cache the system block. The user
+        // message (existing memories + new candidate) varies every call,
+        // so message-level caching doesn't help here. System-only cache
+        // is still a real saving on active agents where `decide_action`
+        // fires dozens of times per session.
         let request = crate::llm_driver::CompletionRequest {
             model: self.model.clone(),
             messages: vec![librefang_types::message::Message::user(user_msg)],
@@ -336,7 +603,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             temperature: 0.0,
             system: Some(DECISION_SYSTEM_PROMPT.to_string()),
             thinking: None,
-            prompt_caching: false,
+            prompt_caching: self.prompt_caching,
             response_format: None,
             timeout_secs: Some(15),
             extra_body: None,

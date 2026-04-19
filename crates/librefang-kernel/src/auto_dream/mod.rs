@@ -33,7 +33,6 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use dashmap::DashMap;
-use librefang_channels::types::SenderContext;
 use librefang_llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::LibreFangResult;
@@ -53,12 +52,16 @@ pub const AUTO_DREAM_CHANNEL: &str = "auto_dream";
 /// Default subdirectory under `data_dir` holding per-agent lock files.
 const DEFAULT_LOCK_DIR: &str = "auto_dream";
 
-/// Deterministic session id used by every dream invocation for an agent.
-/// Must match the id derived in `kernel::send_message_streaming_with_sender_context_and_routing`
-/// from `SenderContext { channel: AUTO_DREAM_CHANNEL, chat_id: None, .. }`
-/// — any drift here would mean the session-gate exclusion misses the dream
-/// session and we'd fall back to the repeated-re-dream loop this guards
-/// against.
+/// Deterministic session id historically used by every dream invocation
+/// under a dedicated `auto_dream` channel. Since the forkedAgent migration
+/// (PR after #2755), dreams run via `run_forked_agent_streaming` which
+/// reuses the agent's canonical session in-memory and does NOT save back —
+/// so no `auto_dream` session exists in the DB anymore. This helper is
+/// kept because the session-gate exclusion still passes it into
+/// `count_agent_sessions_touched_since` as a defensive filter: if a lingering
+/// row from before the migration still exists for an agent, excluding it
+/// from the activity count stays correct behaviour. Freshly-installed daemons
+/// will never see such rows and the filter is a no-op.
 fn dream_session_id(agent_id: AgentId) -> SessionId {
     SessionId::for_channel(agent_id, AUTO_DREAM_CHANNEL)
 }
@@ -76,18 +79,21 @@ const MAX_TURNS: usize = 30;
 /// listing ghost names here just makes the counter under-report.
 const MEMORY_WRITE_TOOLS: &[&str] = &["memory_store"];
 
-/// Tools the dream loop is allowed to call. Used to post-filter
-/// `available_tools` when `sender.channel == AUTO_DREAM_CHANNEL` so a
-/// prompt-injected dream can't escape into shell / file-edit / network
-/// tools even if the target agent's manifest would otherwise permit them.
-/// Matches libre-code's `createAutoMemCanUseTool(memoryRoot)` restriction.
+/// Tools the dream loop is allowed to call. Passed as `allowed_tools` to
+/// `kernel.run_forked_agent_streaming`, which threads them through to
+/// agent_loop's `LoopOptions`. Enforcement happens at tool *execute* time
+/// (not request-build) so the request schema stays byte-identical to the
+/// parent turn's and the Anthropic prompt cache alignment holds. A
+/// prompt-injected dream that emits a `tool_use` for bash or any other
+/// non-memory tool will get a synthetic error result back — same
+/// defense-in-depth pattern as libre-code's `createAutoMemCanUseTool`.
 pub const DREAM_ALLOWED_TOOLS: &[&str] = &["memory_store", "memory_recall", "memory_list"];
 
 /// Minimum spacing between event-driven gate scans for the same agent.
 /// Mirrors libre-code's `SESSION_SCAN_INTERVAL_MS`. Without this, an
 /// agent taking 100 turns/hour past the time gate would run 100 lock-stat
-/// + session-count SQL probes before one of them actually fires a dream —
-/// the scan is cheap per call but pointless at that cadence. This does
+/// plus session-count SQL probes before one of them actually fires a dream
+/// — the scan is cheap per call but pointless at that cadence. This does
 /// NOT apply to the scheduler (already sparse at `check_interval_secs`)
 /// or to manual triggers (operators explicitly asked for a check).
 const EVENT_SCAN_INTERVAL_MS: u64 = 10 * 60 * 1000;
@@ -490,16 +496,6 @@ async fn run_dream(
         total_sessions,
         extra: "",
     });
-    let sender = SenderContext {
-        channel: AUTO_DREAM_CHANNEL.to_string(),
-        user_id: String::new(),
-        display_name: AUTO_DREAM_CHANNEL.to_string(),
-        is_group: false,
-        was_mentioned: false,
-        thread_id: None,
-        account_id: None,
-        ..Default::default()
-    };
 
     let timeout_secs = kernel.config_snapshot().auto_dream.timeout_secs;
     let timeout = Duration::from_secs(timeout_secs.max(30));
@@ -509,24 +505,29 @@ async fn run_dream(
     // `aborted=true` while the dream is already on its way out.
     let mut abort_rx = abort_rx;
 
-    // Kick off streaming.
-    let (mut rx, join_handle) = match kernel
-        .send_message_streaming_with_sender_context_and_routing(target, &prompt_text, None, &sender)
-        .await
-    {
-        Ok(pair) => pair,
-        Err(e) => {
-            abort_rx.take();
-            finalize_failure(
-                &kernel,
-                target,
-                prior_mtime,
-                format!("stream start failed: {e}"),
-            )
-            .await;
-            return;
-        }
-    };
+    // Kick off streaming. Fork mode means the dream reuses the canonical
+    // session as a cache-aligned prefix (Anthropic prompt cache hits the
+    // common system + tools + messages), but the dream's own turn doesn't
+    // get persisted back into the canonical session — so main conversation
+    // history stays clean. Tool allowlist enforced at execute time in
+    // agent_loop (not in the request schema) to preserve cache key byte-
+    // alignment. Matches libre-code's forkedAgent + createAutoMemCanUseTool.
+    let allowed_tools: Vec<String> = DREAM_ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect();
+    let (mut rx, join_handle) =
+        match kernel.run_forked_agent_streaming(target, &prompt_text, Some(allowed_tools)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                abort_rx.take();
+                finalize_failure(
+                    &kernel,
+                    target,
+                    prior_mtime,
+                    format!("stream start failed: {e}"),
+                )
+                .await;
+                return;
+            }
+        };
 
     // Drain events, applying to progress. The loop exits when the channel
     // closes (natural completion), the overall timeout elapses, OR the
@@ -874,6 +875,21 @@ impl librefang_runtime::hooks::HookHandler for AutoDreamTurnEndHook {
         // only one we care about; the registry filters by event type
         // already, so this branch is defensive.
         if ctx.event != HookEvent::AgentLoopEnd {
+            return Ok(());
+        }
+        // Skip fork turns. The dream itself runs as a fork now (via
+        // `run_forked_agent_streaming`) and its own AgentLoopEnd event
+        // reaches this hook — without this check we'd try to fire a new
+        // dream on the back of the dream's completion turn, cascading.
+        // The lock + time gate would eventually stop it, but this cuts the
+        // noise at the source. Main turns fire with `is_fork: false` and
+        // still trigger dreams normally.
+        if ctx
+            .data
+            .get("is_fork")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return Ok(());
         }
         // Kernel has been dropped (process shutting down) — nothing to do.

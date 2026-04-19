@@ -304,6 +304,14 @@ pub struct LibreFangKernel {
     pub(crate) memory: Arc<MemorySubstrate>,
     /// Proactive memory store (mem0-style auto_retrieve/auto_memorize).
     pub(crate) proactive_memory: OnceLock<Arc<librefang_memory::ProactiveMemoryStore>>,
+    /// Concrete handle to the LLM-backed memory extractor used by
+    /// `proactive_memory`. Held alongside the trait-object version
+    /// inside the store so `set_self_handle` can call
+    /// `install_kernel_handle` on it — the fork-based extraction path
+    /// needs `Weak<dyn KernelHandle>` which requires the kernel to be
+    /// Arc-wrapped first. `None` for rule-based extractor (no LLM).
+    pub(crate) proactive_memory_extractor:
+        OnceLock<Arc<librefang_runtime::proactive_memory::LlmMemoryExtractor>>,
     /// Prompt versioning and A/B experiment store.
     pub(crate) prompt_store: OnceLock<librefang_memory::PromptStore>,
     /// Process supervisor.
@@ -2214,6 +2222,7 @@ impl LibreFangKernel {
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
             proactive_memory: OnceLock::new(),
+            proactive_memory_extractor: OnceLock::new(),
             prompt_store: OnceLock::new(),
             supervisor,
             workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
@@ -2309,23 +2318,33 @@ impl LibreFangKernel {
                 &cfg.default_model.provider,
             );
             let llm = Some((Arc::clone(&kernel.default_driver) as _, extraction_model));
-            let store = if let Some(ref emb) = kernel.embedding_driver {
-                librefang_runtime::proactive_memory::init_proactive_memory_with_embedding(
+            // Use the _with_extractor variant so we get the concrete
+            // `LlmMemoryExtractor` back alongside the store. The extractor
+            // needs a `Weak<dyn KernelHandle>` installed before its fork-
+            // based extraction path can light up, and that weak ref can
+            // only be formed after `Arc::new(kernel)` — so we hold the
+            // concrete handle here and call `install_kernel_handle` from
+            // `set_self_handle` below.
+            let embedding = kernel.embedding_driver.as_ref().map(Arc::clone);
+            // Thread the global `prompt_caching` toggle through so the
+            // extractor's fallback `driver.complete()` path respects the
+            // same switch operators use for the main loop. The fork path
+            // inherits caching from the agent's manifest metadata which
+            // the kernel derives from this same flag.
+            let prompt_caching = cfg.prompt_caching;
+            let result =
+                librefang_runtime::proactive_memory::init_proactive_memory_full_with_extractor(
                     Arc::clone(&kernel.memory),
                     pm_config,
                     llm,
-                    Arc::clone(emb),
-                )
-            } else {
-                librefang_runtime::proactive_memory::init_proactive_memory_full(
-                    Arc::clone(&kernel.memory),
-                    pm_config,
-                    llm,
-                    None,
-                )
-            };
-            if let Some(s) = store {
-                let _ = kernel.proactive_memory.set(s);
+                    embedding,
+                    prompt_caching,
+                );
+            if let Some((store, extractor)) = result {
+                let _ = kernel.proactive_memory.set(store);
+                if let Some(ex) = extractor {
+                    let _ = kernel.proactive_memory_extractor.set(ex);
+                }
             }
         }
 
@@ -3355,6 +3374,7 @@ system_prompt = "You are a helpful assistant."
             None, // no proactive memory
             None, // no context engine
             None, // no pending messages
+            &librefang_runtime::agent_loop::LoopOptions::default(),
         )
         .await
         .map_err(KernelError::LibreFang)?;
@@ -3895,6 +3915,59 @@ system_prompt = "You are a helpful assistant."
         self.send_message_streaming_with_sender(agent_id, message, kernel_handle, None, None)
     }
 
+    /// Run a *derivative* (forked) turn for an agent using the canonical
+    /// session's messages as a cache-aligned prefix. Used by auto-dream and
+    /// any future post-turn consumer that wants to fire an LLM call on top
+    /// of the agent's context without persisting into its history.
+    ///
+    /// Semantics vs. `send_message_streaming`:
+    ///
+    /// - **Does not persist** messages added by the fork turn. The session
+    ///   is shared with canonical at read time but writes stay in memory.
+    /// - **Does not trigger AgentLoopEnd consumers that filter on
+    ///   `is_fork`** — notably auto-dream's own hook skips fork turns, so
+    ///   a dream won't trigger a nested dream (the file lock would also
+    ///   prevent it, but this is cheaper).
+    /// - **Enforces a runtime tool allowlist** via `allowed_tools`. The
+    ///   list is NOT applied to the request schema sent to the provider
+    ///   (that would break cache alignment) — it's enforced at tool
+    ///   execute time with a synthetic error returned to the model.
+    ///
+    /// Rejects WASM / Python agents with `Err` — the fork mode only
+    /// makes sense for LLM-backed agents.
+    pub fn run_forked_agent_streaming(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        fork_prompt: &str,
+        allowed_tools: Option<Vec<String>>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        if entry.manifest.module.starts_with("wasm:")
+            || entry.manifest.module.starts_with("python:")
+        {
+            return Err(KernelError::LibreFang(LibreFangError::Internal(
+                "run_forked_agent_streaming is only supported for LLM agents".to_string(),
+            )));
+        }
+        let loop_opts = librefang_runtime::agent_loop::LoopOptions {
+            is_fork: true,
+            allowed_tools,
+        };
+        self.send_message_streaming_with_sender_and_opts(
+            agent_id,
+            fork_prompt,
+            None, // auto-wire self
+            None, // no sender context — fork uses the canonical session
+            None, // no thinking override
+            loop_opts,
+        )
+    }
+
     fn send_message_streaming_with_sender(
         self: &Arc<Self>,
         agent_id: AgentId,
@@ -3902,6 +3975,35 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         sender_context: Option<&SenderContext>,
         thinking_override: Option<bool>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.send_message_streaming_with_sender_and_opts(
+            agent_id,
+            message,
+            kernel_handle,
+            sender_context,
+            thinking_override,
+            librefang_runtime::agent_loop::LoopOptions::default(),
+        )
+    }
+
+    /// Internal: same as [`Self::send_message_streaming_with_sender`] but
+    /// accepts a pre-built [`LoopOptions`]. `run_forked_agent_streaming`
+    /// passes `is_fork = true` + an `allowed_tools` filter so the spawned
+    /// agent_loop knows to skip session-saving and enforce the runtime
+    /// tool allowlist. All public streaming entry points above go through
+    /// this with the default `LoopOptions` (a normal main turn).
+    #[allow(clippy::too_many_arguments)]
+    fn send_message_streaming_with_sender_and_opts(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_context: Option<&SenderContext>,
+        thinking_override: Option<bool>,
+        loop_opts: librefang_runtime::agent_loop::LoopOptions,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -3999,6 +4101,14 @@ system_prompt = "You are a helpful assistant."
                 };
                 SessionId::for_channel(agent_id, &scope)
             }
+            // Fork calls always target the agent's canonical session —
+            // the whole point of fork mode is to share the parent turn's
+            // context (and therefore its prompt-cache prefix). An agent
+            // with `session_mode = "new"` would otherwise land on
+            // `SessionId::new()` here, producing a fresh empty session
+            // and breaking cache alignment. Force Persistent for forks
+            // regardless of manifest.
+            _ if loop_opts.is_fork => entry.session_id,
             _ => match entry.manifest.session_mode {
                 librefang_types::agent::SessionMode::Persistent => entry.session_id,
                 librefang_types::agent::SessionMode::New => SessionId::new(),
@@ -4043,19 +4153,14 @@ system_prompt = "You are a helpful assistant."
         };
 
         let tools = self.available_tools(agent_id);
-        let mut tools = entry.mode.filter_tools((*tools).clone());
-        // Auto-dream tool constraint: when the sender channel indicates a
-        // dream invocation, clamp the tool list to memory-only. This is the
-        // runtime enforcement that backs the prompt's tool-constraint
-        // section — a prompt-injected dream that ignores the warning would
-        // still find shell and network tools absent from its tool schema.
-        if sender_context
-            .map(|s| s.channel.as_str() == crate::auto_dream::AUTO_DREAM_CHANNEL)
-            .unwrap_or(false)
-        {
-            let allowed = crate::auto_dream::DREAM_ALLOWED_TOOLS;
-            tools.retain(|t| allowed.iter().any(|a| *a == t.name));
-        }
+        let tools = entry.mode.filter_tools((*tools).clone());
+        // NOTE: fork-mode tool allowlist is NOT applied at request-build
+        // time — doing so would change the `tools` cache-key component
+        // and break Anthropic prompt-cache alignment between parent and
+        // fork. The allowlist is enforced at execute time via
+        // `LoopOptions::allowed_tools` in agent_loop instead. Before the
+        // forkedAgent migration this was filtered here by matching on
+        // `sender_context.channel == AUTO_DREAM_CHANNEL`.
         let driver = self.resolve_driver(&entry.manifest)?;
 
         // Look up model's actual context window from the catalog
@@ -4256,6 +4361,15 @@ system_prompt = "You are a helpful assistant."
         };
         let kernel_clone = Arc::clone(self);
 
+        // `loop_opts` is already a local — the spawned async move will
+        // capture it. Agent loop reads these at each turn-end / save /
+        // tool-exec checkpoint (see `LoopOptions::is_fork` and
+        // `LoopOptions::allowed_tools`). Also snapshot `is_fork` here
+        // because we need it after the spawn (to gate `running_tasks`
+        // insertion) but `loop_opts` itself gets moved into the async
+        // block — can't be re-read outside.
+        let is_fork = loop_opts.is_fork;
+
         // All config-derived values have been snapshotted above; release the
         // reload barrier before spawning the async task.
         drop(_config_guard);
@@ -4270,7 +4384,12 @@ system_prompt = "You are a helpful assistant."
             // session — and the compactor ended up inspecting an empty
             // one and returning "0 messages, threshold 30" while the
             // real session was 57 messages deep and overflowing.
-            if needs_compact {
+            // Fork turns must not trigger auto-compaction. Compaction mutates
+            // the canonical session on disk — so a dream or auto_memorize fork
+            // could compact the user's real conversation, breaking the
+            // ephemeral-fork guarantee. Main turns are unaffected: they hit
+            // the same check and compact as before.
+            if needs_compact && !loop_opts.is_fork {
                 info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
                 match kernel_clone
                     .compact_agent_session_with_id(agent_id, Some(session.id))
@@ -4326,8 +4445,18 @@ system_prompt = "You are a helpful assistant."
                     let _ = phase_tx.try_send(event);
                 });
 
-            // Set up mid-turn injection channel (#956)
-            let injection_rx = kernel_clone.setup_injection_channel(agent_id);
+            // Set up mid-turn injection channel (#956). Fork turns skip —
+            // inserting into `injection_senders[agent_id]` would overwrite
+            // the parent turn's channel, and external code trying to
+            // inject into the parent during the fork window would land on
+            // the fork's (about-to-be-dropped) sender instead. Forks are
+            // by design short synchronous derivative calls that don't
+            // need mid-turn injection themselves.
+            let injection_rx = if loop_opts.is_fork {
+                None
+            } else {
+                Some(kernel_clone.setup_injection_channel(agent_id))
+            };
 
             let start_time = std::time::Instant::now();
             // Snapshot config for the duration of the agent loop call
@@ -4367,43 +4496,63 @@ system_prompt = "You are a helpful assistant."
                 None, // content_blocks (streaming path uses text only for now)
                 kernel_clone.proactive_memory.get().cloned(),
                 kernel_clone.context_engine_for_agent(&manifest),
-                Some(&injection_rx),
+                injection_rx.as_deref(),
+                &loop_opts,
             )
             .await;
 
-            // Tear down injection channel after loop finishes
-            kernel_clone.teardown_injection_channel(agent_id);
+            // Tear down injection channel after loop finishes (skipped for
+            // forks since they never set one up — tearing down would
+            // remove the parent turn's entry).
+            if !loop_opts.is_fork {
+                kernel_clone.teardown_injection_channel(agent_id);
+            }
 
             let latency_ms = start_time.elapsed().as_millis() as u64;
 
             match result {
                 Ok(result) => {
-                    // Append new messages to canonical session for cross-channel memory.
-                    // Use run_agent_loop_streaming's own start index (post-trim) instead
-                    // of one captured here — the loop may trim session history and make
-                    // a locally-captured index stale (see #2067). Clamp defensively.
-                    let start = result.new_messages_start.min(session.messages.len());
-                    if start < session.messages.len() {
-                        let new_messages = session.messages[start..].to_vec();
-                        if let Err(e) = memory.append_canonical(
-                            agent_id,
-                            &new_messages,
-                            None,
-                            Some(effective_session_id),
-                        ) {
-                            warn!(agent_id = %agent_id, "Failed to update canonical session (streaming): {e}");
+                    // Fork turns must not leak into on-disk persistence. The
+                    // in-loop `save_session_async` is already gated via
+                    // `LoopOptions::is_fork`, but the kernel wraps agent_loop
+                    // with three more persistence side effects that were
+                    // running regardless: `append_canonical` (cross-channel
+                    // memory layer), JSONL session mirror in the agent's
+                    // workspace, and the daily memory log. Without this gate
+                    // a dream / auto_memorize fork's messages would re-enter
+                    // future prompt context via any of those surfaces, which
+                    // is exactly the "ephemeral" guarantee the fork API
+                    // documents that it provides. Metering / usage stays
+                    // unchanged below — forks do consume real tokens and
+                    // should count against the agent's budget.
+                    if !loop_opts.is_fork {
+                        // Append new messages to canonical session for cross-channel memory.
+                        // Use run_agent_loop_streaming's own start index (post-trim) instead
+                        // of one captured here — the loop may trim session history and make
+                        // a locally-captured index stale (see #2067). Clamp defensively.
+                        let start = result.new_messages_start.min(session.messages.len());
+                        if start < session.messages.len() {
+                            let new_messages = session.messages[start..].to_vec();
+                            if let Err(e) = memory.append_canonical(
+                                agent_id,
+                                &new_messages,
+                                None,
+                                Some(effective_session_id),
+                            ) {
+                                warn!(agent_id = %agent_id, "Failed to update canonical session (streaming): {e}");
+                            }
                         }
-                    }
 
-                    // Write JSONL session mirror to workspace
-                    if let Some(ref workspace) = manifest.workspace {
-                        if let Err(e) =
-                            memory.write_jsonl_mirror(&session, &workspace.join("sessions"))
-                        {
-                            warn!("Failed to write JSONL session mirror (streaming): {e}");
+                        // Write JSONL session mirror to workspace
+                        if let Some(ref workspace) = manifest.workspace {
+                            if let Err(e) =
+                                memory.write_jsonl_mirror(&session, &workspace.join("sessions"))
+                            {
+                                warn!("Failed to write JSONL session mirror (streaming): {e}");
+                            }
+                            // Append daily memory log (best-effort)
+                            append_daily_memory_log(workspace, &result.response);
                         }
-                        // Append daily memory log (best-effort)
-                        append_daily_memory_log(workspace, &result.response);
                     }
 
                     kernel_clone
@@ -4452,18 +4601,25 @@ system_prompt = "You are a helpful assistant."
                         let _ = kernel_clone.metering.record(&usage_record);
                     }
 
-                    // Record experiment metrics if running an experiment (kernel has cost info)
-                    if let Some(ref ctx) = result.experiment_context {
-                        let has_content = !result.response.trim().is_empty();
-                        let no_tool_errors = result.iterations > 0;
-                        let success = has_content && no_tool_errors;
-                        let _ = kernel_clone.record_experiment_request(
-                            &ctx.experiment_id.to_string(),
-                            &ctx.variant_id.to_string(),
-                            latency_ms,
-                            cost,
-                            success,
-                        );
+                    // Record experiment metrics if running an experiment.
+                    // Fork turns skip — a dream / auto_memorize fork is not
+                    // a user-initiated request and shouldn't distort the
+                    // experiment arm's latency / success / cost averages.
+                    // Token / cost accounting above still runs for forks
+                    // because those tokens were really billed.
+                    if !loop_opts.is_fork {
+                        if let Some(ref ctx) = result.experiment_context {
+                            let has_content = !result.response.trim().is_empty();
+                            let no_tool_errors = result.iterations > 0;
+                            let success = has_content && no_tool_errors;
+                            let _ = kernel_clone.record_experiment_request(
+                                &ctx.experiment_id.to_string(),
+                                &ctx.variant_id.to_string(),
+                                latency_ms,
+                                cost,
+                                success,
+                            );
+                        }
                     }
 
                     let _ = kernel_clone
@@ -4472,7 +4628,10 @@ system_prompt = "You are a helpful assistant."
 
                     // Post-loop compaction check: if session now exceeds token threshold,
                     // trigger compaction in background for the next call.
-                    {
+                    // Forks skip — compaction rewrites the canonical session
+                    // on disk, which would leak fork context into the user's
+                    // real conversation history.
+                    if !loop_opts.is_fork {
                         use librefang_runtime::compactor::{
                             estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
                         };
@@ -4525,8 +4684,16 @@ system_prompt = "You are a helpful assistant."
             }
         });
 
-        // Store abort handle for cancellation support
-        self.running_tasks.insert(agent_id, handle.abort_handle());
+        // Store abort handle for cancellation support. Fork turns skip —
+        // registering the fork's handle under `agent_id` would overwrite
+        // the parent turn's handle, so a caller invoking
+        // `stop_agent_run(agent_id)` during the fork window would abort
+        // the fork instead of the parent. Forks are driven by their own
+        // caller (auto_memorize, dream) which has its own join handle
+        // and doesn't need external cancellation via `agent_id` key.
+        if !is_fork {
+            self.running_tasks.insert(agent_id, handle.abort_handle());
+        }
 
         Ok((rx, handle))
     }
@@ -5628,6 +5795,7 @@ system_prompt = "You are a helpful assistant."
             proactive_memory,
             self.context_engine_for_agent(&manifest),
             Some(&injection_rx),
+            &librefang_runtime::agent_loop::LoopOptions::default(),
         )
         .await;
 
@@ -7485,6 +7653,18 @@ system_prompt = "You are a helpful assistant."
                     Arc::downgrade(self),
                 )),
             );
+            // Install the kernel-handle weak ref on the proactive-memory
+            // extractor so its `extract_memories_with_agent_id` path can
+            // route through `run_forked_agent_oneshot` for cache alignment
+            // with the parent agent turn. Rule-based extractor (no LLM)
+            // doesn't need this; it short-circuits before touching the
+            // kernel. Safe to no-op when the extractor wasn't configured
+            // (OnceLock::get returns None).
+            if let Some(extractor) = self.proactive_memory_extractor.get() {
+                let weak: std::sync::Weak<dyn librefang_runtime::kernel_handle::KernelHandle> =
+                    Arc::downgrade(self) as _;
+                extractor.install_kernel_handle(weak);
+            }
         }
     }
 
@@ -8686,7 +8866,7 @@ system_prompt = "You are a helpful assistant."
                                 // get their own isolated session (channel="cron").
                                 let cron_sender = SenderContext {
                                     channel: "cron".to_string(),
-                                    user_id: String::new(),
+                                    user_id: job.peer_id.clone().unwrap_or_default(),
                                     display_name: "cron".to_string(),
                                     is_group: false,
                                     was_mentioned: false,
@@ -11715,6 +11895,43 @@ impl KernelHandle for LibreFangKernel {
         }
     }
 
+    async fn run_forked_agent_oneshot(
+        &self,
+        agent_id: &str,
+        prompt: &str,
+        allowed_tools: Option<Vec<String>>,
+    ) -> Result<String, String> {
+        let id = agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("bad agent_id: {e}"))?;
+        // Need `Arc<Self>` to call `run_forked_agent_streaming` (the method
+        // is defined on `Arc<LibreFangKernel>`). Upgrade via `self_handle`;
+        // if the weak ref is stale the daemon is shutting down and the
+        // extractor should abort.
+        let kernel = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| "kernel Arc unavailable (shutting down?)".to_string())?;
+        let (mut rx, handle) = kernel
+            .run_forked_agent_streaming(id, prompt, allowed_tools)
+            .map_err(|e| format!("fork start failed: {e}"))?;
+        // Drain the stream — we don't need streaming semantics for a
+        // one-shot completion, just the final text. The spawned task
+        // keeps running until `ContentComplete` (or error/abort) anyway.
+        while (rx.recv().await).is_some() {
+            // Events consumed; the final text is on the join handle's
+            // `AgentLoopResult.response`. Discarding these events is
+            // fine because `ContentComplete` is already signalled to
+            // the join handle by the time we observe channel close.
+        }
+        let result = handle
+            .await
+            .map_err(|e| format!("fork join failed: {e}"))?
+            .map_err(|e| format!("fork loop failed: {e}"))?;
+        Ok(result.response)
+    }
+
     fn kill_agent(&self, agent_id: &str) -> Result<(), String> {
         let id = self.resolve_agent_identifier(agent_id)?;
         LibreFangKernel::kill_agent(self, id).map_err(|e| format!("Kill failed: {e}"))
@@ -12035,6 +12252,7 @@ impl KernelHandle for LibreFangKernel {
             schedule,
             action,
             delivery,
+            peer_id: None,
             enabled: true,
             created_at: chrono::Utc::now(),
             next_run: None,
