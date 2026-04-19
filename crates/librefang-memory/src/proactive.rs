@@ -1667,8 +1667,18 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         let agent_id = Self::parse_agent_id(user_id)?;
 
+        let categories = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .extract_categories
+            .clone();
+
         // Step 1: Extract structured memories
-        let extraction = self.extractor.extract_memories(messages).await?;
+        let extraction = self
+            .extractor
+            .extract_memories(messages, &categories)
+            .await?;
         if !extraction.has_content {
             // Fallback: store raw message content as session memory
             let content = messages
@@ -2137,7 +2147,11 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         // for kernels running without an LLM extractor.
         let extraction_result = self
             .extractor
-            .extract_memories_with_agent_id(conversation, &agent_id.to_string())
+            .extract_memories_with_agent_id(
+                conversation,
+                &agent_id.to_string(),
+                &cfg.extract_categories,
+            )
             .await?;
 
         // Apply decision flow for each extracted memory
@@ -2360,12 +2374,9 @@ mod tests {
             .unwrap();
 
         assert!(result.has_content);
-        // DefaultMemoryExtractor should extract "I prefer" as user_preference
+        // DefaultMemoryExtractor should extract "I prefer" as preference
         assert!(!result.memories.is_empty());
-        assert_eq!(
-            result.memories[0].category,
-            Some("user_preference".to_string())
-        );
+        assert_eq!(result.memories[0].category, Some("preference".to_string()));
     }
 
     #[tokio::test]
