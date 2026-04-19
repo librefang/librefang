@@ -7,6 +7,7 @@ import {
   useCreateWorkflow,
   useUpdateWorkflow,
   useInstantiateTemplate,
+  useSaveWorkflowAsTemplate,
 } from "./workflows";
 import { workflowKeys } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
@@ -60,7 +61,7 @@ describe.each([
     name: "useDeleteWorkflow",
     hook: useDeleteWorkflow,
     arg: "wf-1",
-    expectedKeys: [workflowKeys.lists()],
+    expectedKeys: [workflowKeys.lists(), workflowKeys.detail("wf-1"), workflowKeys.runs("wf-1")],
   },
   {
     name: "useCreateWorkflow",
@@ -80,8 +81,14 @@ describe.each([
     arg: { id: "tmpl-1", params: {} },
     expectedKeys: [workflowKeys.lists()],
   },
+  {
+    name: "useSaveWorkflowAsTemplate",
+    hook: useSaveWorkflowAsTemplate,
+    arg: "wf-1",
+    expectedKeys: [workflowKeys.templates()],
+  },
 ])("$name", ({ hook, arg, expectedKeys }) => {
-  it("invalidates the expected workflow query keys", async () => {
+  it("invalidates the expected workflow keys", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 

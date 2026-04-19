@@ -47,7 +47,10 @@ export function useDeleteWorkflow() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteWorkflow,
-    onSuccess: () => invalidateWorkflowLists(qc),
+    onSuccess: (_data, workflowId) => Promise.all([
+      invalidateWorkflowLists(qc),
+      invalidateWorkflowRecord(qc, workflowId),
+    ]),
   });
 }
 
@@ -86,7 +89,9 @@ export function useInstantiateTemplate() {
 }
 
 export function useSaveWorkflowAsTemplate() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: saveWorkflowAsTemplate,
+    onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.templates() }),
   });
 }
