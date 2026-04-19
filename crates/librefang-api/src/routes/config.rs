@@ -197,7 +197,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse
 # Run `librefang init --upgrade` for full annotated config.
 
 log_level = "info"
-api_listen = "0.0.0.0:4545"
+api_listen = "127.0.0.1:4545"
 
 [default_model]
 provider = "{provider}"
@@ -775,6 +775,16 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "confidence_decay_rate": config.proactive_memory.confidence_decay_rate,
         "duplicate_threshold": config.proactive_memory.duplicate_threshold,
         "max_memories_per_agent": config.proactive_memory.max_memories_per_agent,
+    });
+
+    // ── Auto-Dream (background memory consolidation) ──
+    set!("auto_dream", {
+        "enabled": config.auto_dream.enabled,
+        "min_hours": config.auto_dream.min_hours,
+        "min_sessions": config.auto_dream.min_sessions,
+        "check_interval_secs": config.auto_dream.check_interval_secs,
+        "timeout_secs": config.auto_dream.timeout_secs,
+        "lock_dir": config.auto_dream.lock_dir,
     });
 
     // ── Network (redact shared_secret) ──
@@ -1650,6 +1660,14 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "confidence_decay_rate": { "type": "number", "min": 0, "max": 1, "step": 0.001 },
         "duplicate_threshold": { "type": "number", "min": 0, "max": 1, "step": 0.01 },
         "max_memories_per_agent": { "type": "number", "min": 0, "max": 100000, "step": 100 }
+    }});
+    sec!("auto_dream", { "fields": {
+        "enabled": "boolean",
+        "min_hours": { "type": "number", "min": 0, "max": 168, "step": 0.5 },
+        "min_sessions": { "type": "number", "min": 0, "max": 1000, "step": 1 },
+        "check_interval_secs": { "type": "number", "min": 60, "max": 86400, "step": 60 },
+        "timeout_secs": { "type": "number", "min": 30, "max": 3600, "step": 30 },
+        "lock_dir": "string"
     }});
     sec!("web", { "fields": {
         "search_provider": { "type": "select", "options": ["brave", "tavily", "perplexity", "duck_duck_go", "auto"] },

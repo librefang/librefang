@@ -135,7 +135,7 @@ jobs:
             echo ""
             echo "- [Documentation](https://librefang.ai)"
             echo "- [Discord](https://discord.gg/DzTYqAZZmc)"
-            echo "- [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)"
+            echo "- [Contributing Guide](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md)"
             echo ""
             PREV=$(git tag --sort=-creatordate | grep -E '^v[0-9]' | grep -v "$TAG" | head -1)
             if [ -n "$PREV" ]; then

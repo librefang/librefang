@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">网站</a> &bull;
   <a href="https://docs.librefang.ai">文档</a> &bull;
-  <a href="../docs/CONTRIBUTING.md">贡献</a> &bull;
+  <a href="../CONTRIBUTING.md">贡献</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -37,10 +37,10 @@ LibreFang 是一个 **Agent 操作系统** — 用 Rust 从头构建的完整自
 
 传统智能体框架等待你的输入。LibreFang 运行**为你工作的智能体** — 按计划全天候运行，监控目标、生成线索、管理社交媒体，并向控制台报告。
 
-> LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区分支，采用开放治理和合并优先的 PR 政策。详见 [GOVERNANCE.md](../docs/GOVERNANCE.md)。
+> LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区分支，采用开放治理和合并优先的 PR 政策。详见 [GOVERNANCE.md](../GOVERNANCE.md)。
 
 <p align="center">
-  <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang 控制台" />
+  <img src="../public/assets/dashboard.png" width="800" alt="LibreFang 控制台" />
 </p>
 
 ## 快速开始
@@ -116,7 +116,7 @@ librefang hand status researcher     # 查看进度
 librefang hand list                  # 查看所有 Hands
 ```
 
-自定义 Hand：定义 `HAND.toml` + 系统提示词 + `SKILL.md`。[指南](../docs/skill-development.md)
+自定义 Hand：定义 `HAND.toml` + 系统提示词 + `SKILL.md`。[指南](https://docs.librefang.ai/agent/skills)
 
 ## 架构
 
@@ -141,13 +141,13 @@ xtask                 构建自动化
 
 ## 核心特性
 
-**40 个渠道适配器** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、飞书、LINE、Mastodon、Bluesky 等。[完整列表](../docs/channel-adapters.md)
+**40 个渠道适配器** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、飞书、LINE、Mastodon、Bluesky 等。[完整列表](https://docs.librefang.ai/integrations/channels)
 
-**27 个 LLM 服务商** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 等。智能路由、自动回退、成本追踪。[详情](../docs/providers.md)
+**27 个 LLM 服务商** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 等。智能路由、自动回退、成本追踪。[详情](https://docs.librefang.ai/configuration/providers)
 
-**16 层安全体系** — WASM 沙箱、Merkle 审计链、污点追踪、Ed25519 签名、SSRF 防护、密钥清零等。[详情](../docs/comparison.md#16-security-systems--defense-in-depth)
+**16 层安全体系** — WASM 沙箱、Merkle 审计链、污点追踪、Ed25519 签名、SSRF 防护、密钥清零等。[详情](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth)
 
-**OpenAI 兼容 API** — 即插即用的 `/v1/chat/completions` 端点。140+ REST/WS/SSE 端点。[API 参考](../docs/api-reference.md)
+**OpenAI 兼容 API** — 即插即用的 `/v1/chat/completions` 端点。140+ REST/WS/SSE 端点。[API 参考](https://docs.librefang.ai/integrations/api)
 
 **客户端 SDK** — 完整 REST 客户端，支持流式传输。
 
@@ -185,9 +185,9 @@ client := librefang.New("http://localhost:4545")
 agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
 ```
 
-**MCP 支持** — 内置 MCP 客户端和服务器。连接 IDE、扩展自定义工具、组合智能体管道。[详情](../docs/providers.md)
+**MCP 支持** — 内置 MCP 客户端和服务器。连接 IDE、扩展自定义工具、组合智能体管道。[详情](https://docs.librefang.ai/integrations/mcp-a2a)
 
-**A2A 协议** — 支持 Google Agent-to-Agent 协议。跨智能体系统发现、通信和任务委派。[详情](../docs/api-reference.md)
+**A2A 协议** — 支持 Google Agent-to-Agent 协议。跨智能体系统发现、通信和任务委派。[详情](https://docs.librefang.ai/integrations/mcp-a2a)
 
 **桌面应用** — Tauri 2.0 原生应用，支持系统托盘、通知和全局快捷键。
 
@@ -204,28 +204,28 @@ cargo fmt --all -- --check                               # 格式化检查
 
 ## 对比
 
-查看 [docs/comparison.md](../docs/comparison.md) 了解 LibreFang 与 OpenClaw、ZeroClaw、CrewAI、AutoGen、LangGraph 的基准测试和功能对比。
+查看 [对比](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth) 了解 LibreFang 与 OpenClaw、ZeroClaw、CrewAI、AutoGen、LangGraph 的基准测试和功能对比。
 
 ## 链接
 
-- [文档](https://docs.librefang.ai) &bull; [API 参考](../docs/api-reference.md) &bull; [入门指南](../docs/getting-started.md) &bull; [故障排除](../docs/troubleshooting.md)
-- [贡献](../docs/CONTRIBUTING.md) &bull; [治理](../docs/GOVERNANCE.md) &bull; [安全](../docs/SECURITY.md)
+- [文档](https://docs.librefang.ai) &bull; [API 参考](https://docs.librefang.ai/integrations/api) &bull; [入门指南](https://docs.librefang.ai/getting-started) &bull; [故障排除](https://docs.librefang.ai/operations/troubleshooting)
+- [贡献](../CONTRIBUTING.md) &bull; [治理](../GOVERNANCE.md) &bull; [安全](../SECURITY.md)
 - 讨论: [问答](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [用例展示](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [功能投票](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [公告](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## 贡献者
 
 <a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="../public/assets/contributors.svg" alt="Contributors" />
+  <img src="../web/public/assets/contributors.svg" alt="Contributors" />
 </a>
 
 <p align="center">
   我们欢迎各种形式的贡献 — 代码、文档、翻译、Bug 报告。<br/>
-  查看 <a href="../docs/CONTRIBUTING.md">贡献指南</a>，从一个 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> 开始吧！
+  查看 <a href="../CONTRIBUTING.md">贡献指南</a>，从一个 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> 开始吧！
 </p>
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">
-    <img src="../public/assets/star-history.svg" alt="Star History" />
+    <img src="../web/public/assets/star-history.svg" alt="Star History" />
   </a>
 </p>
 

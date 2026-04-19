@@ -1,34 +1,42 @@
-//! LibreFang Extensions — one-click integration system.
+//! LibreFang Extensions — MCP server catalog, credential vault, OAuth, health.
 //!
 //! This crate provides:
-//! - **Integration Registry**: MCP server templates (GitHub, Slack, etc.)
+//! - **MCP Catalog**: read-only set of MCP server templates (GitHub, Slack, ...)
+//!   cached at `~/.librefang/mcp/catalog/*.toml` and refreshed by `registry_sync`.
 //! - **Credential Vault**: AES-256-GCM encrypted storage with OS keyring support
 //! - **OAuth2 PKCE**: Localhost callback flows for Google/GitHub/Microsoft/Slack
 //! - **Health Monitor**: Auto-reconnect with exponential backoff
-//! - **Installer**: One-click `librefang add <name>` flow
+//! - **Installer**: Pure transforms from a catalog entry to a new
+//!   `McpServerConfigEntry` that the kernel can wire up.
+//!
+//! Installed MCP servers no longer live in a separate `integrations.toml`;
+//! every configured server is an `[[mcp_servers]]` entry in
+//! `~/.librefang/config.toml`. An optional `template_id` field records the
+//! catalog entry it was installed from.
 
+pub mod catalog;
 pub mod credentials;
 pub mod dotenv;
 pub mod health;
 pub(crate) mod http_client;
 pub mod installer;
 pub mod oauth;
-pub mod registry;
 pub mod vault;
 
-use chrono::{DateTime, Utc};
+// Backwards-compatible module alias so downstream crates can still reach the
+// catalog via the old `registry` path during the rename. Prefer `catalog`.
+
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // ─── Error types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExtensionError {
-    #[error("Integration not found: {0}")]
+    #[error("MCP catalog entry not found: {0}")]
     NotFound(String),
-    #[error("Integration already installed: {0}")]
+    #[error("MCP server already configured: {0}")]
     AlreadyInstalled(String),
-    #[error("Integration not installed: {0}")]
+    #[error("MCP server not configured: {0}")]
     NotInstalled(String),
     #[error("Credential not found: {0}")]
     CredentialNotFound(String),
@@ -52,10 +60,10 @@ pub type ExtensionResult<T> = Result<T, ExtensionError>;
 
 // ─── Core types ──────────────────────────────────────────────────────────────
 
-/// Category of an integration.
+/// Category of an MCP catalog entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum IntegrationCategory {
+pub enum McpCategory {
     DevTools,
     Productivity,
     Communication,
@@ -64,7 +72,7 @@ pub enum IntegrationCategory {
     AI,
 }
 
-impl std::fmt::Display for IntegrationCategory {
+impl std::fmt::Display for McpCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DevTools => write!(f, "Dev Tools"),
@@ -78,9 +86,14 @@ impl std::fmt::Display for IntegrationCategory {
 }
 
 /// MCP transport template — how to launch the server.
+///
+/// Parallels [`librefang_types::config::McpTransportEntry`] but without the
+/// `HttpCompat` variant, which is a user-authored power-user transport and
+/// doesn't ship as a catalog template. The catalog entry's transport is
+/// converted into a `McpTransportEntry` when the user installs it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum McpTransportTemplate {
+pub enum McpCatalogTransport {
     Stdio {
         command: String,
         #[serde(default)]
@@ -94,9 +107,9 @@ pub enum McpTransportTemplate {
     },
 }
 
-/// An environment variable required by an integration.
+/// An environment variable required by an MCP catalog entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RequiredEnvVar {
+pub struct McpCatalogRequiredEnv {
     /// Env var name (e.g., "GITHUB_PERSONAL_ACCESS_TOKEN").
     pub name: String,
     /// Human-readable label (e.g., "Personal Access Token").
@@ -128,7 +141,7 @@ pub struct OAuthTemplate {
     pub token_url: String,
 }
 
-/// Health check configuration for an integration.
+/// Health check configuration for an MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HealthCheckConfig {
@@ -147,9 +160,12 @@ impl Default for HealthCheckConfig {
     }
 }
 
-/// A bundled integration template — describes how to set up an MCP server.
+/// A bundled MCP catalog entry — describes how to configure an MCP server.
+///
+/// Catalog entries live under `~/.librefang/mcp/catalog/*.toml` and are
+/// refreshed from the upstream registry by `librefang-runtime::registry_sync`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IntegrationTemplate {
+pub struct McpCatalogEntry {
     /// Unique identifier (e.g., "github").
     pub id: String,
     /// Human-readable name (e.g., "GitHub").
@@ -157,15 +173,15 @@ pub struct IntegrationTemplate {
     /// Short description.
     pub description: String,
     /// Category for browsing.
-    pub category: IntegrationCategory,
+    pub category: McpCategory,
     /// Icon (emoji).
     #[serde(default)]
     pub icon: String,
     /// MCP transport configuration.
-    pub transport: McpTransportTemplate,
+    pub transport: McpCatalogTransport,
     /// Required credentials.
     #[serde(default)]
-    pub required_env: Vec<RequiredEnvVar>,
+    pub required_env: Vec<McpCatalogRequiredEnv>,
     /// OAuth configuration (None = API key only).
     #[serde(default)]
     pub oauth: Option<OAuthTemplate>,
@@ -180,15 +196,15 @@ pub struct IntegrationTemplate {
     pub health_check: HealthCheckConfig,
 }
 
-/// Status of an installed integration.
+/// Status of an MCP server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum IntegrationStatus {
+pub enum McpStatus {
     /// Configured and MCP server running.
     Ready,
-    /// Installed but credentials missing.
+    /// Configured but credentials missing.
     Setup,
-    /// Not installed.
+    /// Not yet configured (catalog entry only).
     Available,
     /// MCP server errored.
     Error(String),
@@ -196,7 +212,7 @@ pub enum IntegrationStatus {
     Disabled,
 }
 
-impl std::fmt::Display for IntegrationStatus {
+impl std::fmt::Display for McpStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => write!(f, "Ready"),
@@ -208,66 +224,29 @@ impl std::fmt::Display for IntegrationStatus {
     }
 }
 
-/// An installed integration record (persisted in integrations.toml).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstalledIntegration {
-    /// Template ID.
-    pub id: String,
-    /// When installed.
-    pub installed_at: DateTime<Utc>,
-    /// Whether enabled.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// OAuth provider if using OAuth (e.g., "google").
-    #[serde(default)]
-    pub oauth_provider: Option<String>,
-    /// Custom configuration overrides.
-    #[serde(default)]
-    pub config: HashMap<String, String>,
-}
-
-/// Top-level structure for `~/.librefang/integrations.toml`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct IntegrationsFile {
-    #[serde(default)]
-    pub installed: Vec<InstalledIntegration>,
-}
-
-/// Combined view of an integration (template + install state).
-#[derive(Debug, Clone, Serialize)]
-pub struct IntegrationInfo {
-    pub template: IntegrationTemplate,
-    pub status: IntegrationStatus,
-    pub installed: Option<InstalledIntegration>,
-    pub tool_count: usize,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn category_display() {
-        assert_eq!(IntegrationCategory::DevTools.to_string(), "Dev Tools");
-        assert_eq!(
-            IntegrationCategory::Productivity.to_string(),
-            "Productivity"
-        );
-        assert_eq!(IntegrationCategory::AI.to_string(), "AI & Search");
+        assert_eq!(McpCategory::DevTools.to_string(), "Dev Tools");
+        assert_eq!(McpCategory::Productivity.to_string(), "Productivity");
+        assert_eq!(McpCategory::AI.to_string(), "AI & Search");
     }
 
     #[test]
     fn status_display() {
-        assert_eq!(IntegrationStatus::Ready.to_string(), "Ready");
-        assert_eq!(IntegrationStatus::Setup.to_string(), "Setup");
+        assert_eq!(McpStatus::Ready.to_string(), "Ready");
+        assert_eq!(McpStatus::Setup.to_string(), "Setup");
         assert_eq!(
-            IntegrationStatus::Error("timeout".to_string()).to_string(),
+            McpStatus::Error("timeout".to_string()).to_string(),
             "Error: timeout"
         );
     }
 
     #[test]
-    fn integration_template_roundtrip() {
+    fn catalog_entry_roundtrip() {
         let toml_str = r#"
 id = "test"
 name = "Test Integration"
@@ -293,33 +272,12 @@ get_url = "https://test.com/keys"
 interval_secs = 30
 unhealthy_threshold = 5
 "#;
-        let template: IntegrationTemplate = toml::from_str(toml_str).unwrap();
-        assert_eq!(template.id, "test");
-        assert_eq!(template.category, IntegrationCategory::DevTools);
-        assert_eq!(template.required_env.len(), 1);
-        assert!(template.required_env[0].is_secret);
-        assert_eq!(template.health_check.interval_secs, 30);
-    }
-
-    #[test]
-    fn installed_integration_roundtrip() {
-        let toml_str = r#"
-[[installed]]
-id = "github"
-installed_at = "2026-02-23T10:00:00Z"
-enabled = true
-
-[[installed]]
-id = "google-calendar"
-installed_at = "2026-02-23T10:05:00Z"
-enabled = true
-oauth_provider = "google"
-"#;
-        let file: IntegrationsFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(file.installed.len(), 2);
-        assert_eq!(file.installed[0].id, "github");
-        assert!(file.installed[0].enabled);
-        assert_eq!(file.installed[1].oauth_provider.as_deref(), Some("google"));
+        let entry: McpCatalogEntry = toml::from_str(toml_str).unwrap();
+        assert_eq!(entry.id, "test");
+        assert_eq!(entry.category, McpCategory::DevTools);
+        assert_eq!(entry.required_env.len(), 1);
+        assert!(entry.required_env[0].is_secret);
+        assert_eq!(entry.health_check.interval_secs, 30);
     }
 
     #[test]

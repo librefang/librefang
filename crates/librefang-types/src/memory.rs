@@ -335,6 +335,22 @@ pub trait MemoryExtractor: Send + Sync {
         messages: &[serde_json::Value],
     ) -> crate::error::LibreFangResult<ExtractionResult>;
 
+    /// Same as `extract_memories` but also passes the invoking agent's
+    /// id, so implementors can route their LLM call through a forked
+    /// agent turn (shared prompt cache with the parent) instead of a
+    /// standalone provider request. Callers that know the agent id
+    /// (notably auto_memorize, which parses it out of `user_id`) should
+    /// prefer this method. Default delegates to `extract_memories`,
+    /// ignoring `agent_id` — appropriate for the rule-based extractor
+    /// which never touches an LLM.
+    async fn extract_memories_with_agent_id(
+        &self,
+        messages: &[serde_json::Value],
+        _agent_id: &str,
+    ) -> crate::error::LibreFangResult<ExtractionResult> {
+        self.extract_memories(messages).await
+    }
+
     /// Decide what to do with a new memory given existing similar memories.
     ///
     /// This is the core mem0 decision flow:

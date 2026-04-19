@@ -7,15 +7,18 @@ import {
   updateTrigger,
   deleteTrigger,
 } from "../http/client";
-import { cronKeys, scheduleKeys, triggerKeys } from "../queries/keys";
+import { cronKeys, scheduleKeys, triggerKeys, workflowKeys } from "../queries/keys";
 
 // Schedules surface in two views: SchedulerPage (via useSchedules →
 // scheduleKeys) and HandsPage's cron widget (via useCronJobs → cronKeys).
 // Every write MUST invalidate both slices so acting from one page never
 // leaves the other showing stale data.
 function invalidateScheduleCaches(qc: ReturnType<typeof useQueryClient>) {
-  qc.invalidateQueries({ queryKey: scheduleKeys.all });
-  qc.invalidateQueries({ queryKey: cronKeys.all });
+  return Promise.all([
+    qc.invalidateQueries({ queryKey: scheduleKeys.all }),
+    qc.invalidateQueries({ queryKey: cronKeys.all }),
+    qc.invalidateQueries({ queryKey: workflowKeys.lists() }),
+  ]);
 }
 
 export function useCreateSchedule() {

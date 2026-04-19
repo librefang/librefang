@@ -354,6 +354,16 @@ const zhNavigation: Array<NavGroup> = [
 		],
 	},
 	{
+		title: "安全",
+		links: [
+			{ title: "沙盒与执行", href: withPrefix("/zh/security/sandboxing") },
+			{ title: "完整性与凭据", href: withPrefix("/zh/security/integrity") },
+			{ title: "网络与 API 安全", href: withPrefix("/zh/security/network-api") },
+			{ title: "运维与防护", href: withPrefix("/zh/security/operations") },
+			{ title: "审批与 TOTP", href: withPrefix("/zh/security/approvals") },
+		],
+	},
+	{
 		title: "智能体",
 		links: [
 			{ title: "Agent 模板", href: withPrefix("/zh/agent/templates") },
@@ -434,6 +444,16 @@ export const enNavigation: Array<NavGroup> = [
 		links: [
 			{ title: "Architecture", href: withPrefix("/architecture") },
 			{ title: "Security", href: withPrefix("/architecture/security") },
+		],
+	},
+	{
+		title: "Security",
+		links: [
+			{ title: "Sandboxing", href: withPrefix("/security/sandboxing") },
+			{ title: "Integrity & Secrets", href: withPrefix("/security/integrity") },
+			{ title: "Network & API", href: withPrefix("/security/network-api") },
+			{ title: "Operations", href: withPrefix("/security/operations") },
+			{ title: "Approvals & TOTP", href: withPrefix("/security/approvals") },
 		],
 	},
 	{

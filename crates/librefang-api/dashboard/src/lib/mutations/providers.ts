@@ -6,7 +6,7 @@ import {
   setProviderUrl,
   setDefaultProvider,
 } from "../../api";
-import { providerKeys } from "../queries/keys";
+import { providerKeys, runtimeKeys } from "../queries/keys";
 
 export function useTestProvider() {
   return useMutation({
@@ -60,6 +60,7 @@ export function useSetDefaultProvider() {
       setDefaultProvider(id, model),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: providerKeys.all });
+      queryClient.invalidateQueries({ queryKey: runtimeKeys.status() });
     },
   });
 }

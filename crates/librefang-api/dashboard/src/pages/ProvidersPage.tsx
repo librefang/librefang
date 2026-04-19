@@ -1144,7 +1144,6 @@ export function ProvidersPage() {
   const handleSetDefault = async (id: string, model?: string) => {
     try {
       await defaultProviderMutation.mutateAsync({ id, model });
-      await statusQuery.refetch();
       addToast(t("providers.default_set"), "success");
     } catch (e: any) {
       addToast(e?.message || t("common.error"), "error");

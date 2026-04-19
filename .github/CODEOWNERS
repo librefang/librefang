@@ -21,7 +21,7 @@ crates/librefang-api/ @librefang/core
 # ── Security-sensitive ───────────────────────────────────────────────
 crates/librefang-wire/ @librefang/core
 crates/librefang-extensions/ @librefang/core
-docs/SECURITY.md @librefang/core
+SECURITY.md @librefang/core
 
 # ── Desktop & CLI ────────────────────────────────────────────────────
 crates/librefang-desktop/ @librefang/core
@@ -41,7 +41,7 @@ agents/ @librefang/community
 examples/ @librefang/community
 docs/ @librefang/community
 i18n/ @librefang/community
-docs/CONTRIBUTING.md @librefang/community
+CONTRIBUTING.md @librefang/community
 README.md @librefang/community
 
 # ── DevOps (CI, scripts, release, build tooling) ─────────────────────
@@ -54,10 +54,10 @@ Cargo.lock @librefang/devops
 Cross.toml @librefang/devops
 rust-toolchain.toml @librefang/devops
 CHANGELOG.md @librefang/devops
-docs/MIGRATION.md @librefang/integrations
+docs/src/app/integrations/migration/page.mdx @librefang/integrations
 
 # ── Governance (owner only) ──────────────────────────────────────────
-docs/GOVERNANCE.md @houko
-docs/MAINTAINERS.md @houko
-docs/CODE_OF_CONDUCT.md @houko
+GOVERNANCE.md @houko
+MAINTAINERS.md @houko
+CODE_OF_CONDUCT.md @houko
 LICENSE @houko

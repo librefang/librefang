@@ -557,9 +557,18 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
               ));
-              // Don't cleanup immediately — the agent may recover and send a final
-              // response. Shorten the inactivity window to 30s so the user isn't
-              // blocked forever if the agent truly failed.
+              // Release the loading flag so the send button re-enables and the
+              // "streaming" badge drops — the user just saw an error and
+              // should be able to retry immediately (#2745). Keep the WS
+              // listener + recovery fallback timer alive in case the agent
+              // does send a late `response` event; those handlers operate on
+              // the same botMsg.id and will overwrite the error state if
+              // recovery actually happens.
+              finishTurnIfCurrent(sendAgentId, botMsg.id);
+              // Don't cleanup the listener immediately — the agent may recover
+              // and send a final response. Shorten the inactivity window to
+              // 30s so the WS doesn't stay half-open forever if the failure
+              // is terminal.
               if (fallbackTimer) clearTimeout(fallbackTimer);
               fallbackTimer = setTimeout(() => {
                 if (!responded) { cleanup(); sendViaHttp(); }

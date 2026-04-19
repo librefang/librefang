@@ -755,6 +755,20 @@ function CanvasPageInner() {
     setTimeout(() => setErrorMsg(null), 5000);
   }, []);
 
+  const toErrorMessage = useCallback((error: unknown, fallback?: string) => {
+    if (error instanceof Error && error.message) return error.message;
+    if (typeof error === "string" && error) return error;
+    return fallback ?? String(error);
+  }, []);
+
+  const selectCreatedWorkflow = useCallback((workflows: WorkflowItem[], created: unknown) => {
+    const createdId = typeof created === "object" && created !== null && typeof (created as { id?: unknown }).id === "string"
+      ? (created as { id: string }).id
+      : undefined;
+    return (createdId ? workflows.find(w => w.id === createdId) : undefined)
+      ?? [...workflows].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
+  }, []);
+
   // Recalculate group bounds to contain all child nodes (declared early, needed by autoLayout)
   const NODE_W = 200;
   const NODE_H = 80;
@@ -1089,11 +1103,15 @@ function CanvasPageInner() {
         // If editing an existing workflow, restore selectedWorkflow so save uses update logic
         if (workflowId) setSelectedWorkflow({ id: workflowId, name: name || "", description: description || "" } as WorkflowItem);
         sessionStorage.removeItem("workflowTemplate");
-        return true;
-      } catch { /* ignore */ }
+        return "loaded" as const;
+      } catch (e: unknown) {
+        sessionStorage.removeItem("workflowTemplate");
+        showError(toErrorMessage(e, t("canvas.template_load_error", { defaultValue: "Failed to load template" })));
+        return "failed" as const;
+      }
     }
-    return false;
-  }, [t, setNodes, setEdges]);
+    return "missing" as const;
+  }, [t, setNodes, setEdges, showError, toErrorMessage]);
 
   // Load agents, workflows, then load template or workflow from URL
   useEffect(() => {
@@ -1102,7 +1120,8 @@ function CanvasPageInner() {
         setAgents(a);
         setWorkflows(w);
         // 1. Try loading from sessionStorage template
-        if (loadTemplate(a)) return;
+        const templateState = loadTemplate(a);
+        if (templateState !== "missing") return;
         // 2. Try loading from URL ?wf= parameter
         if (routeWorkflowId) {
           try {
@@ -1125,7 +1144,9 @@ function CanvasPageInner() {
             setWorkflowDescription(detail.description || "");
             setSelectedWorkflow({ id: routeWorkflowId, name: detail.name || "", description: detail.description || "" } as WorkflowItem);
             return;
-          } catch { /* ignore */ }
+          } catch (e: unknown) {
+            showError(toErrorMessage(e, t("canvas.workflow_load_error", { defaultValue: "Failed to load workflow" })));
+          }
         }
         // 3. Fallback: restore from sessionStorage
         const savedNodes = sessionStorage.getItem("canvasNodes");
@@ -1133,8 +1154,8 @@ function CanvasPageInner() {
           try { setNodes(JSON.parse(savedNodes)); } catch { /* ignore */ }
         }
       })
-      .catch(() => { });
-  }, [routeTimestamp, routeWorkflowId, loadTemplate]);
+      .catch((e: unknown) => { showError(toErrorMessage(e, t("canvas.load_error", { defaultValue: "Failed to load data" }))); });
+  }, [routeTimestamp, routeWorkflowId, loadTemplate, toErrorMessage]);
 
   // Save nodes to sessionStorage
   useEffect(() => {
@@ -1367,27 +1388,31 @@ function CanvasPageInner() {
     const layout = { nodes, edges };
     try {
       if (selectedWorkflow?.id) {
-        await updateWorkflow(selectedWorkflow.id, { name: workflowName, description: workflowDescription, steps, layout });
+        const workflowId = selectedWorkflow.id;
+        await updateWorkflow(workflowId, { name: workflowName, description: workflowDescription, steps, layout });
+        const workflowsData = await listWorkflows();
+        setWorkflows(workflowsData);
+        navigate({ to: "/canvas", search: { t: undefined, wf: workflowId }, replace: true });
+        setErrorMsg(null);
+        showToast(t("canvas.saved"));
+        return;
       } else {
-        await createWorkflow({ name: workflowName, description: workflowDescription, steps, layout });
-      }
-      const workflowsData = await listWorkflows();
-      setWorkflows(workflowsData);
-      if (!selectedWorkflow?.id) {
-        const newest = [...workflowsData].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
-        if (newest) {
-          setSelectedWorkflow(newest);
-          navigate({ to: "/canvas", search: { t: undefined, wf: newest.id }, replace: true });
+        const created = await createWorkflow({ name: workflowName, description: workflowDescription, steps, layout });
+        const workflowsData = await listWorkflows();
+        setWorkflows(workflowsData);
+        const newWf = selectCreatedWorkflow(workflowsData, created);
+        if (newWf) {
+          setSelectedWorkflow(newWf);
+          navigate({ to: "/canvas", search: { t: undefined, wf: newWf.id }, replace: true });
         }
-      } else {
-        navigate({ to: "/canvas", search: { t: undefined, wf: selectedWorkflow.id }, replace: true });
+        setErrorMsg(null);
+        showToast(t("canvas.saved"));
+        return;
       }
-      setErrorMsg(null);
-      showToast(t("canvas.saved"));
-    } catch (e: any) {
-      showError(e?.message || String(e));
+    } catch (e: unknown) {
+      showError(toErrorMessage(e));
     }
-  }, [workflowName, workflowDescription, selectedWorkflow, nodes, edges, buildSteps, t, showError, showToast]);
+  }, [workflowName, workflowDescription, selectedWorkflow, nodes, edges, buildSteps, t, showError, showToast, selectCreatedWorkflow, toErrorMessage]);
 
   // Save as template
   const handleSaveAsTemplate = useCallback(async () => {
@@ -1398,10 +1423,10 @@ function CanvasPageInner() {
     try {
       await saveWorkflowAsTemplate(selectedWorkflow.id);
       showToast(t("canvas.saved_as_template"));
-    } catch (e: any) {
-      showError(e?.message || String(e));
+    } catch (e: unknown) {
+      showError(toErrorMessage(e));
     }
-  }, [selectedWorkflow, t, showError, showToast]);
+  }, [selectedWorkflow, t, showError, showToast, toErrorMessage]);
 
 
 
@@ -1436,17 +1461,17 @@ function CanvasPageInner() {
       const name = workflowName.trim() || t("workflows.untitled_workflow");
       const layout = { nodes, edges };
       try {
-        await createWorkflow({ name, description: workflowDescription, steps, layout });
+        const created = await createWorkflow({ name, description: workflowDescription, steps, layout });
         const updatedList = await listWorkflows();
         setWorkflows(updatedList);
-        const newest = [...updatedList].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
-        if (newest) {
-          workflowId = newest.id;
-          setSelectedWorkflow(newest);
+        const newWf = selectCreatedWorkflow(updatedList, created);
+        if (newWf) {
+          workflowId = newWf.id;
+          setSelectedWorkflow(newWf);
           setWorkflowName(name);
         }
-      } catch (e: any) {
-        showError(e?.message || String(e));
+      } catch (e: unknown) {
+        showError(toErrorMessage(e));
         return;
       }
     }
