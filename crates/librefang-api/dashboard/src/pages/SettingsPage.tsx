@@ -194,13 +194,15 @@ function TotpSection() {
   async function handleSetup(currentCode?: string) {
     setLoading(true);
     setError(null);
+    setSuccess(null);
     try {
       const data = await totpSetup(currentCode);
       setSetupData({ otpauth_uri: data.otpauth_uri, secret: data.secret, qr_code: data.qr_code, recovery_codes: data.recovery_codes });
       setShowResetPrompt(false);
       setResetCode("");
+      statusQuery.refetch();
     } catch (e: any) {
-      setError(e.message || "Setup failed");
+      setError(e.message || t("settings.totp_setup_failed", "Setup failed"));
     } finally {
       setLoading(false);
     }
@@ -220,14 +222,15 @@ function TotpSection() {
     if (!revokeCode) return;
     setLoading(true);
     setError(null);
+    setSuccess(null);
     try {
       await totpRevoke(revokeCode);
-      setSuccess("TOTP revoked. Set second_factor = \"none\" in config.");
+      setSuccess(t("settings.totp_revoked_success", "TOTP revoked. Set second_factor = \"none\" in config."));
       setShowRevokePrompt(false);
       setRevokeCode("");
       statusQuery.refetch();
     } catch (e: any) {
-      setError(e.message || "Revoke failed");
+      setError(e.message || t("settings.totp_revoke_failed", "Revoke failed"));
     } finally {
       setLoading(false);
     }
@@ -237,14 +240,15 @@ function TotpSection() {
     if (confirmCode.length !== 6) return;
     setLoading(true);
     setError(null);
+    setSuccess(null);
     try {
       await totpConfirm(confirmCode);
-      setSuccess("TOTP confirmed. Set second_factor = \"totp\" in config to enforce.");
+      setSuccess(t("settings.totp_confirmed_success", "TOTP confirmed. Set second_factor = \"totp\" in config to enforce."));
       setSetupData(null);
       setConfirmCode("");
       statusQuery.refetch();
     } catch (e: any) {
-      setError(e.message || "Invalid code");
+      setError(e.message || t("settings.totp_invalid_code", "Invalid code"));
     } finally {
       setLoading(false);
     }
