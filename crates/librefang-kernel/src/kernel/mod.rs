@@ -8694,6 +8694,13 @@ system_prompt = "You are a helpful assistant."
                                     account_id: None,
                                     ..Default::default()
                                 };
+                                // Cron jobs default to New session mode to prevent token accumulation.
+                                // None -> New (fresh session each run)
+                                // Some(Persistent) -> respect user override
+                                // Some(New) -> respect user override
+                                let effective_session_mode = job
+                                    .session_mode
+                                    .or(Some(librefang_types::agent::SessionMode::New));
                                 match tokio::time::timeout(
                                     timeout,
                                     kernel.send_message_full(
@@ -8702,7 +8709,7 @@ system_prompt = "You are a helpful assistant."
                                         Some(kh),
                                         None,
                                         Some(&cron_sender),
-                                        None,
+                                        effective_session_mode,
                                         None,
                                     ),
                                 )
@@ -12020,6 +12027,13 @@ impl KernelHandle for LibreFangKernel {
             // Issue #2338.
             CronDelivery::LastChannel
         };
+        let session_mode: Option<librefang_types::agent::SessionMode> =
+            if job_json["session_mode"].is_string() {
+                serde_json::from_value(job_json["session_mode"].clone())
+                    .map_err(|e| format!("Invalid session_mode: {e}"))?
+            } else {
+                None
+            };
         let one_shot = job_json["one_shot"].as_bool().unwrap_or(false);
 
         let aid = librefang_types::agent::AgentId(
@@ -12033,6 +12047,7 @@ impl KernelHandle for LibreFangKernel {
             schedule,
             action,
             delivery,
+            session_mode,
             enabled: true,
             created_at: chrono::Utc::now(),
             next_run: None,

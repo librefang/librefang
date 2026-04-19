@@ -3039,6 +3039,7 @@ fn default_max_cron_jobs() -> usize {
     500
 }
 
+
 /// Default tool execution timeout in seconds (120s).
 fn default_tool_timeout_secs() -> u64 {
     120

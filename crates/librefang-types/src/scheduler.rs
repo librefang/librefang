@@ -185,6 +185,13 @@ pub struct CronJob {
     pub action: CronAction,
     /// Where to deliver the result.
     pub delivery: CronDelivery,
+    /// Session mode for this cron job's agent invocations.
+    /// When `None` or unset, defaults to `New` so session history does not
+    /// accumulate across fires — the old behavior caused token exhaustion
+    /// after ~1.2M tokens (see #2647).
+    /// Set to `Some(Persistent)` to opt back into the pre-#2647 behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<crate::agent::SessionMode>,
     /// When the job was created.
     pub created_at: DateTime<Utc>,
     /// When the job last fired (if ever).
@@ -427,6 +434,7 @@ mod tests {
             created_at: Utc::now(),
             last_run: None,
             next_run: None,
+            session_mode: None,
         }
     }
 
