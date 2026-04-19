@@ -3,9 +3,8 @@ import {
   generateImage,
   synthesizeSpeech,
   submitVideo,
-  pollVideo,
   generateMusic,
-} from "../../api";
+} from "../http/client";
 
 export function useGenerateImage() {
   return useMutation({ mutationFn: generateImage });
@@ -17,10 +16,6 @@ export function useSynthesizeSpeech() {
 
 export function useSubmitVideo() {
   return useMutation({ mutationFn: submitVideo });
-}
-
-export function usePollVideo() {
-  return useMutation({ mutationFn: ({ taskId, provider }: { taskId: string; provider: string }) => pollVideo(taskId, provider) });
 }
 
 export function useGenerateMusic() {

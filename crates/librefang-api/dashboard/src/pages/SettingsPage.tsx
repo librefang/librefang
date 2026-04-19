@@ -1,6 +1,5 @@
 import { useTranslation } from "react-i18next";
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -9,13 +8,18 @@ import {
   Shield, CheckCircle, XCircle, Download, Play, Square,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
-import { totpSetup, totpConfirm, totpStatus, totpRevoke } from "../api";
 import { useAutoDreamStatus } from "../lib/queries/autoDream";
+import { useTotpStatus } from "../lib/queries/approvals";
 import {
   useTriggerAutoDream,
   useAbortAutoDream,
   useSetAutoDreamEnabled,
 } from "../lib/mutations/autoDream";
+import {
+  useTotpSetup,
+  useTotpConfirm,
+  useTotpRevoke,
+} from "../lib/mutations/approvals";
 import type { AutoDreamAgentStatus } from "../api";
 
 interface SegmentOption<T extends string> {
@@ -180,31 +184,28 @@ function TotpSection() {
   const [revokeCode, setRevokeCode] = useState("");
   const [showResetPrompt, setShowResetPrompt] = useState(false);
   const [showRevokePrompt, setShowRevokePrompt] = useState(false);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  const statusQuery = useQuery({
-    queryKey: ["totp", "status"],
-    queryFn: totpStatus,
-  });
+  const statusQuery = useTotpStatus();
+  const setupTotp = useTotpSetup();
+  const confirmTotp = useTotpConfirm();
+  const revokeTotp = useTotpRevoke();
 
   const status = statusQuery.data;
+  const loading =
+    setupTotp.isPending || confirmTotp.isPending || revokeTotp.isPending;
 
   async function handleSetup(currentCode?: string) {
-    setLoading(true);
     setError(null);
     setSuccess(null);
     try {
-      const data = await totpSetup(currentCode);
+      const data = await setupTotp.mutateAsync(currentCode);
       setSetupData({ otpauth_uri: data.otpauth_uri, secret: data.secret, qr_code: data.qr_code, recovery_codes: data.recovery_codes });
       setShowResetPrompt(false);
       setResetCode("");
-      statusQuery.refetch();
-    } catch (e: any) {
-      setError(e.message || t("settings.totp_setup_failed", "Setup failed"));
-    } finally {
-      setLoading(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t("settings.totp_setup_failed", "Setup failed"));
     }
   }
 
@@ -220,37 +221,31 @@ function TotpSection() {
 
   async function handleRevoke() {
     if (!revokeCode) return;
-    setLoading(true);
     setError(null);
     setSuccess(null);
     try {
-      await totpRevoke(revokeCode);
+      await revokeTotp.mutateAsync(revokeCode);
       setSuccess(t("settings.totp_revoked_success", "TOTP revoked. Set second_factor = \"none\" in config."));
       setShowRevokePrompt(false);
       setRevokeCode("");
-      statusQuery.refetch();
-    } catch (e: any) {
-      setError(e.message || t("settings.totp_revoke_failed", "Revoke failed"));
-    } finally {
-      setLoading(false);
+      setSetupData(null);
+      setConfirmCode("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t("settings.totp_revoke_failed", "Revoke failed"));
     }
   }
 
   async function handleConfirm() {
     if (confirmCode.length !== 6) return;
-    setLoading(true);
     setError(null);
     setSuccess(null);
     try {
-      await totpConfirm(confirmCode);
+      await confirmTotp.mutateAsync(confirmCode);
       setSuccess(t("settings.totp_confirmed_success", "TOTP confirmed. Set second_factor = \"totp\" in config to enforce."));
       setSetupData(null);
       setConfirmCode("");
-      statusQuery.refetch();
-    } catch (e: any) {
-      setError(e.message || t("settings.totp_invalid_code", "Invalid code"));
-    } finally {
-      setLoading(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t("settings.totp_invalid_code", "Invalid code"));
     }
   }
 

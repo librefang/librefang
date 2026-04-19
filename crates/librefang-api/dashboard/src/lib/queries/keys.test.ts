@@ -26,7 +26,7 @@ import {
   mcpKeys,
   pluginKeys,
   registryKeys,
-  metricsKeys,
+  telemetryKeys,
   terminalKeys,
   commsKeys,
   skillKeys,
@@ -258,6 +258,31 @@ describe("query key factories", () => {
     });
   });
 
+  describe("mediaKeys", () => {
+    it("videoTask is nested under videoTasks and media all", () => {
+      expect(mediaKeys.providers()).toEqual(["media", "providers"]);
+      expect(mediaKeys.videoTasks()).toEqual(["media", "videoTasks"]);
+      expect(mediaKeys.videoTask("task-1", "fal")).toEqual([
+        "media",
+        "videoTasks",
+        "task-1",
+        "fal",
+      ]);
+
+      const taskPrefix = mediaKeys.videoTasks();
+      expect(mediaKeys.videoTask("task-1", "fal").slice(0, taskPrefix.length)).toEqual(taskPrefix);
+      expect(mediaKeys.videoTasks().slice(0, mediaKeys.all.length)).toEqual(mediaKeys.all);
+    });
+  });
+
+  describe("telemetryKeys", () => {
+    it("metrics is prefixed with telemetryKeys.all", () => {
+      const prefix = telemetryKeys.all;
+      expect(telemetryKeys.metrics().slice(0, prefix.length)).toEqual(prefix);
+      expect(telemetryKeys.metrics()).toEqual(["telemetry", "metrics"]);
+    });
+  });
+
   describe("all factories exist", () => {
     const factories = [
       agentKeys,
@@ -292,7 +317,7 @@ describe("query key factories", () => {
       pluginKeys,
       configKeys,
       registryKeys,
-      metricsKeys,
+      telemetryKeys,
       terminalKeys,
     ];
 

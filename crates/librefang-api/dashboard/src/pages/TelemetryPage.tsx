@@ -1,9 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
 import { formatCompact } from "../lib/format";
 import { formatUptime } from "../lib/datetime";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { getMetricsText } from "../api";
+import { useTelemetryMetrics } from "../lib/queries/telemetry";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -13,8 +12,6 @@ import {
   Activity, BarChart3, Clock, Globe, TrendingUp, Zap, CheckCircle2,
   ExternalLink, Cpu, DollarSign, Bot, Wrench, MessageSquare, AlertTriangle, RotateCcw, Users,
 } from "lucide-react";
-
-const REFRESH_MS = 5000;
 
 // ── Parsed metric types ──────────────────────────────────────────────
 
@@ -154,17 +151,9 @@ function parseMetrics(text: string): ParsedMetrics {
 
 // ── Component ────────────────────────────────────────────────────────
 
-async function fetchMetrics(): Promise<string> {
-  return getMetricsText();
-}
-
 export function TelemetryPage() {
   const { t } = useTranslation();
-  const metricsQuery = useQuery({
-    queryKey: ["telemetry", "metrics"],
-    queryFn: fetchMetrics,
-    refetchInterval: REFRESH_MS,
-  });
+  const metricsQuery = useTelemetryMetrics();
 
   const parsed = useMemo(
     () =>

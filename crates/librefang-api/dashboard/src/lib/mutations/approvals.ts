@@ -46,8 +46,10 @@ export function useModifyAndRetryApproval() {
 }
 
 export function useTotpSetup() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: totpSetup,
+    onSuccess: () => qc.invalidateQueries({ queryKey: totpKeys.all }),
   });
 }
 

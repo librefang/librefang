@@ -1,14 +1,13 @@
-import { FormEvent, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  pollVideo,
   type MediaProvider,
   type MediaImageResult,
   type SpeechResult,
   type MediaMusicResult,
   type MediaVideoStatus,
-} from "../api";
-import { useMediaProviders } from "../lib/queries/media";
+} from "../lib/http/client";
+import { useMediaProviders, useVideoTask } from "../lib/queries/media";
 import {
   useGenerateImage,
   useSynthesizeSpeech,
@@ -458,35 +457,47 @@ function VideoPanel({
   const [status, setStatus] = useState<MediaVideoStatus | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [taskProvider, setTaskProvider] = useState<string | null>(null);
-  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const stopPolling = () => {
-    if (pollTimer.current) {
-      clearTimeout(pollTimer.current);
-      pollTimer.current = null;
-    }
-  };
-
-  const poll = async (id: string, prov: string) => {
-    try {
-      const s = await pollVideo(id, prov);
-      setStatus(s);
-      if (s.status === "completed" || s.status === "failed" || s.error) {
-        stopPolling();
-        if (s.status === "completed") onToast(t("media.video_done"), "success");
-        else if (s.error) onToast(s.error, "error");
-        return;
-      }
-      pollTimer.current = setTimeout(() => poll(id, prov), 5000);
-    } catch (err) {
-      stopPolling();
-      onToast(err instanceof Error ? err.message : t("common.error"), "error");
-    }
-  };
+  const completionToastShown = useRef<string | null>(null);
+  const errorToastShown = useRef<string | null>(null);
 
   const submit = useSubmitVideo();
+  const videoTaskQuery = useVideoTask(
+    taskId && taskProvider ? { taskId, provider: taskProvider } : null,
+    {
+      enabled: Boolean(taskId && taskProvider), // Only poll after a submission creates a task.
+      refetchInterval: 5_000,
+    },
+  );
 
-  const isPolling = !!pollTimer.current;
+  useEffect(() => {
+    if (!videoTaskQuery.data) return;
+    setStatus(videoTaskQuery.data);
+  }, [videoTaskQuery.data]);
+
+  useEffect(() => {
+    if (!videoTaskQuery.isError) return;
+    const message = videoTaskQuery.error instanceof Error ? videoTaskQuery.error.message : t("common.error");
+    if (errorToastShown.current === message) return;
+    errorToastShown.current = message;
+    onToast(message, "error");
+  }, [videoTaskQuery.error, videoTaskQuery.isError, onToast, t]);
+
+  useEffect(() => {
+    if (!status) return;
+    if (status.status === "completed") {
+      if (completionToastShown.current === taskId) return;
+      completionToastShown.current = taskId;
+      onToast(t("media.video_done"), "success");
+      return;
+    }
+    if (status.error) {
+      if (errorToastShown.current === status.error) return;
+      errorToastShown.current = status.error;
+      onToast(status.error, "error");
+    }
+  }, [onToast, status, t, taskId]);
+
+  const isPolling = videoTaskQuery.isFetching || videoTaskQuery.isLoading;
 
   return (
     <form
@@ -501,12 +512,12 @@ function VideoPanel({
           },
           {
             onSuccess: (data) => {
-              stopPolling();
               setStatus({ status: "submitted", task_id: data.task_id });
               setTaskId(data.task_id);
               setTaskProvider(data.provider);
+              completionToastShown.current = null;
+              errorToastShown.current = null;
               onToast(t("media.video_submitted"), "success");
-              pollTimer.current = setTimeout(() => poll(data.task_id, data.provider), 3000);
             },
             onError: (err: Error) => onToast(err.message || t("common.error"), "error"),
           },

@@ -253,6 +253,9 @@ export const auditKeys = {
 export const mediaKeys = {
   all: ["media"] as const,
   providers: () => [...mediaKeys.all, "providers"] as const,
+  videoTasks: () => [...mediaKeys.all, "videoTasks"] as const,
+  videoTask: (taskId: string, provider: string) =>
+    [...mediaKeys.videoTasks(), taskId, provider] as const,
 };
 
 export const mcpKeys = {
@@ -283,9 +286,9 @@ export const registryKeys = {
     [...registryKeys.all, "schema", contentType] as const,
 };
 
-export const metricsKeys = {
-  all: ["metrics"] as const,
-  text: () => [...metricsKeys.all, "text"] as const,
+export const telemetryKeys = {
+  all: ["telemetry"] as const,
+  metrics: () => [...telemetryKeys.all, "metrics"] as const,
 };
 
 export const terminalKeys = {

@@ -15,6 +15,28 @@ import { runtimeKeys, auditKeys, cronKeys } from "./keys";
 
 export { useDashboardSnapshot, useVersionInfo } from "./overview";
 
+type UseAuditRecentOptions = {
+  enabled?: boolean;
+  staleTime?: number;
+  refetchInterval?: number | false;
+};
+
+export const runtimePageRefreshers = [
+  "refetchSnapshot",
+  "refetchVersion",
+  "refetchQueue",
+  "refetchHealthDetail",
+  "refetchSecurity",
+  "refetchAuditRecent",
+  "refetchAuditVerify",
+  "refetchBackups",
+  "refetchTaskStatus",
+  "refetchTaskList",
+] as const;
+
+export type RuntimePageRefresherName =
+  (typeof runtimePageRefreshers)[number];
+
 export const systemStatusQueryOptions = () =>
   queryOptions({
     queryKey: runtimeKeys.status(),
@@ -71,8 +93,17 @@ export const auditRecentQueryOptions = (limit: number) =>
     refetchInterval: 30_000,
   });
 
-export function useAuditRecent(limit: number) {
-  return useQuery(auditRecentQueryOptions(limit));
+export function useAuditRecent(
+  limit: number,
+  options: UseAuditRecentOptions = {},
+) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...auditRecentQueryOptions(limit),
+    enabled,
+    staleTime,
+    refetchInterval,
+  });
 }
 
 export const auditVerifyQueryOptions = () =>

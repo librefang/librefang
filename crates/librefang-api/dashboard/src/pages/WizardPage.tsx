@@ -27,6 +27,7 @@ export function WizardPage() {
 
   const [step, setStep] = useState<Step>(1);
   const [providerId, setProviderId] = useState<string>("");
+  const [validatedProviderId, setValidatedProviderId] = useState<string>("");
   const [apiKey, setApiKey] = useState<string>("");
   const [confirmReplace, setConfirmReplace] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
@@ -59,6 +60,7 @@ export function WizardPage() {
     !!selectedProvider && isProviderAvailable(selectedProvider.auth_status);
   const typingNewKey = requiresKey && apiKey.trim().length > 0;
   const needsReplaceConfirm = existingKeyWorking && typingNewKey && !confirmReplace;
+  const isValidatedSelection = !!providerId && validatedProviderId === providerId;
 
   const setKeyMutation = useMutation({
     mutationFn: async () => {
@@ -72,6 +74,7 @@ export function WizardPage() {
       }
     },
     onSuccess: () => {
+      setValidatedProviderId(providerId);
       addToast(t("wizard.provider_connected"), "success");
       setStep(3);
     },
@@ -81,7 +84,7 @@ export function WizardPage() {
   });
 
   const finalize = async () => {
-    if (!providerId) return;
+    if (!providerId || !isValidatedSelection) return;
     setFinalizing(true);
     try {
       await setDefaultProviderMutation.mutateAsync({ id: providerId });
@@ -158,7 +161,15 @@ export function WizardPage() {
                     <button
                       key={p.id}
                       type="button"
-                      onClick={() => setProviderId(p.id)}
+                      onClick={() => {
+                        if (providerId !== p.id) {
+                          setProviderId(p.id);
+                          setValidatedProviderId("");
+                          setApiKey("");
+                          setConfirmReplace(false);
+                          setStep(2);
+                        }
+                      }}
                       className={`w-full flex items-center justify-between rounded-xl border px-4 py-3 text-left transition-colors ${isActive ? "border-brand bg-brand/5" : "border-border-subtle bg-surface hover:border-brand/30"}`}
                     >
                       <div className="flex flex-col">
@@ -208,11 +219,13 @@ export function WizardPage() {
                 leftIcon={<Key className="h-4 w-4" />}
                 value={apiKey}
                 onChange={(e) => {
+                  setValidatedProviderId("");
                   setApiKey(e.target.value);
                   // Any edit invalidates a prior confirmation — we don't want
                   // a lingering approval from an earlier typed-then-erased key
                   // to cover a different string the user later retypes.
                   setConfirmReplace(false);
+                  setStep(2);
                 }}
                 autoFocus
               />
@@ -309,6 +322,7 @@ export function WizardPage() {
               variant="primary"
               rightIcon={<Rocket className="h-4 w-4" />}
               isLoading={finalizing}
+              disabled={!isValidatedSelection}
               onClick={finalize}
             >
               {t("wizard.finish_action")}
