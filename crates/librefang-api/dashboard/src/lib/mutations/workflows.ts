@@ -15,11 +15,11 @@ export function useRunWorkflow() {
   return useMutation({
     mutationFn: ({ workflowId, input }: { workflowId: string; input: string }) =>
       runWorkflow(workflowId, input),
-    onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: workflowKeys.runs(variables.workflowId) });
-      qc.invalidateQueries({ queryKey: workflowKeys.lists() });
-      qc.invalidateQueries({ queryKey: workflowKeys.detail(variables.workflowId) });
-    },
+    onSuccess: (_data, variables) => Promise.all([
+      qc.invalidateQueries({ queryKey: workflowKeys.runs(variables.workflowId) }),
+      qc.invalidateQueries({ queryKey: workflowKeys.lists() }),
+      qc.invalidateQueries({ queryKey: workflowKeys.detail(variables.workflowId) }),
+    ]),
   });
 }
 

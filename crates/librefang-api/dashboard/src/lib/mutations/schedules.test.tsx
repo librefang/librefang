@@ -3,7 +3,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import * as http from "../http/client";
 import type { ApiActionResponse, ScheduleItem } from "../../api";
 import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule, useUpdateTrigger, useDeleteTrigger } from "./schedules";
-import { cronKeys, scheduleKeys, triggerKeys } from "../queries/keys";
+import { cronKeys, scheduleKeys, triggerKeys, workflowKeys } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
@@ -28,7 +28,7 @@ describe("useCreateSchedule", () => {
     vi.mocked(http.createSchedule).mockResolvedValue(scheduleResponse);
   });
 
-  it("invalidates scheduleKeys.all and cronKeys.all", async () => {
+  it("invalidates schedule, cron, and workflow list caches", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -37,13 +37,16 @@ describe("useCreateSchedule", () => {
     result.current.mutate({ name: "test schedule", agent_id: "agent-1", cron: "0 * * * *" });
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+      expect(invalidateSpy).toHaveBeenCalledTimes(3);
     });
     expect(invalidateSpy).toHaveBeenNthCalledWith(1, {
       queryKey: scheduleKeys.all,
     });
     expect(invalidateSpy).toHaveBeenNthCalledWith(2, {
       queryKey: cronKeys.all,
+    });
+    expect(invalidateSpy).toHaveBeenNthCalledWith(3, {
+      queryKey: workflowKeys.lists(),
     });
   });
 });
@@ -53,7 +56,7 @@ describe("useUpdateSchedule", () => {
     vi.mocked(http.updateSchedule).mockResolvedValue(actionResponse);
   });
 
-  it("invalidates scheduleKeys.all and cronKeys.all", async () => {
+  it("invalidates schedule, cron, and workflow list caches", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -62,13 +65,16 @@ describe("useUpdateSchedule", () => {
     result.current.mutate({ id: "sched-1", data: { enabled: false } });
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+      expect(invalidateSpy).toHaveBeenCalledTimes(3);
     });
     expect(invalidateSpy).toHaveBeenNthCalledWith(1, {
       queryKey: scheduleKeys.all,
     });
     expect(invalidateSpy).toHaveBeenNthCalledWith(2, {
       queryKey: cronKeys.all,
+    });
+    expect(invalidateSpy).toHaveBeenNthCalledWith(3, {
+      queryKey: workflowKeys.lists(),
     });
   });
 });
@@ -78,7 +84,7 @@ describe("useDeleteSchedule", () => {
     vi.mocked(http.deleteSchedule).mockResolvedValue(actionResponse);
   });
 
-  it("invalidates scheduleKeys.all and cronKeys.all", async () => {
+  it("invalidates schedule, cron, and workflow list caches", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -87,13 +93,16 @@ describe("useDeleteSchedule", () => {
     result.current.mutate("sched-1");
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+      expect(invalidateSpy).toHaveBeenCalledTimes(3);
     });
     expect(invalidateSpy).toHaveBeenNthCalledWith(1, {
       queryKey: scheduleKeys.all,
     });
     expect(invalidateSpy).toHaveBeenNthCalledWith(2, {
       queryKey: cronKeys.all,
+    });
+    expect(invalidateSpy).toHaveBeenNthCalledWith(3, {
+      queryKey: workflowKeys.lists(),
     });
   });
 });
