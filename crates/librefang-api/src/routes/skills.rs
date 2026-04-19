@@ -2992,8 +2992,14 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         })
         .collect();
 
-    // Get connected servers and their tools from the live MCP connections
+    // Get connected servers and their tools from the live MCP connections.
+    //
+    // `connected` reflects liveness, not just vec residency: a subprocess that
+    // died silently (stdio transport crash, SSE drop) leaves its McpConnection
+    // in the vec until the health loop or a reconnect replaces it. Cross-check
+    // with `mcp_health` so the badge/count match reality (#2738).
     let connections = state.kernel.mcp_connections_ref().lock().await;
+    let health = state.kernel.mcp_health();
     let connected: Vec<serde_json::Value> = connections
         .iter()
         .map(|conn| {
@@ -3007,20 +3013,33 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                     })
                 })
                 .collect();
+            let is_alive = matches!(
+                health.get_health(conn.name()).map(|h| h.status),
+                Some(librefang_extensions::McpStatus::Ready),
+            );
             serde_json::json!({
                 "name": conn.name(),
                 "tools_count": tools.len(),
                 "tools": tools,
-                "connected": true,
+                "connected": is_alive,
             })
         })
         .collect();
+
+    let total_connected = connected
+        .iter()
+        .filter(|c| {
+            c.get("connected")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .count();
 
     Json(serde_json::json!({
         "configured": config_servers,
         "connected": connected,
         "total_configured": config_servers.len(),
-        "total_connected": connected.len(),
+        "total_connected": total_connected,
     }))
 }
 
