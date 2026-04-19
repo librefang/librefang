@@ -129,8 +129,18 @@ describe("useDeleteBackup", () => {
 });
 
 describe.each([
-  { name: "useDeleteTask", hook: useDeleteTask, id: "task-1", invalidateKeys: [runtimeKeys.tasks()] },
-  { name: "useRetryTask", hook: useRetryTask, id: "task-2", invalidateKeys: [runtimeKeys.tasks()] },
+  {
+    name: "useDeleteTask",
+    hook: useDeleteTask,
+    id: "task-1",
+    invalidateKeys: [runtimeKeys.tasks(), runtimeKeys.taskStatus(), runtimeKeys.queueStatus()],
+  },
+  {
+    name: "useRetryTask",
+    hook: useRetryTask,
+    id: "task-2",
+    invalidateKeys: [runtimeKeys.tasks(), runtimeKeys.taskStatus(), runtimeKeys.queueStatus()],
+  },
 ] as const)("$name", ({ hook, id, invalidateKeys }) => {
   it("invalidates correct keys", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
