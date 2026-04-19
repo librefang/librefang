@@ -100,6 +100,31 @@ fn is_no_reply(text: &str) -> bool {
         || t.ends_with("no reply needed")
 }
 
+/// Classify a response as a progress-text leak: a short ellipsis-terminated
+/// acknowledgment the model sometimes emits *before* a tool call that the
+/// turn ended without ever producing.
+///
+/// Observed in production when Claude Code / Qwen Code hit an internal limit
+/// after emitting a verbal preamble (e.g. `"Waiting for the script to
+/// complete..."`, `"Let me check that..."`) without the corresponding
+/// `tool_use` block. Without this guard the runtime delivers the preamble
+/// to the channel as the agent's final reply, which reads as nonsense to
+/// the user (cron-triggered ynab report surfaced on Telegram as the
+/// literal string `"Waiting for the script to complete..."`).
+///
+/// Heuristic is intentionally narrow to avoid swallowing legitimate replies:
+/// - Trimmed length ≤ 120 chars (progress preambles are short)
+/// - Ends with `...` or `…`. Two-dot `..` is intentionally excluded —
+///   models almost never emit it deliberately, and skipping it avoids
+///   clipping truncated abbreviations like `"See p.."`.
+fn is_progress_text_leak(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || t.chars().count() > 120 {
+        return false;
+    }
+    t.ends_with("...") || t.ends_with("…")
+}
+
 /// Returns true if this tool-error content is a "soft" error — one the LLM is
 /// expected to recover from cheaply on the next iteration (approval denials,
 /// sandbox rejections, modify-and-retry hints, argument-truncation nudges).
@@ -2735,6 +2760,39 @@ pub async fn run_agent_loop(
                     ));
                 }
 
+                // Progress-text-leak guard: model emitted a short ellipsis-
+                // terminated acknowledgment ("Waiting for the script to
+                // complete...") but the turn ended without producing the
+                // tool call that preamble was introducing. Surfacing this
+                // to the channel reads as nonsense; drop as silent and let
+                // the operator retrigger.
+                if response.tool_calls.is_empty()
+                    && !tools_recovered_from_text
+                    && is_progress_text_leak(&text)
+                {
+                    warn!(
+                        agent = %manifest.name,
+                        text_excerpt = %text.chars().take(80).collect::<String>(),
+                        "Progress-text leak detected (ellipsis-terminated short reply without tool_use) — dropping as silent"
+                    );
+                    session
+                        .messages
+                        .push(Message::assistant("[no reply needed]".to_string()));
+                    memory
+                        .save_session_async(session)
+                        .await
+                        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    return Ok(build_silent_agent_loop_result(
+                        total_usage,
+                        iteration + 1,
+                        parsed_directives,
+                        decision_traces,
+                        memories_used.clone(),
+                        experiment_context.clone(),
+                        new_messages_start,
+                    ));
+                }
+
                 match classify_end_turn_retry(EndTurnRetryContext {
                     text: &text,
                     response: &response,
@@ -3764,6 +3822,36 @@ pub async fn run_agent_loop_streaming(
                             .await
                             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                     }
+                    return Ok(build_silent_agent_loop_result(
+                        total_usage,
+                        iteration + 1,
+                        parsed_directives_s,
+                        decision_traces,
+                        memories_used.clone(),
+                        experiment_context.clone(),
+                        new_messages_start,
+                    ));
+                }
+
+                // Progress-text-leak guard (streaming path) — see non-stream
+                // mirror above. Drops ellipsis-terminated short preambles
+                // that arrive without the promised tool_use.
+                if response.tool_calls.is_empty()
+                    && !tools_recovered_from_text
+                    && is_progress_text_leak(&text)
+                {
+                    warn!(
+                        agent = %manifest.name,
+                        text_excerpt = %text.chars().take(80).collect::<String>(),
+                        "Progress-text leak detected (streaming, ellipsis-terminated short reply without tool_use) — dropping as silent"
+                    );
+                    session
+                        .messages
+                        .push(Message::assistant("[no reply needed]".to_string()));
+                    memory
+                        .save_session_async(session)
+                        .await
+                        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
@@ -4891,6 +4979,34 @@ mod tests {
         assert!(!is_no_reply("Just replying normally."));
         assert!(!is_no_reply("NO_REPLY is my favorite token")); // prefix, not suffix
         assert!(!is_no_reply("no reply needed? let me check")); // doesn't end with marker
+    }
+
+    #[test]
+    fn test_is_progress_text_leak() {
+        // Real production leak — ellipsis-terminated preamble with no tool_use
+        assert!(is_progress_text_leak(
+            "Waiting for the script to complete..."
+        ));
+        assert!(is_progress_text_leak("Let me check that..."));
+        assert!(is_progress_text_leak("Processing..."));
+        assert!(is_progress_text_leak("One moment…"));
+        assert!(is_progress_text_leak("   Checking...   ")); // whitespace
+
+        // Negatives — real replies must never be flagged as leaks
+        assert!(!is_progress_text_leak(""));
+        assert!(!is_progress_text_leak("Done."));
+        assert!(!is_progress_text_leak("Here is the result."));
+        // Two-dot `..` is intentionally not a trigger (too broad, catches
+        // truncated abbreviations). See the `is_progress_text_leak` doc.
+        assert!(!is_progress_text_leak("Running.."));
+        assert!(!is_progress_text_leak("See p.."));
+        // Not an ellipsis, real reply
+        assert!(!is_progress_text_leak("The script ran successfully."));
+        // Over 120 chars — even ending with ellipsis, treat as real content
+        let long =
+            "This is a much longer response where the model actually produced a full explanation of what it did and the ellipsis at the end is just stylistic...";
+        assert!(long.chars().count() > 120);
+        assert!(!is_progress_text_leak(long));
     }
 
     #[test]
