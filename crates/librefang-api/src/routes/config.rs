@@ -197,7 +197,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse
 # Run `librefang init --upgrade` for full annotated config.
 
 log_level = "info"
-api_listen = "0.0.0.0:4545"
+api_listen = "127.0.0.1:4545"
 
 [default_model]
 provider = "{provider}"

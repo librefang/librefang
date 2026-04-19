@@ -317,6 +317,7 @@ fn is_process_running(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::time::Duration;
 
     fn tmpfile(name: &str) -> PathBuf {
@@ -393,6 +394,11 @@ mod tests {
         assert!(!path.exists());
     }
 
+    // Unix-only: `set_mtime_ms` is a no-op on Windows (documented fallback in
+    // lock.rs: rewinding mtime without an extra crate isn't cheap on Windows,
+    // and production relies on the HOLDER_STALE_MS window to recover after a
+    // failed fork). The assertion below exercises Unix-specific semantics.
+    #[cfg(unix)]
     #[tokio::test]
     async fn rollback_rewinds_mtime() {
         let path = tmpfile("rollback-rewind");
@@ -439,6 +445,12 @@ mod tests {
         let _ = tokio::fs::remove_file(&path).await;
     }
 
+    // Unix-only: `is_process_running` always returns true on Windows
+    // (documented fallback in lock.rs — no cheap liveness probe without an
+    // extra crate, so production relies on HOLDER_STALE_MS to reclaim stale
+    // holders after an hour). This test exercises the immediate-reclaim path
+    // which is Unix-specific.
+    #[cfg(unix)]
     #[tokio::test]
     async fn acquire_reclaims_stale_pid() {
         let path = tmpfile("stale-pid");
