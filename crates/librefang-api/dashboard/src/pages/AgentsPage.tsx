@@ -141,7 +141,7 @@ export function AgentsPage() {
     mutate: (agentId: string) =>
       rawDeleteMutation.mutate(agentId, {
         onSuccess: () => {
-          setDetailAgent(null);
+          setDetailAgent(prev => prev?.id === agentId ? null : prev);
           addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
         },
         onError: (e: Error) =>

@@ -68,7 +68,7 @@ export function useApprovalCount(options: { refetchInterval?: number } = {}) {
 }
 
 export function usePendingApprovals(agentId?: string) {
-  return useQuery(approvalQueries.pending(agentId));
+  return useQuery({ ...approvalQueries.pending(agentId), enabled: Boolean(agentId) });
 }
 
 export function useApprovalAudit(params: {

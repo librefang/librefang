@@ -1090,10 +1090,14 @@ function CanvasPageInner() {
         if (workflowId) setSelectedWorkflow({ id: workflowId, name: name || "", description: description || "" } as WorkflowItem);
         sessionStorage.removeItem("workflowTemplate");
         return true;
-      } catch { /* ignore */ }
+      } catch (e: any) {
+        sessionStorage.removeItem("workflowTemplate");
+        showError(e?.message || t("canvas.template_load_error", { defaultValue: "Failed to load template" }));
+        return true;
+      }
     }
     return false;
-  }, [t, setNodes, setEdges]);
+  }, [t, setNodes, setEdges, showError]);
 
   // Load agents, workflows, then load template or workflow from URL
   useEffect(() => {
@@ -1125,7 +1129,9 @@ function CanvasPageInner() {
             setWorkflowDescription(detail.description || "");
             setSelectedWorkflow({ id: routeWorkflowId, name: detail.name || "", description: detail.description || "" } as WorkflowItem);
             return;
-          } catch { /* ignore */ }
+          } catch (e: any) {
+            showError(e?.message || t("canvas.workflow_load_error", { defaultValue: "Failed to load workflow" }));
+          }
         }
         // 3. Fallback: restore from sessionStorage
         const savedNodes = sessionStorage.getItem("canvasNodes");
@@ -1133,7 +1139,7 @@ function CanvasPageInner() {
           try { setNodes(JSON.parse(savedNodes)); } catch { /* ignore */ }
         }
       })
-      .catch(() => { });
+      .catch((e: any) => { showError(e?.message || t("canvas.load_error", { defaultValue: "Failed to load data" })); });
   }, [routeTimestamp, routeWorkflowId, loadTemplate]);
 
   // Save nodes to sessionStorage
@@ -1367,23 +1373,29 @@ function CanvasPageInner() {
     const layout = { nodes, edges };
     try {
       if (selectedWorkflow?.id) {
-        await updateWorkflow(selectedWorkflow.id, { name: workflowName, description: workflowDescription, steps, layout });
+        const workflowId = selectedWorkflow.id;
+        await updateWorkflow(workflowId, { name: workflowName, description: workflowDescription, steps, layout });
+        const workflowsData = await listWorkflows();
+        setWorkflows(workflowsData);
+        navigate({ to: "/canvas", search: { t: undefined, wf: workflowId }, replace: true });
+        setErrorMsg(null);
+        showToast(t("canvas.saved"));
+        return;
       } else {
-        await createWorkflow({ name: workflowName, description: workflowDescription, steps, layout });
-      }
-      const workflowsData = await listWorkflows();
-      setWorkflows(workflowsData);
-      if (!selectedWorkflow?.id) {
-        const newest = [...workflowsData].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
-        if (newest) {
-          setSelectedWorkflow(newest);
-          navigate({ to: "/canvas", search: { t: undefined, wf: newest.id }, replace: true });
+        const created = await createWorkflow({ name: workflowName, description: workflowDescription, steps, layout });
+        const workflowsData = await listWorkflows();
+        setWorkflows(workflowsData);
+        const createdId = created['id'] as string | undefined;
+        const newWf = (createdId ? workflowsData.find(w => w.id === createdId) : undefined)
+          ?? [...workflowsData].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
+        if (newWf) {
+          setSelectedWorkflow(newWf);
+          navigate({ to: "/canvas", search: { t: undefined, wf: newWf.id }, replace: true });
         }
-      } else {
-        navigate({ to: "/canvas", search: { t: undefined, wf: selectedWorkflow.id }, replace: true });
+        setErrorMsg(null);
+        showToast(t("canvas.saved"));
+        return;
       }
-      setErrorMsg(null);
-      showToast(t("canvas.saved"));
     } catch (e: any) {
       showError(e?.message || String(e));
     }
@@ -1436,13 +1448,15 @@ function CanvasPageInner() {
       const name = workflowName.trim() || t("workflows.untitled_workflow");
       const layout = { nodes, edges };
       try {
-        await createWorkflow({ name, description: workflowDescription, steps, layout });
+        const created = await createWorkflow({ name, description: workflowDescription, steps, layout });
         const updatedList = await listWorkflows();
         setWorkflows(updatedList);
-        const newest = [...updatedList].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
-        if (newest) {
-          workflowId = newest.id;
-          setSelectedWorkflow(newest);
+        const createdId = created['id'] as string | undefined;
+        const newWf = (createdId ? updatedList.find(w => w.id === createdId) : undefined)
+          ?? [...updatedList].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
+        if (newWf) {
+          workflowId = newWf.id;
+          setSelectedWorkflow(newWf);
           setWorkflowName(name);
         }
       } catch (e: any) {

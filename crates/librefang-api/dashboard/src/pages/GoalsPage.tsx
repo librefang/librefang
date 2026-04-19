@@ -125,20 +125,25 @@ export function GoalsPage() {
   const rows = useMemo(() => {
     const roots: GoalItem[] = [];
     const childrenByParent = new Map<string, GoalItem[]>();
+    const goalsById = new Map(goals.map(goal => [goal.id, goal]));
     for (const goal of goals) {
-      if (goal.parent_id) {
+      if (goal.parent_id && goalsById.has(goal.parent_id)) {
         const list = childrenByParent.get(goal.parent_id) ?? [];
         list.push(goal);
         childrenByParent.set(goal.parent_id, list);
       } else roots.push(goal);
     }
     const result: { goal: GoalItem; depth: number; hasChildren: boolean }[] = [];
+    const visited = new Set<string>();
     function walk(goal: GoalItem, depth: number) {
+      if (visited.has(goal.id)) return;
+      visited.add(goal.id);
       const children = childrenByParent.get(goal.id) ?? [];
       result.push({ goal, depth, hasChildren: children.length > 0 });
       if (expandedById[goal.id]) for (const child of children) walk(child, depth + 1);
     }
     for (const root of roots) walk(root, 0);
+    for (const goal of goals) walk(goal, 0);
     return result;
   }, [expandedById, goals]);
 
