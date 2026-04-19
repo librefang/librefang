@@ -390,6 +390,33 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Toggle the agent's auto-dream opt-in flag. The auto-dream scheduler
+    /// reads this on every tick, so the change takes effect without restart.
+    /// In-memory only — persisting to the agent manifest file is a separate
+    /// concern (matches the pattern of `update_system_prompt`).
+    pub fn update_auto_dream_enabled(&self, id: AgentId, enabled: bool) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.manifest.auto_dream_enabled = enabled;
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
+
+    /// Cheap read-only check for the auto-dream opt-in flag, without cloning
+    /// the agent entry. Used on the hot path of the `AgentLoopEnd` hook,
+    /// which fires for every turn of every agent and would otherwise pay
+    /// the `AgentEntry` + manifest clone cost (several KB of Strings/Vecs
+    /// per turn) just to read one bool. Missing agent → `false`, matching
+    /// the "not enrolled" behaviour expected by callers.
+    pub fn is_auto_dream_enabled(&self, id: AgentId) -> bool {
+        self.agents
+            .get(&id)
+            .map(|e| e.manifest.auto_dream_enabled)
+            .unwrap_or(false)
+    }
+
     /// Update an agent's resource quota (budget limits).
     pub fn update_resources(
         &self,
@@ -580,5 +607,60 @@ mod tests {
         let after = registry.get(id).unwrap();
         assert!((after.manifest.model.temperature - 1.5).abs() < f32::EPSILON);
         assert!(after.last_active > old_active);
+    }
+
+    #[test]
+    fn test_update_auto_dream_enabled_toggles_flag() {
+        let registry = AgentRegistry::new();
+        let entry = test_entry("dreamer");
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        // Starts false (manifest default).
+        assert!(!registry.get(id).unwrap().manifest.auto_dream_enabled);
+
+        registry.update_auto_dream_enabled(id, true).unwrap();
+        assert!(registry.get(id).unwrap().manifest.auto_dream_enabled);
+
+        registry.update_auto_dream_enabled(id, false).unwrap();
+        assert!(!registry.get(id).unwrap().manifest.auto_dream_enabled);
+    }
+
+    #[test]
+    fn test_is_auto_dream_enabled_tracks_flag() {
+        // Lightweight bool-only accessor must agree with the clone-based
+        // `get().manifest.auto_dream_enabled` path in all three states.
+        let registry = AgentRegistry::new();
+        let entry = test_entry("dreamer-fast");
+        let id = entry.id;
+        registry.register(entry).unwrap();
+        assert!(!registry.is_auto_dream_enabled(id));
+
+        registry.update_auto_dream_enabled(id, true).unwrap();
+        assert!(registry.is_auto_dream_enabled(id));
+
+        registry.update_auto_dream_enabled(id, false).unwrap();
+        assert!(!registry.is_auto_dream_enabled(id));
+    }
+
+    #[test]
+    fn test_is_auto_dream_enabled_missing_agent_is_false() {
+        // Missing agent must return false rather than panic — the auto-dream
+        // hook fires for every turn and cannot distinguish a killed agent
+        // from an opted-out one at that layer.
+        let registry = AgentRegistry::new();
+        let bogus = AgentId::new();
+        assert!(!registry.is_auto_dream_enabled(bogus));
+    }
+
+    #[test]
+    fn test_update_auto_dream_enabled_missing_agent_errors() {
+        let registry = AgentRegistry::new();
+        let bogus = AgentId::new();
+        let result = registry.update_auto_dream_enabled(bogus, true);
+        assert!(matches!(
+            result,
+            Err(librefang_types::error::LibreFangError::AgentNotFound(_))
+        ));
     }
 }

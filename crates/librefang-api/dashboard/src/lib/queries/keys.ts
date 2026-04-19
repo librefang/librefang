@@ -9,6 +9,11 @@
 //
 // All arrays use `as const` for structural stability.
 
+export const autoDreamKeys = {
+  all: ["autoDream"] as const,
+  status: () => [...autoDreamKeys.all, "status"] as const,
+};
+
 export const agentKeys = {
   all: ["agents"] as const,
   lists: () => [...agentKeys.all, "list"] as const,
@@ -60,6 +65,8 @@ export const commsKeys = {
 export const skillKeys = {
   all: ["skills"] as const,
   lists: () => [...skillKeys.all, "list"] as const,
+  details: () => [...skillKeys.all, "detail"] as const,
+  detail: (name: string) => [...skillKeys.details(), name] as const,
 };
 
 export const clawhubKeys = {
@@ -251,7 +258,10 @@ export const mediaKeys = {
 export const mcpKeys = {
   all: ["mcp"] as const,
   servers: () => [...mcpKeys.all, "servers"] as const,
-  integrations: () => [...mcpKeys.all, "integrations"] as const,
+  server: (id: string) => [...mcpKeys.servers(), id] as const,
+  catalog: () => [...mcpKeys.all, "catalog"] as const,
+  catalogEntry: (id: string) => [...mcpKeys.catalog(), id] as const,
+  health: () => [...mcpKeys.all, "health"] as const,
 };
 
 export const pluginKeys = {

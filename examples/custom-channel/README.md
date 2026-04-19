@@ -280,6 +280,6 @@ For real-world examples, study these existing adapters (simplest to most complex
 
 ## Further Reading
 
-See [docs/channel-adapters.md](../../docs/channel-adapters.md) for the full
+See [channel integrations docs](https://docs.librefang.ai/integrations/channels) for the full
 architecture reference, including the channel bridge, message router, formatter
 pipeline, and config TOML schema.

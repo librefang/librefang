@@ -38,7 +38,7 @@ jobs:
           node-version: 20
       - name: Install dependencies
         working-directory: crates/librefang-api/dashboard
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --config.strict-dep-builds=false
       - name: Build dashboard
         working-directory: crates/librefang-api/dashboard
         run: pnpm run build

@@ -385,15 +385,17 @@ The `Retry-After` header indicates the window duration in seconds.
 | GET | `/api/backups` | List backups |
 | DELETE | `/api/backups/{filename}` | Delete backup |
 | POST | `/api/restore` | Restore from backup |
-| **Integrations** | | |
-| GET | `/api/integrations` | List integrations |
-| GET | `/api/integrations/available` | Available integrations |
-| GET | `/api/integrations/health` | Integrations health |
-| POST | `/api/integrations/add` | Add integration |
-| POST | `/api/integrations/reload` | Reload integrations |
-| GET | `/api/integrations/{id}` | Get integration |
-| DELETE | `/api/integrations/{id}` | Remove integration |
-| POST | `/api/integrations/{id}/reconnect` | Reconnect integration |
+| **MCP servers** | | |
+| GET | `/api/mcp/servers` | List configured MCP servers |
+| POST | `/api/mcp/servers` | Add a server (body: `{template_id, credentials}` or raw spec) |
+| GET | `/api/mcp/servers/{id}` | Get one server |
+| PUT | `/api/mcp/servers/{id}` | Update a server |
+| DELETE | `/api/mcp/servers/{id}` | Remove a server |
+| POST | `/api/mcp/servers/{id}/reconnect` | Reconnect |
+| GET | `/api/mcp/catalog` | List installable catalog entries |
+| GET | `/api/mcp/catalog/{id}` | Get catalog entry detail |
+| GET | `/api/mcp/health` | Aggregate health across servers |
+| POST | `/api/mcp/reload` | Hot-reload MCP catalog + reconnect |
 | **Pairing** | | |
 | POST | `/api/pairing/request` | Initiate pairing |
 | POST | `/api/pairing/complete` | Complete pairing |

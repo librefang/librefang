@@ -1,7 +1,7 @@
 # LibreFang Agent OS configuration
 # See https://github.com/librefang/librefang for documentation
 
-api_listen = "0.0.0.0:4545"
+api_listen = "127.0.0.1:4545"
 
 [default_model]
 provider = "{{provider}}"

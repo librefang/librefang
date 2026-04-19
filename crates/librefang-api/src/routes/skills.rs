@@ -132,7 +132,9 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::get(hand_instance_status),
         )
         .route("/hands/reload", axum::routing::post(reload_hands))
-        // MCP server management
+        // Unified MCP server management — every MCP server lives as an
+        // [[mcp_servers]] entry in config.toml, with an optional template_id
+        // recording which catalog entry (if any) it was installed from.
         .route(
             "/mcp/servers",
             axum::routing::get(list_mcp_servers).post(add_mcp_server),
@@ -143,7 +145,11 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
                 .put(update_mcp_server)
                 .delete(delete_mcp_server),
         )
-        // MCP OAuth auth endpoints
+        .route(
+            "/mcp/servers/{name}/reconnect",
+            axum::routing::post(reconnect_mcp_server_handler),
+        )
+        // MCP OAuth auth endpoints (existing, unchanged)
         .route(
             "/mcp/servers/{name}/auth/status",
             axum::routing::get(super::mcp_auth::auth_status),
@@ -160,30 +166,16 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/mcp/servers/{name}/auth/revoke",
             axum::routing::delete(super::mcp_auth::auth_revoke),
         )
-        // Integrations
-        .route("/integrations", axum::routing::get(list_integrations))
+        // Read-only catalog of installable MCP server templates
+        .route("/mcp/catalog", axum::routing::get(list_mcp_catalog))
         .route(
-            "/integrations/available",
-            axum::routing::get(list_available_integrations),
+            "/mcp/catalog/{id}",
+            axum::routing::get(get_mcp_catalog_entry),
         )
-        .route("/integrations/add", axum::routing::post(add_integration))
-        .route(
-            "/integrations/{id}",
-            axum::routing::get(get_integration).delete(remove_integration),
-        )
-        .route(
-            "/integrations/{id}/reconnect",
-            axum::routing::post(reconnect_integration),
-        )
-        .route(
-            "/integrations/health",
-            axum::routing::get(integrations_health),
-        )
-        .route(
-            "/integrations/reload",
-            axum::routing::post(reload_integrations),
-        )
-        // Extensions
+        // Health + reload (covers all configured servers)
+        .route("/mcp/health", axum::routing::get(mcp_health_handler))
+        .route("/mcp/reload", axum::routing::post(reload_mcp_handler))
+        // Extensions — kept as dashboard-friendly aliases over the unified store.
         .route("/extensions", axum::routing::get(list_extensions))
         .route(
             "/extensions/install",
@@ -2991,6 +2983,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                 .unwrap_or(serde_json::json!({"state": "not_required"}));
             serde_json::json!({
                 "name": s.name,
+                "template_id": s.template_id,
                 "transport": transport,
                 "timeout_secs": s.timeout_secs,
                 "env": s.env,
@@ -2999,8 +2992,14 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         })
         .collect();
 
-    // Get connected servers and their tools from the live MCP connections
+    // Get connected servers and their tools from the live MCP connections.
+    //
+    // `connected` reflects liveness, not just vec residency: a subprocess that
+    // died silently (stdio transport crash, SSE drop) leaves its McpConnection
+    // in the vec until the health loop or a reconnect replaces it. Cross-check
+    // with `mcp_health` so the badge/count match reality (#2738).
     let connections = state.kernel.mcp_connections_ref().lock().await;
+    let health = state.kernel.mcp_health();
     let connected: Vec<serde_json::Value> = connections
         .iter()
         .map(|conn| {
@@ -3014,20 +3013,33 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                     })
                 })
                 .collect();
+            let is_alive = matches!(
+                health.get_health(conn.name()).map(|h| h.status),
+                Some(librefang_extensions::McpStatus::Ready),
+            );
             serde_json::json!({
                 "name": conn.name(),
                 "tools_count": tools.len(),
                 "tools": tools,
-                "connected": true,
+                "connected": is_alive,
             })
         })
         .collect();
+
+    let total_connected = connected
+        .iter()
+        .filter(|c| {
+            c.get("connected")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .count();
 
     Json(serde_json::json!({
         "configured": config_servers,
         "connected": connected,
         "total_configured": config_servers.len(),
-        "total_connected": connected.len(),
+        "total_connected": total_connected,
     }))
 }
 
@@ -3068,6 +3080,7 @@ pub async fn get_mcp_server(
 
     let mut result = serde_json::json!({
         "name": entry.name,
+        "template_id": entry.template_id,
         "transport": transport,
         "timeout_secs": entry.timeout_secs,
         "env": entry.env,
@@ -3114,26 +3127,117 @@ pub async fn add_mcp_server(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // Validate required fields
-    let name = match body.get("name").and_then(|v| v.as_str()) {
-        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
-        _ => {
-            return ApiErrorResponse::bad_request("Missing or empty 'name' field")
-                .into_json_tuple();
-        }
-    };
+    // Two accepted shapes:
+    //   (A) Template install: { "template_id": "github", "credentials": { ... } }
+    //   (B) Raw entry:        { "name": "...", "transport": { ... }, ... }
+    let (entry, name) = if let Some(tid) = body
+        .get("template_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        // Template install path
+        let creds: std::collections::HashMap<String, String> = body
+            .get("credentials")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-    if body.get("transport").is_none() {
-        return ApiErrorResponse::bad_request("Missing 'transport' field").into_json_tuple();
-    }
+        let catalog = state
+            .kernel
+            .mcp_catalog()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = match catalog.get(&tid) {
+            Some(e) => e.clone(),
+            None => {
+                return ApiErrorResponse::not_found(format!("MCP catalog entry '{tid}' not found"))
+                    .into_json_tuple();
+            }
+        };
+        drop(catalog);
 
-    // Validate by deserializing the body into McpServerConfigEntry
-    let entry: librefang_types::config::McpServerConfigEntry = match serde_json::from_value(body) {
-        Ok(e) => e,
-        Err(e) => {
-            return ApiErrorResponse::bad_request(format!("Invalid MCP server config: {e}"))
-                .into_json_tuple();
+        // Duplicate-name check BEFORE running the installer. `install_integration`
+        // stores provided credentials in the vault as a side effect, so if we
+        // returned 409 from the check below (which used to run after install)
+        // the vault would already hold credentials for a server the caller never
+        // managed to register. Reject first, side-effect second.
+        let prospective_name = entry.id.clone();
+        if state
+            .kernel
+            .config_ref()
+            .mcp_servers
+            .iter()
+            .any(|s| s.name == prospective_name)
+        {
+            return ApiErrorResponse::conflict(format!(
+                "MCP server '{prospective_name}' already exists"
+            ))
+            .into_json_tuple();
         }
+
+        // Credential resolver: dotenv + vault (if unlocked)
+        let home = state.kernel.home_dir().to_path_buf();
+        let dotenv_path = home.join(".env");
+        let vault_path = home.join("vault.enc");
+        let vault = if vault_path.exists() {
+            let mut v = librefang_extensions::vault::CredentialVault::new(vault_path);
+            if v.unlock().is_ok() {
+                Some(v)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut resolver =
+            librefang_extensions::credentials::CredentialResolver::new(vault, Some(&dotenv_path));
+
+        // Ephemeral catalog to feed the installer (it takes &McpCatalog).
+        let mut cat = librefang_extensions::catalog::McpCatalog::new(&home);
+        cat.load(&home);
+        let result = match librefang_extensions::installer::install_integration(
+            &cat,
+            &mut resolver,
+            &entry.id,
+            &creds,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return ApiErrorResponse::bad_request(format!("Install failed: {e}"))
+                    .into_json_tuple();
+            }
+        };
+        (result.server, result.id)
+    } else {
+        // Raw entry path
+        let name = match body.get("name").and_then(|v| v.as_str()) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => {
+                return ApiErrorResponse::bad_request("Missing or empty 'name' field")
+                    .into_json_tuple();
+            }
+        };
+
+        if body.get("transport").is_none() {
+            return ApiErrorResponse::bad_request("Missing 'transport' field").into_json_tuple();
+        }
+
+        let entry: librefang_types::config::McpServerConfigEntry =
+            match serde_json::from_value(body) {
+                Ok(e) => e,
+                Err(e) => {
+                    return ApiErrorResponse::bad_request(format!(
+                        "Invalid MCP server config: {e}"
+                    ))
+                    .into_json_tuple();
+                }
+            };
+        (entry, name)
     };
 
     // Check for duplicate name
@@ -3183,6 +3287,7 @@ pub async fn add_mcp_server(
         Json(serde_json::json!({
             "status": "added",
             "name": name,
+            "template_id": entry.template_id,
             "reload": reload_status,
         })),
     )
@@ -3420,7 +3525,10 @@ fn upsert_mcp_server_config(
     validate_static_file_path(config_path, "config.toml")?;
     let mut table: toml::value::Table = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-        toml::from_str(&content).unwrap_or_default()
+        // Propagate parse errors instead of silently defaulting to an empty
+        // table, which would overwrite every unrelated section when we write
+        // back. A malformed config.toml should surface to the caller.
+        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
     } else {
         toml::value::Table::new()
     };
@@ -3456,7 +3564,10 @@ fn remove_mcp_server_config(config_path: &std::path::Path, name: &str) -> Result
     validate_static_file_path(config_path, "config.toml")?;
     let mut table: toml::value::Table = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-        toml::from_str(&content).unwrap_or_default()
+        // Propagate parse errors instead of silently defaulting to an empty
+        // table, which would destroy every unrelated section when we write
+        // back after the retain().
+        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
     } else {
         return Ok(());
     };
@@ -4342,353 +4453,157 @@ pub(crate) fn remove_channel_config(
 }
 
 // ---------------------------------------------------------------------------
-// Integration management endpoints
+// MCP catalog + reconnect + health + reload endpoints
 // ---------------------------------------------------------------------------
 
-/// Derive a human-readable status string for an integration.
-fn integration_status_str(
-    installed: Option<&librefang_extensions::InstalledIntegration>,
-    health: Option<&librefang_extensions::health::IntegrationHealth>,
-) -> &'static str {
-    match installed {
-        Some(inst) if !inst.enabled => "disabled",
-        Some(_) => match health.map(|h| &h.status) {
-            Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
-            Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
-            _ => "installed",
-        },
-        None => "available",
+/// Serialize a single catalog transport for API output.
+fn serialize_catalog_transport(t: &librefang_extensions::McpCatalogTransport) -> serde_json::Value {
+    match t {
+        librefang_extensions::McpCatalogTransport::Stdio { command, args } => {
+            serde_json::json!({ "type": "stdio", "command": command, "args": args })
+        }
+        librefang_extensions::McpCatalogTransport::Sse { url } => {
+            serde_json::json!({ "type": "sse", "url": url })
+        }
+        librefang_extensions::McpCatalogTransport::Http { url } => {
+            serde_json::json!({ "type": "http", "url": url })
+        }
     }
 }
 
-/// GET /api/integrations — List installed integrations with status.
+/// Collect catalog ids that are "already installed" for the purposes of
+/// the catalog list/detail endpoints. Includes both `template_id` matches
+/// (server was installed via the template) and `name` matches (manually
+/// configured server occupies the catalog entry's id), so the endpoints
+/// agree with `add_mcp_server`'s 409 name-collision guard and the UI
+/// doesn't offer Install on entries that will definitely fail.
+fn collect_installed_catalog_ids(state: &Arc<AppState>) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for s in state.kernel.config_ref().mcp_servers.iter() {
+        if let Some(tid) = s.template_id.clone() {
+            ids.insert(tid);
+        }
+        ids.insert(s.name.clone());
+    }
+    ids
+}
+
+fn render_catalog_entry(
+    entry: &librefang_extensions::McpCatalogEntry,
+    installed_template_ids: &std::collections::HashSet<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": entry.id,
+        "name": entry.name,
+        "description": entry.description,
+        "icon": entry.icon,
+        "category": entry.category.to_string(),
+        "installed": installed_template_ids.contains(&entry.id),
+        "tags": entry.tags,
+        "transport": serialize_catalog_transport(&entry.transport),
+        "required_env": entry.required_env.iter().map(|e| serde_json::json!({
+            "name": e.name,
+            "label": e.label,
+            "help": e.help,
+            "is_secret": e.is_secret,
+            "get_url": e.get_url,
+        })).collect::<Vec<_>>(),
+        "has_oauth": entry.oauth.is_some(),
+        "setup_instructions": entry.setup_instructions,
+    })
+}
+
+/// GET /api/mcp/catalog — List all installable MCP catalog entries.
 #[utoipa::path(
     get,
-    path = "/api/integrations",
-    tag = "integrations",
+    path = "/api/mcp/catalog",
+    tag = "mcp",
     responses(
-        (status = 200, description = "List installed integrations with status", body = serde_json::Value)
+        (status = 200, description = "MCP catalog entries", body = serde_json::Value)
     )
 )]
-pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let registry = state
+pub async fn list_mcp_catalog(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let installed_ids = collect_installed_catalog_ids(&state);
+
+    let catalog = state
         .kernel
-        .extensions()
+        .mcp_catalog()
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let health = &state.kernel.extension_monitor();
-
-    let mut entries = Vec::new();
-    for info in registry.list_all_info() {
-        let h = health.get_health(&info.template.id);
-        let status = integration_status_str(info.installed.as_ref(), h.as_ref());
-        if status == "available" {
-            continue; // Only show installed
-        }
-        entries.push(serde_json::json!({
-            "id": info.template.id,
-            "name": info.template.name,
-            "icon": info.template.icon,
-            "category": info.template.category.to_string(),
-            "status": status,
-            "tool_count": h.as_ref().map(|h| h.tool_count).unwrap_or(0),
-            "installed_at": info.installed.as_ref().map(|i| i.installed_at.to_rfc3339()),
-        }));
-    }
-
+    let entries: Vec<serde_json::Value> = catalog
+        .list()
+        .iter()
+        .map(|e| render_catalog_entry(e, &installed_ids))
+        .collect();
     Json(serde_json::json!({
-        "installed": entries,
+        "entries": entries,
         "count": entries.len(),
     }))
 }
 
-/// GET /api/integrations/:id — Get a single integration by ID.
+/// GET /api/mcp/catalog/{id} — Single catalog entry detail.
 #[utoipa::path(
     get,
-    path = "/api/integrations/{id}",
-    tag = "integrations",
-    params(
-        ("id" = String, Path, description = "Integration ID"),
-    ),
+    path = "/api/mcp/catalog/{id}",
+    tag = "mcp",
+    params(("id" = String, Path, description = "Catalog entry id")),
     responses(
-        (status = 200, description = "Integration detail", body = serde_json::Value),
-        (status = 404, description = "Integration not found", body = serde_json::Value),
+        (status = 200, description = "Catalog entry detail", body = serde_json::Value),
+        (status = 404, description = "Catalog entry not found", body = serde_json::Value),
     )
 )]
-pub async fn get_integration(
+pub async fn get_mcp_catalog_entry(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let registry = state
+    let installed_ids = collect_installed_catalog_ids(&state);
+
+    let catalog = state
         .kernel
-        .extensions()
+        .mcp_catalog()
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let health = &state.kernel.extension_monitor();
-
-    // Look up the template first
-    let template = match registry.get_template(&id) {
-        Some(t) => t,
-        None => {
-            return ApiErrorResponse::not_found(format!("Integration '{}' not found", id))
-                .into_json_tuple()
-                .into_response();
-        }
-    };
-
-    let installed = registry.get_installed(&id);
-    let h = health.get_health(&id);
-
-    let status = integration_status_str(installed, h.as_ref());
-
-    let error_message = h.as_ref().and_then(|h| match &h.status {
-        librefang_extensions::IntegrationStatus::Error(msg) => Some(msg.clone()),
-        _ => None,
-    });
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "id": template.id,
-            "name": template.name,
-            "description": template.description,
-            "icon": template.icon,
-            "category": template.category.to_string(),
-            "status": status,
-            "tags": template.tags,
-            "tool_count": h.as_ref().map(|h| h.tool_count).unwrap_or(0),
-            "installed": installed.is_some(),
-            "enabled": installed.map(|i| i.enabled).unwrap_or(false),
-            "installed_at": installed.map(|i| i.installed_at.to_rfc3339()),
-            "has_oauth": template.oauth.is_some(),
-            "setup_instructions": template.setup_instructions,
-            "required_env": template.required_env.iter().map(|e| serde_json::json!({
-                "name": e.name,
-                "label": e.label,
-                "help": e.help,
-                "is_secret": e.is_secret,
-                "get_url": e.get_url,
-            })).collect::<Vec<_>>(),
-            "error": error_message,
-        })),
-    )
-        .into_response()
+    match catalog.get(&id) {
+        Some(entry) => (
+            StatusCode::OK,
+            Json(render_catalog_entry(entry, &installed_ids)),
+        ),
+        None => ApiErrorResponse::not_found(format!("MCP catalog entry '{}' not found", id))
+            .into_json_tuple(),
+    }
 }
 
-/// GET /api/integrations/available — List all available templates.
+/// POST /api/mcp/servers/{name}/reconnect — Force a reconnect of an MCP server.
 #[utoipa::path(
-    get,
-    path = "/api/integrations/available",
-    tag = "integrations",
+    post,
+    path = "/api/mcp/servers/{name}/reconnect",
+    tag = "mcp",
+    params(("name" = String, Path, description = "Server name")),
     responses(
-        (status = 200, description = "List all available integration templates", body = serde_json::Value)
+        (status = 200, description = "Reconnect an MCP server", body = serde_json::Value),
+        (status = 404, description = "MCP server not configured", body = serde_json::Value),
     )
 )]
-pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let registry = state
+pub async fn reconnect_mcp_server_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let configured = state
         .kernel
-        .extensions()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    let templates: Vec<serde_json::Value> = registry
-        .list_templates()
+        .config_ref()
+        .mcp_servers
         .iter()
-        .map(|t| {
-            let installed = registry.is_installed(&t.id);
-            let transport = match &t.transport {
-                librefang_extensions::McpTransportTemplate::Stdio { command, args } => {
-                    serde_json::json!({ "type": "stdio", "command": command, "args": args })
-                }
-                librefang_extensions::McpTransportTemplate::Sse { url } => {
-                    serde_json::json!({ "type": "sse", "url": url })
-                }
-                librefang_extensions::McpTransportTemplate::Http { url } => {
-                    serde_json::json!({ "type": "http", "url": url })
-                }
-            };
-            serde_json::json!({
-                "id": t.id,
-                "name": t.name,
-                "description": t.description,
-                "icon": t.icon,
-                "category": t.category.to_string(),
-                "installed": installed,
-                "tags": t.tags,
-                "transport": transport,
-                "required_env": t.required_env.iter().map(|e| serde_json::json!({
-                    "name": e.name,
-                    "label": e.label,
-                    "help": e.help,
-                    "is_secret": e.is_secret,
-                    "get_url": e.get_url,
-                })).collect::<Vec<_>>(),
-                "has_oauth": t.oauth.is_some(),
-                "setup_instructions": t.setup_instructions,
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "integrations": templates,
-        "count": templates.len(),
-    }))
-}
-
-/// POST /api/integrations/add — Install an integration.
-#[utoipa::path(
-    post,
-    path = "/api/integrations/add",
-    tag = "integrations",
-    request_body = serde_json::Value,
-    responses(
-        (status = 200, description = "Install an integration", body = serde_json::Value)
-    )
-)]
-pub async fn add_integration(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let id = match req.get("id").and_then(|v| v.as_str()) {
-        Some(id) => id.to_string(),
-        None => {
-            return ApiErrorResponse::bad_request("Missing 'id' field").into_json_tuple();
-        }
-    };
-
-    // Scope the write lock so it's dropped before any .await
-    let install_err = {
-        let mut registry = state
-            .kernel
-            .extensions()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-
-        if registry.is_installed(&id) {
-            Some((
-                StatusCode::CONFLICT,
-                format!("Integration '{}' already installed", id),
-            ))
-        } else if registry.get_template(&id).is_none() {
-            Some((
-                StatusCode::NOT_FOUND,
-                format!("Unknown integration: '{}'", id),
-            ))
-        } else {
-            let entry = librefang_extensions::InstalledIntegration {
-                id: id.clone(),
-                installed_at: chrono::Utc::now(),
-                enabled: true,
-                oauth_provider: None,
-                config: std::collections::HashMap::new(),
-            };
-            match registry.install(entry) {
-                Ok(_) => None,
-                Err(e) => Some((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-            }
-        }
-    }; // write lock dropped here
-
-    if let Some((status, error)) = install_err {
-        return (status, Json(serde_json::json!({"error": error})));
-    }
-
-    state.kernel.extension_monitor().register(&id);
-
-    // Hot-connect the new MCP server
-    let connected = state.kernel.reload_extension_mcps().await.unwrap_or(0);
-
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "id": id,
-            "status": "installed",
-            "connected": connected > 0,
-            "message": format!("Integration '{}' installed", id),
-        })),
-    )
-}
-
-/// DELETE /api/integrations/:id — Remove an integration.
-#[utoipa::path(
-    delete,
-    path = "/api/integrations/{id}",
-    tag = "integrations",
-    params(
-        ("id" = String, Path, description = "Integration ID"),
-    ),
-    responses(
-        (status = 200, description = "Remove an integration", body = serde_json::Value)
-    )
-)]
-pub async fn remove_integration(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    // Scope the write lock
-    let uninstall_err = {
-        let mut registry = state
-            .kernel
-            .extensions()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        registry.uninstall(&id).err()
-    };
-
-    if let Some(e) = uninstall_err {
-        return ApiErrorResponse::not_found(e.to_string()).into_json_tuple();
-    }
-
-    state.kernel.extension_monitor().unregister(&id);
-
-    // Hot-disconnect the removed MCP server
-    if let Err(e) = state.kernel.reload_extension_mcps().await {
-        tracing::warn!("Failed to reload MCP extensions: {e}");
-    }
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "id": id,
-            "status": "removed",
-        })),
-    )
-}
-
-/// POST /api/integrations/:id/reconnect — Reconnect an MCP server.
-#[utoipa::path(
-    post,
-    path = "/api/integrations/{id}/reconnect",
-    tag = "integrations",
-    params(
-        ("id" = String, Path, description = "Integration ID"),
-    ),
-    responses(
-        (status = 200, description = "Reconnect an integration MCP server", body = serde_json::Value)
-    )
-)]
-pub async fn reconnect_integration(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let is_installed = {
-        let registry = state
-            .kernel
-            .extensions()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        registry.is_installed(&id)
-    };
-
-    if !is_installed {
-        return ApiErrorResponse::not_found(format!("Integration '{}' not installed", id))
+        .any(|s| s.name == name);
+    if !configured {
+        return ApiErrorResponse::not_found(format!("MCP server '{}' not configured", name))
             .into_json_tuple();
     }
 
-    match state.kernel.reconnect_extension_mcp(&id).await {
+    match state.kernel.reconnect_mcp_server(&name).await {
         Ok(tool_count) => (
             StatusCode::OK,
             Json(serde_json::json!({
-                "id": id,
+                "id": name,
                 "status": "connected",
                 "tool_count": tool_count,
             })),
@@ -4696,7 +4611,7 @@ pub async fn reconnect_integration(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
-                "id": id,
+                "id": name,
                 "status": "error",
                 "error": e,
             })),
@@ -4704,17 +4619,17 @@ pub async fn reconnect_integration(
     }
 }
 
-/// GET /api/integrations/health — Health status for all integrations.
+/// GET /api/mcp/health — Health snapshot across all configured MCP servers.
 #[utoipa::path(
     get,
-    path = "/api/integrations/health",
-    tag = "integrations",
+    path = "/api/mcp/health",
+    tag = "mcp",
     responses(
-        (status = 200, description = "Health status for all integrations", body = serde_json::Value)
+        (status = 200, description = "Health snapshot for all configured MCP servers", body = serde_json::Value)
     )
 )]
-pub async fn integrations_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let health_entries = state.kernel.extension_monitor().all_health();
+pub async fn mcp_health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let health_entries = state.kernel.mcp_health().all_health();
     let entries: Vec<serde_json::Value> = health_entries
         .iter()
         .map(|h| {
@@ -4738,17 +4653,26 @@ pub async fn integrations_health(State(state): State<Arc<AppState>>) -> impl Int
     }))
 }
 
-/// POST /api/integrations/reload — Hot-reload integration configs and reconnect MCP.
+/// POST /api/mcp/reload — Re-read the catalog and reconnect MCP servers.
 #[utoipa::path(
     post,
-    path = "/api/integrations/reload",
-    tag = "integrations",
+    path = "/api/mcp/reload",
+    tag = "mcp",
     responses(
-        (status = 200, description = "Hot-reload integration configs and reconnect MCP", body = serde_json::Value)
+        (status = 200, description = "Reload catalog and reconnect MCP servers", body = serde_json::Value)
     )
 )]
-pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.kernel.reload_extension_mcps().await {
+pub async fn reload_mcp_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Sync the in-memory config with config.toml before reconnecting.
+    // `reload_mcp_servers` reads from `self.config.load_full()`, so if the
+    // caller just edited config.toml out-of-band (the CLI's `librefang mcp
+    // add/remove` does this, then POSTs /api/mcp/reload) the reload would
+    // otherwise run against the stale snapshot and miss the change.
+    if let Err(e) = state.kernel.reload_config().await {
+        tracing::warn!("Failed to reload config before MCP reload: {e}");
+    }
+
+    match state.kernel.reload_mcp_servers().await {
         Ok(connected) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -4761,49 +4685,80 @@ pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl Int
 }
 
 // ---------------------------------------------------------------------------
-// Extension management endpoints
+// Extension management endpoints — kept as dashboard-friendly aliases over
+// the unified store. Installed state comes from config.mcp_servers with
+// `template_id` set; catalog-only entries come from the McpCatalog.
 // ---------------------------------------------------------------------------
 
-/// GET /api/extensions — List all installed extensions (integrations) with status.
+fn installed_servers_by_template(
+    servers: &[librefang_types::config::McpServerConfigEntry],
+) -> std::collections::HashMap<String, &librefang_types::config::McpServerConfigEntry> {
+    let mut map = std::collections::HashMap::new();
+    for s in servers {
+        if let Some(tid) = &s.template_id {
+            map.insert(tid.clone(), s);
+        }
+    }
+    map
+}
+
+fn status_str_for_catalog(
+    template_id: &str,
+    installed_by_template: &std::collections::HashMap<
+        String,
+        &librefang_types::config::McpServerConfigEntry,
+    >,
+    health: &librefang_extensions::health::HealthMonitor,
+) -> &'static str {
+    match installed_by_template.get(template_id) {
+        Some(srv) => match health.get_health(&srv.name).as_ref().map(|h| &h.status) {
+            Some(librefang_extensions::McpStatus::Ready) => "ready",
+            Some(librefang_extensions::McpStatus::Error(_)) => "error",
+            _ => "installed",
+        },
+        None => "available",
+    }
+}
+
+/// GET /api/extensions — List catalog entries annotated with installed state.
 #[utoipa::path(
     get,
     path = "/api/extensions",
     tag = "extensions",
     responses(
-        (status = 200, description = "List all installed extensions with status", body = serde_json::Value)
+        (status = 200, description = "List catalog entries with install/health status", body = serde_json::Value)
     )
 )]
 pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let registry = state
+    let cfg = state.kernel.config_snapshot();
+    let installed_map = installed_servers_by_template(&cfg.mcp_servers);
+    let health = state.kernel.mcp_health();
+
+    let catalog = state
         .kernel
-        .extensions()
+        .mcp_catalog()
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let health = &state.kernel.extension_monitor();
 
     let mut extensions = Vec::new();
-    for info in registry.list_all_info() {
-        let h = health.get_health(&info.template.id);
-        let status = match &info.installed {
-            Some(inst) if !inst.enabled => "disabled",
-            Some(_) => match h.as_ref().map(|h| &h.status) {
-                Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
-                Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
-                _ => "installed",
-            },
-            None => "available",
-        };
+    for entry in catalog.list() {
+        let status = status_str_for_catalog(&entry.id, &installed_map, health);
+        let installed_entry = installed_map.get(&entry.id);
+        let tool_count = installed_entry
+            .and_then(|srv| health.get_health(&srv.name))
+            .map(|h| h.tool_count)
+            .unwrap_or(0);
         extensions.push(serde_json::json!({
-            "name": info.template.id,
-            "display_name": info.template.name,
-            "description": info.template.description,
-            "icon": info.template.icon,
-            "category": info.template.category.to_string(),
+            "name": entry.id,
+            "display_name": entry.name,
+            "description": entry.description,
+            "icon": entry.icon,
+            "category": entry.category.to_string(),
             "status": status,
-            "tags": info.template.tags,
-            "installed": info.installed.is_some(),
-            "tool_count": h.as_ref().map(|h| h.tool_count).unwrap_or(0),
-            "installed_at": info.installed.as_ref().map(|i| i.installed_at.to_rfc3339()),
+            "tags": entry.tags,
+            "installed": installed_entry.is_some(),
+            "tool_count": tool_count,
+            "installed_at": serde_json::Value::Null,
         }));
     }
 
@@ -4813,72 +4768,68 @@ pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoRes
     }))
 }
 
-/// GET /api/extensions/:name — Get details for a single extension by name.
+/// GET /api/extensions/:name — Get details for a single catalog entry.
 #[utoipa::path(
     get,
     path = "/api/extensions/{name}",
     tag = "extensions",
     params(
-        ("name" = String, Path, description = "Extension name"),
+        ("name" = String, Path, description = "Catalog entry id"),
     ),
     responses(
-        (status = 200, description = "Get details for a single extension", body = serde_json::Value)
+        (status = 200, description = "Catalog entry detail + install status", body = serde_json::Value)
     )
 )]
 pub async fn get_extension(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let registry = state
+    let cfg = state.kernel.config_snapshot();
+    let installed_map = installed_servers_by_template(&cfg.mcp_servers);
+    let catalog = state
         .kernel
-        .extensions()
+        .mcp_catalog()
         .read()
         .unwrap_or_else(|e| e.into_inner());
 
-    let template = match registry.get_template(&name) {
+    let entry = match catalog.get(&name) {
         Some(t) => t.clone(),
         None => {
             return ApiErrorResponse::not_found(format!("Extension '{}' not found", name))
                 .into_json_tuple();
         }
     };
+    drop(catalog);
 
-    let installed = registry.get_installed(&name).cloned();
-    let health = state.kernel.extension_monitor().get_health(&name);
+    let installed_entry = installed_map.get(&entry.id);
+    let health = state.kernel.mcp_health();
+    let health_snapshot = installed_entry.and_then(|srv| health.get_health(&srv.name));
 
-    let status = match &installed {
-        Some(inst) if !inst.enabled => "disabled",
-        Some(_) => match health.as_ref().map(|h| &h.status) {
-            Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
-            Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
-            _ => "installed",
-        },
-        None => "available",
-    };
+    let status = status_str_for_catalog(&entry.id, &installed_map, health);
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "name": template.id,
-            "display_name": template.name,
-            "description": template.description,
-            "icon": template.icon,
-            "category": template.category.to_string(),
+            "name": entry.id,
+            "display_name": entry.name,
+            "description": entry.description,
+            "icon": entry.icon,
+            "category": entry.category.to_string(),
             "status": status,
-            "tags": template.tags,
-            "installed": installed.is_some(),
-            "tool_count": health.as_ref().map(|h| h.tool_count).unwrap_or(0),
-            "installed_at": installed.as_ref().map(|i| i.installed_at.to_rfc3339()),
-            "required_env": template.required_env.iter().map(|e| serde_json::json!({
+            "tags": entry.tags,
+            "installed": installed_entry.is_some(),
+            "tool_count": health_snapshot.as_ref().map(|h| h.tool_count).unwrap_or(0),
+            "installed_at": serde_json::Value::Null,
+            "required_env": entry.required_env.iter().map(|e| serde_json::json!({
                 "name": e.name,
                 "label": e.label,
                 "help": e.help,
                 "is_secret": e.is_secret,
                 "get_url": e.get_url,
             })).collect::<Vec<_>>(),
-            "has_oauth": template.oauth.is_some(),
-            "setup_instructions": template.setup_instructions,
-            "health": health.as_ref().map(|h| serde_json::json!({
+            "has_oauth": entry.oauth.is_some(),
+            "setup_instructions": entry.setup_instructions,
+            "health": health_snapshot.as_ref().map(|h| serde_json::json!({
                 "last_ok": h.last_ok.map(|t| t.to_rfc3339()),
                 "last_error": h.last_error,
                 "consecutive_failures": h.consecutive_failures,
@@ -4888,14 +4839,15 @@ pub async fn get_extension(
     )
 }
 
-/// POST /api/extensions/install — Install an extension by name.
+/// POST /api/extensions/install — Install a catalog entry (alias for
+/// POST /api/mcp/servers with template_id).
 #[utoipa::path(
     post,
     path = "/api/extensions/install",
     tag = "extensions",
     request_body = serde_json::Value,
     responses(
-        (status = 200, description = "Install an extension by name", body = serde_json::Value)
+        (status = 200, description = "Install a catalog entry", body = serde_json::Value)
     )
 )]
 pub async fn install_extension(
@@ -4907,47 +4859,78 @@ pub async fn install_extension(
         return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
     }
 
-    // Scope the write lock so it's dropped before any .await
-    let install_err = {
-        let mut registry = state
-            .kernel
-            .extensions()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-
-        if registry.is_installed(&name) {
-            Some((
-                StatusCode::CONFLICT,
-                format!("Extension '{}' already installed", name),
-            ))
-        } else if registry.get_template(&name).is_none() {
-            Some((
-                StatusCode::NOT_FOUND,
-                format!("Unknown extension: '{}'", name),
-            ))
-        } else {
-            let entry = librefang_extensions::InstalledIntegration {
-                id: name.clone(),
-                installed_at: chrono::Utc::now(),
-                enabled: true,
-                oauth_provider: None,
-                config: std::collections::HashMap::new(),
-            };
-            match registry.install(entry) {
-                Ok(_) => None,
-                Err(e) => Some((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-            }
-        }
-    }; // write lock dropped here
-
-    if let Some((status, error)) = install_err {
-        return (status, Json(serde_json::json!({"error": error})));
+    let already_installed = state
+        .kernel
+        .config_ref()
+        .mcp_servers
+        .iter()
+        .any(|s| s.template_id.as_deref() == Some(name.as_str()) || s.name == name);
+    if already_installed {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Extension '{}' already installed", name),
+            })),
+        );
     }
 
-    state.kernel.extension_monitor().register(&name);
+    // Reuse the installer via an ephemeral catalog load.
+    let home = state.kernel.home_dir().to_path_buf();
+    let dotenv_path = home.join(".env");
+    let vault_path = home.join("vault.enc");
+    let vault = if vault_path.exists() {
+        let mut v = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if v.unlock().is_ok() {
+            Some(v)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut resolver =
+        librefang_extensions::credentials::CredentialResolver::new(vault, Some(&dotenv_path));
+    let mut catalog = librefang_extensions::catalog::McpCatalog::new(&home);
+    catalog.load(&home);
 
-    // Hot-connect the new MCP server
-    let connected = state.kernel.reload_extension_mcps().await.unwrap_or(0);
+    let result = match librefang_extensions::installer::install_integration(
+        &catalog,
+        &mut resolver,
+        &name,
+        &std::collections::HashMap::new(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            let err_str = e.to_string();
+            let status = match e {
+                librefang_extensions::ExtensionError::NotFound(_) => StatusCode::NOT_FOUND,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return (status, Json(serde_json::json!({"error": err_str})));
+        }
+    };
+
+    let config_path = state.kernel.home_dir().join("config.toml");
+    if let Err(e) = upsert_mcp_server_config(&config_path, &result.server) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to write config: {e}"),
+            })),
+        );
+    }
+
+    // Sync the in-memory config with the freshly-written config.toml before
+    // reload_mcp_servers runs. `reload_mcp_servers` reads from
+    // `self.config.load_full()`, so skipping this step means the just-added
+    // [[mcp_servers]] entry is invisible and the endpoint reports "installed"
+    // without actually connecting anything.
+    if let Err(e) = state.kernel.reload_config().await {
+        tracing::warn!("Failed to reload config after extension install: {e}");
+    }
+
+    state.kernel.mcp_health().register(&result.server.name);
+    let connected = state.kernel.reload_mcp_servers().await.unwrap_or(0);
 
     (
         StatusCode::OK,
@@ -4959,14 +4942,14 @@ pub async fn install_extension(
     )
 }
 
-/// POST /api/extensions/uninstall — Uninstall an extension by name.
+/// POST /api/extensions/uninstall — Uninstall by catalog id (template_id).
 #[utoipa::path(
     post,
     path = "/api/extensions/uninstall",
     tag = "extensions",
     request_body = serde_json::Value,
     responses(
-        (status = 200, description = "Uninstall an extension by name", body = serde_json::Value)
+        (status = 200, description = "Uninstall a catalog-backed MCP server", body = serde_json::Value)
     )
 )]
 pub async fn uninstall_extension(
@@ -4978,25 +4961,41 @@ pub async fn uninstall_extension(
         return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
     }
 
-    // Scope the write lock
-    let uninstall_err = {
-        let mut registry = state
-            .kernel
-            .extensions()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        registry.uninstall(&name).err()
+    // Resolve template_id -> server name (may differ for raw-authored entries).
+    let server_name = state
+        .kernel
+        .config_ref()
+        .mcp_servers
+        .iter()
+        .find(|s| s.template_id.as_deref() == Some(name.as_str()) || s.name == name)
+        .map(|s| s.name.clone());
+
+    let server_name = match server_name {
+        Some(n) => n,
+        None => {
+            return ApiErrorResponse::not_found(format!("Extension '{}' not installed", name))
+                .into_json_tuple();
+        }
     };
 
-    if let Some(e) = uninstall_err {
-        return ApiErrorResponse::not_found(e.to_string()).into_json_tuple();
+    let config_path = state.kernel.home_dir().join("config.toml");
+    if let Err(e) = remove_mcp_server_config(&config_path, &server_name) {
+        return ApiErrorResponse::internal(format!("Failed to update config: {e}"))
+            .into_json_tuple();
     }
 
-    state.kernel.extension_monitor().unregister(&name);
+    // Sync the in-memory config before reload_mcp_servers runs. Otherwise
+    // `self.config.load_full()` still returns the stale snapshot with the
+    // removed entry and `reload_mcp_servers` happily reconnects the server
+    // we just deleted.
+    if let Err(e) = state.kernel.reload_config().await {
+        tracing::warn!("Failed to reload config after extension uninstall: {e}");
+    }
 
-    // Hot-disconnect the removed MCP server
-    if let Err(e) = state.kernel.reload_extension_mcps().await {
-        tracing::warn!("Failed to reload MCP extensions after uninstall: {e}");
+    state.kernel.mcp_health().unregister(&server_name);
+    state.kernel.disconnect_mcp_server(&server_name).await;
+    if let Err(e) = state.kernel.reload_mcp_servers().await {
+        tracing::warn!("Failed to reload MCP servers after uninstall: {e}");
     }
 
     (
@@ -5043,6 +5042,7 @@ mod tests {
 
         let entry = McpServerConfigEntry {
             name: "nocodb".to_string(),
+            template_id: None,
             transport: Some(McpTransportEntry::Stdio {
                 command: "npx".to_string(),
                 args: vec![
@@ -5101,6 +5101,7 @@ mod tests {
 
         let v1 = McpServerConfigEntry {
             name: "nocodb".to_string(),
+            template_id: None,
             transport: Some(McpTransportEntry::Http {
                 url: "http://old:8080/mcp".to_string(),
             }),
@@ -5114,6 +5115,7 @@ mod tests {
 
         let v2 = McpServerConfigEntry {
             name: "nocodb".to_string(),
+            template_id: None,
             transport: Some(McpTransportEntry::Http {
                 url: "http://new:9090/mcp".to_string(),
             }),

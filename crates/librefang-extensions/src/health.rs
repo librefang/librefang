@@ -1,22 +1,22 @@
-//! Integration health monitor — tracks MCP server status with auto-reconnect.
+//! MCP server health monitor — tracks status with auto-reconnect.
 //!
 //! Background tokio task pings MCP connections, auto-reconnects with
 //! exponential backoff (5s -> 10s -> 20s -> ... -> 5min max, 10 attempts max).
 
-use crate::IntegrationStatus;
+use crate::McpStatus;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Health status for a single integration.
+/// Health status for a single MCP server.
 #[derive(Debug, Clone, Serialize)]
-pub struct IntegrationHealth {
-    /// Integration ID.
+pub struct McpHealth {
+    /// MCP server id (matches `McpServerConfigEntry.name`).
     pub id: String,
     /// Current status.
-    pub status: IntegrationStatus,
+    pub status: McpStatus,
     /// Number of tools available from this MCP server.
     pub tool_count: usize,
     /// Last successful health check.
@@ -33,12 +33,12 @@ pub struct IntegrationHealth {
     pub connected_since: Option<DateTime<Utc>>,
 }
 
-impl IntegrationHealth {
+impl McpHealth {
     /// Create a new health record.
     pub fn new(id: String) -> Self {
         Self {
             id,
-            status: IntegrationStatus::Available,
+            status: McpStatus::Available,
             tool_count: 0,
             last_ok: None,
             last_error: None,
@@ -51,7 +51,7 @@ impl IntegrationHealth {
 
     /// Mark as healthy.
     pub fn mark_ok(&mut self, tool_count: usize) {
-        self.status = IntegrationStatus::Ready;
+        self.status = McpStatus::Ready;
         self.tool_count = tool_count;
         self.last_ok = Some(Utc::now());
         self.last_error = None;
@@ -65,7 +65,7 @@ impl IntegrationHealth {
 
     /// Mark as failed.
     pub fn mark_error(&mut self, error: String) {
-        self.status = IntegrationStatus::Error(error.clone());
+        self.status = McpStatus::Error(error.clone());
         self.last_error = Some(error);
         self.consecutive_failures += 1;
         self.connected_since = None;
@@ -102,10 +102,10 @@ impl Default for HealthMonitorConfig {
     }
 }
 
-/// The health monitor — stores health state for all integrations.
+/// The MCP health monitor — stores health state for all configured MCP servers.
 pub struct HealthMonitor {
-    /// Health records keyed by integration ID.
-    health: Arc<DashMap<String, IntegrationHealth>>,
+    /// Health records keyed by MCP server id.
+    health: Arc<DashMap<String, McpHealth>>,
     /// Configuration.
     config: HealthMonitorConfig,
 }
@@ -119,14 +119,14 @@ impl HealthMonitor {
         }
     }
 
-    /// Register an integration for monitoring.
+    /// Register an MCP server for monitoring.
     pub fn register(&self, id: &str) {
         self.health
             .entry(id.to_string())
-            .or_insert_with(|| IntegrationHealth::new(id.to_string()));
+            .or_insert_with(|| McpHealth::new(id.to_string()));
     }
 
-    /// Unregister an integration.
+    /// Unregister an MCP server.
     pub fn unregister(&self, id: &str) {
         self.health.remove(id);
     }
@@ -145,13 +145,13 @@ impl HealthMonitor {
         }
     }
 
-    /// Get health for a specific integration.
-    pub fn get_health(&self, id: &str) -> Option<IntegrationHealth> {
+    /// Get health for a specific MCP server.
+    pub fn get_health(&self, id: &str) -> Option<McpHealth> {
         self.health.get(id).map(|e| e.clone())
     }
 
-    /// Get health for all integrations.
-    pub fn all_health(&self) -> Vec<IntegrationHealth> {
+    /// Get health for all MCP servers.
+    pub fn all_health(&self) -> Vec<McpHealth> {
         self.health.iter().map(|e| e.value().clone()).collect()
     }
 
@@ -162,20 +162,20 @@ impl HealthMonitor {
         Duration::from_secs(backoff.min(self.config.max_backoff_secs))
     }
 
-    /// Check if an integration should be reconnected.
+    /// Check if an MCP server should be reconnected.
     pub fn should_reconnect(&self, id: &str) -> bool {
         if !self.config.auto_reconnect {
             return false;
         }
         if let Some(entry) = self.health.get(id) {
-            matches!(entry.status, IntegrationStatus::Error(_))
+            matches!(entry.status, McpStatus::Error(_))
                 && entry.reconnect_attempts < self.config.max_reconnect_attempts
         } else {
             false
         }
     }
 
-    /// Mark an integration as reconnecting.
+    /// Mark an MCP server as reconnecting.
     pub fn mark_reconnecting(&self, id: &str) {
         if let Some(mut entry) = self.health.get_mut(id) {
             entry.mark_reconnecting();
@@ -183,7 +183,7 @@ impl HealthMonitor {
     }
 
     /// Get a reference to the health DashMap (for background task).
-    pub fn health_map(&self) -> Arc<DashMap<String, IntegrationHealth>> {
+    pub fn health_map(&self) -> Arc<DashMap<String, McpHealth>> {
         self.health.clone()
     }
 
@@ -203,12 +203,12 @@ mod tests {
         monitor.register("github");
 
         let h = monitor.get_health("github").unwrap();
-        assert_eq!(h.status, IntegrationStatus::Available);
+        assert_eq!(h.status, McpStatus::Available);
         assert_eq!(h.tool_count, 0);
 
         monitor.report_ok("github", 12);
         let h = monitor.get_health("github").unwrap();
-        assert_eq!(h.status, IntegrationStatus::Ready);
+        assert_eq!(h.status, McpStatus::Ready);
         assert_eq!(h.tool_count, 12);
         assert!(h.last_ok.is_some());
         assert!(h.connected_since.is_some());
@@ -221,7 +221,7 @@ mod tests {
 
         monitor.report_error("slack", "Connection refused".to_string());
         let h = monitor.get_health("slack").unwrap();
-        assert!(matches!(h.status, IntegrationStatus::Error(_)));
+        assert!(matches!(h.status, McpStatus::Error(_)));
         assert_eq!(h.consecutive_failures, 1);
 
         monitor.report_error("slack", "Timeout".to_string());
@@ -232,7 +232,7 @@ mod tests {
         monitor.report_ok("slack", 5);
         let h = monitor.get_health("slack").unwrap();
         assert_eq!(h.consecutive_failures, 0);
-        assert_eq!(h.status, IntegrationStatus::Ready);
+        assert_eq!(h.status, McpStatus::Ready);
     }
 
     #[test]

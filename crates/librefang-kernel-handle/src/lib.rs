@@ -501,4 +501,34 @@ pub trait KernelHandle: Send + Sync {
     ) -> Result<serde_json::Value, String> {
         Err("Goal system not available".to_string())
     }
+
+    /// Run a forked agent turn that collapses to a single text response —
+    /// the "structured-output via forked call" primitive. Used by the
+    /// proactive memory extractor so its LLM call shares the parent
+    /// turn's `(system + tools + messages)` prefix for Anthropic prompt
+    /// cache alignment, instead of issuing a standalone `driver.complete()`
+    /// that always starts cold.
+    ///
+    /// Internally: spawn `run_forked_agent_streaming`, drain to completion,
+    /// return the final assistant text. Fork semantics apply — the call's
+    /// messages do NOT persist into the agent's canonical session, and the
+    /// turn-end hook fires with `is_fork: true` so auto-dream won't
+    /// recurse.
+    ///
+    /// `allowed_tools = Some(vec![])` keeps the fork single-turn (no tool
+    /// calls permitted — model returns text). Pass a larger allowlist only
+    /// when the caller actually expects tool use (e.g. future extractors
+    /// that want the fork to call `memory_store` directly).
+    ///
+    /// Default: error. The real kernel overrides; tests / stubs that
+    /// don't implement the full streaming path just fall back to a
+    /// standalone driver call through the extractor's own path.
+    async fn run_forked_agent_oneshot(
+        &self,
+        _agent_id: &str,
+        _prompt: &str,
+        _allowed_tools: Option<Vec<String>>,
+    ) -> Result<String, String> {
+        Err("run_forked_agent_oneshot not available in this KernelHandle".to_string())
+    }
 }

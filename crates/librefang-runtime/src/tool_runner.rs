@@ -4984,8 +4984,25 @@ async fn tool_skill_evolve_delete(
     ensure_not_frozen(registry)?;
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
 
-    let skills_dir = registry.skills_dir();
-    match librefang_skills::evolution::delete_skill(skills_dir, name) {
+    // Resolve the actual installed skill's parent directory instead of
+    // blindly targeting `registry.skills_dir() + name`. Workspace skills
+    // shadow global skills with the same name in an agent run; without
+    // this, `skill_evolve_delete` removed the global skill (or reported
+    // NotFound) while leaving the workspace copy the agent was actually
+    // using in place — destructive against the wrong resource.
+    let parent = match registry.get(name) {
+        Some(s) => s
+            .path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| registry.skills_dir().to_path_buf()),
+        // Fall back to the global dir when the registry hasn't caught up
+        // yet (e.g. a skill created in this same turn hasn't been
+        // hot-reloaded into the live view) — delete_skill will return
+        // NotFound if nothing exists there either.
+        None => registry.skills_dir().to_path_buf(),
+    };
+    match librefang_skills::evolution::delete_skill(&parent, name) {
         Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
         Err(e) => Err(format!("Failed to delete skill: {e}")),
     }

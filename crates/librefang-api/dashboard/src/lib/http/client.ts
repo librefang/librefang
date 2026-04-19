@@ -55,7 +55,10 @@ export {
   getHandManifestToml,
   // mcp
   listMcpServers,
-  listAvailableIntegrations,
+  getMcpServer,
+  listMcpCatalog,
+  getMcpCatalogEntry,
+  getMcpHealth,
   // memory
   listMemories,
   searchMemories,
@@ -91,6 +94,10 @@ export {
   listWorkflowRuns,
   getWorkflowRun,
   listWorkflowTemplates,
+  // terminal
+  listTerminalWindows,
+  // auto-dream
+  getAutoDreamStatus,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -145,6 +152,8 @@ export {
   addMcpServer,
   updateMcpServer,
   deleteMcpServer,
+  reconnectMcpServer,
+  reloadMcp,
   // memory
   addMemoryFromText,
   updateMemory,
@@ -184,12 +193,27 @@ export {
   updateWorkflow,
   instantiateTemplate,
   saveWorkflowAsTemplate,
+  // terminal
+  createTerminalWindow,
+  renameTerminalWindow,
+  deleteTerminalWindow,
+  // auto-dream
+  triggerAutoDream,
+  abortAutoDream,
+  setAutoDreamEnabled,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
 // Type re-exports used by hooks and pages
 // ---------------------------------------------------------------------------
 export type {
+  AutoDreamAbortOutcome,
+  AutoDreamAgentStatus,
+  AutoDreamProgress,
+  AutoDreamStatus,
+  AutoDreamStatusName,
+  AutoDreamTriggerOutcome,
+  AutoDreamTurn,
   CronJobItem,
   HandDefinitionItem,
   HandInstanceItem,
@@ -198,4 +222,5 @@ export type {
   HandStatsResponse,
   MemoryItem,
   ModelOverrides,
+  TerminalWindow,
 } from "../../api";

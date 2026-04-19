@@ -74,6 +74,11 @@ pub enum AppEvent {
     },
     /// Audit trail loaded.
     AuditLoaded(Vec<AuditRow>),
+    /// Auto-dream status loaded. Surfaces on the Dashboard's dream strip.
+    DreamsLoaded {
+        enabled: bool,
+        rows: Vec<crate::tui::screens::dashboard::DreamRow>,
+    },
     /// Channel list loaded.
     ChannelListLoaded(Vec<ChannelInfo>),
     /// Channel test result.
@@ -588,6 +593,63 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                     let _ = tx.send(AppEvent::AuditLoaded(rows));
                 }
             }
+
+            // Try to fetch auto-dream status. Silent skip on any failure —
+            // this endpoint is optional and the dashboard should keep
+            // working if auto-dream is not wired up.
+            if let Ok(resp) = client
+                .get(format!("{base_url}/api/auto-dream/status"))
+                .send()
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let enabled = body
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let rows: Vec<crate::tui::screens::dashboard::DreamRow> = body
+                        .get("agents")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|a| {
+                                    let progress = a.get("progress")?;
+                                    if progress.is_null() {
+                                        return None;
+                                    }
+                                    Some(crate::tui::screens::dashboard::DreamRow {
+                                        agent_name: a
+                                            .get("agent_name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("?")
+                                            .to_string(),
+                                        status: progress
+                                            .get("status")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("?")
+                                            .to_string(),
+                                        phase: progress
+                                            .get("phase")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        memories_touched: progress
+                                            .get("memories_touched")
+                                            .and_then(|v| v.as_array())
+                                            .map(|a| a.len() as u32)
+                                            .unwrap_or(0),
+                                        tool_use_count: progress
+                                            .get("tool_use_count")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as u32,
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::DreamsLoaded { enabled, rows });
+                }
+            }
         }
         BackendRef::InProcess(kernel) => {
             let count = kernel.agent_registry().count() as u64;
@@ -600,6 +662,41 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             });
             // In-process mode doesn't have a REST audit endpoint yet
             let _ = tx.send(AppEvent::AuditLoaded(Vec::new()));
+
+            // Pull auto-dream status directly off the kernel. Without this
+            // the DREAMS strip never receives data in standalone TUI mode
+            // (no daemon), even though the local kernel's dream flow is
+            // fully active. `current_status` is async so we spin up a
+            // throwaway runtime on this worker thread.
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            let status = rt.block_on(librefang_kernel::auto_dream::current_status(&kernel));
+            let rows: Vec<crate::tui::screens::dashboard::DreamRow> = status
+                .agents
+                .iter()
+                .filter_map(|a| {
+                    let progress = a.progress.as_ref()?;
+                    let status_str = match progress.status {
+                        librefang_kernel::auto_dream::DreamStatus::Running => "running",
+                        librefang_kernel::auto_dream::DreamStatus::Completed => "completed",
+                        librefang_kernel::auto_dream::DreamStatus::Failed => "failed",
+                        librefang_kernel::auto_dream::DreamStatus::Aborted => "aborted",
+                    };
+                    Some(crate::tui::screens::dashboard::DreamRow {
+                        agent_name: a.agent_name.clone(),
+                        status: status_str.to_string(),
+                        phase: progress.phase.clone(),
+                        memories_touched: progress.memories_touched.len() as u32,
+                        tool_use_count: progress.tool_use_count,
+                    })
+                })
+                .collect();
+            let _ = tx.send(AppEvent::DreamsLoaded {
+                enabled: status.enabled,
+                rows,
+            });
         }
     });
 }
@@ -2401,33 +2498,15 @@ pub fn spawn_fetch_extensions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
             let client = daemon_client();
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/integrations/available"))
-                .send()
-            {
+            if let Ok(resp) = client.get(format!("{base_url}/api/mcp/catalog")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                    // Also fetch installed to merge status
-                    let installed_ids: Vec<String> = client
-                        .get(format!("{base_url}/api/integrations"))
-                        .send()
-                        .ok()
-                        .and_then(|r| r.json::<serde_json::Value>().ok())
-                        .and_then(|b| {
-                            b["installed"].as_array().map(|arr| {
-                                arr.iter()
-                                    .filter_map(|i| i["id"].as_str().map(String::from))
-                                    .collect()
-                            })
-                        })
-                        .unwrap_or_default();
-
-                    let extensions: Vec<ExtensionInfo> = body["integrations"]
+                    let extensions: Vec<ExtensionInfo> = body["entries"]
                         .as_array()
                         .map(|arr| {
                             arr.iter()
                                 .map(|e| {
                                     let id = e["id"].as_str().unwrap_or("").to_string();
-                                    let installed = installed_ids.contains(&id);
+                                    let installed = e["installed"].as_bool().unwrap_or(false);
                                     ExtensionInfo {
                                         id: id.clone(),
                                         name: e["name"].as_str().unwrap_or("").to_string(),
@@ -2462,15 +2541,21 @@ pub fn spawn_fetch_extensions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             }
         }
         BackendRef::InProcess(kernel) => {
-            let registry = kernel
-                .extensions()
+            let installed_ids: std::collections::HashSet<String> = kernel
+                .config_ref()
+                .mcp_servers
+                .iter()
+                .filter_map(|s| s.template_id.clone())
+                .collect();
+            let catalog = kernel
+                .mcp_catalog()
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
-            let extensions: Vec<ExtensionInfo> = registry
-                .list_templates()
+            let extensions: Vec<ExtensionInfo> = catalog
+                .list()
                 .iter()
                 .map(|t| {
-                    let installed = registry.is_installed(&t.id);
+                    let installed = installed_ids.contains(&t.id);
                     ExtensionInfo {
                         id: t.id.clone(),
                         name: t.name.clone(),
@@ -2498,10 +2583,7 @@ pub fn spawn_fetch_extension_health(backend: BackendRef, tx: mpsc::Sender<AppEve
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
             let client = daemon_client();
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/integrations/health"))
-                .send()
-            {
+            if let Ok(resp) = client.get(format!("{base_url}/api/mcp/health")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let entries: Vec<ExtensionHealthInfo> = body["health"]
                         .as_array()
@@ -2531,7 +2613,7 @@ pub fn spawn_fetch_extension_health(backend: BackendRef, tx: mpsc::Sender<AppEve
             }
         }
         BackendRef::InProcess(kernel) => {
-            let health = kernel.extension_monitor().all_health();
+            let health = kernel.mcp_health().all_health();
             let entries: Vec<ExtensionHealthInfo> = health
                 .iter()
                 .map(|h| ExtensionHealthInfo {
@@ -2559,8 +2641,8 @@ pub fn spawn_install_extension(backend: BackendRef, id: String, tx: mpsc::Sender
         BackendRef::Daemon(base_url) => {
             let client = daemon_client();
             match client
-                .post(format!("{base_url}/api/integrations/add"))
-                .json(&serde_json::json!({"id": id}))
+                .post(format!("{base_url}/api/mcp/servers"))
+                .json(&serde_json::json!({"template_id": id}))
                 .send()
             {
                 Ok(resp) if resp.status().is_success() => {
@@ -2587,12 +2669,20 @@ pub fn spawn_install_extension(backend: BackendRef, id: String, tx: mpsc::Sender
 }
 
 /// Remove an extension.
+///
+/// Routes through `/api/extensions/uninstall` rather than
+/// `DELETE /api/mcp/servers/{name}` because the UI list carries the
+/// catalog `entry.id` (template_id), and that can diverge from the
+/// configured server name (user renamed it, or the catalog entry id
+/// doesn't match the final server name). The extensions endpoint
+/// resolves either form; the MCP endpoint only accepts the exact name.
 pub fn spawn_remove_extension(backend: BackendRef, id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
             let client = daemon_client();
             match client
-                .delete(format!("{base_url}/api/integrations/{id}"))
+                .post(format!("{base_url}/api/extensions/uninstall"))
+                .json(&serde_json::json!({ "name": id }))
                 .send()
             {
                 Ok(resp) if resp.status().is_success() => {
@@ -2617,7 +2707,7 @@ pub fn spawn_reconnect_extension(backend: BackendRef, id: String, tx: mpsc::Send
         BackendRef::Daemon(base_url) => {
             let client = daemon_client();
             match client
-                .post(format!("{base_url}/api/integrations/{id}/reconnect"))
+                .post(format!("{base_url}/api/mcp/servers/{id}/reconnect"))
                 .send()
             {
                 Ok(resp) if resp.status().is_success() => {

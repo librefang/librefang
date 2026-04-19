@@ -242,6 +242,33 @@ impl TmuxController {
         Ok(())
     }
 
+    /// Rename a window identified by `id` to `name`.
+    ///
+    /// Both the ID and the new name are validated before the subprocess is
+    /// spawned.
+    pub async fn rename_window(&self, id: &str, name: &str) -> anyhow::Result<()> {
+        if !validate_window_id(id) {
+            return Err(anyhow::anyhow!(
+                "invalid window id {:?}: must match ^@[0-9]{{1,9}}$",
+                id
+            ));
+        }
+        if !validate_window_name(name) {
+            return Err(anyhow::anyhow!(
+                "invalid window name {:?}: must match ^[A-Za-z0-9 ._-]{{1,64}}$",
+                name
+            ));
+        }
+
+        let mut cmd = self.base_cmd();
+        cmd.arg("rename-window")
+            .arg("-t")
+            .arg(format!("{}:{}", self.session_name, id))
+            .arg(name);
+        self.run(cmd).await?;
+        Ok(())
+    }
+
     /// Kill a single window by ID (e.g. `"@1"`).
     ///
     /// The ID is validated before the subprocess is spawned.

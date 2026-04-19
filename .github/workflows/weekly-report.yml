@@ -87,7 +87,7 @@ jobs:
 
           - 🆕 Check [good first issues](https://github.com/librefang/librefang/labels/good%20first%20issue)
           - 💬 Join [Discussions](https://github.com/librefang/librefang/discussions)
-          - 📖 Read the [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)
+          - 📖 Read the [Contributing Guide](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md)
           CTA_EOF
 
           # Clean up leading whitespace from heredoc indentation
@@ -144,7 +144,7 @@ jobs:
           📌 PRs merged: **${{ steps.report.outputs.merged_count }}** | Issues opened: **${{ steps.report.outputs.opened_count }}** | Issues closed: **${{ steps.report.outputs.closed_count }}**
           ⭐ Stars: **${{ steps.report.outputs.stars }}** | Good first issues: **${{ steps.report.outputs.gfi_count }}**
 
-          👉 [Full report](https://github.com/librefang/librefang/discussions) | [Contribute](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)"
+          👉 [Full report](https://github.com/librefang/librefang/discussions) | [Contribute](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md)"
 
           # Clean indentation
           CONTENT=$(echo "$CONTENT" | sed 's/^          //')

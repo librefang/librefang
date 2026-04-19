@@ -149,13 +149,14 @@ function HandChatPanel({
   }, [sessionData]);
 
   useEffect(() => {
-    if (messages.length > 0) {
-      setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 60);
-    }
+    if (messages.length === 0) return;
+    const id = setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 60);
+    return () => clearTimeout(id);
   }, [messages]);
 
   useEffect(() => {
-    setTimeout(() => inputRef.current?.focus(), 100);
+    const id = setTimeout(() => inputRef.current?.focus(), 100);
+    return () => clearTimeout(id);
   }, []);
 
   const handleSend = useCallback(async () => {
