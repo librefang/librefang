@@ -1,7 +1,6 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { configureChannel, wechatQrStart, wechatQrStatus, whatsappQrStart, whatsappQrStatus, type ChannelItem } from "../api";
+import { wechatQrStart, wechatQrStatus, whatsappQrStart, whatsappQrStatus, type ChannelItem } from "../api";
 import { useChannels } from "../lib/queries/channels";
 import { useConfigureChannel, useTestChannel, useReloadChannels } from "../lib/mutations/channels";
 import { useUIStore } from "../lib/store";
@@ -459,15 +458,11 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
 
 // QR Login Dialog for channels with setup_type === "qr" (e.g. WeChat, WhatsApp)
 function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () => void; t: (key: string) => string }) {
-  const queryClient = useQueryClient();
+  const configureChannelMutation = useConfigureChannel();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cancelledRef = useRef(false);
   const [phase, setPhase] = useState<"idle" | "loading" | "scanning" | "success" | "error">("idle");
   const [message, setMessage] = useState("");
-
-  const cleanup = useCallback(() => {
-    cancelledRef.current = true;
-  }, []);
 
   useEffect(() => () => { cancelledRef.current = true; }, []);
 
@@ -476,7 +471,7 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
     setPhase("loading");
     setMessage("");
     try {
-      // Pick the correct QR API based on channel name
+      // QR start/status are imperative long-poll probes, so they stay raw instead of going through cached query hooks.
       const qrStart = channel.name === "whatsapp" ? whatsappQrStart : wechatQrStart;
       const qrStatus = channel.name === "whatsapp" ? whatsappQrStatus : wechatQrStatus;
       const displayName = channel.name === "whatsapp" ? "WhatsApp" : "WeChat";
@@ -506,10 +501,12 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
             if (cancelledRef.current) break;
             if (status.connected && status.bot_token) {
               cancelledRef.current = true;
+              await configureChannelMutation.mutateAsync({
+                channelName: channel.name,
+                config: { bot_token_env: status.bot_token },
+              });
               setPhase("success");
               setMessage(t("channels.login_success"));
-              await configureChannel(channel.name, { bot_token_env: status.bot_token });
-              queryClient.invalidateQueries({ queryKey: ["channels", "list"] });
               setTimeout(onClose, 1500);
               return;
             } else if (status.expired) {
@@ -530,7 +527,7 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
       setPhase("error");
       setMessage(e instanceof Error ? e.message : "Failed to start QR login");
     }
-  }, [channel.name, cleanup, onClose, queryClient]);
+  }, [channel.name, configureChannelMutation, onClose, t]);
 
   // Auto-start on mount
   useEffect(() => { startQr(); }, [startQr]);
