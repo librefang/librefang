@@ -2326,12 +2326,19 @@ impl LibreFangKernel {
             // concrete handle here and call `install_kernel_handle` from
             // `set_self_handle` below.
             let embedding = kernel.embedding_driver.as_ref().map(Arc::clone);
+            // Thread the global `prompt_caching` toggle through so the
+            // extractor's fallback `driver.complete()` path respects the
+            // same switch operators use for the main loop. The fork path
+            // inherits caching from the agent's manifest metadata which
+            // the kernel derives from this same flag.
+            let prompt_caching = cfg.prompt_caching;
             let result =
                 librefang_runtime::proactive_memory::init_proactive_memory_full_with_extractor(
                     Arc::clone(&kernel.memory),
                     pm_config,
                     llm,
                     embedding,
+                    prompt_caching,
                 );
             if let Some((store, extractor)) = result {
                 let _ = kernel.proactive_memory.set(store);
@@ -4094,6 +4101,14 @@ system_prompt = "You are a helpful assistant."
                 };
                 SessionId::for_channel(agent_id, &scope)
             }
+            // Fork calls always target the agent's canonical session —
+            // the whole point of fork mode is to share the parent turn's
+            // context (and therefore its prompt-cache prefix). An agent
+            // with `session_mode = "new"` would otherwise land on
+            // `SessionId::new()` here, producing a fresh empty session
+            // and breaking cache alignment. Force Persistent for forks
+            // regardless of manifest.
+            _ if loop_opts.is_fork => entry.session_id,
             _ => match entry.manifest.session_mode {
                 librefang_types::agent::SessionMode::Persistent => entry.session_id,
                 librefang_types::agent::SessionMode::New => SessionId::new(),
@@ -4365,7 +4380,12 @@ system_prompt = "You are a helpful assistant."
             // session — and the compactor ended up inspecting an empty
             // one and returning "0 messages, threshold 30" while the
             // real session was 57 messages deep and overflowing.
-            if needs_compact {
+            // Fork turns must not trigger auto-compaction. Compaction mutates
+            // the canonical session on disk — so a dream or auto_memorize fork
+            // could compact the user's real conversation, breaking the
+            // ephemeral-fork guarantee. Main turns are unaffected: they hit
+            // the same check and compact as before.
+            if needs_compact && !loop_opts.is_fork {
                 info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
                 match kernel_clone
                     .compact_agent_session_with_id(agent_id, Some(session.id))
@@ -4474,32 +4494,47 @@ system_prompt = "You are a helpful assistant."
 
             match result {
                 Ok(result) => {
-                    // Append new messages to canonical session for cross-channel memory.
-                    // Use run_agent_loop_streaming's own start index (post-trim) instead
-                    // of one captured here — the loop may trim session history and make
-                    // a locally-captured index stale (see #2067). Clamp defensively.
-                    let start = result.new_messages_start.min(session.messages.len());
-                    if start < session.messages.len() {
-                        let new_messages = session.messages[start..].to_vec();
-                        if let Err(e) = memory.append_canonical(
-                            agent_id,
-                            &new_messages,
-                            None,
-                            Some(effective_session_id),
-                        ) {
-                            warn!(agent_id = %agent_id, "Failed to update canonical session (streaming): {e}");
+                    // Fork turns must not leak into on-disk persistence. The
+                    // in-loop `save_session_async` is already gated via
+                    // `LoopOptions::is_fork`, but the kernel wraps agent_loop
+                    // with three more persistence side effects that were
+                    // running regardless: `append_canonical` (cross-channel
+                    // memory layer), JSONL session mirror in the agent's
+                    // workspace, and the daily memory log. Without this gate
+                    // a dream / auto_memorize fork's messages would re-enter
+                    // future prompt context via any of those surfaces, which
+                    // is exactly the "ephemeral" guarantee the fork API
+                    // documents that it provides. Metering / usage stays
+                    // unchanged below — forks do consume real tokens and
+                    // should count against the agent's budget.
+                    if !loop_opts.is_fork {
+                        // Append new messages to canonical session for cross-channel memory.
+                        // Use run_agent_loop_streaming's own start index (post-trim) instead
+                        // of one captured here — the loop may trim session history and make
+                        // a locally-captured index stale (see #2067). Clamp defensively.
+                        let start = result.new_messages_start.min(session.messages.len());
+                        if start < session.messages.len() {
+                            let new_messages = session.messages[start..].to_vec();
+                            if let Err(e) = memory.append_canonical(
+                                agent_id,
+                                &new_messages,
+                                None,
+                                Some(effective_session_id),
+                            ) {
+                                warn!(agent_id = %agent_id, "Failed to update canonical session (streaming): {e}");
+                            }
                         }
-                    }
 
-                    // Write JSONL session mirror to workspace
-                    if let Some(ref workspace) = manifest.workspace {
-                        if let Err(e) =
-                            memory.write_jsonl_mirror(&session, &workspace.join("sessions"))
-                        {
-                            warn!("Failed to write JSONL session mirror (streaming): {e}");
+                        // Write JSONL session mirror to workspace
+                        if let Some(ref workspace) = manifest.workspace {
+                            if let Err(e) =
+                                memory.write_jsonl_mirror(&session, &workspace.join("sessions"))
+                            {
+                                warn!("Failed to write JSONL session mirror (streaming): {e}");
+                            }
+                            // Append daily memory log (best-effort)
+                            append_daily_memory_log(workspace, &result.response);
                         }
-                        // Append daily memory log (best-effort)
-                        append_daily_memory_log(workspace, &result.response);
                     }
 
                     kernel_clone
@@ -4548,18 +4583,25 @@ system_prompt = "You are a helpful assistant."
                         let _ = kernel_clone.metering.record(&usage_record);
                     }
 
-                    // Record experiment metrics if running an experiment (kernel has cost info)
-                    if let Some(ref ctx) = result.experiment_context {
-                        let has_content = !result.response.trim().is_empty();
-                        let no_tool_errors = result.iterations > 0;
-                        let success = has_content && no_tool_errors;
-                        let _ = kernel_clone.record_experiment_request(
-                            &ctx.experiment_id.to_string(),
-                            &ctx.variant_id.to_string(),
-                            latency_ms,
-                            cost,
-                            success,
-                        );
+                    // Record experiment metrics if running an experiment.
+                    // Fork turns skip — a dream / auto_memorize fork is not
+                    // a user-initiated request and shouldn't distort the
+                    // experiment arm's latency / success / cost averages.
+                    // Token / cost accounting above still runs for forks
+                    // because those tokens were really billed.
+                    if !loop_opts.is_fork {
+                        if let Some(ref ctx) = result.experiment_context {
+                            let has_content = !result.response.trim().is_empty();
+                            let no_tool_errors = result.iterations > 0;
+                            let success = has_content && no_tool_errors;
+                            let _ = kernel_clone.record_experiment_request(
+                                &ctx.experiment_id.to_string(),
+                                &ctx.variant_id.to_string(),
+                                latency_ms,
+                                cost,
+                                success,
+                            );
+                        }
                     }
 
                     let _ = kernel_clone
@@ -4568,7 +4610,10 @@ system_prompt = "You are a helpful assistant."
 
                     // Post-loop compaction check: if session now exceeds token threshold,
                     // trigger compaction in background for the next call.
-                    {
+                    // Forks skip — compaction rewrites the canonical session
+                    // on disk, which would leak fork context into the user's
+                    // real conversation history.
+                    if !loop_opts.is_fork {
                         use librefang_runtime::compactor::{
                             estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
                         };

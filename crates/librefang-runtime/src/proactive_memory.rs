@@ -75,8 +75,10 @@ pub fn init_proactive_memory_full(
     llm: Option<(Arc<dyn crate::llm_driver::LlmDriver>, String)>,
     embedding: Option<Arc<dyn crate::embedding::EmbeddingDriver + Send + Sync>>,
 ) -> Option<Arc<ProactiveMemoryStore>> {
+    // Legacy callers (tests, external) can't pass prompt_caching — default
+    // to true to match the behaviour shipped before the global-toggle fix.
     let (store, _extractor) =
-        init_proactive_memory_full_with_extractor(memory, config, llm, embedding)?;
+        init_proactive_memory_full_with_extractor(memory, config, llm, embedding, true)?;
     Some(store)
 }
 
@@ -86,11 +88,20 @@ pub fn init_proactive_memory_full(
 /// `Arc<LibreFangKernel>` exists — the fork-based extraction path needs
 /// a `Weak<dyn KernelHandle>` which can't be formed before the kernel
 /// is in an Arc.
+///
+/// `prompt_caching` controls whether the extractor's fallback
+/// `driver.complete()` path stamps `cache_control` markers. Should be
+/// threaded from `KernelConfig.prompt_caching` so operators who disable
+/// caching globally see proactive memory also skip it. The fork path
+/// inherits caching from the agent's own manifest metadata, which the
+/// kernel derives from the same global — so this flag only gates the
+/// fallback.
 pub fn init_proactive_memory_full_with_extractor(
     memory: Arc<librefang_memory::MemorySubstrate>,
     config: ProactiveMemoryConfig,
     llm: Option<(Arc<dyn crate::llm_driver::LlmDriver>, String)>,
     embedding: Option<Arc<dyn crate::embedding::EmbeddingDriver + Send + Sync>>,
+    prompt_caching: bool,
 ) -> Option<(Arc<ProactiveMemoryStore>, Option<Arc<LlmMemoryExtractor>>)> {
     if !config.auto_retrieve && !config.auto_memorize {
         tracing::debug!("Proactive memory is disabled");
@@ -103,7 +114,11 @@ pub fn init_proactive_memory_full_with_extractor(
             // type (so the kernel can install its weak self-ref on it
             // later), one as the trait object (so the store can invoke it
             // via `MemoryExtractor`).
-            let extractor_concrete = Arc::new(LlmMemoryExtractor::new(driver, model));
+            let extractor_concrete = Arc::new(LlmMemoryExtractor::with_prompt_caching(
+                driver,
+                model,
+                prompt_caching,
+            ));
             let extractor_dyn: Arc<dyn librefang_types::memory::MemoryExtractor> =
                 Arc::clone(&extractor_concrete) as _;
             (
@@ -245,14 +260,36 @@ pub struct LlmMemoryExtractor {
     /// kernel init, many reads during `extract_memories_with_agent_id`.
     kernel_handle:
         std::sync::RwLock<Option<std::sync::Weak<dyn crate::kernel_handle::KernelHandle>>>,
+    /// Whether to stamp `prompt_caching = true` on the standalone
+    /// fallback `driver.complete()` request. Mirrors the global
+    /// `KernelConfig.prompt_caching` toggle — operators who disable
+    /// caching at the kernel level (compatibility, cost accounting,
+    /// debugging) should see proactive-memory requests also skip
+    /// `cache_control`. The fork path inherits this automatically
+    /// because it runs through agent_loop which reads the per-agent
+    /// manifest metadata that the kernel derives from the same global.
+    prompt_caching: bool,
 }
 
 impl LlmMemoryExtractor {
     pub fn new(driver: Arc<dyn crate::llm_driver::LlmDriver>, model: String) -> Self {
+        Self::with_prompt_caching(driver, model, true)
+    }
+
+    /// Explicit variant for callers that want to control the
+    /// fallback-path `prompt_caching` flag — typically the kernel,
+    /// which passes `KernelConfig.prompt_caching` through so the
+    /// extractor honours the same global toggle as the main loop.
+    pub fn with_prompt_caching(
+        driver: Arc<dyn crate::llm_driver::LlmDriver>,
+        model: String,
+        prompt_caching: bool,
+    ) -> Self {
         Self {
             driver,
             model,
             kernel_handle: std::sync::RwLock::new(None),
+            prompt_caching,
         }
     }
 
@@ -410,7 +447,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             temperature: 0.1,
             system: Some(EXTRACTION_SYSTEM_PROMPT.to_string()),
             thinking: None,
-            prompt_caching: true,
+            prompt_caching: self.prompt_caching,
             response_format: Some(ResponseFormat::Json),
             timeout_secs: Some(30),
             extra_body: None,
@@ -566,7 +603,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             temperature: 0.0,
             system: Some(DECISION_SYSTEM_PROMPT.to_string()),
             thinking: None,
-            prompt_caching: true,
+            prompt_caching: self.prompt_caching,
             response_format: None,
             timeout_secs: Some(15),
             extra_body: None,
