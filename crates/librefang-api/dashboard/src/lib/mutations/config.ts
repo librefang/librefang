@@ -8,6 +8,13 @@ import { configKeys, overviewKeys } from "../queries/keys";
 
 type SetConfigResult = { status: string; restart_required?: boolean };
 type SetConfigVars = { path: string; value: unknown };
+type BatchSetConfigResult = Array<{
+  path: string;
+  value: unknown;
+  data?: SetConfigResult;
+  error?: Error;
+}>;
+type BatchSetConfigVars = SetConfigVars[];
 
 export function useSetConfigValue(
   options?: Partial<
@@ -19,7 +26,38 @@ export function useSetConfigValue(
     ...options,
     mutationFn: ({ path, value }) => setConfigValue(path, value),
     onSuccess: (data, variables, context, meta) => {
-      qc.invalidateQueries({ queryKey: configKeys.all });
+      qc.invalidateQueries({ queryKey: configKeys.full() });
+      qc.invalidateQueries({ queryKey: configKeys.schema() });
+      qc.invalidateQueries({ queryKey: configKeys.rawToml() });
+      options?.onSuccess?.(data, variables, context, meta);
+    },
+  });
+}
+
+export function useBatchSetConfigValues(
+  options?: Partial<
+    UseMutationOptions<BatchSetConfigResult, Error, BatchSetConfigVars>
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<BatchSetConfigResult, Error, BatchSetConfigVars>({
+    ...options,
+    mutationFn: async (entries) => Promise.all(entries.map(async ({ path, value }) => {
+      try {
+        const data = await setConfigValue(path, value);
+        return { path, value, data };
+      } catch (error) {
+        return {
+          path,
+          value,
+          error: error instanceof Error ? error : new Error(String(error)),
+        };
+      }
+    })),
+    onSuccess: (data, variables, context, meta) => {
+      qc.invalidateQueries({ queryKey: configKeys.full() });
+      qc.invalidateQueries({ queryKey: configKeys.schema() });
+      qc.invalidateQueries({ queryKey: configKeys.rawToml() });
       options?.onSuccess?.(data, variables, context, meta);
     },
   });

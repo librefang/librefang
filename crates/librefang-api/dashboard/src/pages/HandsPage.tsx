@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { router } from "../router";
 import {
-  sendHandMessage,
   type HandDefinitionItem,
   type HandInstanceItem,
   type HandStatsResponse,
@@ -58,6 +57,7 @@ import {
   useUninstallHand,
   useSetHandSecret,
   useUpdateHandSettings,
+  useSendHandMessage,
 } from "../lib/mutations/hands";
 import { useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
 import { useCronJobs } from "../lib/queries/runtime";
@@ -130,11 +130,12 @@ function HandChatPanel({
   const [sending, setSending] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const sendHandMessageMutation = useSendHandMessage();
 
   const { data: sessionData } = useHandSession(instanceId);
 
   useEffect(() => {
-    if (sessionData?.messages?.length) {
+    if (sessionData?.messages) {
       const hist: ChatMsg[] = sessionData.messages.map(
         (m: HandSessionMessage, i: number) => ({
           id: `hist-${i}`,
@@ -144,9 +145,14 @@ function HandChatPanel({
           blocks: m.blocks,
         }),
       );
-      setMessages(hist);
+      setMessages((current) => {
+        if (hist.length > 0 || current.length === 0) {
+          return hist;
+        }
+        return current;
+      });
     }
-  }, [sessionData]);
+  }, [sessionData?.messages]);
 
   useEffect(() => {
     if (messages.length === 0) return;
@@ -182,7 +188,10 @@ function HandChatPanel({
     setSending(true);
 
     try {
-      const res = await sendHandMessage(instanceId, text);
+      const res = await sendHandMessageMutation.mutateAsync({
+        instanceId,
+        message: text,
+      });
       setMessages((prev) =>
         prev.map((m) =>
           m.id === botMsg.id
@@ -207,7 +216,7 @@ function HandChatPanel({
       setSending(false);
       setTimeout(() => inputRef.current?.focus(), 50);
     }
-  }, [input, sending, instanceId]);
+  }, [input, sending, instanceId, sendHandMessageMutation]);
 
   return (
     <div

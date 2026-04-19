@@ -1,7 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
+import * as httpClient from "../http/client";
 import { renderHook, waitFor } from "@testing-library/react";
 import { useRunSchedule } from "./schedules";
-import { useSetConfigValue, useReloadConfig } from "./config";
+import {
+  useBatchSetConfigValues,
+  useSetConfigValue,
+  useReloadConfig,
+} from "./config";
 import { scheduleKeys, cronKeys, configKeys, overviewKeys } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
@@ -29,7 +34,7 @@ describe("useRunSchedule", () => {
 });
 
 describe("useSetConfigValue", () => {
-  it("invalidates configKeys.all", async () => {
+  it("invalidates config queries touched by config writes", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -40,7 +45,9 @@ describe("useSetConfigValue", () => {
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.full() });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.schema() });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.rawToml() });
   });
 
   it("calls options.onSuccess after invalidation", async () => {
@@ -57,6 +64,69 @@ describe("useSetConfigValue", () => {
     await waitFor(() => {
       expect(onSuccess).toHaveBeenCalled();
     });
+  });
+});
+
+describe("useBatchSetConfigValues", () => {
+  it("invalidates config queries once each after batch save", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useBatchSetConfigValues(), { wrapper });
+
+    await result.current.mutateAsync([
+      { path: "kernel.max_agents", value: 10 },
+      { path: "kernel.max_memory", value: 20 },
+    ]);
+
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalled();
+    });
+    expect(invalidateSpy).toHaveBeenCalledTimes(3);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.full() });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.schema() });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.rawToml() });
+  });
+
+  it("calls options.onSuccess after invalidation", async () => {
+    const { wrapper } = createQueryClientWrapper();
+    const onSuccess = vi.fn();
+
+    const { result } = renderHook(
+      () => useBatchSetConfigValues({ onSuccess }),
+      { wrapper },
+    );
+
+    await result.current.mutateAsync([{ path: "kernel.max_agents", value: 10 }]);
+
+    await waitFor(() => {
+      expect(onSuccess).toHaveBeenCalled();
+    });
+  });
+
+  it("returns mixed success and error results for partial failure", async () => {
+    const { wrapper } = createQueryClientWrapper();
+    vi.mocked(httpClient.setConfigValue)
+      .mockResolvedValueOnce({ status: "saved" })
+      .mockRejectedValueOnce(new Error("boom"));
+
+    const { result } = renderHook(() => useBatchSetConfigValues(), { wrapper });
+
+    await expect(result.current.mutateAsync([
+      { path: "kernel.max_agents", value: 10 },
+      { path: "kernel.max_memory", value: 20 },
+    ])).resolves.toEqual([
+      {
+        path: "kernel.max_agents",
+        value: 10,
+        data: { status: "saved" },
+      },
+      {
+        path: "kernel.max_memory",
+        value: 20,
+        error: expect.any(Error),
+      },
+    ]);
   });
 });
 

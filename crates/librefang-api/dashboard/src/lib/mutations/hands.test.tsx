@@ -174,7 +174,7 @@ describe("useUpdateHandSettings", () => {
 });
 
 describe("useSendHandMessage", () => {
-  it("does not invalidate queries and calls mutationFn with correct args", async () => {
+  it("invalidates the session query and calls mutationFn with correct args", async () => {
     const response: HandMessageResponse = { response: "ok" };
     vi.mocked(http.sendHandMessage).mockResolvedValue(response);
     const { queryClient, wrapper } = createQueryClientWrapper();
@@ -184,7 +184,9 @@ describe("useSendHandMessage", () => {
 
     await result.current.mutateAsync({ instanceId: "inst-1", message: "hello" });
 
-    expect(invalidateSpy).not.toHaveBeenCalled();
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: handKeys.session("inst-1"),
+    });
     expect(http.sendHandMessage).toHaveBeenCalledWith("inst-1", "hello");
   });
 });
