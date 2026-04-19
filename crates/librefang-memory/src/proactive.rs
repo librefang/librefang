@@ -2127,8 +2127,18 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
 
         let agent_id = Self::parse_agent_id(user_id)?;
 
-        // Extract memories using configured extractor (LLM or rule-based)
-        let extraction_result = self.extractor.extract_memories(conversation).await?;
+        // Extract memories using the configured extractor. Use the
+        // agent-id variant: when the extractor has a kernel handle wired
+        // (LlmMemoryExtractor::with_forked_kernel), this routes the LLM
+        // call through a forked agent turn so the cache key matches the
+        // parent conversation — Anthropic hits cache on (system + tools
+        // + messages). The rule-based DefaultMemoryExtractor ignores
+        // agent_id via the trait's default forwarding, so nothing changes
+        // for kernels running without an LLM extractor.
+        let extraction_result = self
+            .extractor
+            .extract_memories_with_agent_id(conversation, &agent_id.to_string())
+            .await?;
 
         // Apply decision flow for each extracted memory
         let mut stored_memories = Vec::new();

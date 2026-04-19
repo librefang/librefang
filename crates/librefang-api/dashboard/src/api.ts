@@ -2895,6 +2895,20 @@ export interface AutoDreamTurn {
   tool_use_count: number;
 }
 
+/** Token accounting snapshot from a completed dream. Populated only on
+ * the `completed` status; absent for running / failed / aborted. The
+ * cache_* fields let the dashboard surface cache-hit rate so operators
+ * can see the forkedAgent cost savings in real terms. */
+export interface AutoDreamUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  iterations: number;
+  latency_ms: number;
+  cost_usd?: number;
+}
+
 export interface AutoDreamProgress {
   task_id: string;
   agent_id: string;
@@ -2906,6 +2920,7 @@ export interface AutoDreamProgress {
   memories_touched: string[];
   turns: AutoDreamTurn[];
   error: string | null;
+  usage?: AutoDreamUsage;
 }
 
 export interface AutoDreamAgentStatus {
