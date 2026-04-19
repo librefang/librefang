@@ -98,11 +98,13 @@ export function useAuditRecent(
   options: UseAuditRecentOptions = {},
 ) {
   const { enabled, staleTime, refetchInterval } = options;
+  const query = auditRecentQueryOptions(limit);
+
   return useQuery({
-    ...auditRecentQueryOptions(limit),
-    enabled,
-    staleTime,
-    refetchInterval,
+    ...query,
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(staleTime !== undefined ? { staleTime } : {}),
+    ...(refetchInterval !== undefined ? { refetchInterval } : {}),
   });
 }
 

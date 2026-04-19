@@ -1,4 +1,4 @@
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { queryOptions, skipToken, useQuery } from "@tanstack/react-query";
 import {
   listMediaProviders,
   pollVideo,
@@ -47,11 +47,13 @@ export const mediaQueries = {
 
 export function useMediaProviders(options: UseMediaProvidersOptions = {}) {
   const { enabled, staleTime, refetchInterval } = options;
+  const query = mediaQueries.providers();
+
   return useQuery({
-    ...mediaQueries.providers(),
-    enabled,
-    staleTime,
-    refetchInterval,
+    ...query,
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(staleTime !== undefined ? { staleTime } : {}),
+    ...(refetchInterval !== undefined ? { refetchInterval } : {}),
   });
 }
 
@@ -66,18 +68,10 @@ export function useVideoTask(
 ) {
   const { enabled, staleTime, refetchInterval } = options;
   const isEnabled = Boolean(enabled ?? true) && Boolean(params?.taskId) && Boolean(params?.provider);
-  const queryKey = params
-    ? mediaKeys.videoTask(params.taskId, params.provider)
-    : mediaKeys.videoTask("", "");
 
   return useQuery({
-    queryKey,
-    queryFn: () => {
-      if (!params) {
-        throw new Error("video task params are required");
-      }
-      return pollVideo(params.taskId, params.provider);
-    },
+    queryKey: params ? mediaKeys.videoTask(params.taskId, params.provider) : mediaKeys.videoTask("pending", "pending"),
+    queryFn: params ? () => pollVideo(params.taskId, params.provider) : skipToken,
     gcTime: 0,
     enabled: isEnabled,
     staleTime: staleTime ?? VIDEO_TASK_STALE_MS,

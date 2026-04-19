@@ -23,10 +23,12 @@ export function useTelemetryMetrics(
   options: UseTelemetryMetricsOptions = {},
 ) {
   const { enabled, staleTime, refetchInterval } = options;
+  const query = telemetryQueryOptions();
+
   return useQuery({
-    ...telemetryQueryOptions(),
-    enabled,
-    staleTime,
-    refetchInterval,
+    ...query,
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(staleTime !== undefined ? { staleTime } : {}),
+    ...(refetchInterval !== undefined ? { refetchInterval } : {}),
   });
 }
