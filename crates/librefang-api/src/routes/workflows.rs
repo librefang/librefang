@@ -1329,6 +1329,7 @@ pub async fn create_schedule(
         schedule: librefang_types::scheduler::CronSchedule::Cron { expr: cron, tz },
         action,
         delivery: librefang_types::scheduler::CronDelivery::None,
+        peer_id: None,
         created_at: chrono::Utc::now(),
         last_run: None,
         next_run: None,

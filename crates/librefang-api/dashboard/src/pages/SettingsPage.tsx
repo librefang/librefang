@@ -658,6 +658,57 @@ function AutoDreamAgentRow({
               {progress.error}
             </p>
           )}
+          {/* Cache-hit visibility. Since the forkedAgent migration, dreams
+              fork off the parent turn and hit Anthropic's prompt cache on
+              the (system + tools + messages) prefix. Surfacing the hit
+              rate here lets operators see the actual cost win — the
+              whole reason the forkedAgent PR exists. Only shown for
+              completed dreams (usage is populated then) and only when
+              there actually was input (avoids 0/0 noise). */}
+          {progress.usage && progress.usage.input_tokens > 0 && (
+            <p className="text-[10px] text-text-dim">
+              <span className="uppercase tracking-wider">
+                {t("settings.auto_dream_cache", "Cache")}:
+              </span>{" "}
+              {(() => {
+                const u = progress.usage!;
+                const totalIn =
+                  u.input_tokens +
+                  u.cache_read_input_tokens +
+                  u.cache_creation_input_tokens;
+                const hitPct =
+                  totalIn > 0
+                    ? Math.round((u.cache_read_input_tokens / totalIn) * 100)
+                    : 0;
+                return (
+                  <span
+                    title={t(
+                      "settings.auto_dream_cache_title",
+                      "Prompt cache hit rate for this dream — higher means more of the prefix came from Anthropic's cache instead of being re-billed.",
+                    )}
+                  >
+                    <span className="font-mono">{hitPct}%</span>
+                    {" "}
+                    ({u.cache_read_input_tokens.toLocaleString()}/
+                    {totalIn.toLocaleString()} tok)
+                  </span>
+                );
+              })()}
+              {typeof progress.usage.cost_usd === "number" && (
+                <>
+                  {" · "}
+                  <span
+                    title={t(
+                      "settings.auto_dream_cost_title",
+                      "Measured provider cost for this dream turn (input + output, cached tokens billed at the reduced rate).",
+                    )}
+                  >
+                    ${progress.usage.cost_usd.toFixed(5)}
+                  </span>
+                </>
+              )}
+            </p>
+          )}
         </div>
       )}
     </div>

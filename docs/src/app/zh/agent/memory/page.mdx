@@ -285,7 +285,7 @@ auto_dream_min_sessions = 1     # 每个会话之后都触发，适合高频 age
 ### 一次梦境的流程
 
 1. 主触发路径是 `AgentLoopEnd` 钩子 —— agent 每完成一次 turn，kernel 立刻依次检查四道闸门：全局启用 → 时间间隔 → 会话活跃数 → 文件锁。任一不通过即跳过。另有稀疏的兜底调度器（默认 `check_interval_secs = 86400`，即每天一次）覆盖从不 turn 的 agent（例如等待外部触发的 channel bot）。
-2. 闸门通过后，agent 会以合成的 `auto_dream` 通道被调用，工具白名单收缩到 `memory_store` / `memory_recall` / `memory_list` —— 即使提示被注入，梦境也无法越权调用 shell 或网络工具。
+2. 闸门通过后，agent 以 **fork turn** 方式从 canonical session 派生调用（`kernel.run_forked_agent_streaming`）—— system prompt、tools、消息前缀和父 turn 字节级一致，命中 Anthropic prompt cache。Fork turn 不会把消息写回 canonical session，所以用户对话历史不会被梦境过程污染。工具白名单（`memory_store` / `memory_recall` / `memory_list`）在 execute 阶段强制，不在 request 构造阶段过滤 —— 这样请求 schema 仍然和父 turn 对齐，cache 才能命中。被 prompt 注入的梦境即使试图调用非 memory 工具，也只会拿到合成的错误结果。
 3. 流式进度（phase、工具调用次数、涉及的记忆条目、最近一 turn 预览、token / 费用）存入每 agent 的进度注册表，通过状态端点对外暴露。
 4. 成功后锁的 mtime 前进到 "现在"（作为时间闸门的基准）；失败或中止后会回滚 mtime，下次 tick 会重试。
 
