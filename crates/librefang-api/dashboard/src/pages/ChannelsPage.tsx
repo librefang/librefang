@@ -461,12 +461,14 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
   const configureChannelMutation = useConfigureChannel();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cancelledRef = useRef(false);
+  const pollIdRef = useRef(0);
   const [phase, setPhase] = useState<"idle" | "loading" | "scanning" | "success" | "error">("idle");
   const [message, setMessage] = useState("");
 
-  useEffect(() => () => { cancelledRef.current = true; }, []);
+  useEffect(() => () => { cancelledRef.current = true; pollIdRef.current += 1; }, []);
 
   const startQr = useCallback(async () => {
+    const pollId = ++pollIdRef.current;
     cancelledRef.current = false;
     setPhase("loading");
     setMessage("");
@@ -495,16 +497,22 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
       // The backend holds each request ~30s (long-poll), so setInterval would
       // stack up parallel requests that all resolve at once on scan → flashing UI.
       const pollLoop = async () => {
-        while (!cancelledRef.current) {
+        while (!cancelledRef.current && pollIdRef.current === pollId) {
           try {
             const status = await qrStatus(res.qr_code!);
-            if (cancelledRef.current) break;
+            if (cancelledRef.current || pollIdRef.current !== pollId) break;
             if (status.connected && status.bot_token) {
               cancelledRef.current = true;
-              await configureChannelMutation.mutateAsync({
-                channelName: channel.name,
-                config: { bot_token_env: status.bot_token },
-              });
+              try {
+                await configureChannelMutation.mutateAsync({
+                  channelName: channel.name,
+                  config: { bot_token_env: status.bot_token },
+                });
+              } catch (error) {
+                setPhase("error");
+                setMessage(error instanceof Error ? error.message : t("channels.qr_failed"));
+                return;
+              }
               setPhase("success");
               setMessage(t("channels.login_success"));
               setTimeout(onClose, 1500);
@@ -517,7 +525,7 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
             }
           } catch {
             // Transient error — wait briefly then retry
-            if (cancelledRef.current) break;
+            if (cancelledRef.current || pollIdRef.current !== pollId) break;
             await new Promise(r => setTimeout(r, 3000));
           }
         }

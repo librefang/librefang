@@ -399,18 +399,36 @@ export function ConfigPage({ category }: { category: string }) {
   });
 
   const [batchSaving, setBatchSaving] = useState(false);
+  const batchStatusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearBatchStatuses = useCallback((paths: string[], statuses: Record<string, { ok: boolean; msg: string }>, delay: number) => {
+    if (batchStatusTimeoutRef.current) clearTimeout(batchStatusTimeoutRef.current);
+    batchStatusTimeoutRef.current = setTimeout(() => {
+      setSaveStatus((current) => {
+        const next = { ...current };
+        for (const path of paths) {
+          if (next[path]?.msg === statuses[path]?.msg) {
+            delete next[path];
+          }
+        }
+        return next;
+      });
+    }, delay);
+  }, []);
+
+  useEffect(() => () => {
+    if (batchStatusTimeoutRef.current) clearTimeout(batchStatusTimeoutRef.current);
+  }, []);
+
   const batchSaveMutation = useBatchSetConfigValues({
     onSuccess: (results) => {
       let errors = 0;
+      const nextStatuses: Record<string, { ok: boolean; msg: string }> = {};
       for (const result of results) {
         if (result.error) {
-          setSaveStatus((s) => ({
-            ...s,
-            [result.path]: {
-              ok: false,
-              msg: result.error?.message || t("config.save_failed"),
-            },
-          }));
+          nextStatuses[result.path] = {
+            ok: false,
+            msg: result.error?.message || t("config.save_failed"),
+          };
           errors++;
           continue;
         }
@@ -422,20 +440,22 @@ export function ConfigPage({ category }: { category: string }) {
           : restartRequired
             ? t("config.saved_restart", "Saved (restart required)")
             : t("common.saved", "Saved");
-        setSaveStatus((s) => ({ ...s, [result.path]: { ok: !reloadFailed, msg } }));
+        nextStatuses[result.path] = { ok: !reloadFailed, msg };
       }
+
+      setSaveStatus((current) => ({ ...current, ...nextStatuses }));
 
       setPendingChanges((current) => {
         const next = { ...current };
         for (const result of results) {
-          if (!result.error) {
+          if (!result.error && JSON.stringify(current[result.path]) === JSON.stringify(result.value)) {
             delete next[result.path];
           }
         }
         return next;
       });
       setBatchSaving(false);
-      setTimeout(() => setSaveStatus({}), errors > 0 ? 5000 : 3000);
+      clearBatchStatuses(results.map((result) => result.path), nextStatuses, errors > 0 ? 5000 : 3000);
     },
     onError: (err: Error) => {
       setBatchSaving(false);
@@ -454,7 +474,11 @@ export function ConfigPage({ category }: { category: string }) {
     const entries = Object.entries(pendingChanges);
     if (entries.length === 0) return;
     setBatchSaving(true);
-    await batchSaveMutation.mutateAsync(entries.map(([path, value]) => ({ path, value })));
+    try {
+      await batchSaveMutation.mutateAsync(entries.map(([path, value]) => ({ path, value })));
+    } catch {
+      // onError handles UI state for unexpected batch-level failures.
+    }
   }, [batchSaveMutation, pendingChanges]);
 
   const handleResetField = useCallback(

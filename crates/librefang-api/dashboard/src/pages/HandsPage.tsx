@@ -130,9 +130,17 @@ function HandChatPanel({
   const [sending, setSending] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const hydratedInstanceIdRef = useRef<string | null>(null);
   const sendHandMessageMutation = useSendHandMessage();
 
   const { data: sessionData } = useHandSession(instanceId);
+
+  useEffect(() => {
+    if (hydratedInstanceIdRef.current !== instanceId) {
+      hydratedInstanceIdRef.current = instanceId;
+      setMessages([]);
+    }
+  }, [instanceId]);
 
   useEffect(() => {
     if (sessionData?.messages) {
@@ -146,6 +154,9 @@ function HandChatPanel({
         }),
       );
       setMessages((current) => {
+        if (current.some((msg) => msg.isLoading || msg.error)) {
+          return current;
+        }
         if (hist.length > 0 || current.length === 0) {
           return hist;
         }
