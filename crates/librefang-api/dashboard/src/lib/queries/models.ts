@@ -29,13 +29,7 @@ export function useModels(
   filters: { provider?: string; tier?: string; available?: boolean } = {},
   options: { enabled?: boolean; staleTime?: number; refetchInterval?: number | false } = {},
 ) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...modelQueries.list(filters),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+  return useQuery({ ...modelQueries.list(filters), ...options });
 }
 
 export function useModelOverrides(modelKey: string) {

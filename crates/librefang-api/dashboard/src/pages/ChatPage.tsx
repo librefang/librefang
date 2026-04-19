@@ -164,7 +164,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void) {
+function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void) {
   const { t } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Per-agent loading state. A single shared `isLoading` would freeze the
@@ -323,13 +323,17 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       setMessages([]);
       return;
     }
-    await clearAgentHistory(agentId);
-    sessionCache.delete(agentId);
-    if (prevAgentRef.current === agentId) {
-      messagesRef.current = [];
+    try {
+      await clearAgentHistory(agentId);
+      sessionCache.delete(agentId);
+      if (prevAgentRef.current === agentId) {
+        messagesRef.current = [];
+      }
+      setMessages([]);
+    } catch (error) {
+      onClearError?.(error instanceof Error ? error.message : t("common.error"));
     }
-    setMessages([]);
-  }, [agentId]);
+  }, [agentId, onClearError, t]);
 
   // Send message - WS first, HTTP fallback
   const sendMessage = useCallback(async (content: string) => {
@@ -1747,7 +1751,8 @@ export function ChatPage() {
     selectedAgentId || null,
     agents,
     sessionVersion,
-      () => void agentsQuery.refetch(),
+    () => void agentsQuery.refetch(),
+    (message) => addToast(message, "error"),
   );
   // Track LLM text streaming (cleared on `typing:stop`) independently of
   // `isLoading`, which stays true through post-processing until the final
@@ -2019,7 +2024,7 @@ export function ChatPage() {
               agentName={selectedAgent?.name || ""}
               isLoading={isLoading}
               messageCount={messages.length}
-              onClear={clearHistory}
+              onClear={() => { void clearHistory(); }}
               onExport={handleExport}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
