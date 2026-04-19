@@ -1548,6 +1548,7 @@ struct RecallSetupContext<'a> {
     sender_user_id: Option<&'a str>,
     stable_prefix_mode: bool,
     streaming: bool,
+    opts: &'a LoopOptions,
 }
 
 struct PromptSetup {
@@ -1761,7 +1762,13 @@ async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> RecallSetup {
         )
     };
 
-    if !ctx.stable_prefix_mode {
+    // Fork turns skip auto_retrieve: (a) it would add memory fragments
+    // to the prompt that the parent turn didn't have, breaking byte-
+    // alignment with the cached prefix and missing the Anthropic cache
+    // entirely; (b) the fork is by definition a short derivative task
+    // (dream / memory extraction) whose context should be exactly the
+    // parent's, not a fresh retrieval.
+    if !ctx.stable_prefix_mode && !ctx.opts.is_fork {
         if let Some(pm_store_arc) = ctx.proactive_memory {
             let user_id = ctx.session.agent_id.0.to_string();
             match pm_store_arc
@@ -2240,22 +2247,34 @@ async fn finalize_successful_end_turn(
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
     }
 
-    let interaction_text = format!(
-        "User asked: {}\nI responded: {}",
-        ctx.user_message, end_turn.final_response
-    );
-    remember_interaction_best_effort(
-        ctx.memory,
-        ctx.embedding_driver,
-        ctx.session.agent_id,
-        &interaction_text,
-        ctx.streaming,
-    )
-    .await;
+    // Post-turn memory writes and context-engine updates are skipped for
+    // fork turns. Three reasons: (1) the fork's conversation is ephemeral
+    // by design — persisting its content to the memory bank would leak
+    // derivative artefacts into long-term memory; (2) `context_engine`
+    // state tracked across real turns (summary chains, token budgets)
+    // shouldn't be advanced by a fork that doesn't count as a real user
+    // interaction; (3) critical — `auto_memorize` below would fire
+    // `run_forked_agent_oneshot` again on the fork's own completion,
+    // recursing into another fork, ad infinitum. Gating here is what
+    // stops that cycle.
+    if !ctx.opts.is_fork {
+        let interaction_text = format!(
+            "User asked: {}\nI responded: {}",
+            ctx.user_message, end_turn.final_response
+        );
+        remember_interaction_best_effort(
+            ctx.memory,
+            ctx.embedding_driver,
+            ctx.session.agent_id,
+            &interaction_text,
+            ctx.streaming,
+        )
+        .await;
 
-    if let Some(engine) = ctx.context_engine {
-        if let Err(e) = engine.after_turn(ctx.session.agent_id, ctx.messages).await {
-            warn!("Context engine after_turn failed: {e}");
+        if let Some(engine) = ctx.context_engine {
+            if let Err(e) = engine.after_turn(ctx.session.agent_id, ctx.messages).await {
+                warn!("Context engine after_turn failed: {e}");
+            }
         }
     }
 
@@ -2267,6 +2286,7 @@ async fn finalize_successful_end_turn(
         agent = %ctx.manifest.name,
         iterations = end_turn.iteration + 1,
         tokens = end_turn.total_usage.total(),
+        is_fork = ctx.opts.is_fork,
         "{}",
         if ctx.streaming {
             "Streaming agent loop completed"
@@ -2275,36 +2295,38 @@ async fn finalize_successful_end_turn(
         }
     );
 
-    if let Some(pm_store) = ctx.proactive_memory {
-        let user_id = ctx.session.agent_id.0.to_string();
-        let new_messages = &ctx.session.messages[end_turn.new_messages_start..];
-        let messages_json = serialize_session_messages(new_messages);
-        match pm_store
-            .auto_memorize(&user_id, &messages_json, ctx.sender_user_id)
-            .await
-        {
-            Ok(result) if result.has_content => {
-                debug!(
-                    memories = result.memories.len(),
-                    relations = result.relations.len(),
-                    "{}",
+    if !ctx.opts.is_fork {
+        if let Some(pm_store) = ctx.proactive_memory {
+            let user_id = ctx.session.agent_id.0.to_string();
+            let new_messages = &ctx.session.messages[end_turn.new_messages_start..];
+            let messages_json = serialize_session_messages(new_messages);
+            match pm_store
+                .auto_memorize(&user_id, &messages_json, ctx.sender_user_id)
+                .await
+            {
+                Ok(result) if result.has_content => {
+                    debug!(
+                        memories = result.memories.len(),
+                        relations = result.relations.len(),
+                        "{}",
+                        if ctx.streaming {
+                            "Proactive memory (streaming): stored {} memories, {} relations"
+                        } else {
+                            "Proactive memory: stored {} memories, {} relations"
+                        }
+                    );
+                    end_turn
+                        .memories_saved
+                        .extend(result.memories.iter().map(|m| m.content.clone()));
+                    end_turn.memory_conflicts.extend(result.conflicts);
+                }
+                Ok(_) => {}
+                Err(e) => {
                     if ctx.streaming {
-                        "Proactive memory (streaming): stored {} memories, {} relations"
+                        warn!("Proactive memory auto_memorize failed (streaming): {e}");
                     } else {
-                        "Proactive memory: stored {} memories, {} relations"
+                        warn!("Proactive memory auto_memorize failed: {e}");
                     }
-                );
-                end_turn
-                    .memories_saved
-                    .extend(result.memories.iter().map(|m| m.content.clone()));
-                end_turn.memory_conflicts.extend(result.conflicts);
-            }
-            Ok(_) => {}
-            Err(e) => {
-                if ctx.streaming {
-                    warn!("Proactive memory auto_memorize failed (streaming): {e}");
-                } else {
-                    warn!("Proactive memory auto_memorize failed: {e}");
                 }
             }
         }
@@ -2438,6 +2460,7 @@ pub async fn run_agent_loop(
         sender_user_id: sender_user_id.as_deref(),
         stable_prefix_mode,
         streaming: false,
+        opts,
     })
     .await;
 
@@ -3415,6 +3438,7 @@ pub async fn run_agent_loop_streaming(
         sender_user_id: sender_user_id.as_deref(),
         stable_prefix_mode,
         streaming: true,
+        opts,
     })
     .await;
 
