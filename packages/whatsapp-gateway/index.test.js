@@ -17,6 +17,7 @@ const {
   markdownToWhatsApp,
   extractNotifyOwner,
   extractRelayCommands,
+  ownerIntentsRelay,
   buildConversationsContext,
   isRateLimited,
   buildCorsHeaders,
@@ -994,4 +995,94 @@ after(() => {
   } catch {}
   // Force exit — SQLite and setInterval timers keep the event loop alive
   setTimeout(() => process.exit(0), 100);
+});
+
+// ---------------------------------------------------------------------------
+// ownerIntentsRelay — guards the RELAY system-instruction injection so that
+// neutral owner-to-agent messages don't get forced into relay mode when a
+// stranger conversation happens to be active.
+// ---------------------------------------------------------------------------
+describe('ownerIntentsRelay', () => {
+  it('returns false for neutral greetings', () => {
+    assert.equal(ownerIntentsRelay('saludos'), false);
+    assert.equal(ownerIntentsRelay('hola'), false);
+    assert.equal(ownerIntentsRelay('ciao'), false);
+    assert.equal(ownerIntentsRelay('Buondì'), false);
+    assert.equal(ownerIntentsRelay('come stai?'), false);
+    assert.equal(ownerIntentsRelay(''), false);
+    assert.equal(ownerIntentsRelay('   '), false);
+  });
+
+  it('returns true for explicit /relay or /reply command', () => {
+    assert.equal(ownerIntentsRelay('/relay tell him I will be late'), true);
+    assert.equal(ownerIntentsRelay('/reply ok grazie'), true);
+  });
+
+  it('returns true for @mention', () => {
+    assert.equal(ownerIntentsRelay('@alice hi there'), true);
+    assert.equal(ownerIntentsRelay('please say @bob hi'), true);
+  });
+
+  it('Italian pack: recognises delegated-speech verbs, rejects owner→agent formal imperative', () => {
+    const { compileIntentRegex } = require('./lib/intent_patterns');
+    const re = compileIntentRegex(['it']);
+    // Positive — explicit recipient / verb-with-baked-in-object
+    assert.ok(re.test('rispondi a Federico che sto bene'));
+    assert.ok(re.test('digli che arrivo'));
+    assert.ok(re.test('saluta Caterina per me'));
+    assert.ok(re.test('scrivi a Paolo'));
+    assert.ok(re.test('chiedi a Mario il prezzo'));
+    assert.ok(re.test('inoltra a tutti la comunicazione'));
+    assert.ok(re.test('dica a Mario che sto bene'));
+    // Negative — owner addressing the bot, not a relay.
+    // Pre-fix regex matched bare `dica`, so "mi dica" triggered a false
+    // relay intent; the narrowed `dica\s+a\s+\w+` pattern blocks it.
+    assert.equal(re.test('mi dica'), false);
+    assert.equal(re.test('mi dica di più'), false);
+    assert.equal(re.test('Dica pure'), false);
+  });
+
+  it('multi-language union: both EN and IT patterns active simultaneously', () => {
+    const { compileIntentRegex } = require('./lib/intent_patterns');
+    const re = compileIntentRegex(['en', 'it']);
+    assert.ok(re.test('tell Alice I am busy'));
+    assert.ok(re.test('digli che arrivo'));
+  });
+
+  it('returns true for English delegated-speech verbs', () => {
+    assert.equal(ownerIntentsRelay('reply to Bob that I agree'), true);
+    assert.equal(ownerIntentsRelay('tell Alice I am busy'), true);
+    assert.equal(ownerIntentsRelay('write to the team'), true);
+  });
+
+  it('is case-insensitive (IT pack)', () => {
+    const { compileIntentRegex } = require('./lib/intent_patterns');
+    const re = compileIntentRegex(['it']);
+    assert.ok(re.test('  RISPONDI A Mario ok'.trim()));
+    assert.ok(re.test('DIGLI che sto arrivando'));
+  });
+
+  it('does not match partial words', () => {
+    assert.equal(ownerIntentsRelay('salutami la zia'), false);
+    assert.equal(ownerIntentsRelay('rispostaok'), false);
+  });
+
+  it('does not treat "tell me/us/you" as relay intent (owner → agent)', () => {
+    assert.equal(ownerIntentsRelay('tell me a joke'), false);
+    assert.equal(ownerIntentsRelay('can you tell me about this'), false);
+    assert.equal(ownerIntentsRelay('tell us the news'), false);
+    assert.equal(ownerIntentsRelay('tell you what'), false);
+  });
+
+  it('does not treat "looking forward to" as relay intent', () => {
+    assert.equal(ownerIntentsRelay('I look forward to meeting you'), false);
+    assert.equal(ownerIntentsRelay('looking forward to the call'), false);
+    assert.equal(ownerIntentsRelay('I am forward to hearing from you'), false);
+  });
+
+  it('still matches "forward <it|this|the X> to <recipient>"', () => {
+    assert.equal(ownerIntentsRelay('forward it to Bob'), true);
+    assert.equal(ownerIntentsRelay('forward this to Alice'), true);
+    assert.equal(ownerIntentsRelay('forward the message to the team'), true);
+  });
 });
