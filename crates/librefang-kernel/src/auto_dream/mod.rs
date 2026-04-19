@@ -84,12 +84,15 @@ const MEMORY_WRITE_TOOLS: &[&str] = &["memory_store"];
 pub const DREAM_ALLOWED_TOOLS: &[&str] = &["memory_store", "memory_recall", "memory_list"];
 
 /// Minimum spacing between event-driven gate scans for the same agent.
-/// Mirrors libre-code's `SESSION_SCAN_INTERVAL_MS`. Without this, an
-/// agent taking 100 turns/hour past the time gate would run 100 lock-stat
-/// + session-count SQL probes before one of them actually fires a dream —
-/// the scan is cheap per call but pointless at that cadence. This does
-/// NOT apply to the scheduler (already sparse at `check_interval_secs`)
-/// or to manual triggers (operators explicitly asked for a check).
+/// Mirrors libre-code's `SESSION_SCAN_INTERVAL_MS`.
+///
+/// Without this throttle, an agent taking 100 turns/hour past the time
+/// gate would run 100 lock-stat plus session-count SQL probes before one
+/// actually fires a dream. Each scan is cheap but running 100 of them
+/// per hour is pointless at that cadence. Applies only to the
+/// event-driven path: the scheduler is already sparse at
+/// `check_interval_secs`, and manual triggers deliberately bypass
+/// because the operator explicitly asked for a check.
 const EVENT_SCAN_INTERVAL_MS: u64 = 10 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
