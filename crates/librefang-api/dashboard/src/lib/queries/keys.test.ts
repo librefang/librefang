@@ -220,6 +220,30 @@ describe("query key factories", () => {
     });
   });
 
+  describe("skillKeys", () => {
+    it("supporting files are nested under detail", () => {
+      expect(skillKeys.supportingFiles("demo")).toEqual([
+        "skills",
+        "detail",
+        "demo",
+        "supportingFile",
+      ]);
+      expect(skillKeys.supportingFile("demo", "references/file.md")).toEqual([
+        "skills",
+        "detail",
+        "demo",
+        "supportingFile",
+        "references/file.md",
+      ]);
+      expect(
+        skillKeys.supportingFile("demo", "references/file.md").slice(
+          0,
+          skillKeys.supportingFiles("demo").length,
+        ),
+      ).toEqual(skillKeys.supportingFiles("demo"));
+    });
+  });
+
   describe("runtimeKeys anchoring", () => {
     it("all sub-keys are prefixed with runtimeKeys.all", () => {
       const prefix = runtimeKeys.all;

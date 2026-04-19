@@ -5,6 +5,7 @@ import {
   listMcpCatalog,
   getMcpCatalogEntry,
   getMcpHealth,
+  getMcpAuthStatus,
 } from "../http/client";
 import { mcpKeys } from "./keys";
 
@@ -48,6 +49,13 @@ export const mcpQueries = {
       queryFn: getMcpHealth,
       staleTime: HEALTH_STALE_MS,
     }),
+  authStatus: (id: string, opts: { enabled?: boolean } = {}) =>
+    queryOptions({
+      queryKey: mcpKeys.authStatus(id),
+      queryFn: () => getMcpAuthStatus(id),
+      staleTime: SERVERS_STALE_MS,
+      enabled: opts.enabled ?? Boolean(id),
+    }),
 };
 
 export function useMcpServers() {
@@ -68,4 +76,11 @@ export function useMcpCatalogEntry(id: string) {
 
 export function useMcpHealth() {
   return useQuery(mcpQueries.health());
+}
+
+export function useMcpAuthStatus(id: string, options: { enabled?: boolean } = {}) {
+  return useQuery({
+    ...mcpQueries.authStatus(id, options),
+    enabled: options.enabled ?? Boolean(id),
+  });
 }

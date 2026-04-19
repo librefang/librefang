@@ -1,6 +1,8 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   listSkills,
+  getSkillDetail,
+  getSupportingFile,
   clawhubBrowse,
   clawhubSearch,
   clawhubGetSkill,
@@ -15,6 +17,12 @@ const STALE_MS = 30_000;
 const REFRESH_MS = 30_000;
 const BROWSE_STALE_MS = 60_000;
 
+type UseSkillOptions = {
+  enabled?: boolean;
+  staleTime?: number;
+  refetchInterval?: number | false;
+};
+
 export const skillQueries = {
   list: () =>
     queryOptions({
@@ -22,6 +30,20 @@ export const skillQueries = {
       queryFn: listSkills,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+    }),
+  detail: (name: string) =>
+    queryOptions({
+      queryKey: skillKeys.detail(name),
+      queryFn: () => getSkillDetail(name),
+      enabled: !!name,
+      staleTime: STALE_MS,
+    }),
+  supportingFile: (name: string, path: string) =>
+    queryOptions({
+      queryKey: skillKeys.supportingFile(name, path),
+      queryFn: () => getSupportingFile(name, path),
+      enabled: !!name && !!path,
+      staleTime: STALE_MS,
     }),
   clawhubBrowse: (sort?: string, limit?: number, cursor?: string) =>
     queryOptions({
@@ -71,6 +93,30 @@ export const skillQueries = {
 
 export function useSkills() {
   return useQuery(skillQueries.list());
+}
+
+export function useSkillDetail(name: string, options: UseSkillOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...skillQueries.detail(name),
+    enabled: enabled ?? Boolean(name),
+    staleTime,
+    refetchInterval,
+  });
+}
+
+export function useSupportingFile(
+  name: string,
+  path: string,
+  options: UseSkillOptions = {},
+) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...skillQueries.supportingFile(name, path),
+    enabled: enabled ?? (Boolean(name) && Boolean(path)),
+    staleTime,
+    refetchInterval,
+  });
 }
 
 export function useClawHubBrowse(sort?: string, limit?: number, cursor?: string) {
