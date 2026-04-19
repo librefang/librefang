@@ -271,7 +271,21 @@ impl MemoryExtractor for LlmMemoryExtractor {
             });
         }
 
-        // Build the LLM request
+        // Build the LLM request. `prompt_caching: true` lets Anthropic
+        // cache the ~1KB `EXTRACTION_SYSTEM_PROMPT` across back-to-back
+        // auto_memorize calls — the user message (conversation text)
+        // differs every call, but the system prompt is stable, so the
+        // driver stamps a `cache_control` marker on the system block and
+        // subsequent calls within the 5-min TTL hit cache. Non-Anthropic
+        // providers ignore the flag (OpenAI caches automatically; others
+        // no-op), so enabling it is safe cross-provider.
+        //
+        // NOTE: this does NOT share cache with the main agent's turn —
+        // LlmMemoryExtractor deliberately uses its own `EXTRACTION_SYSTEM_PROMPT`
+        // (not the agent's system prompt) for better extraction quality.
+        // Cross-call parent-child cache sharing would require rewriting
+        // the extractor to use the forkedAgent pattern + tool calls
+        // (libre-code's `extractMemories` shape); that's a separate PR.
         let request = crate::llm_driver::CompletionRequest {
             model: self.model.clone(),
             messages: vec![librefang_types::message::Message::user(format!(
@@ -282,7 +296,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             temperature: 0.1,
             system: Some(EXTRACTION_SYSTEM_PROMPT.to_string()),
             thinking: None,
-            prompt_caching: false,
+            prompt_caching: true,
             response_format: Some(ResponseFormat::Json),
             timeout_secs: Some(30),
             extra_body: None,
@@ -328,6 +342,13 @@ impl MemoryExtractor for LlmMemoryExtractor {
             new_memory.content, existing_text
         );
 
+        // Same caching rationale as `extract_memories` above — the
+        // `DECISION_SYSTEM_PROMPT` is stable across calls, so enabling
+        // prompt caching lets Anthropic cache the system block. The user
+        // message (existing memories + new candidate) varies every call,
+        // so message-level caching doesn't help here. System-only cache
+        // is still a real saving on active agents where `decide_action`
+        // fires dozens of times per session.
         let request = crate::llm_driver::CompletionRequest {
             model: self.model.clone(),
             messages: vec![librefang_types::message::Message::user(user_msg)],
@@ -336,7 +357,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             temperature: 0.0,
             system: Some(DECISION_SYSTEM_PROMPT.to_string()),
             thinking: None,
-            prompt_caching: false,
+            prompt_caching: true,
             response_format: None,
             timeout_secs: Some(15),
             extra_body: None,
