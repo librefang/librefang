@@ -87,7 +87,7 @@ export function PluginsPage() {
   };
 
   const handleRegistryInstall = (name: string, repo: string) => {
-    setInstallingName(name);
+    setInstallingName(`${repo}:${name}`);
     installMutation.mutate(
       { source: "registry", name, github_repo: repo },
       {
@@ -300,9 +300,9 @@ export function PluginsPage() {
                                 variant="primary"
                                 size="sm"
                                 onClick={() => handleRegistryInstall(rp.name, reg.github_repo)}
-                                disabled={installingName === rp.name}
+                                disabled={installingName === `${reg.github_repo}:${rp.name}`}
                               >
-                                {installingName === rp.name
+                                {installingName === `${reg.github_repo}:${rp.name}`
                                   ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                   : <Download className="w-3.5 h-3.5 mr-1" />}
                                 {t("plugins.install")}
