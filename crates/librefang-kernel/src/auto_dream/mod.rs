@@ -83,6 +83,15 @@ const MEMORY_WRITE_TOOLS: &[&str] = &["memory_store"];
 /// Matches libre-code's `createAutoMemCanUseTool(memoryRoot)` restriction.
 pub const DREAM_ALLOWED_TOOLS: &[&str] = &["memory_store", "memory_recall", "memory_list"];
 
+/// Minimum spacing between event-driven gate scans for the same agent.
+/// Mirrors libre-code's `SESSION_SCAN_INTERVAL_MS`. Without this, an
+/// agent taking 100 turns/hour past the time gate would run 100 lock-stat
+/// + session-count SQL probes before one of them actually fires a dream —
+/// the scan is cheap per call but pointless at that cadence. This does
+/// NOT apply to the scheduler (already sparse at `check_interval_secs`)
+/// or to manual triggers (operators explicitly asked for a check).
+const EVENT_SCAN_INTERVAL_MS: u64 = 10 * 60 * 1000;
+
 // ---------------------------------------------------------------------------
 // Progress types
 // ---------------------------------------------------------------------------
@@ -169,6 +178,37 @@ type AbortSlot = Mutex<Option<oneshot::Sender<()>>>;
 /// a reliable "a manual dream is still running" signal for `can_abort` in
 /// the status endpoint.
 static ABORT_HANDLES: LazyLock<DashMap<AgentId, Arc<AbortSlot>>> = LazyLock::new(DashMap::new);
+
+/// Per-agent last-scan timestamp (Unix-ms). Entries are written under
+/// DashMap's per-shard lock, so concurrent racers for the same agent
+/// serialise naturally and only one wins the "first scan" slot.
+/// See `should_throttle_event_scan` for the read-and-update logic.
+static LAST_EVENT_SCAN_AT: LazyLock<DashMap<AgentId, u64>> = LazyLock::new(DashMap::new);
+
+/// Returns `true` if the event-driven path should skip this turn because
+/// we already evaluated this agent's gates within `EVENT_SCAN_INTERVAL_MS`.
+/// On a miss (or on first call for this agent), records `now` and returns
+/// `false` so the caller proceeds with the full gate check.
+///
+/// Uses DashMap's per-shard lock via `entry()` so two concurrent turns on
+/// the same agent cannot both see a fresh slot — one wins, the other is
+/// throttled. Scheduler and manual-trigger paths bypass this — they're
+/// sparse enough or explicitly user-intended, respectively.
+fn should_throttle_event_scan(agent_id: AgentId) -> bool {
+    let now = now_ms();
+    let mut throttled = false;
+    LAST_EVENT_SCAN_AT
+        .entry(agent_id)
+        .and_modify(|last| {
+            if now.saturating_sub(*last) < EVENT_SCAN_INTERVAL_MS {
+                throttled = true;
+            } else {
+                *last = now;
+            }
+        })
+        .or_insert(now);
+    throttled
+}
 
 fn insert_progress(agent_id: AgentId, progress: DreamProgress) {
     DREAM_PROGRESS.insert(agent_id, progress);
@@ -725,6 +765,133 @@ pub fn set_agent_enabled(
     Ok(())
 }
 
+/// Event-driven trigger: called from the `AgentLoopEnd` hook whenever any
+/// agent finishes a turn. Cheap early-exits for the globally-disabled,
+/// not-opted-in, and shutting-down cases so the hot path (every turn for
+/// every agent) stays near-free. The actual gate check + dream invocation
+/// run on a detached tokio task so we never block the agent loop's return
+/// path on a lock stat or SQL query.
+///
+/// This is the primary trigger path. `spawn_scheduler` below is a sparse
+/// backstop for agents that may sit opted-in without ever turning.
+pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
+    // Gate 1 (cheapest): kernel shutdown. The daemon is unwinding; no point
+    // spawning a new dream that the runtime will immediately have to cancel.
+    // Matches the same check at the head of the scheduler loop body.
+    if kernel.supervisor.is_shutting_down() {
+        return;
+    }
+    // Gate 2: global auto-dream toggle. `config_snapshot` is an ArcSwap
+    // load_full — lock-free, nanoseconds uncontested.
+    {
+        let cfg = kernel.config_snapshot();
+        if !cfg.auto_dream.enabled {
+            return;
+        }
+    }
+    // Gate 3: per-agent opt-in. Use the lightweight bool-only accessor to
+    // avoid cloning the full AgentEntry (manifest Strings/Vecs) on the hot
+    // path. A missing agent returns false so freshly-deleted agents don't
+    // attempt a dream.
+    if !kernel.agent_registry().is_auto_dream_enabled(agent_id) {
+        return;
+    }
+
+    tokio::spawn(async move {
+        // Re-check all three gates inside the task. The operator could have
+        // flipped the global switch, toggled this agent off, or started a
+        // shutdown in the microseconds between the synchronous pre-filter
+        // above and this task actually being scheduled. Re-checking all
+        // three (rather than just two) keeps the guarantees symmetrical —
+        // no gate is "best effort" relative to the others.
+        if kernel.supervisor.is_shutting_down() {
+            return;
+        }
+        if !kernel.config_snapshot().auto_dream.enabled {
+            tracing::debug!(agent = %agent_id, "auto_dream: global toggled off between hook and spawn, skipping");
+            return;
+        }
+        if !kernel.agent_registry().is_auto_dream_enabled(agent_id) {
+            tracing::debug!(agent = %agent_id, "auto_dream: agent toggled off between hook and spawn, skipping");
+            return;
+        }
+        // Scan throttle: a chatty agent can push dozens of turns per minute
+        // past the three pre-filters. Each of those would otherwise run a
+        // full `check_agent_gates` (lock stat + sessions-touched SQL).
+        // Cheap individually but pointless at that rate — by design, at
+        // most one dream fires per `min_hours`, so scanning more often
+        // than every ~10 minutes is pure noise. Matches libre-code's
+        // `SESSION_SCAN_INTERVAL_MS = 10 min`.
+        if should_throttle_event_scan(agent_id) {
+            tracing::trace!(agent = %agent_id, "auto_dream: turn-end scan throttled (within 10 min of last scan)");
+            return;
+        }
+        match check_agent_gates(&kernel, agent_id, false).await {
+            AgentGateResult::Fire { prior_mtime } => {
+                tracing::debug!(agent = %agent_id, "auto_dream: turn-end triggered dream");
+                // Same invocation mode as the scheduler: `None` for the
+                // abort channel so this dream runs to completion or its
+                // own timeout. Manual triggers remain the only
+                // abort-capable entry point.
+                run_dream(kernel, agent_id, prior_mtime, None).await;
+            }
+            AgentGateResult::TooSoon { hours_remaining } => {
+                tracing::trace!(agent = %agent_id, hours_remaining, "auto_dream: turn-end, time gate not open");
+            }
+            AgentGateResult::NoActivity {
+                sessions_since,
+                required,
+            } => {
+                tracing::trace!(agent = %agent_id, sessions_since, required, "auto_dream: turn-end, session gate not met");
+            }
+            AgentGateResult::LockHeld => {
+                tracing::debug!(agent = %agent_id, "auto_dream: turn-end, lock held (dream in progress)");
+            }
+            AgentGateResult::Skipped(reason) => {
+                tracing::warn!(agent = %agent_id, reason, "auto_dream: turn-end skipped");
+            }
+        }
+    });
+}
+
+/// `HookHandler` wiring the runtime's `AgentLoopEnd` event to auto-dream's
+/// event-driven trigger. Registered once during `LibreFangKernel::set_self_handle`
+/// so it can hold a `Weak<LibreFangKernel>` and upgrade on fire.
+pub struct AutoDreamTurnEndHook {
+    kernel: std::sync::Weak<LibreFangKernel>,
+}
+
+impl AutoDreamTurnEndHook {
+    pub fn new(kernel: std::sync::Weak<LibreFangKernel>) -> Self {
+        Self { kernel }
+    }
+}
+
+impl librefang_runtime::hooks::HookHandler for AutoDreamTurnEndHook {
+    fn on_event(&self, ctx: &librefang_runtime::hooks::HookContext) -> Result<(), String> {
+        use librefang_types::agent::HookEvent;
+        // Not our event — observe-only, silent no-op. AgentLoopEnd is the
+        // only one we care about; the registry filters by event type
+        // already, so this branch is defensive.
+        if ctx.event != HookEvent::AgentLoopEnd {
+            return Ok(());
+        }
+        // Kernel has been dropped (process shutting down) — nothing to do.
+        let Some(kernel) = self.kernel.upgrade() else {
+            return Ok(());
+        };
+        let Ok(uuid) = uuid::Uuid::parse_str(ctx.agent_id) else {
+            tracing::debug!(
+                agent_id = %ctx.agent_id,
+                "auto_dream: AgentLoopEnd hook saw non-UUID agent_id, skipping",
+            );
+            return Ok(());
+        };
+        maybe_fire_on_turn_end(kernel, AgentId(uuid));
+        Ok(())
+    }
+}
+
 pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
     tokio::spawn(async move {
         {
@@ -734,7 +901,7 @@ pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
                     min_hours = cfg.auto_dream.min_hours,
                     min_sessions = cfg.auto_dream.min_sessions,
                     check_interval_s = cfg.auto_dream.check_interval_secs,
-                    "auto_dream: enabled (per-agent opt-in via manifest)"
+                    "auto_dream: enabled (event-driven via AgentLoopEnd hook; scheduler is sparse backstop)"
                 );
             } else {
                 tracing::debug!("auto_dream: disabled");
@@ -764,11 +931,14 @@ pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
             for (agent_id, name) in enrolled_agents(&kernel) {
                 match check_agent_gates(&kernel, agent_id, false).await {
                     AgentGateResult::Fire { prior_mtime } => {
-                        // Scheduled dreams run inline — serial token spend.
-                        // `None` for abort_rx: scheduled dreams can't be
-                        // cancelled individually without stalling the
-                        // queue; users who want to interrupt wait for the
-                        // dream's own timeout or disable auto-dream.
+                        // Scheduled (backstop) dreams run inline — serial
+                        // token spend. This path mostly fires for opted-in
+                        // agents that never take a turn (channel bots
+                        // awaiting inbound traffic); active agents are
+                        // already covered by `maybe_fire_on_turn_end`
+                        // invoked from the AgentLoopEnd hook. `None` for
+                        // abort_rx: backstop dreams aren't individually
+                        // cancellable without stalling the queue.
                         run_dream(Arc::clone(&kernel), agent_id, prior_mtime, None).await;
                     }
                     AgentGateResult::TooSoon { hours_remaining } => {
@@ -1085,4 +1255,98 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+    use librefang_runtime::hooks::{HookContext, HookHandler};
+    use librefang_types::agent::HookEvent;
+
+    /// Hook must handle a dangling `Weak<LibreFangKernel>` (the kernel was
+    /// dropped, e.g. shutdown between turn end and hook dispatch) without
+    /// panicking. A panicking hook would crash the agent loop thread.
+    #[test]
+    fn hook_with_dropped_kernel_is_silent_noop() {
+        let hook = AutoDreamTurnEndHook::new(std::sync::Weak::new());
+        let ctx = HookContext {
+            agent_name: "probe",
+            agent_id: &uuid::Uuid::new_v4().to_string(),
+            event: HookEvent::AgentLoopEnd,
+            data: serde_json::json!({"reason": "normal_completion"}),
+        };
+        assert!(hook.on_event(&ctx).is_ok());
+    }
+
+    /// Hook must tolerate a non-UUID `agent_id` in the context rather than
+    /// erroring or panicking. Some internal agents (synthetic probe ids,
+    /// historical data) could surface a non-uuid; silent skip is safer than
+    /// crashing the hook registry.
+    #[test]
+    fn hook_with_non_uuid_agent_id_is_silent_noop() {
+        let hook = AutoDreamTurnEndHook::new(std::sync::Weak::new());
+        let ctx = HookContext {
+            agent_name: "probe",
+            agent_id: "not-a-uuid",
+            event: HookEvent::AgentLoopEnd,
+            data: serde_json::json!({}),
+        };
+        assert!(hook.on_event(&ctx).is_ok());
+    }
+
+    /// First call for an agent must not throttle (nothing to compare
+    /// against); second call within the window must throttle; third call
+    /// after manually aging the stamp past the window must pass again.
+    #[test]
+    fn scan_throttle_rate_limits_same_agent() {
+        let agent = AgentId::new();
+        // First scan always proceeds.
+        assert!(!should_throttle_event_scan(agent));
+        // Immediate second scan should be throttled.
+        assert!(should_throttle_event_scan(agent));
+        // Age the stored timestamp past the interval to simulate elapsed
+        // time without sleeping.
+        LAST_EVENT_SCAN_AT.insert(agent, now_ms().saturating_sub(EVENT_SCAN_INTERVAL_MS + 1));
+        assert!(!should_throttle_event_scan(agent));
+        // And now throttled again until it ages out.
+        assert!(should_throttle_event_scan(agent));
+        LAST_EVENT_SCAN_AT.remove(&agent);
+    }
+
+    /// Throttle is per-agent — two agents racing with back-to-back turns
+    /// must each get their own first pass without starving each other.
+    #[test]
+    fn scan_throttle_is_per_agent() {
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+        assert!(!should_throttle_event_scan(agent_a));
+        assert!(!should_throttle_event_scan(agent_b));
+        assert!(should_throttle_event_scan(agent_a));
+        assert!(should_throttle_event_scan(agent_b));
+        LAST_EVENT_SCAN_AT.remove(&agent_a);
+        LAST_EVENT_SCAN_AT.remove(&agent_b);
+    }
+
+    /// Other hook events (BeforeToolCall, etc.) must be silent no-ops —
+    /// auto-dream only reacts to AgentLoopEnd.
+    #[test]
+    fn hook_ignores_unrelated_events() {
+        let hook = AutoDreamTurnEndHook::new(std::sync::Weak::new());
+        for event in [
+            HookEvent::BeforeToolCall,
+            HookEvent::AfterToolCall,
+            HookEvent::BeforePromptBuild,
+        ] {
+            let ctx = HookContext {
+                agent_name: "probe",
+                agent_id: &uuid::Uuid::new_v4().to_string(),
+                event,
+                data: serde_json::json!({}),
+            };
+            assert!(
+                hook.on_event(&ctx).is_ok(),
+                "event {event:?} should be ignored"
+            );
+        }
+    }
 }

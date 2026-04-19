@@ -404,6 +404,19 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Cheap read-only check for the auto-dream opt-in flag, without cloning
+    /// the agent entry. Used on the hot path of the `AgentLoopEnd` hook,
+    /// which fires for every turn of every agent and would otherwise pay
+    /// the `AgentEntry` + manifest clone cost (several KB of Strings/Vecs
+    /// per turn) just to read one bool. Missing agent → `false`, matching
+    /// the "not enrolled" behaviour expected by callers.
+    pub fn is_auto_dream_enabled(&self, id: AgentId) -> bool {
+        self.agents
+            .get(&id)
+            .map(|e| e.manifest.auto_dream_enabled)
+            .unwrap_or(false)
+    }
+
     /// Update an agent's resource quota (budget limits).
     pub fn update_resources(
         &self,
@@ -611,6 +624,33 @@ mod tests {
 
         registry.update_auto_dream_enabled(id, false).unwrap();
         assert!(!registry.get(id).unwrap().manifest.auto_dream_enabled);
+    }
+
+    #[test]
+    fn test_is_auto_dream_enabled_tracks_flag() {
+        // Lightweight bool-only accessor must agree with the clone-based
+        // `get().manifest.auto_dream_enabled` path in all three states.
+        let registry = AgentRegistry::new();
+        let entry = test_entry("dreamer-fast");
+        let id = entry.id;
+        registry.register(entry).unwrap();
+        assert!(!registry.is_auto_dream_enabled(id));
+
+        registry.update_auto_dream_enabled(id, true).unwrap();
+        assert!(registry.is_auto_dream_enabled(id));
+
+        registry.update_auto_dream_enabled(id, false).unwrap();
+        assert!(!registry.is_auto_dream_enabled(id));
+    }
+
+    #[test]
+    fn test_is_auto_dream_enabled_missing_agent_is_false() {
+        // Missing agent must return false rather than panic — the auto-dream
+        // hook fires for every turn and cannot distinguish a killed agent
+        // from an opted-out one at that layer.
+        let registry = AgentRegistry::new();
+        let bogus = AgentId::new();
+        assert!(!registry.is_auto_dream_enabled(bogus));
     }
 
     #[test]
