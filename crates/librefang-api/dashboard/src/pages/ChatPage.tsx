@@ -1493,7 +1493,9 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
 // ---------------------------------------------------------------------------
 function useApprovalPoller(agentId: string | null) {
   const queryClient = useQueryClient();
-  const approvalsQuery = usePendingApprovals(agentId ?? undefined);
+  const approvalsQuery = usePendingApprovals(agentId ?? undefined, {
+    enabled: !!agentId,
+  });
 
   const remove = useCallback((id: string) => {
     queryClient.setQueryData<ApprovalItem[]>(

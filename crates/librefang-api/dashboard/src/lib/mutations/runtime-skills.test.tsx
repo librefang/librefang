@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { renderHook } from "@testing-library/react";
+import { act, renderHook } from "@testing-library/react";
 import {
   useRestoreBackup,
   useCreateBackup,
@@ -42,7 +42,9 @@ describe("useRestoreBackup", () => {
 
     const { result } = renderHook(() => useRestoreBackup(), { wrapper });
 
-    result.current.mutate("backup-1");
+    act(() => {
+      result.current.mutate("backup-1");
+    });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
@@ -63,7 +65,9 @@ describe("useFangHubInstall", () => {
 
     const { result } = renderHook(() => useFangHubInstall(), { wrapper });
 
-    result.current.mutate({ name: "test-skill" });
+    act(() => {
+      result.current.mutate({ name: "test-skill" });
+    });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
@@ -82,7 +86,9 @@ describe("useFangHubInstall", () => {
 
     const { result } = renderHook(() => useFangHubInstall(), { wrapper });
 
-    result.current.mutate({ name: "test-skill", hand: "test-hand" });
+    act(() => {
+      result.current.mutate({ name: "test-skill", hand: "test-hand" });
+    });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
@@ -103,7 +109,9 @@ describe("useCreateBackup", () => {
 
     const { result } = renderHook(() => useCreateBackup(), { wrapper });
 
-    result.current.mutate();
+    act(() => {
+      result.current.mutate();
+    });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
@@ -119,7 +127,9 @@ describe("useDeleteBackup", () => {
 
     const { result } = renderHook(() => useDeleteBackup(), { wrapper });
 
-    result.current.mutate("backup-1");
+    act(() => {
+      result.current.mutate("backup-1");
+    });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
@@ -129,8 +139,18 @@ describe("useDeleteBackup", () => {
 });
 
 describe.each([
-  { name: "useDeleteTask", hook: useDeleteTask, id: "task-1", invalidateKeys: [runtimeKeys.tasks()] },
-  { name: "useRetryTask", hook: useRetryTask, id: "task-2", invalidateKeys: [runtimeKeys.tasks()] },
+  {
+    name: "useDeleteTask",
+    hook: useDeleteTask,
+    id: "task-1",
+    invalidateKeys: [runtimeKeys.tasks(), runtimeKeys.taskStatus(), runtimeKeys.queueStatus()],
+  },
+  {
+    name: "useRetryTask",
+    hook: useRetryTask,
+    id: "task-2",
+    invalidateKeys: [runtimeKeys.tasks(), runtimeKeys.taskStatus(), runtimeKeys.queueStatus()],
+  },
 ] as const)("$name", ({ hook, id, invalidateKeys }) => {
   it("invalidates correct keys", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
@@ -138,7 +158,9 @@ describe.each([
 
     const { result } = renderHook(() => hook(), { wrapper });
 
-    result.current.mutate(id);
+    act(() => {
+      result.current.mutate(id);
+    });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
@@ -156,7 +178,9 @@ describe("useCleanupSessions", () => {
 
     const { result } = renderHook(() => useCleanupSessions(), { wrapper });
 
-    result.current.mutate();
+    act(() => {
+      result.current.mutate();
+    });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
@@ -174,7 +198,9 @@ describe("useShutdownServer", () => {
 
     const { result } = renderHook(() => useShutdownServer(), { wrapper });
 
-    result.current.mutate();
+    act(() => {
+      result.current.mutate();
+    });
     await vi.waitFor(() => {
       expect(result.current.isSuccess).toBe(true);
     });
@@ -190,7 +216,9 @@ describe("useUninstallSkill", () => {
 
     const { result } = renderHook(() => useUninstallSkill(), { wrapper });
 
-    result.current.mutate("skill-1");
+    act(() => {
+      result.current.mutate("skill-1");
+    });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
@@ -208,7 +236,9 @@ describe("useClawHubInstall", () => {
 
     const { result } = renderHook(() => useClawHubInstall(), { wrapper });
 
-    result.current.mutate({ slug: "test-skill", version: "1.0.0", hand: "test-hand" });
+    act(() => {
+      result.current.mutate({ slug: "test-skill", version: "1.0.0", hand: "test-hand" });
+    });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
@@ -226,7 +256,9 @@ describe("useSkillHubInstall", () => {
 
     const { result } = renderHook(() => useSkillHubInstall(), { wrapper });
 
-    result.current.mutate({ slug: "test-skill", hand: "test-hand" });
+    act(() => {
+      result.current.mutate({ slug: "test-skill", hand: "test-hand" });
+    });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });

@@ -5,8 +5,8 @@ import { memoryKeys } from "../queries/keys";
 export function useAddMemory() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ content, agentId }: { content: string; agentId?: string }) =>
-      addMemoryFromText(content, agentId),
+    mutationFn: ({ content, level, agentId }: { content: string; level?: string; agentId?: string }) =>
+      addMemoryFromText(content, level, agentId),
     onSuccess: () => qc.invalidateQueries({ queryKey: memoryKeys.all }),
   });
 }

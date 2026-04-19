@@ -15,11 +15,13 @@ export function useRunWorkflow() {
   return useMutation({
     mutationFn: ({ workflowId, input }: { workflowId: string; input: string }) =>
       runWorkflow(workflowId, input),
-    onSuccess: (_data, variables) => Promise.all([
-      qc.invalidateQueries({ queryKey: workflowKeys.runs(variables.workflowId) }),
-      qc.invalidateQueries({ queryKey: workflowKeys.lists() }),
-      qc.invalidateQueries({ queryKey: workflowKeys.detail(variables.workflowId) }),
-    ]),
+    onSuccess: async (_data, { workflowId }) => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: workflowKeys.lists() }),
+        qc.invalidateQueries({ queryKey: workflowKeys.runs(workflowId) }),
+        qc.invalidateQueries({ queryKey: workflowKeys.runDetails() }),
+      ]);
+    },
   });
 }
 
@@ -70,7 +72,9 @@ export function useInstantiateTemplate() {
 }
 
 export function useSaveWorkflowAsTemplate() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: saveWorkflowAsTemplate,
+    onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.templates() }),
   });
 }

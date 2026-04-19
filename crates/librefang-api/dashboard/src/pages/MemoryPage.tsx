@@ -27,7 +27,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
 
   const handleAdd = () => {
     addMutation.mutate(
-      { content, agentId: agentId || undefined },
+      { content, level, agentId: agentId || undefined },
       { onSuccess: () => onClose() }
     );
   };

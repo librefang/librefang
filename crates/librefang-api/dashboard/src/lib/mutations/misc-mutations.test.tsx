@@ -43,7 +43,7 @@ describe("useCompleteExperiment", () => {
 });
 
 describe("useSetSessionLabel", () => {
-  it("with agentId invalidates session lists and agent sessions", async () => {
+  it("with agentId invalidates session lists, detail and agent sessions", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -58,17 +58,20 @@ describe("useSetSessionLabel", () => {
     });
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+      expect(invalidateSpy).toHaveBeenCalledTimes(3);
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: sessionKeys.lists(),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: sessionKeys.detail("sess-1"),
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.sessions("agent-1"),
     });
   });
 
-  it("without agentId invalidates only session lists", async () => {
+  it("without agentId invalidates session lists and detail", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -79,10 +82,13 @@ describe("useSetSessionLabel", () => {
     await result.current.mutateAsync({ sessionId: "sess-1", label: "test label" });
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(1);
+      expect(invalidateSpy).toHaveBeenCalledTimes(2);
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: sessionKeys.lists(),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: sessionKeys.detail("sess-1"),
     });
   });
 });
