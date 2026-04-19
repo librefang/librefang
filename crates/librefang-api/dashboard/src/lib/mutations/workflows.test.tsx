@@ -22,7 +22,7 @@ vi.mock("../http/client", () => ({
 }));
 
 describe("useRunWorkflow", () => {
-  it("invalidates workflow runs, lists, and detail for the workflow", async () => {
+  it("invalidates workflow runs, lists, and run details", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -37,7 +37,7 @@ describe("useRunWorkflow", () => {
       queryKey: workflowKeys.lists(),
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: workflowKeys.detail("wf-1"),
+      queryKey: workflowKeys.runDetails(),
     });
   });
 });

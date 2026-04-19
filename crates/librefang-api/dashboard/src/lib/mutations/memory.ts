@@ -6,7 +6,7 @@ export function useAddMemory() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ content, level, agentId }: { content: string; level?: string; agentId?: string }) =>
-      addMemoryFromText(content, level, agentId),
+      addMemoryFromText(content, { level, agentId }),
     onSuccess: () => qc.invalidateQueries({ queryKey: memoryKeys.all }),
   });
 }

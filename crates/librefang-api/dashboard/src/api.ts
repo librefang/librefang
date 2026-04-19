@@ -1963,9 +1963,9 @@ export async function getMemoryStats(agentId?: string): Promise<MemoryStatsRespo
 
 export async function addMemoryFromText(
   content: string,
-  level?: string,
-  agentId?: string
+  options: { level?: string; agentId?: string } = {}
 ): Promise<ApiActionResponse> {
+  const { level, agentId } = options;
   return post<ApiActionResponse>("/api/memory", {
     messages: [{ role: "user", content }],
     ...(level ? { level } : {}),

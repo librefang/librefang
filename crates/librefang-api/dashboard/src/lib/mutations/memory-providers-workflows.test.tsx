@@ -38,8 +38,7 @@ describe("useAddMemory", () => {
 
     expect(api.addMemoryFromText).toHaveBeenCalledWith(
       "remember this",
-      "semantic",
-      "agent-1",
+      { level: "semantic", agentId: "agent-1" },
     );
   });
 });

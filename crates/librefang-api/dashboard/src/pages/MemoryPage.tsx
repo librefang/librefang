@@ -22,6 +22,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const [content, setContent] = useState("");
   const [agentId, setAgentId] = useState("");
+  const [level, setLevel] = useState("episodic");
 
   const addMutation = useAddMemory();
 
@@ -45,6 +46,19 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
               rows={4}
               className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none resize-none"
             />
+          </div>
+
+          <div>
+            <label className="text-xs font-bold text-text-dim mb-1 block">{t("memory.level", { defaultValue: "Level" })}</label>
+            <select
+              value={level}
+              onChange={(e) => setLevel(e.target.value)}
+              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+            >
+              <option value="episodic">{t("memory.episodic", { defaultValue: "episodic" })}</option>
+              <option value="semantic">{t("memory.semantic", { defaultValue: "semantic" })}</option>
+              <option value="working">{t("memory.working", { defaultValue: "working" })}</option>
+            </select>
           </div>
 
           <div>
