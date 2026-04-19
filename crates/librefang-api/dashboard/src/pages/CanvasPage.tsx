@@ -1,7 +1,6 @@
 import { useCallback, useState, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { useQueryClient } from "@tanstack/react-query";
 import {
   ReactFlow,
   Background,
@@ -61,6 +60,7 @@ type CanvasDraft = {
 const CANVAS_DRAFT_KEY = "canvasDraft";
 
 function readCanvasDraft(): CanvasDraft | null {
+  if (typeof window === "undefined") return null;
   const rawDraft = sessionStorage.getItem(CANVAS_DRAFT_KEY);
   if (!rawDraft) return null;
   try {
@@ -79,6 +79,7 @@ function readCanvasDraft(): CanvasDraft | null {
 }
 
 function clearCanvasDraft() {
+  if (typeof window === "undefined") return;
   sessionStorage.removeItem(CANVAS_DRAFT_KEY);
 }
 
@@ -304,7 +305,6 @@ function TemplateBrowser({
   const [paramValues, setParamValues] = useState<Record<string, unknown>>({});
   const [error, setError] = useState<string | null>(null);
   const instantiateTemplateMutation = useInstantiateTemplate();
-  const queryClient = useQueryClient();
   const templatesQuery = useWorkflowTemplates(searchQuery || undefined);
   const templates = templatesQuery.data ?? [];
   const loading = templatesQuery.isLoading || templatesQuery.isFetching;
@@ -326,7 +326,6 @@ function TemplateBrowser({
     try {
       const resp = await instantiateTemplateMutation.mutateAsync({ id: selectedTemplate.id, params: paramValues });
       const workflowId = (resp as any).workflow_id || (resp as any).id || "";
-      await queryClient.invalidateQueries({ queryKey: ["workflows", "list"] });
       onInstantiate(workflowId);
     } catch (e: any) {
       setError(e?.message || t("canvas.template_instantiate_error"));
@@ -836,6 +835,7 @@ function CanvasPageInner() {
       clearDraft();
       return;
     }
+    if (typeof window === "undefined") return;
     sessionStorage.setItem(CANVAS_DRAFT_KEY, JSON.stringify(draft));
   }, [clearDraft]);
 
@@ -1626,7 +1626,8 @@ function CanvasPageInner() {
     if (!workflowId && nodes.length > 0) {
       try {
         const saved = await ensureSavedWorkflow();
-        workflowId = saved?.id;
+        if (!saved) return;
+        workflowId = saved.id;
       } catch (e: unknown) {
         showError(toErrorMessage(e));
         return;
