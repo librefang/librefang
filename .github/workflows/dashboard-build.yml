@@ -37,7 +37,9 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/librefang-api/dashboard
-        run: pnpm install --frozen-lockfile
+        # pnpm 10 in CI ignores both .npmrc and pnpm-workspace.yaml for the
+        # ignored-builds setting; pass it on the CLI so it can't be missed.
+        run: pnpm install --frozen-lockfile --config.strict-dep-builds=false
 
       - name: Build dashboard
         working-directory: crates/librefang-api/dashboard

@@ -3,7 +3,7 @@
 ## This is a minimal agent template that you can copy and customize.
 ## To use: librefang agent spawn examples/custom-agent/agent.toml
 ##
-## For the full reference, see: docs/agent-templates.md
+## For the full reference, see: https://docs.librefang.ai/agent/templates
 
 name = "my-custom-agent"
 version = "0.1.0"

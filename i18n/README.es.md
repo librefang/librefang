@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">Sitio web</a> &bull;
   <a href="https://docs.librefang.ai">Documentación</a> &bull;
-  <a href="../docs/CONTRIBUTING.md">Contribuir</a> &bull;
+  <a href="../CONTRIBUTING.md">Contribuir</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -37,10 +37,10 @@ LibreFang es un **Sistema Operativo de Agentes** — una plataforma completa par
 
 Los frameworks de agentes tradicionales esperan tu entrada. LibreFang ejecuta **agentes que trabajan para ti** — según horarios, 24/7, monitorizando objetivos, generando leads, gestionando redes sociales e informando a tu dashboard.
 
-> LibreFang es un fork comunitario de [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) con gobernanza abierta y política de merge-first para PRs. Ver [GOVERNANCE.md](../docs/GOVERNANCE.md) para detalles.
+> LibreFang es un fork comunitario de [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) con gobernanza abierta y política de merge-first para PRs. Ver [GOVERNANCE.md](../GOVERNANCE.md) para detalles.
 
 <p align="center">
-  <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang Dashboard" />
+  <img src="../public/assets/dashboard.png" width="800" alt="LibreFang Dashboard" />
 </p>
 
 ## Inicio Rápido
@@ -116,7 +116,7 @@ librefang hand status researcher     # Ver progreso
 librefang hand list                  # Ver todos los Hands
 ```
 
-Crea el tuyo: define un `HAND.toml` + prompt de sistema + `SKILL.md`. [Guía](../docs/skill-development.md)
+Crea el tuyo: define un `HAND.toml` + prompt de sistema + `SKILL.md`. [Guía](https://docs.librefang.ai/agent/skills)
 
 ## Arquitectura
 
@@ -141,13 +141,13 @@ xtask                 Automatización de build
 
 ## Características Principales
 
-**40 Adaptadores de Canal** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky y 26 más. [Lista completa](../docs/channel-adapters.md)
+**40 Adaptadores de Canal** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky y 26 más. [Lista completa](https://docs.librefang.ai/integrations/channels)
 
-**27 Proveedores LLM** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama y 20 más. Enrutamiento inteligente, fallback automático, seguimiento de costos. [Detalles](../docs/providers.md)
+**27 Proveedores LLM** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama y 20 más. Enrutamiento inteligente, fallback automático, seguimiento de costos. [Detalles](https://docs.librefang.ai/configuration/providers)
 
-**16 Capas de Seguridad** — Sandbox WASM, auditoría Merkle, seguimiento de taint, firma Ed25519, protección SSRF, zeroización de secretos y más. [Detalles](../docs/comparison.md#16-security-systems--defense-in-depth)
+**16 Capas de Seguridad** — Sandbox WASM, auditoría Merkle, seguimiento de taint, firma Ed25519, protección SSRF, zeroización de secretos y más. [Detalles](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth)
 
-**API Compatible con OpenAI** — Endpoint drop-in `/v1/chat/completions`. 140+ endpoints REST/WS/SSE. [Referencia API](../docs/api-reference.md)
+**API Compatible con OpenAI** — Endpoint drop-in `/v1/chat/completions`. 140+ endpoints REST/WS/SSE. [Referencia API](https://docs.librefang.ai/integrations/api)
 
 **SDKs de Cliente** — Cliente REST completo con soporte de streaming.
 
@@ -185,9 +185,9 @@ client := librefang.New("http://localhost:4545")
 agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
 ```
 
-**Soporte MCP** — Cliente y servidor MCP integrados. Conecta con IDEs, extiende con herramientas personalizadas, compone pipelines de agentes. [Detalles](../docs/providers.md)
+**Soporte MCP** — Cliente y servidor MCP integrados. Conecta con IDEs, extiende con herramientas personalizadas, compone pipelines de agentes. [Detalles](https://docs.librefang.ai/integrations/mcp-a2a)
 
-**Protocolo A2A** — Soporte del protocolo Agent-to-Agent de Google. Descubre, comunica y delega tareas entre sistemas de agentes. [Detalles](../docs/api-reference.md)
+**Protocolo A2A** — Soporte del protocolo Agent-to-Agent de Google. Descubre, comunica y delega tareas entre sistemas de agentes. [Detalles](https://docs.librefang.ai/integrations/mcp-a2a)
 
 **App de Escritorio** — App nativa Tauri 2.0 con bandeja del sistema, notificaciones y atajos globales.
 
@@ -204,28 +204,28 @@ cargo fmt --all -- --check                               # Verificar formato
 
 ## Comparación
 
-Ver [docs/comparison.md](../docs/comparison.md) para benchmarks y comparación de características vs OpenClaw, ZeroClaw, CrewAI, AutoGen y LangGraph.
+Ver [Comparación](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth) para benchmarks y comparación de características vs OpenClaw, ZeroClaw, CrewAI, AutoGen y LangGraph.
 
 ## Enlaces
 
-- [Documentación](https://docs.librefang.ai) &bull; [Referencia API](../docs/api-reference.md) &bull; [Guía de Inicio](../docs/getting-started.md) &bull; [Solución de Problemas](../docs/troubleshooting.md)
-- [Contribuir](../docs/CONTRIBUTING.md) &bull; [Gobernanza](../docs/GOVERNANCE.md) &bull; [Seguridad](../docs/SECURITY.md)
+- [Documentación](https://docs.librefang.ai) &bull; [Referencia API](https://docs.librefang.ai/integrations/api) &bull; [Guía de Inicio](https://docs.librefang.ai/getting-started) &bull; [Solución de Problemas](https://docs.librefang.ai/operations/troubleshooting)
+- [Contribuir](../CONTRIBUTING.md) &bull; [Gobernanza](../GOVERNANCE.md) &bull; [Seguridad](../SECURITY.md)
 - Discusiones: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [Casos de Uso](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [Votaciones](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [Anuncios](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## Contribuidores
 
 <a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="../public/assets/contributors.svg" alt="Contributors" />
+  <img src="../web/public/assets/contributors.svg" alt="Contributors" />
 </a>
 
 <p align="center">
   Damos la bienvenida a contribuciones de todo tipo — código, documentación, traducciones, reportes de bugs.<br/>
-  Consulta la <a href="../docs/CONTRIBUTING.md">Guía de Contribución</a> y elige un <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> para empezar.
+  Consulta la <a href="../CONTRIBUTING.md">Guía de Contribución</a> y elige un <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> para empezar.
 </p>
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">
-    <img src="../public/assets/star-history.svg" alt="Star History" />
+    <img src="../web/public/assets/star-history.svg" alt="Star History" />
   </a>
 </p>
 

@@ -5,7 +5,7 @@
 # ══════════════════════════════════════════════════════════════
 
 # ── Server ────────────────────────────────────────────────────
-api_listen = "0.0.0.0:4545"    # Use "127.0.0.1:4545" for local-only
+api_listen = "127.0.0.1:4545"  # Local-only; use "0.0.0.0:4545" to expose on LAN/remote
 log_level = "info"             # trace | debug | info | warn | error
 mode = "default"               # stable | default | dev
 

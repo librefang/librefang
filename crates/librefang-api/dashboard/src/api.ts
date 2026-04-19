@@ -2037,7 +2037,11 @@ export async function resumeAgent(agentId: string): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/resume`, {});
 }
 
-export async function spawnAgent(req: { manifest_toml?: string; template?: string }): Promise<ApiActionResponse> {
+export async function spawnAgent(req: {
+  manifest_toml?: string;
+  template?: string;
+  name?: string;
+}): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/agents", req);
 }
 
@@ -2639,8 +2643,13 @@ export async function createRegistryContent(
 // ---------------------------------------------------------------------------
 
 // ── MCP Servers API ─────────────────────────────────────────────────────
+//
+// The MCP API is unified under `/api/mcp/*` — both raw-configured servers
+// (from `config.toml`) and catalog-installed servers live in the same
+// `/api/mcp/servers` collection. `template_id` tracks provenance when a
+// server was installed from a catalog entry.
 
-export interface McpServerTransport {
+export interface McpTransport {
   type: "stdio" | "sse" | "http";
   command?: string;
   args?: string[];
@@ -2648,11 +2657,15 @@ export interface McpServerTransport {
 }
 
 export interface McpServerConfigured {
+  /** Stable identifier; falls back to `name` when the backend omits it. */
+  id?: string;
   name: string;
-  transport: McpServerTransport;
+  transport: McpTransport;
   timeout_secs?: number;
   env?: string[];
   headers?: string[];
+  /** Catalog template this server was installed from, when applicable. */
+  template_id?: string;
   auth_state?: { state: string; auth_url?: string; message?: string };
 }
 
@@ -2674,9 +2687,13 @@ export async function listMcpServers(): Promise<McpServersResponse> {
   return get<McpServersResponse>("/api/mcp/servers");
 }
 
-// ── Registry Integrations (available MCP server templates) ────────
+export async function getMcpServer(id: string): Promise<McpServerConfigured> {
+  return get<McpServerConfigured>(`/api/mcp/servers/${encodeURIComponent(id)}`);
+}
 
-export interface IntegrationRequiredEnv {
+// ── MCP Catalog (read-only browse of registry templates) ────────
+
+export interface McpCatalogRequiredEnv {
   name: string;
   label: string;
   help?: string;
@@ -2684,14 +2701,7 @@ export interface IntegrationRequiredEnv {
   get_url?: string;
 }
 
-export interface IntegrationTransport {
-  type: "stdio" | "sse" | "http";
-  command?: string;
-  args?: string[];
-  url?: string;
-}
-
-export interface IntegrationTemplate {
+export interface McpCatalogEntry {
   id: string;
   name: string;
   description: string;
@@ -2699,34 +2709,91 @@ export interface IntegrationTemplate {
   category?: string;
   installed: boolean;
   tags?: string[];
-  transport?: IntegrationTransport;
-  required_env?: IntegrationRequiredEnv[];
+  transport?: McpTransport;
+  required_env?: McpCatalogRequiredEnv[];
   has_oauth?: boolean;
   setup_instructions?: string;
 }
 
-export interface AvailableIntegrationsResponse {
-  integrations: IntegrationTemplate[];
+export interface McpCatalogResponse {
+  entries: McpCatalogEntry[];
   count: number;
 }
 
-export async function listAvailableIntegrations(): Promise<AvailableIntegrationsResponse> {
-  return get<AvailableIntegrationsResponse>("/api/integrations/available");
+export async function listMcpCatalog(): Promise<McpCatalogResponse> {
+  return get<McpCatalogResponse>("/api/mcp/catalog");
 }
 
-export async function addMcpServer(server: Omit<McpServerConfigured, "name"> & { name: string }): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/mcp/servers", server);
+export async function getMcpCatalogEntry(id: string): Promise<McpCatalogEntry> {
+  return get<McpCatalogEntry>(`/api/mcp/catalog/${encodeURIComponent(id)}`);
 }
 
-export async function updateMcpServer(name: string, server: Partial<McpServerConfigured>): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`, server);
+// ── MCP Server mutations ────────────────────────────────────────────────
+
+/** Install a server from a catalog template with the supplied credentials. */
+export type AddMcpServerFromTemplate = {
+  template_id: string;
+  credentials?: Record<string, string>;
+};
+
+/** Create a server from a raw spec (same shape as a configured entry). */
+export type AddMcpServerSpec = Omit<McpServerConfigured, "id"> & { name: string };
+
+/**
+ * Body is either `{ template_id, credentials }` to install a catalog entry,
+ * or a raw `McpServerConfigured` spec. The backend disambiguates by the
+ * presence of `template_id`.
+ */
+export async function addMcpServer(
+  body: AddMcpServerFromTemplate | AddMcpServerSpec,
+): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/mcp/servers", body);
 }
 
-export async function deleteMcpServer(name: string): Promise<ApiActionResponse> {
-  return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`);
+export async function updateMcpServer(
+  id: string,
+  server: Partial<McpServerConfigured>,
+): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`, server);
 }
 
-// MCP OAuth Auth
+export async function deleteMcpServer(id: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`);
+}
+
+export async function reconnectMcpServer(id: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/reconnect`, {});
+}
+
+// ── MCP Health & Reload ────────────────────────────────────────────────
+
+export interface McpHealthEntry {
+  id: string;
+  status: string;
+  tool_count?: number;
+  last_ok?: string | null;
+  last_error?: string | null;
+  consecutive_failures?: number;
+  reconnecting?: boolean;
+  reconnect_attempts?: number;
+  connected_since?: string | null;
+}
+
+export interface McpHealthResponse {
+  health: McpHealthEntry[];
+  count: number;
+}
+
+export async function getMcpHealth(): Promise<McpHealthResponse> {
+  return get<McpHealthResponse>("/api/mcp/health");
+}
+
+export async function reloadMcp(): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/mcp/reload", {});
+}
+
+// ── MCP OAuth Auth ──────────────────────────────────────────────────────
+
 export interface McpAuthStatusResponse {
   server: string;
   auth: { state: string; auth_url?: string; message?: string };
@@ -2737,16 +2804,16 @@ export interface McpAuthStartResponse {
   server: string;
 }
 
-export async function getMcpAuthStatus(name: string): Promise<McpAuthStatusResponse> {
-  return get<McpAuthStatusResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/status`);
+export async function getMcpAuthStatus(id: string): Promise<McpAuthStatusResponse> {
+  return get<McpAuthStatusResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/status`);
 }
 
-export async function startMcpAuth(name: string): Promise<McpAuthStartResponse> {
-  return post<McpAuthStartResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/start`, {});
+export async function startMcpAuth(id: string): Promise<McpAuthStartResponse> {
+  return post<McpAuthStartResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/start`, {});
 }
 
-export async function revokeMcpAuth(name: string): Promise<{ server: string; state: string }> {
-  return del<{ server: string; state: string }>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/revoke`);
+export async function revokeMcpAuth(id: string): Promise<{ server: string; state: string }> {
+  return del<{ server: string; state: string }>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/revoke`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2763,5 +2830,164 @@ export async function changePassword(
       ...(newPassword ? { new_password: newPassword } : {}),
       ...(newUsername ? { new_username: newUsername } : {}),
     },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Terminal (tmux windows)
+// ---------------------------------------------------------------------------
+
+export interface TerminalWindow {
+  id: string;
+  index: number;
+  name: string;
+  active: boolean;
+}
+
+export async function listTerminalWindows(): Promise<TerminalWindow[]> {
+  const response = await fetch("/api/terminal/windows", {
+    headers: buildHeaders(),
+  });
+  if (!response.ok) throw await parseError(response);
+  const data = (await response.json()) as { windows?: TerminalWindow[] } | TerminalWindow[];
+  return Array.isArray(data) ? data : (data.windows ?? []);
+}
+
+export async function createTerminalWindow(body: { name?: string } = {}): Promise<void> {
+  const response = await fetch("/api/terminal/windows", {
+    method: "POST",
+    headers: buildHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw await parseError(response);
+}
+
+export async function renameTerminalWindow(windowId: string, name: string): Promise<void> {
+  const response = await fetch(
+    `/api/terminal/windows/${encodeURIComponent(windowId)}`,
+    {
+      method: "PATCH",
+      headers: buildHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name }),
+    },
+  );
+  if (!response.ok) throw await parseError(response);
+}
+
+export async function deleteTerminalWindow(windowId: string): Promise<void> {
+  const response = await fetch(
+    `/api/terminal/windows/${encodeURIComponent(windowId)}`,
+    { method: "DELETE", headers: buildHeaders() },
+  );
+  if (!response.ok) throw await parseError(response);
+}
+
+// ── Auto-Dream (background memory consolidation) ──────────────────────
+
+export type AutoDreamStatusName =
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted";
+
+export interface AutoDreamTurn {
+  text: string;
+  tool_use_count: number;
+}
+
+/** Token accounting snapshot from a completed dream. Populated only on
+ * the `completed` status; absent for running / failed / aborted. The
+ * cache_* fields let the dashboard surface cache-hit rate so operators
+ * can see the forkedAgent cost savings in real terms. */
+export interface AutoDreamUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  iterations: number;
+  latency_ms: number;
+  cost_usd?: number;
+}
+
+export interface AutoDreamProgress {
+  task_id: string;
+  agent_id: string;
+  started_at_ms: number;
+  ended_at_ms: number | null;
+  status: AutoDreamStatusName;
+  phase: string;
+  tool_use_count: number;
+  memories_touched: string[];
+  turns: AutoDreamTurn[];
+  error: string | null;
+  usage?: AutoDreamUsage;
+}
+
+export interface AutoDreamAgentStatus {
+  agent_id: string;
+  agent_name: string;
+  auto_dream_enabled: boolean;
+  last_consolidated_at_ms: number;
+  /** Unix-ms when the time gate reopens. Omitted when the agent has never been dreamed. */
+  next_eligible_at_ms?: number;
+  /** Hours since last consolidation. Omitted when the agent has never been dreamed. */
+  hours_since_last?: number;
+  sessions_since_last: number;
+  /** Resolved min_hours (manifest override or global default). */
+  effective_min_hours: number;
+  /** Resolved min_sessions (manifest override or global default; 0 = gate disabled). */
+  effective_min_sessions: number;
+  lock_path: string;
+  progress: AutoDreamProgress | null;
+  can_abort: boolean;
+}
+
+export interface AutoDreamStatus {
+  enabled: boolean;
+  min_hours: number;
+  min_sessions: number;
+  check_interval_secs: number;
+  lock_dir: string;
+  agents: AutoDreamAgentStatus[];
+}
+
+export interface AutoDreamTriggerOutcome {
+  fired: boolean;
+  agent_id: string;
+  task_id: string | null;
+  reason: string;
+}
+
+export interface AutoDreamAbortOutcome {
+  aborted: boolean;
+  agent_id: string;
+  reason: string;
+}
+
+export async function getAutoDreamStatus(): Promise<AutoDreamStatus> {
+  return get<AutoDreamStatus>("/api/auto-dream/status");
+}
+
+export async function triggerAutoDream(agentId: string): Promise<AutoDreamTriggerOutcome> {
+  return post<AutoDreamTriggerOutcome>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/trigger`,
+    {},
+  );
+}
+
+export async function abortAutoDream(agentId: string): Promise<AutoDreamAbortOutcome> {
+  return post<AutoDreamAbortOutcome>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/abort`,
+    {},
+  );
+}
+
+export async function setAutoDreamEnabled(
+  agentId: string,
+  enabled: boolean,
+): Promise<{ agent_id: string; enabled: boolean }> {
+  return put<{ agent_id: string; enabled: boolean }>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/enabled`,
+    { enabled },
   );
 }

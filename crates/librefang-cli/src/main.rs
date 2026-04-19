@@ -76,7 +76,7 @@ const AFTER_HELP: &str = "\
   librefang chat                 Quick chat with the default agent
   librefang agent new coder      Spawn a new agent from a template
   librefang models list          Browse available LLM models
-  librefang add github           Install the GitHub integration
+  librefang mcp add github       Install the GitHub MCP server
   librefang doctor               Run diagnostic health checks
   librefang channel setup        Interactive channel setup wizard
   librefang cron list            List scheduled jobs
@@ -285,37 +285,13 @@ enum Commands {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-    /// Start MCP (Model Context Protocol) server over stdio.
+    /// MCP (Model Context Protocol) server management.
     #[command(
-        long_about = "Start the MCP (Model Context Protocol) server over stdio.\n\nThis exposes LibreFang capabilities to MCP-compatible clients such as\nClaude Code, Cursor, and other AI editors.\n\nExamples:\n  librefang mcp   # Start MCP server (communicates over stdin/stdout)"
+        long_about = "Manage MCP (Model Context Protocol) servers.\n\nCalled without a subcommand, starts the stdio MCP server that exposes\nLibreFang to MCP-compatible clients (Claude Code, Cursor, ...).\n\nExamples:\n  librefang mcp                    # Start the stdio MCP server\n  librefang mcp list               # List configured MCP servers\n  librefang mcp catalog            # List installable catalog entries\n  librefang mcp add github         # Install the 'github' catalog entry\n  librefang mcp add slack --key xoxb-...  # Provide key inline\n  librefang mcp remove github      # Remove an MCP server by id"
     )]
-    Mcp,
-    /// Add an integration (one-click MCP server setup).
-    #[command(
-        long_about = "Add an integration by name with one-click setup.\n\nInstalls and configures an MCP server integration. Optionally provide\nan API key inline.\n\nExamples:\n  librefang add github                    # Interactive key prompt\n  librefang add slack --key xoxb-...      # Provide key inline\n  librefang add notion"
-    )]
-    Add {
-        /// Integration name (e.g., "github", "slack", "notion").
-        name: String,
-        /// API key or token to store in the vault.
-        #[arg(long)]
-        key: Option<String>,
-    },
-    /// Remove an installed integration.
-    #[command(
-        long_about = "Remove a previously installed integration.\n\nExamples:\n  librefang remove github\n  librefang remove slack"
-    )]
-    Remove {
-        /// Integration name.
-        name: String,
-    },
-    /// List or search integrations.
-    #[command(
-        long_about = "List all available integrations, or search by keyword.\n\nExamples:\n  librefang integrations            # List all integrations\n  librefang integrations \"code\"     # Search for code-related integrations"
-    )]
-    Integrations {
-        /// Search query (optional — lists all if omitted).
-        query: Option<String>,
+    Mcp {
+        #[command(subcommand)]
+        command: Option<McpCommands>,
     },
     /// Authenticate with a provider (chatgpt) [*].
     #[command(
@@ -329,9 +305,9 @@ enum Commands {
         long_about = "Manage the encrypted credential vault for storing API keys and tokens.\n\nExamples:\n  librefang vault init            # Initialize the vault\n  librefang vault set GROQ_API_KEY  # Store a credential (prompts for value)\n  librefang vault list            # List stored keys (values hidden)\n  librefang vault remove GROQ_API_KEY  # Remove a credential"
     )]
     Vault(VaultCommands),
-    /// Scaffold a new skill or integration template.
+    /// Scaffold a new skill or MCP server template.
     #[command(
-        long_about = "Scaffold a new skill or integration from a template.\n\nCreates boilerplate files for developing a custom skill or integration.\n\nExamples:\n  librefang new skill         # Scaffold a new skill\n  librefang new integration   # Scaffold a new integration"
+        long_about = "Scaffold a new skill or MCP server template.\n\nCreates boilerplate files for developing a custom skill or MCP server.\n\nExamples:\n  librefang new skill   # Scaffold a new skill\n  librefang new mcp     # Scaffold a new MCP server"
     )]
     New {
         /// What to scaffold.
@@ -561,7 +537,42 @@ enum AuthCommands {
 #[derive(Clone, clap::ValueEnum)]
 enum ScaffoldKind {
     Skill,
-    Integration,
+    Mcp,
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// List configured MCP servers (reads config.toml).
+    #[command(long_about = "List every MCP server currently in config.toml with its status.")]
+    List,
+    /// List or search the catalog of installable MCP templates.
+    #[command(
+        long_about = "List or search the read-only MCP catalog.\n\nExamples:\n  librefang mcp catalog           # List all catalog entries\n  librefang mcp catalog \"code\"   # Search"
+    )]
+    Catalog {
+        /// Search query.
+        query: Option<String>,
+    },
+    /// Install a catalog entry as a new MCP server.
+    #[command(
+        long_about = "Install a catalog entry as a new MCP server. Writes a new \
+[[mcp_servers]] entry to config.toml. If the daemon is running, it hot-reloads.\n\nExamples:\n  librefang mcp add github\n  librefang mcp add slack --key xoxb-..."
+    )]
+    Add {
+        /// Catalog id.
+        name: String,
+        /// API key or token to store in the vault.
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Remove a configured MCP server by id.
+    #[command(
+        long_about = "Remove a configured MCP server by id.\n\nExamples:\n  librefang mcp remove github"
+    )]
+    Remove {
+        /// MCP server id.
+        name: String,
+    },
 }
 
 #[derive(clap::Args)]
@@ -1816,10 +1827,13 @@ fn main() {
         Some(Commands::Doctor { json, repair }) => cmd_doctor(json, repair),
         Some(Commands::Dashboard) => cmd_dashboard(),
         Some(Commands::Completion { shell }) => cmd_completion(shell),
-        Some(Commands::Mcp) => mcp::run_mcp_server(cli.config),
-        Some(Commands::Add { name, key }) => cmd_integration_add(&name, key.as_deref()),
-        Some(Commands::Remove { name }) => cmd_integration_remove(&name),
-        Some(Commands::Integrations { query }) => cmd_integrations_list(query.as_deref()),
+        Some(Commands::Mcp { command }) => match command {
+            None => mcp::run_mcp_server(cli.config),
+            Some(McpCommands::List) => cmd_mcp_list(),
+            Some(McpCommands::Catalog { query }) => cmd_mcp_catalog(query.as_deref()),
+            Some(McpCommands::Add { name, key }) => cmd_mcp_add(&name, key.as_deref()),
+            Some(McpCommands::Remove { name }) => cmd_mcp_remove(&name),
+        },
         Some(Commands::Auth(sub)) => match sub {
             AuthCommands::Chatgpt { device_auth } => cmd_auth_chatgpt(device_auth),
         },
@@ -2770,11 +2784,22 @@ fn spawn_detached_daemon(
 
 /// Ensure LibreFang is initialized (config.toml exists). Auto-runs quick init on first run.
 fn ensure_initialized(config: &Option<PathBuf>) {
-    if config.is_none() {
-        let home = cli_librefang_home();
-        if !home.join("config.toml").exists() {
-            ui::hint("First run detected — running quick setup...");
-            cmd_init(true);
+    match config {
+        None => {
+            let home = cli_librefang_home();
+            if !home.join("config.toml").exists() {
+                ui::hint("First run detected — running quick setup...");
+                cmd_init(true);
+            }
+        }
+        Some(path) => {
+            if !path.exists() {
+                ui::error_with_fix(
+                    &format!("Config file not found: {}", path.display()),
+                    "Run `librefang init` to create a default config at ~/.librefang/config.toml, or check the --config path.",
+                );
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -4441,27 +4466,40 @@ fn cmd_doctor(json: bool, repair: bool) {
         }
     }
 
-    // --- Check 14: Extension registry health ---
+    // --- Check 14: MCP catalog + configured servers ---
     {
         if !json {
-            println!("\n  Extensions:");
+            println!("\n  MCP servers:");
         }
         let librefang_dir = cli_librefang_home();
-        let mut ext_registry =
-            librefang_extensions::registry::IntegrationRegistry::new(&librefang_dir);
-        ext_registry
-            .load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-        let _ = ext_registry.load_installed();
-        let template_count = ext_registry.template_count();
-        let installed_count = ext_registry.installed_count();
+        let mut catalog = librefang_extensions::catalog::McpCatalog::new(&librefang_dir);
+        catalog.load(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        let template_count = catalog.len();
+
+        // Count configured [[mcp_servers]] entries in config.toml (if any).
+        let configured_count = {
+            let config_path = librefang_dir.join("config.toml");
+            if config_path.is_file() {
+                let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+                toml::from_str::<toml::Value>(&raw)
+                    .ok()
+                    .and_then(|v| v.as_table().cloned())
+                    .and_then(|t| t.get("mcp_servers").cloned())
+                    .and_then(|v| v.as_array().cloned())
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        };
         if !json {
-            ui::check_ok(&format!(
-                "Available integration templates: {template_count}"
-            ));
-            ui::check_ok(&format!("Installed integrations: {installed_count}"));
+            ui::check_ok(&format!("MCP catalog templates: {template_count}"));
+            ui::check_ok(&format!("Configured MCP servers: {configured_count}"));
         }
-        checks.push(serde_json::json!({"check": "extensions_available", "status": "ok", "count": template_count}));
-        checks.push(serde_json::json!({"check": "extensions_installed", "status": "ok", "count": installed_count}));
+        checks.push(
+            serde_json::json!({"check": "mcp_catalog", "status": "ok", "count": template_count}),
+        );
+        checks.push(serde_json::json!({"check": "mcp_servers_configured", "status": "ok", "count": configured_count}));
     }
 
     // --- Check 15: Daemon health detail (if running) ---
@@ -4566,8 +4604,8 @@ fn cmd_doctor(json: bool, repair: bool) {
             _ => {}
         }
 
-        // Check extensions health endpoint
-        match client.get(format!("{base}/api/integrations/health")).send() {
+        // Check MCP health endpoint
+        match client.get(format!("{base}/api/mcp/health")).send() {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let entries = body.get("health").and_then(|h| h.as_array());
@@ -4585,15 +4623,15 @@ fn cmd_doctor(json: bool, repair: bool) {
                         if healthy == total {
                             if !json {
                                 ui::check_ok(&format!(
-                                    "Integration health: {healthy}/{total} healthy"
+                                    "MCP server health: {healthy}/{total} healthy"
                                 ));
                             }
                         } else if !json {
                             ui::check_warn(&format!(
-                                "Integration health: {healthy}/{total} healthy"
+                                "MCP server health: {healthy}/{total} healthy"
                             ));
                         }
-                        checks.push(serde_json::json!({"check": "integration_health", "status": if healthy == total { "ok" } else { "warn" }, "healthy": healthy, "total": total}));
+                        checks.push(serde_json::json!({"check": "mcp_health", "status": if healthy == total { "ok" } else { "warn" }, "healthy": healthy, "total": total}));
                     }
                 }
             }
@@ -7383,29 +7421,68 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
 }
 
 // ---------------------------------------------------------------------------
-// Integration commands (librefang add/remove/integrations)
+// MCP server commands (librefang mcp {add,remove,list,catalog})
 // ---------------------------------------------------------------------------
 
-fn cmd_integration_add(name: &str, key: Option<&str>) {
+fn cmd_mcp_add(name: &str, key: Option<&str>) {
     let home = librefang_home();
-    let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_templates(&home);
-    let _ = registry.load_installed();
+    let mut catalog = librefang_extensions::catalog::McpCatalog::new(&home);
+    catalog.load(&home);
 
     // Check template exists
-    let template = match registry.get_template(name) {
+    let template = match catalog.get(name) {
         Some(t) => t.clone(),
         None => {
-            ui::error(&format!("Unknown integration: '{name}'"));
-            println!("\nAvailable integrations:");
-            for t in registry.list_templates() {
+            ui::error(&format!("Unknown MCP catalog entry: '{name}'"));
+            println!("\nAvailable MCP servers (catalog):");
+            for t in catalog.list() {
                 println!("  {} {} — {}", t.icon, t.id, t.description);
             }
             std::process::exit(1);
         }
     };
 
-    // Set up credential resolver
+    // Reject re-install of an already-configured server by name/template_id.
+    // The API path returns 409 here; the CLI was silently overwriting the
+    // existing [[mcp_servers]] entry (including edited transport/env/oauth)
+    // because upsert_mcp_server_local replaces by name. Users should remove
+    // first if they want to re-install.
+    let config_path = home.join("config.toml");
+    if config_path.is_file() {
+        let content = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                ui::error(&format!("Failed to read {}: {e}", config_path.display()));
+                std::process::exit(1);
+            }
+        };
+        let parsed: toml::value::Table = match toml::from_str(&content) {
+            Ok(t) => t,
+            Err(e) => {
+                ui::error(&format!("{} is not valid TOML: {e}", config_path.display()));
+                std::process::exit(1);
+            }
+        };
+        if let Some(toml::Value::Array(servers)) = parsed.get("mcp_servers") {
+            let conflict = servers.iter().any(|v| {
+                let t = match v.as_table() {
+                    Some(t) => t,
+                    None => return false,
+                };
+                let matches_field = |k: &str| t.get(k).and_then(|n| n.as_str()) == Some(name);
+                matches_field("name") || matches_field("template_id")
+            });
+            if conflict {
+                ui::error(&format!(
+                    "MCP server '{name}' is already configured. Run \
+                     `librefang mcp remove {name}` first if you want to re-install."
+                ));
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Set up credential resolver (vault + dotenv + interactive prompt fallback)
     let dotenv_path = home.join(".env");
     let vault_path = home.join("vault.enc");
     let vault = if vault_path.exists() {
@@ -7431,92 +7508,135 @@ fn cmd_integration_add(name: &str, key: Option<&str>) {
         }
     }
 
-    match librefang_extensions::installer::install_integration(
-        &mut registry,
+    let result = match librefang_extensions::installer::install_integration(
+        &catalog,
         &mut resolver,
         name,
         &provided_keys,
     ) {
-        Ok(result) => {
-            match &result.status {
-                librefang_extensions::IntegrationStatus::Ready => {
-                    ui::success(&result.message);
-                }
-                librefang_extensions::IntegrationStatus::Setup => {
-                    println!("{}", result.message.yellow());
-                    println!("\nTo add credentials:");
-                    for env in &template.required_env {
-                        if env.is_secret {
-                            println!("  librefang vault set {}  # {}", env.name, env.help);
-                            if let Some(ref url) = env.get_url {
-                                println!("  Get it here: {url}");
-                            }
-                        }
+        Ok(r) => r,
+        Err(e) => {
+            ui::error(&e.to_string());
+            std::process::exit(1);
+        }
+    };
+
+    // Persist the new [[mcp_servers]] entry directly into config.toml.
+    let config_path = home.join("config.toml");
+    if let Err(e) = upsert_mcp_server_local(&config_path, &result.server) {
+        ui::error(&format!("Failed to write config.toml: {e}"));
+        std::process::exit(1);
+    }
+
+    match &result.status {
+        librefang_extensions::McpStatus::Ready => ui::success(&result.message),
+        librefang_extensions::McpStatus::Setup => {
+            println!("{}", result.message.yellow());
+            println!("\nTo add credentials:");
+            for env in &template.required_env {
+                if env.is_secret {
+                    println!("  librefang vault set {}  # {}", env.name, env.help);
+                    if let Some(ref url) = env.get_url {
+                        println!("  Get it here: {url}");
                     }
                 }
-                _ => println!("{}", result.message),
             }
+        }
+        _ => println!("{}", result.message),
+    }
 
-            // If daemon is running, trigger hot-reload
-            if let Some(base_url) = find_daemon() {
-                let client = daemon_client();
-                let _ = client
-                    .post(format!("{base_url}/api/integrations/reload"))
-                    .send();
-            }
-        }
-        Err(e) => {
-            ui::error(&e.to_string());
-            std::process::exit(1);
-        }
+    // If daemon is running, trigger hot-reload.
+    if let Some(base_url) = find_daemon() {
+        let client = daemon_client();
+        let _ = client.post(format!("{base_url}/api/mcp/reload")).send();
     }
 }
 
-fn cmd_integration_remove(name: &str) {
+fn cmd_mcp_remove(name: &str) {
     let home = librefang_home();
-    let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_templates(&home);
-    let _ = registry.load_installed();
+    let config_path = home.join("config.toml");
 
-    match librefang_extensions::installer::remove_integration(&mut registry, name) {
-        Ok(msg) => {
-            ui::success(&msg);
-            // Hot-reload daemon
-            if let Some(base_url) = find_daemon() {
-                let client = daemon_client();
-                let _ = client
-                    .post(format!("{base_url}/api/integrations/reload"))
-                    .send();
-            }
-        }
-        Err(e) => {
-            ui::error(&e.to_string());
+    // Resolve by template_id first, fall back to server name.
+    let target_name: Option<String> = {
+        let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let doc: toml::Value =
+            toml::from_str(&raw).unwrap_or(toml::Value::Table(Default::default()));
+        doc.as_table()
+            .and_then(|t| t.get("mcp_servers"))
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|entry| {
+                    let tbl = entry.as_table()?;
+                    let tid = tbl.get("template_id").and_then(|v| v.as_str());
+                    let nm = tbl.get("name").and_then(|v| v.as_str())?;
+                    if tid == Some(name) || nm == name {
+                        Some(nm.to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+    };
+
+    let target_name = match target_name {
+        Some(n) => n,
+        None => {
+            ui::error(&format!("MCP server '{name}' is not configured"));
             std::process::exit(1);
         }
+    };
+
+    if let Err(e) = remove_mcp_server_local(&config_path, &target_name) {
+        ui::error(&format!("Failed to update config.toml: {e}"));
+        std::process::exit(1);
+    }
+
+    ui::success(&format!("{target_name} removed."));
+
+    // Hot-reload daemon
+    if let Some(base_url) = find_daemon() {
+        let client = daemon_client();
+        let _ = client.post(format!("{base_url}/api/mcp/reload")).send();
     }
 }
 
-fn cmd_integrations_list(query: Option<&str>) {
+fn cmd_mcp_catalog(query: Option<&str>) {
     let home = librefang_home();
-    let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_templates(&home);
-    let _ = registry.load_installed();
+    let mut catalog = librefang_extensions::catalog::McpCatalog::new(&home);
+    catalog.load(&home);
 
-    let dotenv_path = home.join(".env");
-    let resolver =
-        librefang_extensions::credentials::CredentialResolver::new(None, Some(&dotenv_path));
+    // Installed state comes from config.mcp_servers' template_id field.
+    let installed_template_ids: std::collections::HashSet<String> = {
+        let raw = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+        toml::from_str::<toml::Value>(&raw)
+            .ok()
+            .and_then(|v| v.as_table().cloned())
+            .and_then(|t| t.get("mcp_servers").cloned())
+            .and_then(|v| v.as_array().cloned())
+            .map(|arr| {
+                arr.into_iter()
+                    .filter_map(|v| {
+                        v.as_table()
+                            .and_then(|t| t.get("template_id"))
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
 
-    let entries = if let Some(q) = query {
-        librefang_extensions::installer::search_integrations(&registry, q)
+    let entries: Vec<_> = if let Some(q) = query {
+        catalog.search(q).into_iter().cloned().collect()
     } else {
-        librefang_extensions::installer::list_integrations(&registry, &resolver)
+        catalog.list().into_iter().cloned().collect()
     };
 
     if entries.is_empty() {
         if let Some(q) = query {
-            println!("No integrations matching '{q}'.");
+            println!("No MCP catalog entries matching '{q}'.");
         } else {
-            println!("No integrations available.");
+            println!("No MCP catalog entries available.");
         }
         return;
     }
@@ -7524,11 +7644,11 @@ fn cmd_integrations_list(query: Option<&str>) {
     // Group by category
     let mut by_category: std::collections::BTreeMap<
         String,
-        Vec<&librefang_extensions::installer::IntegrationListEntry>,
+        Vec<&librefang_extensions::McpCatalogEntry>,
     > = std::collections::BTreeMap::new();
     for entry in &entries {
         by_category
-            .entry(entry.category.clone())
+            .entry(entry.category.to_string())
             .or_default()
             .push(entry);
     }
@@ -7536,39 +7656,175 @@ fn cmd_integrations_list(query: Option<&str>) {
     for (category, items) in &by_category {
         println!("\n{}", format!("  {category}").bold());
         for item in items {
-            let status_badge = match &item.status {
-                librefang_extensions::IntegrationStatus::Ready => "[Ready]".green().to_string(),
-                librefang_extensions::IntegrationStatus::Setup => "[Setup]".yellow().to_string(),
-                librefang_extensions::IntegrationStatus::Available => {
-                    "[Available]".dimmed().to_string()
-                }
-                librefang_extensions::IntegrationStatus::Error(msg) => {
-                    format!("[Error: {msg}]").red().to_string()
-                }
-                librefang_extensions::IntegrationStatus::Disabled => {
-                    "[Disabled]".dimmed().to_string()
-                }
+            let status_badge = if installed_template_ids.contains(&item.id) {
+                "[Installed]".green().to_string()
+            } else {
+                "[Available]".dimmed().to_string()
             };
             println!(
-                "    {} {:<20} {:<12} {}",
+                "    {} {:<20} {:<13} {}",
                 item.icon, item.id, status_badge, item.description
             );
         }
     }
     println!();
     println!(
-        "  {} integrations ({} installed)",
+        "  {} catalog entries ({} installed)",
         entries.len(),
         entries
             .iter()
-            .filter(|e| matches!(
-                e.status,
-                librefang_extensions::IntegrationStatus::Ready
-                    | librefang_extensions::IntegrationStatus::Setup
-            ))
+            .filter(|e| installed_template_ids.contains(&e.id))
             .count()
     );
-    println!("  Use `librefang add <name>` to install an integration.");
+    println!("  Use `librefang mcp add <id>` to install an MCP server.");
+}
+
+fn cmd_mcp_list() {
+    let home = librefang_home();
+    let raw = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+    let doc: toml::Value = toml::from_str(&raw).unwrap_or(toml::Value::Table(Default::default()));
+    let servers = doc
+        .as_table()
+        .and_then(|t| t.get("mcp_servers"))
+        .and_then(|v| v.as_array());
+    let Some(servers) = servers else {
+        println!("No MCP servers configured.");
+        return;
+    };
+    if servers.is_empty() {
+        println!("No MCP servers configured.");
+        return;
+    }
+    println!();
+    println!(
+        "  {:<28} {:<14} {:<18} details",
+        "name", "template_id", "transport"
+    );
+    for entry in servers {
+        let Some(tbl) = entry.as_table() else {
+            continue;
+        };
+        let name = tbl.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let tid = tbl
+            .get("template_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+        let (transport, detail) = match tbl.get("transport").and_then(|v| v.as_table()) {
+            Some(t) => {
+                let ttype = t.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+                let detail = match ttype {
+                    "stdio" => t
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    "sse" | "http" => t
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    _ => String::new(),
+                };
+                (ttype.to_string(), detail)
+            }
+            None => ("-".to_string(), String::new()),
+        };
+        println!("  {name:<28} {tid:<14} {transport:<18} {detail}");
+    }
+    println!();
+    println!("  Use `librefang mcp catalog` to list installable entries.");
+}
+
+/// Local upsert helper — mirrors the API's `upsert_mcp_server_config`.
+fn upsert_mcp_server_local(
+    config_path: &std::path::Path,
+    entry: &librefang_types::config::McpServerConfigEntry,
+) -> Result<(), String> {
+    let mut table: toml::value::Table = if config_path.exists() {
+        let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+        // Propagate parse errors instead of silently defaulting. A
+        // malformed config.toml would otherwise be overwritten as a new
+        // near-empty file, wiping unrelated sections the user may want
+        // to fix by hand.
+        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
+    } else {
+        toml::value::Table::new()
+    };
+
+    let entry_json = serde_json::to_value(entry).map_err(|e| e.to_string())?;
+    let entry_toml = json_to_toml_value_cli(&entry_json);
+
+    let servers = table
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()));
+
+    if let toml::Value::Array(ref mut arr) = servers {
+        arr.retain(|v| {
+            v.as_table()
+                .and_then(|t| t.get("name"))
+                .and_then(|n| n.as_str())
+                .map(|n| n != entry.name)
+                .unwrap_or(true)
+        });
+        arr.push(entry_toml);
+    }
+
+    let toml_string = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn remove_mcp_server_local(config_path: &std::path::Path, name: &str) -> Result<(), String> {
+    let mut table: toml::value::Table = if config_path.exists() {
+        let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
+    } else {
+        return Ok(());
+    };
+    if let Some(toml::Value::Array(ref mut arr)) = table.get_mut("mcp_servers") {
+        arr.retain(|v| {
+            v.as_table()
+                .and_then(|t| t.get("name"))
+                .and_then(|n| n.as_str())
+                .map(|n| n != name)
+                .unwrap_or(true)
+        });
+    }
+    let toml_string = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+    std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// JSON → TOML converter. Duplicates the `json_to_toml_value` helper from
+/// the API crate to avoid a cross-crate dependency.
+fn json_to_toml_value_cli(value: &serde_json::Value) -> toml::Value {
+    match value {
+        serde_json::Value::Null => toml::Value::String(String::new()),
+        serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                toml::Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                toml::Value::Float(f)
+            } else {
+                toml::Value::String(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => toml::Value::String(s.clone()),
+        serde_json::Value::Array(arr) => {
+            toml::Value::Array(arr.iter().map(json_to_toml_value_cli).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let mut t = toml::value::Table::new();
+            for (k, v) in map {
+                t.insert(k.clone(), json_to_toml_value_cli(v));
+            }
+            toml::Value::Table(t)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7910,8 +8166,8 @@ fn cmd_scaffold(kind: ScaffoldKind) {
         ScaffoldKind::Skill => {
             librefang_extensions::installer::scaffold_skill(&cwd.join("my-skill"))
         }
-        ScaffoldKind::Integration => {
-            librefang_extensions::installer::scaffold_integration(&cwd.join("my-integration"))
+        ScaffoldKind::Mcp => {
+            librefang_extensions::installer::scaffold_integration(&cwd.join("my-mcp"))
         }
     };
     match result {
@@ -10703,10 +10959,9 @@ mod tests {
     fn test_doctor_extension_registry_loads_templates() {
         let tmp = std::env::temp_dir().join("librefang-doctor-test-ext");
         let _ = std::fs::create_dir_all(&tmp);
-        let mut ext_reg = librefang_extensions::registry::IntegrationRegistry::new(&tmp);
-        let count =
-            ext_reg.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-        assert_eq!(ext_reg.template_count(), count);
+        let mut catalog = librefang_extensions::catalog::McpCatalog::new(&tmp);
+        let count = catalog.load(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        assert_eq!(catalog.len(), count);
     }
 
     #[test]

@@ -402,9 +402,9 @@ pub async fn auth(
             | "/api/hands/active"
             | "/api/skills"
             | "/api/sessions"
-            | "/api/integrations"
-            | "/api/integrations/available"
-            | "/api/integrations/health"
+            | "/api/mcp/servers"
+            | "/api/mcp/catalog"
+            | "/api/mcp/health"
             | "/api/workflows"
     );
     let dashboard_read_prefix = path.starts_with("/api/budget/agents/")

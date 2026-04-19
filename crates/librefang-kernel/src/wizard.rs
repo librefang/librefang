@@ -190,6 +190,9 @@ impl SetupWizard {
             context_injection: vec![],
             is_hand: false,
             web_search_augmentation: librefang_types::agent::WebSearchAugmentationMode::default(),
+            auto_dream_enabled: false,
+            auto_dream_min_hours: None,
+            auto_dream_min_sessions: None,
         };
 
         let skills_to_install: Vec<String> = intent

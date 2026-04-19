@@ -1,2 +1,6 @@
 workers/*/.wrangler/
 workers/*/node_modules/
+
+# Per-item OG images are generated at build time from registry.json.
+# The top-level category OGs stay checked in as the fallback set.
+public/og/*/

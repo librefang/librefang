@@ -161,13 +161,21 @@ export function OverviewPage() {
               <h3 className="text-sm font-bold">{t("overview.setup_title")}</h3>
               <p className="mt-1 text-xs text-text-dim">{t("overview.setup_description")}</p>
             </div>
-            <button
-              onClick={handleInit}
-              disabled={initLoading}
-              className="shrink-0 rounded-xl bg-brand px-5 py-2.5 text-xs font-bold text-white shadow-lg shadow-brand/20 transition-all hover:shadow-xl hover:shadow-brand/30 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {initLoading ? t("overview.setup_running") : t("overview.setup_button")}
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => navigate({ to: "/wizard" })}
+                className="rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-xs font-bold text-text-main hover:border-brand/30 hover:text-brand transition-all"
+              >
+                {t("overview.setup_wizard", { defaultValue: "Use Wizard" })}
+              </button>
+              <button
+                onClick={handleInit}
+                disabled={initLoading}
+                className="rounded-xl bg-brand px-5 py-2.5 text-xs font-bold text-white shadow-lg shadow-brand/20 transition-all hover:shadow-xl hover:shadow-brand/30 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {initLoading ? t("overview.setup_running") : t("overview.setup_button")}
+              </button>
+            </div>
           </div>
         </Card>
       )}
@@ -341,7 +349,7 @@ export function OverviewPage() {
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0"><HardDrive className="w-4 h-4 text-brand" /></div>
                 <span className="text-xs text-text-dim flex-1">{t("overview.memory_usage")}</span>
-                <span className="text-sm font-mono font-black">{snapshot?.status?.memory_used_mb ? `${snapshot.status.memory_used_mb} MB` : "-"}</span>
+                <span className="text-sm font-mono font-black">{snapshot?.status?.memory_used_mb != null ? `${snapshot.status.memory_used_mb} MB` : "-"}</span>
               </div>
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-warning/10 flex items-center justify-center shrink-0"><Activity className="w-4 h-4 text-warning" /></div>

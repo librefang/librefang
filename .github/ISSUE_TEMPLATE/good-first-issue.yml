@@ -78,7 +78,7 @@ body:
       description: Links to similar implementations, relevant docs, or tips.
       placeholder: |
         - Look at `crates/librefang-skills/src/builtin/web_fetch.rs` for a similar pattern
-        - Skill development guide: docs/skill-development.md
+        - Skill development guide: docs/src/app/agent/skills/page.mdx
 
   - type: checkboxes
     id: rust-required
