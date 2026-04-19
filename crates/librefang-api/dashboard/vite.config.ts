@@ -1,6 +1,12 @@
 import { defineConfig, createLogger } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { fileURLToPath } from "node:url";
+import { resolve, dirname } from "node:path";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const reactRoot = resolve(__dirname, "node_modules/react");
+const reactDomRoot = resolve(__dirname, "node_modules/react-dom");
 
 const logger = createLogger();
 const origError = logger.error.bind(logger);
@@ -40,6 +46,18 @@ export default defineConfig({
   base: "/dashboard/",
   resolve: {
     dedupe: SINGLETON_DEPS,
+    // Force every `import "react"` / `import "react-dom"` to resolve to the
+    // SAME absolute path regardless of which pnpm symlink chain requested it.
+    // Without this, Vite's pre-bundler can treat paths that symlink to the
+    // same file as distinct modules, producing multiple React instances at
+    // runtime and breaking hook calls with "Cannot read properties of null
+    // (reading 'useContext')".
+    alias: [
+      { find: /^react$/, replacement: reactRoot },
+      { find: /^react\/(.*)$/, replacement: `${reactRoot}/$1` },
+      { find: /^react-dom$/, replacement: reactDomRoot },
+      { find: /^react-dom\/(.*)$/, replacement: `${reactDomRoot}/$1` },
+    ],
   },
   optimizeDeps: {
     include: SINGLETON_DEPS,

@@ -378,12 +378,22 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
       <div className="max-w-xl text-center space-y-4 px-4">
         <p className="text-lg font-semibold">{title}</p>
         <p className="text-sm text-gray-500 break-words">{detail}</p>
-        <div className="flex gap-2 justify-center">
+        <div className="flex gap-2 justify-center flex-wrap">
           <button
             onClick={() => window.location.reload()}
             className="rounded-xl bg-sky-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-sky-600 transition-colors"
           >
             Reload
+          </button>
+          <button
+            onClick={() => {
+              sessionStorage.removeItem("__chunk_reload");
+              window.location.reload();
+            }}
+            className="rounded-xl bg-red-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-red-600 transition-colors"
+            title="Clears the auto-reload cooldown and forces a fresh load"
+          >
+            Force reload
           </button>
           {error.stack && (
             <button
