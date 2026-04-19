@@ -82,22 +82,9 @@ async fn signal_response_complete(tx: &mpsc::Sender<StreamEvent>) {
 }
 
 /// Check if a response is a NO_REPLY. Matches:
-/// - Exact `"NO_REPLY"` (original behaviour)
-/// - Text ending with `NO_REPLY` (model sometimes adds context before it,
-///   either on the same line or on a new line)
-/// - Exact `"[no reply needed]"` — the runtime writes this placeholder back
-///   into the session when the agent chooses silence (see `agent_loop.rs`
-///   silent-turn handling), so the LLM sometimes mimics it on later turns.
-/// - Text ending with `"[no reply needed]"` (same reasoning as above)
-/// - Unbracketed `"no reply needed"` variant the model occasionally emits
+/// Delegate to the canonical sentinel check in `librefang_types`.
 fn is_no_reply(text: &str) -> bool {
-    let t = text.trim();
-    t == "NO_REPLY"
-        || t.ends_with("NO_REPLY")
-        || t == "[no reply needed]"
-        || t.ends_with("[no reply needed]")
-        || t == "no reply needed"
-        || t.ends_with("no reply needed")
+    librefang_types::is_no_reply_sentinel(text)
 }
 
 /// Returns true if this tool-error content is a "soft" error — one the LLM is
@@ -4882,15 +4869,16 @@ mod tests {
         assert!(is_no_reply("[no reply needed]"));
         assert!(is_no_reply("Some context. [no reply needed]"));
 
-        // Unbracketed variant the model sometimes emits
+        // Unbracketed variant — exact match only (ends_with dropped to avoid prose false-positives)
         assert!(is_no_reply("no reply needed"));
-        assert!(is_no_reply("context here\nno reply needed"));
 
         // Negatives — real responses must never be silenced
         assert!(!is_no_reply(""));
         assert!(!is_no_reply("Just replying normally."));
         assert!(!is_no_reply("NO_REPLY is my favorite token")); // prefix, not suffix
         assert!(!is_no_reply("no reply needed? let me check")); // doesn't end with marker
+        assert!(!is_no_reply("I filed the bug; no reply needed")); // prose ending — not a sentinel
+        assert!(!is_no_reply("context here\nno reply needed")); // multi-line prose ending
     }
 
     #[test]
