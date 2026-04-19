@@ -1589,7 +1589,7 @@
     "fld_whatsapp": "WhatsApp",
     "fld_workdir": "Work Directory",
     "fld_workspaces_dir": "Workspaces Directory",
-    "desc_api_listen": "Address and port the API server listens on, e.g. 0.0.0.0:4545",
+    "desc_api_listen": "Address and port the API server listens on, e.g. 127.0.0.1:4545 (local-only) or 0.0.0.0:4545 (all interfaces)",
     "desc_api_key": "API key for authenticating dashboard and API requests",
     "desc_api_key_env": "Environment variable name that holds the provider API key",
     "desc_log_level": "Logging verbosity level",

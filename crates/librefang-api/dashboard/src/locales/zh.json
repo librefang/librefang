@@ -1564,7 +1564,7 @@
     "fld_whatsapp": "WhatsApp",
     "fld_workdir": "工作目录",
     "fld_workspaces_dir": "工作区目录",
-    "desc_api_listen": "API 服务器监听地址和端口，如 0.0.0.0:4545",
+    "desc_api_listen": "API 服务器监听地址和端口，如 127.0.0.1:4545（仅本机）或 0.0.0.0:4545（所有网卡）",
     "desc_api_key": "用于验证 Dashboard 和 API 请求的密钥",
     "desc_api_key_env": "存放提供商 API 密钥的环境变量名",
     "desc_log_level": "日志输出级别",

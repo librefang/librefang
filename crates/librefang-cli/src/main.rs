@@ -2784,11 +2784,22 @@ fn spawn_detached_daemon(
 
 /// Ensure LibreFang is initialized (config.toml exists). Auto-runs quick init on first run.
 fn ensure_initialized(config: &Option<PathBuf>) {
-    if config.is_none() {
-        let home = cli_librefang_home();
-        if !home.join("config.toml").exists() {
-            ui::hint("First run detected — running quick setup...");
-            cmd_init(true);
+    match config {
+        None => {
+            let home = cli_librefang_home();
+            if !home.join("config.toml").exists() {
+                ui::hint("First run detected — running quick setup...");
+                cmd_init(true);
+            }
+        }
+        Some(path) => {
+            if !path.exists() {
+                ui::error_with_fix(
+                    &format!("Config file not found: {}", path.display()),
+                    "Run `librefang init` to create a default config at ~/.librefang/config.toml, or check the --config path.",
+                );
+                std::process::exit(1);
+            }
         }
     }
 }
