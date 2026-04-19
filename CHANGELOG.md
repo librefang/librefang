@@ -9,7 +9,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Added
 
-- Auto-dream: per-agent background memory consolidation with four-layer gating (global / per-agent opt-in / time / session count / file lock). Includes web dashboard toggle card, TUI Dashboard strip, `[auto_dream]` config section, `DreamConsolidation` audit events with token and cost capture, runtime tool allowlist enforcement, and `GET/POST/PUT /api/auto-dream/status|trigger|abort|enabled` endpoints. (#2750) (@houko)
+- Auto-dream: per-agent background memory consolidation with four-layer gating (global / per-agent opt-in / time / session count / file lock). Triggered event-driven from the `AgentLoopEnd` hook (fires the moment an agent finishes a turn) with a sparse daily backstop scheduler for opted-in agents that never turn. Includes web dashboard toggle card, TUI Dashboard strip, `[auto_dream]` config section, `DreamConsolidation` audit events with token and cost capture, runtime tool allowlist enforcement, and `GET/POST/PUT /api/auto-dream/status|trigger|abort|enabled` endpoints. (#2750) (@houko)
 
 ### Maintenance
 

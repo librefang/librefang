@@ -284,7 +284,7 @@ auto_dream_min_sessions = 1     # after every session, for a chatty one
 
 ### How a dream runs
 
-1. The scheduler wakes every `check_interval_secs` (default 10 min) and evaluates each opted-in agent against four cheap gates, in order: global enabled → time since last dream → session activity count → per-agent file lock. Any miss and the agent is skipped this tick.
+1. The primary trigger is the `AgentLoopEnd` hook — the moment an agent finishes a turn, the kernel evaluates its four gates in order: global enabled → time since last dream → session activity count → per-agent file lock. Any miss and the dream is skipped. A sparse backstop scheduler (default `check_interval_secs = 86400` / 1 day) covers opted-in agents that never turn (e.g. channel bots waiting on inbound traffic).
 2. On a pass, the agent is invoked through the synthetic `auto_dream` channel with a tool allowlist restricted to `memory_store` / `memory_recall` / `memory_list` — even a prompt-injected dream cannot escape into shell or network tools.
 3. Streamed progress (phase, tool calls, memories touched, last turn preview, token/cost) is kept in a per-agent registry and surfaced via the status endpoint.
 4. On success the lock's mtime advances to "now" (driving the time gate); on failure or abort the mtime is rolled back so the next tick will retry.
