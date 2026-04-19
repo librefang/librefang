@@ -30,8 +30,8 @@ export function useTerminalHealth(options: UseTerminalQueryOptions = {}) {
   return useQuery({
     ...terminalQueries.health(),
     enabled,
-    staleTime,
-    refetchInterval,
+    ...(staleTime !== undefined ? { staleTime } : {}),
+    ...(refetchInterval !== undefined ? { refetchInterval } : {}),
   });
 }
 
@@ -40,7 +40,7 @@ export function useTerminalWindows(options: UseTerminalQueryOptions = {}) {
   return useQuery({
     ...terminalQueries.windows(),
     enabled,
-    staleTime,
-    refetchInterval,
+    ...(staleTime !== undefined ? { staleTime } : {}),
+    ...(refetchInterval !== undefined ? { refetchInterval } : {}),
   });
 }

@@ -237,9 +237,17 @@ export function TerminalPage() {
       wsRef.current.close();
       wsRef.current = null;
     }
+    desiredWindowIdRef.current = activeWindowId;
+    setPendingWindowId(null);
     setIsConnected(false);
     setIsConnecting(false);
-  }, [sendCloseMessage]);
+  }, [sendCloseMessage, activeWindowId]);
+
+  useEffect(() => {
+    if (terminalEnabled === true) return;
+    desiredWindowIdRef.current = null;
+    setPendingWindowId(null);
+  }, [terminalEnabled]);
 
   const handleInstallTmux = useCallback(() => {
     const cmd = getTmuxInstallCommand(serverOs);
@@ -443,7 +451,6 @@ export function TerminalPage() {
         ws={wsRef.current}
         tmuxAvailable={tmuxAvailable}
         maxWindows={maxWindows}
-        activeWindowId={activeWindowId}
         displayedActiveWindowId={displayedActiveWindowId}
         onSwitchWindow={handleSwitchWindow}
         terminalRef={terminalRef}

@@ -2852,11 +2852,7 @@ export interface TerminalHealth {
 }
 
 export async function getTerminalHealth(): Promise<TerminalHealth> {
-  const response = await fetch("/api/terminal/health", {
-    headers: buildHeaders(),
-  });
-  if (!response.ok) throw await parseError(response);
-  return (await response.json()) as TerminalHealth;
+  return get<TerminalHealth>("/api/terminal/health");
 }
 
 export async function listTerminalWindows(): Promise<TerminalWindow[]> {
