@@ -966,12 +966,12 @@ export function McpServersPage() {
                               : <Plug className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-brand"}`} />
                             }
                           </div>
-                          <div className="min-w-0">
+                          <div className="min-w-0 flex-1">
                             <h3 className={`text-sm font-black truncate transition-colors ${
                               alreadyAdded ? "" : "group-hover:text-brand"
                             }`}>{tpl.name}</h3>
                             {tpl.category && (
-                              <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{tpl.category}</span>
+                              <span className="block truncate text-[10px] font-black uppercase tracking-widest text-text-dim/60">{tpl.category}</span>
                             )}
                           </div>
                         </div>
