@@ -9,6 +9,12 @@ logger.error = (msg, opts) => {
   origError(msg, opts);
 };
 
+// Every React-consuming dep MUST be pre-bundled up-front so Vite doesn't
+// re-optimize mid-session when a lazy route first pulls one. Re-optimization
+// flips the `?v=xxx` hash, the browser loads the newly-hashed React chunk,
+// and any already-loaded module still referencing the old hash now sees a
+// DIFFERENT React instance — resulting in dispatcher=null / "Cannot read
+// properties of null (reading 'useContext')" on hook calls.
 const SINGLETON_DEPS = [
   "react",
   "react-dom",
@@ -19,6 +25,13 @@ const SINGLETON_DEPS = [
   "@tanstack/react-router",
   "react-i18next",
   "i18next",
+  "cmdk",
+  "react-markdown",
+  "recharts",
+  "@xyflow/react",
+  "zustand",
+  "lucide-react",
+  "lucide-react/dynamic",
 ];
 
 export default defineConfig({
@@ -34,6 +47,16 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     allowedHosts: true,
+    // Eagerly transform every lazy page at startup so any React-coupled
+    // dep they drag in gets folded into the initial optimize pass instead
+    // of triggering a mid-session re-optimization.
+    warmup: {
+      clientFiles: [
+        "./src/main.tsx",
+        "./src/App.tsx",
+        "./src/pages/*.tsx",
+      ],
+    },
     proxy: {
       "/api": {
         target: "http://127.0.0.1:4545",
