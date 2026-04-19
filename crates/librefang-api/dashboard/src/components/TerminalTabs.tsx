@@ -23,6 +23,7 @@ interface TerminalTabsProps {
   tmuxAvailable: boolean;
   maxWindows: number;
   activeWindowId: string | null;
+  displayedActiveWindowId: string | null;
   onSwitchWindow: (windowId: string) => void;
   terminalRef: RefObject<Terminal | null>;
   fitAddonRef: RefObject<FitAddon | null>;
@@ -35,6 +36,7 @@ export function TerminalTabs({
   tmuxAvailable,
   maxWindows,
   activeWindowId,
+  displayedActiveWindowId,
   onSwitchWindow,
   terminalRef,
   fitAddonRef,
@@ -180,7 +182,7 @@ export function TerminalTabs({
   return (
     <div className="flex items-center gap-1 px-2 py-1 bg-gray-900/80 border-b border-gray-700/50 overflow-x-auto shrink-0">
       {windows.map((w) => {
-        const isActive = w.id === activeWindowId;
+          const isActive = w.id === displayedActiveWindowId;
         const isEditing = editingId === w.id;
         return (
           <div

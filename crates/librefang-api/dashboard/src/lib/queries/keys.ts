@@ -290,5 +290,6 @@ export const metricsKeys = {
 
 export const terminalKeys = {
   all: ["terminal"] as const,
+  health: () => [...terminalKeys.all, "health"] as const,
   windows: () => [...terminalKeys.all, "windows"] as const,
 };

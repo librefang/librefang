@@ -95,6 +95,7 @@ export {
   getWorkflowRun,
   listWorkflowTemplates,
   // terminal
+  getTerminalHealth,
   listTerminalWindows,
   // auto-dream
   getAutoDreamStatus,
@@ -222,5 +223,6 @@ export type {
   HandStatsResponse,
   MemoryItem,
   ModelOverrides,
+  TerminalHealth,
   TerminalWindow,
 } from "../../api";
