@@ -404,6 +404,18 @@ pub trait ChannelBridgeHandle: Send + Sync {
     ) -> Result<String, String> {
         Err("Channel push not available".to_string())
     }
+
+    // ── File download config accessors ──
+
+    /// Return the configured file download directory, if set.
+    fn channels_download_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Return the configured max file download size in bytes, if set.
+    fn channels_download_max_bytes(&self) -> Option<u64> {
+        None
+    }
 }
 
 struct PendingMessage {
@@ -942,6 +954,15 @@ impl BridgeManager {
         &mut self,
         adapter: Arc<dyn ChannelAdapter>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Sweep stale files (>24h) from the download directory on startup.
+        {
+            let dir = self
+                .handle
+                .channels_download_dir()
+                .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+            cleanup_old_uploads(&dir).await;
+        }
+
         // Prefer shared webhook routes over adapter-managed HTTP servers.
         // If the adapter provides webhook routes, collect them for mounting
         // on the main API server and use the returned stream for dispatch.
@@ -2264,6 +2285,41 @@ async fn dispatch_message(
         // Image download failed — fall through to text description below
     }
 
+    // For files: download to disk and send as content blocks
+    if let ChannelContent::File {
+        ref url,
+        ref filename,
+    } = message.content
+    {
+        let download_dir = handle
+            .channels_download_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let max_bytes = handle
+            .channels_download_max_bytes()
+            .unwrap_or(50 * 1024 * 1024);
+        let blocks = download_file_to_blocks(url, filename, max_bytes, &download_dir).await;
+        if blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ImageFile { .. }))
+        {
+            dispatch_with_blocks(
+                blocks,
+                message,
+                handle,
+                router,
+                adapter,
+                ct_str,
+                thread_id,
+                output_format,
+                overrides.as_ref(),
+                journal,
+            )
+            .await;
+            return;
+        }
+        // Download failed — fall through to text description below
+    }
+
     // Intercept interactive menu callbacks before forwarding to LLM.
     if let ChannelContent::ButtonCallback { ref action, .. } = message.content {
         if action.starts_with("prov:") || action.starts_with("model:") || action == "back:providers"
@@ -3165,6 +3221,214 @@ fn media_type_from_url(url: &str) -> String {
     } else {
         // JPEG is the most common image format — safe default
         "image/jpeg".to_string()
+    }
+}
+
+/// Sanitize a file extension to alphanumeric characters only.
+///
+/// Strips everything that isn't ASCII alphanumeric. Returns `"bin"` when the
+/// result would be empty.
+fn sanitize_extension(ext: &str) -> String {
+    let cleaned: String = ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if cleaned.is_empty() {
+        "bin".to_string()
+    } else {
+        cleaned.to_lowercase()
+    }
+}
+
+/// Validate that a URL uses an allowed scheme (http or https).
+fn validate_url_scheme(url: &str) -> Result<(), String> {
+    if url.starts_with("https://") || url.starts_with("http://") {
+        Ok(())
+    } else {
+        Err(format!(
+            "Rejected URL with unsupported scheme: {}",
+            url.split(':').next().unwrap_or("unknown")
+        ))
+    }
+}
+
+/// Download a file from a URL to disk with streaming and size cap.
+///
+/// Returns `ContentBlock::ImageFile` on success (reuses the variant for all
+/// downloaded files) or a text block describing the failure.
+async fn download_file_to_blocks(
+    url: &str,
+    filename: &str,
+    max_bytes: u64,
+    download_dir: &std::path::Path,
+) -> Vec<ContentBlock> {
+    // Validate URL scheme
+    if let Err(reason) = validate_url_scheme(url) {
+        warn!("{reason}");
+        return vec![ContentBlock::Text {
+            text: format!("[File download rejected: {reason}]"),
+            provider_metadata: None,
+        }];
+    }
+
+    let client = crate::http_client::new_client();
+    let resp = match client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to download file from channel: {e}");
+            return vec![ContentBlock::Text {
+                text: format!("[File download failed: {e}]"),
+                provider_metadata: None,
+            }];
+        }
+    };
+
+    // Fast-reject via Content-Length header when available.
+    if let Some(cl) = resp.content_length() {
+        if cl > max_bytes {
+            warn!(
+                content_length = cl,
+                max_bytes, "File exceeds size cap (Content-Length), skipping download"
+            );
+            return vec![ContentBlock::Text {
+                text: format!(
+                    "[File too large: {cl} bytes exceeds {max_bytes} byte limit ({filename})]"
+                ),
+                provider_metadata: None,
+            }];
+        }
+    }
+
+    // Detect media type from Content-Type header.
+    let media_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    // Extract and sanitize extension from the original filename.
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(sanitize_extension)
+        .unwrap_or_else(|| "bin".to_string());
+
+    let dest_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+    let file_path = download_dir.join(&dest_filename);
+
+    // Ensure upload directory exists.
+    if let Err(e) = tokio::fs::create_dir_all(download_dir).await {
+        warn!(
+            "Failed to create download dir {}: {e}",
+            download_dir.display()
+        );
+        return vec![ContentBlock::Text {
+            text: format!("[File download failed: cannot create directory: {e}]"),
+            provider_metadata: None,
+        }];
+    }
+
+    // Stream body to disk chunk by chunk, enforcing size cap.
+    let mut stream = resp.bytes_stream();
+    let mut file = match tokio::fs::File::create(&file_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("Failed to create file {}: {e}", file_path.display());
+            return vec![ContentBlock::Text {
+                text: format!("[File download failed: {e}]"),
+                provider_metadata: None,
+            }];
+        }
+    };
+
+    let mut total: u64 = 0;
+    use tokio::io::AsyncWriteExt;
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(chunk) => {
+                total += chunk.len() as u64;
+                if total > max_bytes {
+                    warn!(
+                        total_bytes = total,
+                        max_bytes, "File download exceeded size cap, aborting"
+                    );
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&file_path).await;
+                    return vec![ContentBlock::Text {
+                        text: format!(
+                            "[File too large: exceeded {max_bytes} byte limit ({filename})]"
+                        ),
+                        provider_metadata: None,
+                    }];
+                }
+                if let Err(e) = file.write_all(&chunk).await {
+                    warn!("Failed to write chunk to {}: {e}", file_path.display());
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&file_path).await;
+                    return vec![ContentBlock::Text {
+                        text: format!("[File download failed: write error: {e}]"),
+                        provider_metadata: None,
+                    }];
+                }
+            }
+            Err(e) => {
+                warn!("Stream error downloading file: {e}");
+                drop(file);
+                let _ = tokio::fs::remove_file(&file_path).await;
+                return vec![ContentBlock::Text {
+                    text: format!("[File download failed: {e}]"),
+                    provider_metadata: None,
+                }];
+            }
+        }
+    }
+
+    if let Err(e) = file.flush().await {
+        warn!("Failed to flush file {}: {e}", file_path.display());
+    }
+
+    info!(
+        path = %file_path.display(),
+        size_bytes = total,
+        media_type = %media_type,
+        original_filename = %filename,
+        "Downloaded channel file to disk"
+    );
+
+    vec![ContentBlock::ImageFile {
+        media_type,
+        path: file_path.to_string_lossy().into_owned(),
+    }]
+}
+
+/// Remove files older than 24 hours from the upload/download directory.
+///
+/// Called on bridge startup to prevent unbounded disk growth.
+async fn cleanup_old_uploads(dir: &std::path::Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 60 * 60);
+    let mut removed = 0u64;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let Ok(meta) = entry.metadata().await else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if modified < cutoff && tokio::fs::remove_file(entry.path()).await.is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        info!(removed, dir = %dir.display(), "Cleaned up old upload files");
     }
 }
 
@@ -5283,6 +5547,77 @@ mod tests {
                 Some(None),
                 "None bot_name must be forwarded as None"
             );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // File download helpers
+    // ---------------------------------------------------------------------
+
+    mod file_download_tests {
+        use super::*;
+
+        #[test]
+        fn test_sanitize_extension_normal() {
+            assert_eq!(sanitize_extension("pdf"), "pdf");
+            assert_eq!(sanitize_extension("PNG"), "png");
+            assert_eq!(sanitize_extension("tar"), "tar");
+            assert_eq!(sanitize_extension("jpg"), "jpg");
+        }
+
+        #[test]
+        fn test_sanitize_extension_strips_non_alnum() {
+            // tar.gz via Path::extension gives "gz", but test the sanitizer directly
+            assert_eq!(sanitize_extension("g.z"), "gz");
+            assert_eq!(sanitize_extension("../etc/passwd"), "etcpasswd");
+            assert_eq!(sanitize_extension("exe;rm -rf"), "exermrf");
+        }
+
+        #[test]
+        fn test_sanitize_extension_empty_and_special() {
+            assert_eq!(sanitize_extension(""), "bin");
+            assert_eq!(sanitize_extension("..."), "bin");
+            assert_eq!(sanitize_extension("///"), "bin");
+        }
+
+        #[test]
+        fn test_sanitize_extension_unicode() {
+            // Non-ASCII chars are stripped
+            assert_eq!(sanitize_extension("pdfé"), "pdf");
+            assert_eq!(sanitize_extension("日本語"), "bin");
+        }
+
+        #[test]
+        fn test_validate_url_scheme_http() {
+            assert!(validate_url_scheme("https://example.com/file.pdf").is_ok());
+            assert!(validate_url_scheme("http://example.com/file.pdf").is_ok());
+        }
+
+        #[test]
+        fn test_validate_url_scheme_rejected() {
+            assert!(validate_url_scheme("file:///etc/passwd").is_err());
+            assert!(validate_url_scheme("ftp://example.com/file.pdf").is_err());
+            assert!(validate_url_scheme("javascript:alert(1)").is_err());
+            assert!(validate_url_scheme("data:text/plain,hello").is_err());
+            assert!(validate_url_scheme("/local/path").is_err());
+        }
+
+        #[tokio::test]
+        async fn test_file_download_rejects_bad_scheme() {
+            let dir = std::env::temp_dir().join("librefang_test_download");
+            let blocks =
+                download_file_to_blocks("ftp://evil.com/malware.exe", "malware.exe", 1024, &dir)
+                    .await;
+            assert_eq!(blocks.len(), 1);
+            match &blocks[0] {
+                ContentBlock::Text { text, .. } => {
+                    assert!(
+                        text.contains("rejected"),
+                        "Expected rejection message, got: {text}"
+                    );
+                }
+                other => panic!("Expected Text block, got: {other:?}"),
+            }
         }
     }
 }
