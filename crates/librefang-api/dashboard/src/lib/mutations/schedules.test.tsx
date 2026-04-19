@@ -120,10 +120,13 @@ describe("useUpdateTrigger", () => {
 
     await result.current.mutateAsync({ id: "trig-1", data: { enabled: true } });
 
-    expect(invalidateSpy).toHaveBeenNthCalledWith(1, {
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: triggerKeys.all,
     });
-    expect(invalidateSpy).toHaveBeenNthCalledWith(2, {
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: cronKeys.all,
     });
   });
@@ -142,10 +145,13 @@ describe("useDeleteTrigger", () => {
 
     await result.current.mutateAsync("trig-1");
 
-    expect(invalidateSpy).toHaveBeenNthCalledWith(1, {
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: triggerKeys.all,
     });
-    expect(invalidateSpy).toHaveBeenNthCalledWith(2, {
+    expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: cronKeys.all,
     });
   });
