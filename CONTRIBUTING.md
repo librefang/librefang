@@ -84,7 +84,7 @@ cp -r agents/hello-world agents/my-agent
 **I want to write a Python skill** (no Rust):
 ```bash
 mkdir -p ~/.librefang/skills/my-skill
-# See docs/skill-development.md for the skill format
+# See https://docs.librefang.ai/agent/skills for the skill format
 ```
 
 **I want to fix a bug or add a Rust feature**:
