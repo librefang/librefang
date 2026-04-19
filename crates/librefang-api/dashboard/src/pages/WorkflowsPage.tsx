@@ -1,10 +1,8 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
-  createSchedule,
   type DryRunResult,
   type WorkflowTemplate,
 } from "../api";
@@ -33,6 +31,7 @@ import {
   useDeleteWorkflow,
   useInstantiateTemplate,
 } from "../lib/mutations/workflows";
+import { useCreateSchedule } from "../lib/mutations/schedules";
 import { useUIStore } from "../lib/store";
 
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -43,7 +42,6 @@ export function WorkflowsPage() {
   const { t, i18n } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>("");
   const [runInput, setRunInput] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -61,6 +59,7 @@ export function WorkflowsPage() {
   const dryRunMutation = useDryRunWorkflow();
   const deleteMutation = useDeleteWorkflow();
   const instantiateMutation = useInstantiateTemplate();
+  const createScheduleMutation = useCreateSchedule();
 
   const workflows = useMemo(() =>
     [...(workflowsQuery.data ?? [])]
@@ -628,10 +627,23 @@ export function WorkflowsPage() {
           onSave={async (cron, tz) => {
             const wf = workflows.find(w => w.id === scheduleWorkflowId);
             try {
-              await createSchedule({ name: `${wf?.name || "workflow"} schedule`, cron, tz, workflow_id: scheduleWorkflowId, enabled: true });
+              await createScheduleMutation.mutateAsync({
+                name: `${wf?.name || "workflow"} schedule`,
+                cron,
+                tz,
+                workflow_id: scheduleWorkflowId,
+                enabled: true,
+              });
+              addToast(t("scheduler.save_success", { defaultValue: "Schedule saved" }), "success");
               setScheduleWorkflowId(null);
-              await queryClient.invalidateQueries({ queryKey: ["workflows"] });
-            } catch { /* ignore */ }
+            } catch (err) {
+              addToast(
+                err instanceof Error
+                  ? err.message
+                  : t("workflows.schedule_failed", { defaultValue: "Schedule creation failed" }),
+                "error",
+              );
+            }
           }}
           onClose={() => setScheduleWorkflowId(null)}
         />

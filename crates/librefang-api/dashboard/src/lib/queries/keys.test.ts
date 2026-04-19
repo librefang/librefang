@@ -129,6 +129,15 @@ describe("query key factories", () => {
         "wf-1",
       ]);
     });
+
+    it("detail and runDetail are nested under their parent prefixes", () => {
+      expect(
+        workflowKeys.detail("wf-1").slice(0, workflowKeys.details().length),
+      ).toEqual(workflowKeys.details());
+      expect(
+        workflowKeys.runDetail("run-1").slice(0, workflowKeys.runDetails().length),
+      ).toEqual(workflowKeys.runDetails());
+    });
   });
 
   describe("auditKeys", () => {
