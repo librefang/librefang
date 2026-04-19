@@ -100,8 +100,8 @@ export function useSkillDetail(name: string, options: UseSkillOptions = {}) {
   return useQuery({
     ...skillQueries.detail(name),
     enabled: enabled ?? Boolean(name),
-    staleTime,
-    refetchInterval,
+    staleTime: staleTime ?? STALE_MS,
+    refetchInterval: refetchInterval ?? false,
   });
 }
 
@@ -114,8 +114,8 @@ export function useSupportingFile(
   return useQuery({
     ...skillQueries.supportingFile(name, path),
     enabled: enabled ?? (Boolean(name) && Boolean(path)),
-    staleTime,
-    refetchInterval,
+    staleTime: staleTime ?? STALE_MS,
+    refetchInterval: refetchInterval ?? false,
   });
 }
 

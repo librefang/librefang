@@ -53,7 +53,8 @@ export const mcpQueries = {
     queryOptions({
       queryKey: mcpKeys.authStatus(id),
       queryFn: () => getMcpAuthStatus(id),
-      staleTime: SERVERS_STALE_MS,
+      // Auth polling needs a fresh read on each fetchQuery call.
+      staleTime: 0,
       enabled: opts.enabled ?? Boolean(id),
     }),
 };

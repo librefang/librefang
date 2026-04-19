@@ -271,6 +271,8 @@ function AuthBadge({
           const status = await queryClient.fetchQuery(mcpQueries.authStatus(serverIdentity));
           if (status.auth.state === "authorized") {
             setPolling(false);
+            queryClient.invalidateQueries({ queryKey: mcpQueries.servers().queryKey });
+            queryClient.invalidateQueries({ queryKey: mcpQueries.health().queryKey });
             onAuthSuccess();
           } else if (status.auth.state === "error") {
             setPolling(false);

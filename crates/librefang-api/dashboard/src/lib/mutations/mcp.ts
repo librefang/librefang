@@ -14,6 +14,7 @@ function invalidateMcpServer(qc: ReturnType<typeof useQueryClient>, id: string) 
   return Promise.all([
     qc.invalidateQueries({ queryKey: mcpKeys.servers() }),
     qc.invalidateQueries({ queryKey: mcpKeys.server(id) }),
+    qc.invalidateQueries({ queryKey: mcpKeys.authStatus(id) }),
     qc.invalidateQueries({ queryKey: mcpKeys.health() }),
   ]);
 }
