@@ -5,6 +5,36 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.19] - 2026-04-19
+
+### Added
+
+- Add auto-dream per-agent background memory consolidation (#2750) (@houko)
+- Trigger on AgentLoopEnd hook, scheduler becomes backstop (#2755) (@houko)
+- Derivative LLM calls reuse parent's prompt cache (#2767) (@houko)
+
+### Fixed
+
+- Show Provider before Model in Config default_model section (#2749) (@houko)
+- Add peer_id to cron jobs for peer-scoped memory access (#2759) (@DaBlitzStein)
+- Match ImageFile in vision dispatch gates (#2762) (@DaBlitzStein)
+- Default api_listen to 127.0.0.1:4545 for local-only startup (closes #2766) (#2769) (@houko)
+- Clear stale TOTP banners, refetch status on reset, localize error messages (#2771) (@leszek3737)
+- Fix 12 UI bugs across scheduler, sessions, memory, models, plugins, providers, runtime, workflows (#2772) (@leszek3737)
+- Gate Duration import with cfg(unix) for Windows CI (#2773) (@houko)
+- Harden canvas workflow recovery and related UI state (#2774) (@leszek3737)
+- Derive 'connected' from health state + fix catalog card overflow (closes #2738) (#2775) (@houko)
+- Align workflow mutation invalidation (#2778) (@leszek3737)
+
+### Documentation
+
+- Fix stale documentation references (#2720) (@leszek3737)
+
+### Maintenance
+
+- Replace cloudflare/wrangler-action with direct npx wrangler calls (#2740) (@houko)
+
+
 ## [Unreleased]
 
 ### Changed
