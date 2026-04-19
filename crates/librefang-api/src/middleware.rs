@@ -367,11 +367,22 @@ pub async fn auth(
     // Pattern: /api/mcp/servers/{name}/auth/callback — GET only.
     let is_mcp_oauth_callback =
         is_get && path.starts_with("/api/mcp/servers/") && path.ends_with("/auth/callback");
+    // Compute `auth_configured` early so we can decide whether the SPA
+    // shell at `/dashboard/*` stays publicly reachable. When *any* form of
+    // auth is configured, shell access goes behind the session cookie and
+    // an unauthenticated browser gets a minimal inline login page
+    // (see the 401 handler below). When no auth is configured the shell
+    // stays public so the out-of-the-box dev experience still works.
+    let auth_configured = !api_key.trim().is_empty()
+        || !auth_state.user_api_keys.is_empty()
+        || auth_state.dashboard_auth_enabled;
+    let dashboard_shell_public = !auth_configured && path.starts_with("/dashboard/");
+
     let always_public_get_only = is_get
         && (matches!(
             path,
             "/.well-known/agent.json" | "/api/config/schema" | "/api/auth/providers"
-        ) || path.starts_with("/dashboard/")
+        ) || dashboard_shell_public
             || path.starts_with("/a2a/")
             || path.starts_with("/api/uploads/")
             || path.starts_with("/api/auth/login"));
@@ -414,15 +425,6 @@ pub async fn auth(
     let dashboard_read_public =
         (is_get && (dashboard_read_exact || dashboard_read_prefix)) || path == "/api/logs/stream"; // SSE stream, read-only
 
-    // The flag only engages when *some* form of auth is actually configured.
-    // Gating on `api_key.is_empty()` alone would silently no-op the flag
-    // whenever an operator configures only per-user keys or dashboard
-    // username/password auth — which is exactly the setup most production
-    // deployments use. Mirror the "auth configured?" check below so every
-    // auth mode participates.
-    let auth_configured = !api_key.trim().is_empty()
-        || !auth_state.user_api_keys.is_empty()
-        || auth_state.dashboard_auth_enabled;
     let enforce_auth_on_reads = auth_state.require_auth_for_reads && auth_configured;
 
     let is_public = always_public || (dashboard_read_public && !enforce_auth_on_reads);
@@ -456,6 +458,27 @@ pub async fn auth(
             .and_then(|v| v.to_str().ok())
     });
 
+    // Cookie-based session token — only accepted for SPA shell navigation
+    // (`/dashboard/*`). API endpoints still require a Bearer/header token so
+    // a cross-site request that auto-forwards the cookie cannot trigger a
+    // write. Pair with `SameSite=Lax` on the Set-Cookie (issued by
+    // `dashboard_login`) for the usual CSRF posture.
+    let cookie_session_token = if path.starts_with("/dashboard/") {
+        request
+            .headers()
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|header| {
+                header
+                    .split(';')
+                    .map(str::trim)
+                    .find_map(|kv| kv.strip_prefix("librefang_session="))
+                    .map(str::to_string)
+            })
+    } else {
+        None
+    };
+
     // Split composite key (supports multiple valid tokens separated by \n).
     let valid_keys: Vec<&str> = api_key.split('\n').filter(|k| !k.is_empty()).collect();
 
@@ -486,8 +509,11 @@ pub async fn auth(
     }
 
     // Check the active session store for randomly generated dashboard tokens.
-    // Also prune expired sessions opportunistically.
-    let provided_token = api_token.or(query_token);
+    // Also prune expired sessions opportunistically. Cookie token is only
+    // consulted for `/dashboard/*` navigation (filtered upstream).
+    let provided_token = api_token
+        .or(query_token)
+        .or(cookie_session_token.as_deref());
     if let Some(token_str) = provided_token {
         let mut sessions = auth_state.active_sessions.write().await;
         // Remove expired sessions while we hold the lock
@@ -555,6 +581,19 @@ pub async fn auth(
         translator.t("api-error-auth-missing-header")
     };
 
+    // Browser navigation to `/dashboard/*` with no valid session — serve a
+    // minimal self-contained login page instead of a JSON error, so the SPA
+    // bundle (and whatever it imports) never reaches an unauthenticated
+    // caller.
+    if is_get && path.starts_with("/dashboard/") {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("content-type", "text/html; charset=utf-8")
+            .header("cache-control", "no-store")
+            .body(Body::from(LOGIN_PAGE_HTML))
+            .unwrap_or_default();
+    }
+
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header("www-authenticate", "Bearer")
@@ -564,6 +603,8 @@ pub async fn auth(
         ))
         .unwrap_or_default()
 }
+
+const LOGIN_PAGE_HTML: &str = include_str!("login_page.html");
 
 /// Security headers middleware — applied to ALL API responses.
 pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Body> {

@@ -9,10 +9,28 @@ logger.error = (msg, opts) => {
   origError(msg, opts);
 };
 
+const SINGLETON_DEPS = [
+  "react",
+  "react-dom",
+  "react-dom/client",
+  "react/jsx-runtime",
+  "react/jsx-dev-runtime",
+  "@tanstack/react-query",
+  "@tanstack/react-router",
+  "react-i18next",
+  "i18next",
+];
+
 export default defineConfig({
   customLogger: logger,
   plugins: [react(), tailwindcss()],
   base: "/dashboard/",
+  resolve: {
+    dedupe: SINGLETON_DEPS,
+  },
+  optimizeDeps: {
+    include: SINGLETON_DEPS,
+  },
   server: {
     host: "0.0.0.0",
     allowedHosts: true,
@@ -21,9 +39,9 @@ export default defineConfig({
         target: "http://127.0.0.1:4545",
         changeOrigin: true,
         ws: true,
+        timeout: 300_000,
+        proxyTimeout: 300_000,
         configure: (proxy) => {
-          proxy.options.proxyTimeout = 300_000;
-          proxy.options.timeout = 300_000;
           type Emitter = { on(event: string, fn: (...args: never[]) => void): void };
           const p = proxy as unknown as Emitter;
           p.on("error", () => {});

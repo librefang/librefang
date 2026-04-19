@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>LibreFang — Sign in</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #0b0d12;
+    color: #e6e8ee;
+    display: grid; place-items: center;
+  }
+  @media (prefers-color-scheme: light) {
+    body { background: #f6f7fb; color: #1a1c22; }
+    .card { background: #fff; box-shadow: 0 10px 30px rgba(20,20,40,.08); }
+    input { background: #fff; color: #1a1c22; border-color: #d7d9e1; }
+    .sub { color: #5a6070; }
+  }
+  .card {
+    width: min(92vw, 380px);
+    padding: 28px 24px;
+    border-radius: 14px;
+    background: #12151c;
+    box-shadow: 0 20px 50px rgba(0,0,0,.5);
+    border: 1px solid rgba(255,255,255,.06);
+  }
+  h1 {
+    margin: 0 0 4px; font-size: 20px; font-weight: 700; letter-spacing: -0.01em;
+  }
+  .sub { margin: 0 0 18px; font-size: 13px; color: #8a92a6; }
+  label { display: block; font-size: 12px; margin-bottom: 6px; font-weight: 600; }
+  input {
+    width: 100%; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid #2a2e39; background: #0b0d12; color: #e6e8ee;
+    font: inherit; outline: none;
+  }
+  input:focus { border-color: #7c8cff; box-shadow: 0 0 0 3px rgba(124,140,255,.2); }
+  .row { margin-bottom: 12px; }
+  button {
+    width: 100%; padding: 10px 12px; border-radius: 8px; border: 0;
+    background: #7c8cff; color: #0b0d12; font-weight: 700; font-size: 14px;
+    cursor: pointer; margin-top: 6px;
+  }
+  button:disabled { opacity: .6; cursor: not-allowed; }
+  .err {
+    margin-top: 10px; min-height: 1.2em; font-size: 12px; color: #ff7a7a;
+  }
+  .foot { margin-top: 16px; font-size: 11px; color: #6b7182; text-align: center; }
+</style>
+</head>
+<body>
+<main class="card" role="main">
+  <h1>LibreFang</h1>
+  <p class="sub">Sign in to continue.</p>
+  <form id="f" autocomplete="on">
+    <div class="row">
+      <label for="u">Username</label>
+      <input id="u" name="username" autocomplete="username" required autofocus>
+    </div>
+    <div class="row">
+      <label for="p">Password</label>
+      <input id="p" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <div class="row" id="totp-row" hidden>
+      <label for="t">TOTP code</label>
+      <input id="t" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code">
+    </div>
+    <button id="btn" type="submit">Sign in</button>
+    <div class="err" id="err" aria-live="polite"></div>
+  </form>
+  <div class="foot">Auth required — configured in <code>config.toml</code>.</div>
+</main>
+<script>
+(function () {
+  var form = document.getElementById('f');
+  var btn  = document.getElementById('btn');
+  var err  = document.getElementById('err');
+  var totpRow = document.getElementById('totp-row');
+  var requiresTotp = false;
+
+  function setError(msg) { err.textContent = msg || ''; }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    setError('');
+    btn.disabled = true;
+    var payload = {
+      username: document.getElementById('u').value.trim(),
+      password: document.getElementById('p').value
+    };
+    if (requiresTotp) payload.totp_code = document.getElementById('t').value.trim();
+
+    fetch('/api/auth/dashboard-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(payload)
+    })
+      .then(function (r) { return r.json().then(function (d) { return { status: r.status, data: d }; }); })
+      .then(function (res) {
+        var d = res.data || {};
+        if (d.ok && d.token) {
+          try { localStorage.setItem('librefang-api-key', d.token); } catch (e) {}
+          // Preserve the original destination when possible.
+          var target = location.pathname + location.search + location.hash;
+          if (!target || target === '/') target = '/dashboard/';
+          location.replace(target);
+          return;
+        }
+        if (d.requires_totp) {
+          requiresTotp = true;
+          totpRow.hidden = false;
+          document.getElementById('t').focus();
+          setError('Enter your 6-digit TOTP code.');
+        } else {
+          setError(d.error || 'Sign in failed.');
+        }
+      })
+      .catch(function () { setError('Network error.'); })
+      .finally(function () { btn.disabled = false; });
+  });
+})();
+</script>
+</body>
+</html>

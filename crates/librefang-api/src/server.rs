@@ -70,6 +70,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/auth/dashboard-check",
             axum::routing::get(dashboard_auth_check),
         )
+        .route("/auth/logout", axum::routing::post(dashboard_logout))
         .route(
             "/auth/change-password",
             axum::routing::post(change_password),
@@ -322,13 +323,27 @@ async fn dashboard_login(
                 save_sessions(state.kernel.home_dir(), &sessions);
             }
 
-            axum::response::Json(serde_json::json!({
-                "ok": true,
-                "token": token.token,
-                "created_at": token.created_at,
-                "expires_at": token.created_at + crate::password_hash::DEFAULT_SESSION_TTL_SECS,
-            }))
-            .into_response()
+            // Issue a session cookie so subsequent browser navigation to
+            // `/dashboard/*` authenticates without JS sending a header.
+            // Scope to `Path=/dashboard` so the cookie never auto-attaches
+            // to `/api/*` requests — API calls keep using the Bearer token
+            // from localStorage, which neutralises cookie-borne CSRF.
+            let cookie = format!(
+                "librefang_session={}; Path=/dashboard; HttpOnly; SameSite=Lax; Max-Age={}",
+                token.token,
+                crate::password_hash::DEFAULT_SESSION_TTL_SECS
+            );
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::SET_COOKIE, cookie)],
+                axum::response::Json(serde_json::json!({
+                    "ok": true,
+                    "token": token.token,
+                    "created_at": token.created_at,
+                    "expires_at": token.created_at + crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+                })),
+            )
+                .into_response()
         }
         crate::password_hash::VerifyResult::Denied => (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -384,6 +399,52 @@ async fn dashboard_auth_check(
         "mode": mode,
         "username": "",
     }))
+}
+
+/// Invalidate the caller's dashboard session and clear the browser cookie.
+///
+/// Accepts the token via the `librefang_session` cookie, `Authorization:
+/// Bearer ...`, or `X-API-Key`. Always clears the cookie client-side so a
+/// caller who already lost their token can still wipe it locally.
+async fn dashboard_logout(
+    axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let token_from_cookie = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| {
+            h.split(';')
+                .map(str::trim)
+                .find_map(|kv| kv.strip_prefix("librefang_session="))
+                .map(str::to_string)
+        });
+    let token_from_bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").map(str::to_string));
+    let token_from_xapi = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    for token in [token_from_cookie, token_from_bearer, token_from_xapi]
+        .into_iter()
+        .flatten()
+    {
+        let mut sessions = state.active_sessions.write().await;
+        if sessions.remove(&token).is_some() {
+            save_sessions(state.kernel.home_dir(), &sessions);
+        }
+    }
+
+    let expired_cookie = "librefang_session=; Path=/dashboard; HttpOnly; SameSite=Lax; Max-Age=0";
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, expired_cookie)],
+        axum::response::Json(serde_json::json!({"ok": true})),
+    )
+        .into_response()
 }
 
 /// Request body for POST /api/auth/change-password.

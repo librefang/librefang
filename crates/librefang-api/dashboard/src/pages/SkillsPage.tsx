@@ -92,11 +92,11 @@ function FangHubSkillCard({ skill, pendingId, onInstall, t }: {
   const isPending = pendingId === skill.name;
   return (
     <Card hover padding="none" className="flex flex-col overflow-hidden">
-      <div className="h-1.5 bg-gradient-to-r from-brand via-brand/60 to-brand/30" />
+      <div className="h-1.5 bg-linear-to-r from-brand via-brand/60 to-brand/30" />
       <div className="p-5 flex-1 flex flex-col">
         <div className="flex items-start justify-between gap-3 mb-3">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20">
               <Zap className="w-5 h-5 text-brand" />
             </div>
             <div className="min-w-0">
@@ -138,11 +138,11 @@ function InstalledSkillCard({ skill, onUninstall, onViewDetail, t }: {
 }) {
   return (
     <Card hover padding="none" className="flex flex-col overflow-hidden group">
-      <div className="h-1.5 bg-gradient-to-r from-success via-success/60 to-success/30" />
+      <div className="h-1.5 bg-linear-to-r from-success via-success/60 to-success/30" />
       <div className="p-5 flex-1 flex flex-col">
         <div className="flex items-start justify-between gap-3 mb-4">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-lg flex items-center justify-center text-xl bg-gradient-to-br from-success/10 to-success/5 border border-success/20">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center text-xl bg-linear-to-br from-success/10 to-success/5 border border-success/20">
               <Wrench className="w-5 h-5 text-success" />
             </div>
             <div className="min-w-0">
@@ -832,11 +832,11 @@ function MarketplaceSkillCard({ skill, onInstall, pendingId, onViewDetails, sour
 }) {
   return (
     <Card hover padding="none" className="flex flex-col overflow-hidden group cursor-pointer" onClick={() => onViewDetails(skill)}>
-      <div className={`h-1.5 bg-gradient-to-r ${source === "skillhub" ? "from-accent via-accent/60 to-accent/30" : "from-brand via-brand/60 to-brand/30"}`} />
+      <div className={`h-1.5 bg-linear-to-r ${source === "skillhub" ? "from-accent via-accent/60 to-accent/30" : "from-brand via-brand/60 to-brand/30"}`} />
       <div className="p-5 flex-1 flex flex-col">
         <div className="flex items-start justify-between gap-3 mb-4">
           <div className="flex items-center gap-3 min-w-0">
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl bg-gradient-to-br ${source === "skillhub" ? "from-accent/10 to-accent/5 border border-accent/20" : "from-brand/10 to-brand/5 border border-brand/20"}`}>
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl bg-linear-to-br ${source === "skillhub" ? "from-accent/10 to-accent/5 border border-accent/20" : "from-brand/10 to-brand/5 border border-brand/20"}`}>
               {source === "skillhub"
                 ? <Store className="w-5 h-5 text-accent" />
                 : <Sparkles className="w-5 h-5 text-brand" />}
@@ -908,7 +908,7 @@ function DetailsModal({ skill, onClose, onInstall, pendingId, source = "clawhub"
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-lg shadow-2xl rounded-t-2xl sm:rounded-2xl max-h-[90vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-        <div className={`h-2 bg-gradient-to-r rounded-t-2xl ${source === "skillhub" ? "from-accent via-accent/60 to-accent/30" : "from-brand via-brand/60 to-brand/30"}`} />
+        <div className={`h-2 bg-linear-to-r rounded-t-2xl ${source === "skillhub" ? "from-accent via-accent/60 to-accent/30" : "from-brand via-brand/60 to-brand/30"}`} />
         <div className="p-6 border-b border-border-subtle">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
