@@ -52,6 +52,10 @@ export function SessionsPage() {
 
   const activeCount = sessions.filter(s => s.active).length;
 
+  function saveLabel(sessionId: string, label: string, agentId?: string) {
+    labelMutation.mutate({ sessionId, label, agentId }, { onSuccess: () => setEditingLabelId(null) });
+  }
+
   async function handleSwitch(agentId: string, sessionId: string) {
     setPendingId(sessionId);
     try {
@@ -157,11 +161,11 @@ export function SessionsPage() {
                           autoFocus
                           value={labelValue}
                           onChange={e => setLabelValue(e.target.value)}
-                          onKeyDown={e => { if (e.key === "Enter") labelMutation.mutate({ sessionId: s.session_id, label: labelValue, agentId: s.agent_id ?? undefined }, { onSuccess: () => setEditingLabelId(null) }); if (e.key === "Escape") setEditingLabelId(null); }}
+                          onKeyDown={e => { if (e.key === "Enter") saveLabel(s.session_id, labelValue, s.agent_id ?? undefined); if (e.key === "Escape") setEditingLabelId(null); }}
                           className="px-1.5 py-0.5 rounded border border-brand bg-main text-[10px] w-24 outline-none"
                           placeholder={t("sessions.label_placeholder", { defaultValue: "Label..." })}
                         />
-                        <button onClick={() => labelMutation.mutate({ sessionId: s.session_id, label: labelValue, agentId: s.agent_id ?? undefined }, { onSuccess: () => setEditingLabelId(null) })} className="text-success"><Check className="w-3 h-3" /></button>
+                        <button onClick={() => saveLabel(s.session_id, labelValue, s.agent_id ?? undefined)} className="text-success"><Check className="w-3 h-3" /></button>
                         <button onClick={() => setEditingLabelId(null)} className="text-text-dim"><X className="w-3 h-3" /></button>
                       </span>
                     ) : (

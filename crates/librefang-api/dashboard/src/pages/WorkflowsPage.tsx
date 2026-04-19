@@ -70,12 +70,14 @@ export function WorkflowsPage() {
   );
 
   useEffect(() => {
-    if (!selectedWorkflowId || workflows.some(wf => wf.id === selectedWorkflowId)) return;
+    if (!selectedWorkflowId) return;
+    const all = workflowsQuery.data ?? [];
+    if (all.some(wf => wf.id === selectedWorkflowId)) return;
     setSelectedWorkflowId("");
     setSelectedRunId(null);
     setRunInput("");
     setDryRunResult(null);
-  }, [workflows, selectedWorkflowId]);
+  }, [workflowsQuery.data, selectedWorkflowId]);
 
   const handleRun = async () => {
     if (!selectedWorkflowId) return;

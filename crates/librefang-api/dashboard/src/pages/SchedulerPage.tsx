@@ -57,11 +57,13 @@ export function SchedulerPage() {
   const schedules = useMemo(() => [...(schedulesQuery.data ?? [])].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")), [schedulesQuery.data]);
   const triggers = triggersQuery.data ?? [];
 
+  const canSubmit = !name.trim() ? false
+    : targetType === "agent" ? !!agentId
+    : !!workflowId;
+
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
-    if (targetType === "agent" && !agentId) return;
-    if (targetType === "workflow" && !workflowId) return;
+    if (!canSubmit) return;
     try {
       await createMut.mutateAsync({
         name, cron, tz: cronTz, message, enabled: true,
@@ -315,7 +317,7 @@ export function SchedulerPage() {
                 <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(createMut.error as any)?.message}</div>
               )}
               <div className="flex gap-2 pt-2">
-                <Button type="submit" variant="primary" className="flex-1" disabled={createMut.isPending || !name.trim() || (targetType === "agent" && !agentId) || (targetType === "workflow" && !workflowId)}>
+                <Button type="submit" variant="primary" className="flex-1" disabled={createMut.isPending || !canSubmit}>
                   {createMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
                   {t("scheduler.create_job")}
                 </Button>
