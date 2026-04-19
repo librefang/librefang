@@ -115,10 +115,11 @@ export function ModelsPage() {
     if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
     setConfirmDeleteId(null);
     try {
+      const model = allModels.find(m => m.id === id);
+      const key = model ? modelKey(model) : null;
       await deleteMut.mutateAsync(id);
       addToast(t("models.model_deleted"), "success");
-      const orphan = hiddenModelKeys.find(k => k.endsWith(`:${id}`));
-      if (orphan) unhideModelAction(orphan);
+      if (key && hiddenModelKeys.includes(key)) unhideModelAction(key);
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
 
@@ -727,9 +728,9 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     if (o.frequency_penalty != null) { setFreqPenalty(o.frequency_penalty); setFreqEnabled(true); }
     if (o.presence_penalty != null) { setPresPenalty(o.presence_penalty); setPresEnabled(true); }
     if (o.reasoning_effort) setReasoningEffort(o.reasoning_effort);
-    if (o.use_max_completion_tokens) setUseMaxCompletionTokens(true);
-    if (o.no_system_role) setNoSystemRole(true);
-    if (o.force_max_tokens) setForceMaxTokens(true);
+    if (o.use_max_completion_tokens != null) setUseMaxCompletionTokens(o.use_max_completion_tokens);
+    if (o.no_system_role != null) setNoSystemRole(o.no_system_role);
+    if (o.force_max_tokens != null) setForceMaxTokens(o.force_max_tokens);
     setOverridesLoaded(true);
   }, [overridesQuery.data, overridesLoaded]);
 

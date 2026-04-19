@@ -36,6 +36,7 @@ pub use librefang_llm_driver as llm_driver;
 pub use librefang_llm_driver::llm_errors;
 pub mod loop_guard;
 pub use librefang_runtime_mcp as mcp;
+pub mod mcp_migrate;
 pub use librefang_runtime_mcp::mcp_oauth;
 pub mod mcp_server;
 pub mod media;

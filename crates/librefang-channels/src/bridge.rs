@@ -1021,7 +1021,7 @@ impl BridgeManager {
                                         ref url, ref caption, ref mime_type
                                     } = message.content {
                                         match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await {
-                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })) => Some(blocks),
+                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
                                             _ => None,
                                         }
                                     } else {
@@ -2187,10 +2187,12 @@ async fn dispatch_message(
     } = message.content
     {
         let blocks = download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await;
-        if blocks
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Image { .. }))
-        {
+        if blocks.iter().any(|b| {
+            matches!(
+                b,
+                ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
+            )
+        }) {
             // We have actual image data — send as structured blocks for vision
             dispatch_with_blocks(
                 blocks,
@@ -3647,6 +3649,27 @@ mod tests {
     use crate::types::ChannelType;
     use std::sync::Mutex;
 
+    /// Serialize every test in this module that reads OR writes
+    /// `LIBREFANG_GROUP_ADDRESSEE_GUARD`. The nested
+    /// `should_process_group_message_v2` module has its own copy of this
+    /// pattern for its tests; without serialization at this level too,
+    /// `test_mention_only_*` tests that live in the outer module flake
+    /// under parallel execution — they read the env var through
+    /// `addressee_guard_enabled()` while v2 tests concurrently mutate
+    /// it, and occasionally see `guard=on` when they expect the default.
+    pub(super) static ADDRESSEE_GUARD_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire the env lock and clear the guard var for the duration of
+    /// the test so reads return `false` deterministically. Intended for
+    /// tests that assume the default (guard-off) behavior.
+    pub(super) fn with_guard_off_locked<F: FnOnce()>(f: F) {
+        let _g = ADDRESSEE_GUARD_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
+        f();
+    }
+
     #[test]
     fn test_is_command_allowed_default_allows_everything() {
         // No overrides configured — all commands allowed (current behaviour).
@@ -3933,50 +3956,58 @@ mod tests {
 
     #[test]
     fn test_mention_only_allows_regex_trigger_pattern() {
-        let message = group_text_message("hello MyAgent");
-        let overrides = ChannelOverrides {
-            group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
-            ..Default::default()
-        };
-        assert!(should_process_group_message(
-            "whatsapp", &overrides, &message
-        ));
+        with_guard_off_locked(|| {
+            let message = group_text_message("hello MyAgent");
+            let overrides = ChannelOverrides {
+                group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
+                ..Default::default()
+            };
+            assert!(should_process_group_message(
+                "whatsapp", &overrides, &message
+            ));
+        });
     }
 
     #[test]
     fn test_mention_only_rejects_partial_regex_match() {
-        let message = group_text_message("hello myagenttt");
-        let overrides = ChannelOverrides {
-            group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
-            ..Default::default()
-        };
-        assert!(!should_process_group_message(
-            "whatsapp", &overrides, &message
-        ));
+        with_guard_off_locked(|| {
+            let message = group_text_message("hello myagenttt");
+            let overrides = ChannelOverrides {
+                group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
+                ..Default::default()
+            };
+            assert!(!should_process_group_message(
+                "whatsapp", &overrides, &message
+            ));
+        });
     }
 
     #[test]
     fn test_mention_only_skips_invalid_regex_patterns() {
-        let message = group_text_message("bot please reply");
-        let overrides = ChannelOverrides {
-            group_trigger_patterns: vec!["(".to_string(), "(?i)\\bbot\\b".to_string()],
-            ..Default::default()
-        };
-        assert!(should_process_group_message(
-            "telegram", &overrides, &message
-        ));
+        with_guard_off_locked(|| {
+            let message = group_text_message("bot please reply");
+            let overrides = ChannelOverrides {
+                group_trigger_patterns: vec!["(".to_string(), "(?i)\\bbot\\b".to_string()],
+                ..Default::default()
+            };
+            assert!(should_process_group_message(
+                "telegram", &overrides, &message
+            ));
+        });
     }
 
     #[test]
     fn test_mention_only_keeps_existing_mention_behavior() {
-        let mut message = group_text_message("hello there");
-        message
-            .metadata
-            .insert("was_mentioned".to_string(), serde_json::Value::Bool(true));
-        let overrides = ChannelOverrides::default();
-        assert!(should_process_group_message(
-            "telegram", &overrides, &message
-        ));
+        with_guard_off_locked(|| {
+            let mut message = group_text_message("hello there");
+            message
+                .metadata
+                .insert("was_mentioned".to_string(), serde_json::Value::Bool(true));
+            let overrides = ChannelOverrides::default();
+            assert!(should_process_group_message(
+                "telegram", &overrides, &message
+            ));
+        });
     }
 
     #[test]
@@ -4836,21 +4867,24 @@ mod tests {
         use super::group_text_message;
         use librefang_types::config::{ChannelOverrides, GroupPolicy};
         use serde_json::json;
-        use std::sync::Mutex;
 
-        // Serialize tests that mutate the LIBREFANG_GROUP_ADDRESSEE_GUARD env
-        // var — env mutation is process-global.
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        // Reuse the outer module's env lock so tests across BOTH modules
+        // serialize their reads/writes of LIBREFANG_GROUP_ADDRESSEE_GUARD.
+        // Two independent Mutexes meant v2 tests could mutate the env var
+        // while outer-module `test_mention_only_*` tests read it via
+        // `addressee_guard_enabled()`, causing flakes under `cargo test`
+        // parallel execution.
+        use super::ADDRESSEE_GUARD_ENV_LOCK as ENV_LOCK;
 
         fn with_guard_on<F: FnOnce()>(f: F) {
-            let _g = ENV_LOCK.lock().unwrap();
+            let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             std::env::set_var("LIBREFANG_GROUP_ADDRESSEE_GUARD", "on");
             f();
             std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
         }
 
         fn with_guard_off<F: FnOnce()>(f: F) {
-            let _g = ENV_LOCK.lock().unwrap();
+            let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
             f();
         }

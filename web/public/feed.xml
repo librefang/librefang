@@ -1,0 +1,1513 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>LibreFang Changelog</title>
+  <link href="https://librefang.ai/feed.xml" rel="self" />
+  <link href="https://librefang.ai/changelog/" />
+  <id>https://librefang.ai/feed.xml</id>
+  <updated>2026-04-15T00:00:00Z</updated>
+  <author><name>LibreFang &lt;noreply@librefang.ai&gt;</name></author>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-15</id>
+      <title>LibreFang 2026.4.15</title>
+      <link href="https://librefang.ai/changelog/#2026-4-15" />
+      <updated>2026-04-15T00:00:00Z</updated>
+      <summary type="text">2026.4.15 — 2026-04-15</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add LIBREFANG_DASHBOARD_EMBEDDED_ONLY env var to pin dashboard to embedded assets (#2520) (@neo-wanderer)
+- Add TOTP scope selector in Settings (#2526) (@houko)
+- Add section tab switcher to config category pages (#2532) (@houko)
+- Add voice input button to ChatPage (#2533) (@houko)
+- Swap tab bar and page header positions in config pages (#2534) (@houko)
+- Polish config page layout and UX (#2535) (@houko)
+- Step-by-step provider creation wizard (#2544) (@houko)
+
+### Fixed
+
+- Scope telegram sessions per chat_id to prevent context leakage (#2349) (#2522) (@DaBlitzStein)
+- Honour silent flag in KernelBridgeAdapter sender methods (#2521) (#2523) (@DaBlitzStein)
+- Use is_some_and instead of map_or in webchat asset_path check (#2525) (@houko)
+- Move TOTP scope to ConfigPage via schema (#2527) (@houko)
+- Restore ready-for-review when blockers are cleared (#2528) (@houko)
+- Fall back to npm when pnpm is unavailable in dev command (#2529) (@houko)
+- Check review state before clearing needs-changes on push (#2530) (@houko)
+- Remove needless borrow in serde_json::to_value call (#2531) (@houko)
+- Show disabled mic button when STT not configured (#2536) (@houko)
+- Fix stale state bugs in provider config modal (#2537) (@houko)
+- Move field description to label column (#2538) (@houko)
+- Show field description below input/toggle (#2539) (@houko)
+- Save API key on provider creation and show remove button for all providers (#2540) (@houko)
+- Improve provider auto-detection accuracy and UX (#2542) (@houko)
+- Remove orphaned doc comment causing clippy failure on main (#2543) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-14</id>
+      <title>LibreFang 2026.4.14</title>
+      <link href="https://librefang.ai/changelog/#2026-4-14" />
+      <updated>2026-04-14T00:00:00Z</updated>
+      <summary type="text">2026.4.14 — 2026-04-14</summary>
+      <content type="text"><![CDATA[### Added
+
+- Pass image blocks to CLI via @path references (#2331) (@f-liva)
+- MCP OAuth discovery for Streamable HTTP transport (#2346) (@neo-wanderer)
+- Add require_auth_for_reads to lock down dashboard reads (#2398) (@houko)
+- Per-call deep-thinking toggle and reasoning display (#2423) (@houko)
+- Add audit.anchor_path to redirect the tip-anchor file (#2442) (@houko)
+- Enrich registry cards with manifest metadata (#2452) (@houko)
+- Channel scoping enforcement, proactive LID, heartbeat watchdog, jittered backoff (#2462) (@f-liva)
+- PR review state and issue response tracking labels (#2471) (@houko)
+- Multi-page configuration editor under Configuration nav group (#2473) (@houko)
+- Group addressee detection — stop responding when not actually spoken to (#2480) (@f-liva)
+- Per-provider cost/token limits (#2316) (#2482) (@houko)
+- Add qwen3.6-plus from coding plan (#2494) (@joshuachong)
+- Add echo tracker to drop our own messages reflected back (#2498) (@f-liva)
+
+### Fixed
+
+- Transcode .oga to .ogg before Whisper transcription (#2386) (@f-liva)
+- Relax brittle alibaba-coding-plan model count assertion (#2388) (@houko)
+- Block SSRF via IPv4-mapped IPv6 addresses (#2396) (@houko)
+- Reject path traversal in agent template name param (#2397) (@houko)
+- Require trusted_manifest_signers for signed manifests (#2407) (@houko)
+- Make NonceTracker check_and_record atomic and bounded (#2408) (@houko)
+- Block SSRF via NAT64 well-known prefix (64:ff9b::/96) (#2409) (@houko)
+- Stop leaking sandbox watchdog threads (#2410) (@houko)
+- Extend IPv4-mapped IPv6 SSRF guard to remaining call sites (#2411) (@houko)
+- Clippy regressions from refactor splits (#2404, #2406) (#2412) (@houko)
+- GCRA rate limiter never honoured per-key token exhaustion (#2413) (@houko)
+- Strip parent env before host_shell_exec spawns child (#2417) (@houko)
+- Tighten upload MIME allowlist to match SECURITY.md (#2419) (@houko)
+- Split_message panic on multi-byte UTF-8 at boundary (#2285) (#2420) (@houko)
+- Add default connect/read timeouts to shared HTTP client (#2340) (#2421) (@houko)
+- Lock Owner-only writes away from Admin-role API keys (#2422) (@houko)
+- Copy button silently failing in non-secure contexts (#2424) (@houko)
+- At schedules in the past no longer fire forever (#2337) (#2425) (@houko)
+- Task_claim accepts agent name in addition to UUID (#2330) (#2427) (@houko)
+- Emit stub tool_results when batch is interrupted (#2381) (#2428) (@houko)
+- Actually extract WWW-Authenticate from rmcp AuthRequired (#2429) (@houko)
+- Hot-reload of agent.toml updates ResourceQuota immediately (#2317) (#2430) (@houko)
+- Add external tip anchor to audit log to detect full rewrites (#2431) (@houko)
+- Default delivery to LastChannel instead of None (#2338) (#2432) (@houko)
+- Session_repair phase 3 preserves tool-call boundaries (#2353) (#2433) (@houko)
+- Claude_code fails fast when agent has tools (#2314) (#2434) (@houko)
+- Wire audit log through with_db_anchored by default (#2436) (@houko)
+- Use full viewport width for page content (#2439) (@houko)
+- Enforce capability inheritance at spawn_agent_inner (#2440) (@houko)
+- Terminal WebSocket rejected local-dev daemons with no api_key (#2441) (@houko)
+- Break Feishu bot self-echo loop (#2435) (#2443) (@houko)
+- Extend taint-sink checks to agent_send and web_fetch body/headers (#2444) (@houko)
+- Terminal WebSocket froze after ~10 keystrokes from per-message cap (#2445) (@houko)
+- Cap chat message bubble width for readability (#2446) (@houko)
+- Taint-scan MCP tool-call arguments before send (#2447) (@houko)
+- Derive require_auth_for_reads from api_key when unset (#2448) (@houko)
+- Make overview stats cards responsive at md breakpoint (#2449) (@houko)
+- Tighten recent agents grid and widen running hand chips (#2450) (@houko)
+- Repair mobile layout breakage across pages (#2451) (@houko)
+- Tighten card grid breakpoints across pages (#2453) (@houko)
+- Revert issue auto-label body scan, keep keyword expansion (#2457) (@houko)
+- Match camelCase/snake_case keywords in issue auto-label (#2461) (@houko)
+- Scope canonical context injection per session to stop cross-chat leak (#2464) (@f-liva)
+- Stop killing unrelated process groups in tree-kill path (#2472) (@houko)
+- Bridge LibreFang tools to claude_code driver via MCP config (#2314) (#2478) (@houko)
+- Scope canonical context injection per session to stop cross-chat leak (#2464) (#2490) (@houko)
+- Wire MCP bridge end-to-end for claude_code (#2314) (#2495) (@houko)
+- Use direct libc::kill syscall to prevent Ubuntu CI SIGTERM (#2497) (@houko)
+
+### Changed
+
+- Extract http_client into librefang-http shared crate (#2389) (@houko)
+- Extract metering into librefang-kernel-metering subcrate (#2395) (@houko)
+- Extract oauth flows into librefang-runtime-oauth subcrate (#2400) (@houko)
+- Extract mcp into librefang-runtime-mcp subcrate (#2403) (@houko)
+- Extract drivers and llm_driver trait into subcrates (#2404) (@houko)
+- Extract wasm sandbox and kernel-handle trait into subcrates (#2405) (@houko)
+- Extract hand/template router into librefang-kernel-router subcrate (#2406) (@houko)
+- Remove bare SignedManifest::verify() and inline it as private (#2437) (@houko)
+- Rename librefang-runtime-drivers to librefang-llm-drivers (#2467) (@houko)
+- Extract pure helpers and tests out of kernel.rs (#2469) (@houko)
+
+### Documentation
+
+- Describe prompt-injection scanner as a heuristic (#2399) (@houko)
+- Audit chain is tamper-evident only against partial edits (#2415) (@houko)
+- Narrow the secret-zeroization claim to its actual scope (#2416) (@houko)
+- Describe taint tracking as a two-sink pattern match (#2426) (@houko)
+- Document additive penalty assumption in fallback recover (#2465) (@f-liva)
+
+### Maintenance
+
+- Stabilize load_endpoint_latency against shared-runner jitter (#2418) (@houko)
+- Remove stray empty .codex marker file (#2454) (@houko)
+- Broaden issue auto-label coverage and add backfill (#2455) (@houko)
+- Refresh dashboard screenshot and drop unused images (#2456) (@houko)
+- Address houko follow-ups on oga transcode (#2459) (@f-liva)
+- Tidy repo metadata and remove stale api-docs (#2466) (@houko)
+- PR conflict/CI-failure detection and issue status labels (#2481) (@houko)
+- Sync Cargo.lock with librefang-api toml_edit dep (#2500) (@houko)
+- Sync Cargo.lock after librefang-llm-driver dep addition (#2501) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-13</id>
+      <title>LibreFang 2026.4.13</title>
+      <link href="https://librefang.ai/changelog/#2026-4-13" />
+      <updated>2026-04-13T00:00:00Z</updated>
+      <summary type="text">2026.4.13 — 2026-04-13</summary>
+      <content type="text"><![CDATA[### Added
+
+- Allow editing hand agent model settings from agents page (#2335) (@leszek3737)
+- Add config-driven session_mode for agent triggers (#2341) (@neo-wanderer)
+- Telegram rich media, polls, interactive commands, and channel_send tool (#2356) (@leszek3737)
+
+### Fixed
+
+- Decryption retry, streaming tag leak, session isolation (#2217) (@f-liva)
+- Inherit kernel default_model instead of hardcoded Anthropic (#2299) (@houko)
+- Per-agent loading state so streaming one agent doesn't block others (#2324) (@houko)
+- Write MCP server config as TOML table, not stringified JSON (#2327) (@houko)
+- Load secrets.env autonomously at boot time (#2359) (@f-liva)
+- Prevent zombie processes on shutdown (#2360) (@f-liva)
+- Refuse direct DELETE on hand-spawned agents + clarify revert warning (#2361) (@houko)
+- Normalize MIME type parameters before allowlist check (#2362) (@f-liva)
+- Resolve LID JIDs to phone numbers for owner detection (#2363) (@f-liva)
+- Harden poll_options parsing and poll context cleanup (#2364) (@houko)
+- Deterministic prompt context ordering and raise truncation cap (#2365) (@houko)
+- Stop Qwen driver from leaking raw JSON into chat (#2366) (@f-liva)
+- Let FallbackDriver recover from transient unhealthiness (#2367) (@f-liva)
+- Clear stale per-agent overrides on provider switch (#2371) (@neo-wanderer)
+- Scrub NO_REPLY sentinel in every reply path (#2373) (@f-liva)
+- Restore /message/send-audio endpoint accidentally removed in #2217 (#2376) (@f-liva)
+- Support "date" metric format and drop ureq from cli (#2382) (@houko)
+
+### Performance
+
+- Shrink dev debug info to line-tables-only (#2378) (@houko)
+
+### Maintenance
+
+- Split Docker image and deploy status (#2323) (@houko)
+- Fix max_tokens assertions after pure-text short-circuit (#2325) (@houko)
+- Strengthen telegram sanitizer coverage (#2334) (@leszek3737)
+- Fix rustfmt on upsert_mcp_server test assert (#2358) (@houko)
+- Replace cat with sleep in process_manager tests to fix flake (#2375) (@houko)
+- Skip security and install-smoke on unrelated PRs (#2377) (@houko)
+- Apply cargo fmt to runtime drivers (#2380) (@houko)
+
+
+## [Unreleased]
+
+### Added
+
+- Config-driven session mode for agent triggers (`session_mode = "new" | "persistent"`) — per-agent default with per-trigger override
+
+### Security
+
+- **BREAKING**: `require_auth_for_reads` now defaults to *enabled* whenever any form of authentication is configured (`api_key`, `user_api_keys`, or dashboard credentials). Previously the flag had to be set explicitly, leaving read endpoints open even on instances with an `api_key`. Operators who deliberately want open reads on an authenticated instance (e.g. behind a trusted reverse proxy) must now set `require_auth_for_reads = false` in `config.toml`. A boot-time INFO log records when the flag is auto-enabled. (#2448)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-11</id>
+      <title>LibreFang 2026.4.11</title>
+      <link href="https://librefang.ai/changelog/#2026-4-11" />
+      <updated>2026-04-11T00:00:00Z</updated>
+      <summary type="text">2026.4.11 — 2026-04-11</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add WebSocket terminal with PTY backend and xterm frontend  (Phase 1) (#2229) (@leszek3737)
+- Claude Code CLI profile rotation for rate-limit resilience (#2249) (@f-liva)
+- Add MCP Servers management page (#2278) (@houko)
+- Raise MSRV to 1.94.1 and keep stable toolchain (#2302) (@houko)
+- Uninstall hand (#2312) (@houko)
+
+### Fixed
+
+- Change Docker setup to fix permissions for LIBREFANG_HOME (#2240) (@Cruel)
+- Also ignore secrets.env (dashboard-managed env file) (#2248) (@DaBlitzStein)
+- Localize agent template copy for zh users (#2257) (@houko)
+- Restore approval context and dashboard auth flows (#2272) (@houko)
+- Exclude Hand sub-agents from channel routing fallback (#2276) (@houko)
+- Accept claude-code (hyphen) in CLI profile rotation guard (#2284) (@f-liva)
+- Replace --verbose with --include-partial-messages for qwen driver (#2290) (@f-liva)
+- Add missing cli_profile_dirs to DefaultModelConfig literals (#2296) (@houko)
+- Delegate first-boot config to librefang init (#2297) (@houko)
+- Scan workspaces/ dir to persist locally-installed hands across boot (#2298) (@houko)
+- Hide delete button for built-in providers, flag custom (#2300) (@houko)
+- Mark manifest mut in parse_manifest (#2306) (@houko)
+- Stop middleware path normalization from swallowing GET / (#2307) (@houko)
+- Preserve pending Telegram updates across daemon restart (#2309) (@houko)
+- Stop agent loop on pure-text max_tokens overflow (#2310) (@houko)
+- Make Hands Settings tab actually editable (#2311) (@houko)
+- Wire ConPTY resize on Windows (#2313) (@houko)
+
+### Changed
+
+- Harden and optimize Telegram adapter (#2223) (@leszek3737)
+
+### Maintenance
+
+- Cover full-path context hook launchers (#2255) (@houko)
+- Cover wechat and wecom multi-account config parsing (#2258) (@houko)
+
+### Other
+
+- Feat(ws) harden terminal websocket follow-ups after #2229 (#2304) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-10</id>
+      <title>LibreFang 2026.4.10</title>
+      <link href="https://librefang.ai/changelog/#2026-4-10" />
+      <updated>2026-04-10T00:00:00Z</updated>
+      <summary type="text">2026.4.10 — 2026-04-10</summary>
+      <content type="text"><![CDATA[### Added
+
+- Per-channel session isolation via deterministic UUID v5 (#2097) (@f-liva)
+- Save channel images as files instead of inline base64 (#2098) (@f-liva)
+- TOTP second-factor for critical tool approvals (#2131) (@houko)
+- Proper resource composition for hand agents (#2133) (@houko)
+- Add extra_params support for openai compatible model (#2181) (@houko)
+- Add config export/backup endpoint and UI button (#2186) (@houko)
+- Prefill TOML editor from template selection (#2187) (@houko)
+- Add per-channel auto-routing with configurable strategies (#2189) (@houko)
+- Allow hooks to access vault secrets via allowed_secrets (#2216) (@houko)
+- Add [config] section support to plugin.toml (#2218) (@houko)
+- Add [[requires]] system binary checks to plugin.toml (#2219) (@houko)
+
+### Fixed
+
+- Detect "[no reply needed]" as silent response (#2093) (@f-liva)
+- Harden agent loop tool flow and trim handling (#2135) (@leszek3737)
+- Timezone-aware schedule creation (#2138) (@f-liva)
+- Replace librefang.dev with librefang.ai (#2147) (@houko)
+- Glob-match declared tools and auto-promote shell_exec exec_policy (#2148) (@houko)
+- Persist mcp server updates in patch agent (#2151) (@TechWizard9999)
+- Use codex exec for codex cli driver (#2153) (@TechWizard9999)
+- Improve Claude Code detection for keychain auth and non-login shells (#2166) (@x86txt)
+- Show active agent count instead of total in overview card (#2170) (@DaBlitzStein)
+- Handle SkillHub search response format with proper headers (#2171) (@DaBlitzStein)
+- Suppress CMD window flash on Windows (#2159) (#2176) (@houko)
+- Resolve hand.toml agent scan conflict (#2136) (#2177) (@houko)
+- Parameter errors trigger self-correction not user report (#2144) (#2178) (@houko)
+- Resolve pre-existing clippy and test compile failures (#2180) (@houko)
+- Multi-bot Telegram routing uses account_id, not first-match on allowed_users (#2183) (@houko)
+- Resolve build errors and clippy warnings (#2184) (@houko)
+- Skip auto-init when piped via curl, prompt user to run manually (#2190) (@houko)
+- Clean up post-install messaging for piped installs (#2192) (@houko)
+- Replace as_deref() with as_ref() for ChannelOverrides in bridge.rs (#2193) (@houko)
+- Add missing extra_body field to make_completion_request (#2197) (@houko)
+- Remove dead completion_timeout_override and build_completion_request (#2198) (@houko)
+- Derive Default for PluginManifest (#2205) (@houko)
+- Add INFO logs for all ingest hook success paths (#2213) (@houko)
+- Reduce agent count display lag on state changes (#2215) (@houko)
+- Decryption retry, streaming tag leak, session isolation (#2217) (@f-liva)
+- Filter tool_use/tool_result blocks from chat rendering (#2220) (@f-liva)
+- Resolve default provider in agent detail endpoint (#2221) (@DaBlitzStein)
+- Resolve default provider before creating driver (#2222) (@DaBlitzStein)
+- Add error handling to channel config dialog (#2224) (@DaBlitzStein)
+- Default to unconfigured tab when no channels are set up (#2225) (@DaBlitzStein)
+- Propagate ClawHub/Skillhub errors instead of returning 200 OK with empty items (#2231) (@DaBlitzStein)
+- Fix compile errors and rustfmt from Custom variant merge (#2234) (@houko)
+- Show embedding status ok when fts_only mode is active (#2236) (@houko)
+- Rustfmt formatting in snapshot handler (#2237) (@houko)
+- Rustfmt formatting in config routes (#2238) (@houko)
+- Merge extra_body into JSON Value to avoid duplicate keys (#2239) (@shilkazx)
+- Scope RwLockReadGuard before await in dashboard_snapshot (#2241) (@houko)
+- Increase dark theme surface opacity for readable dropdowns (#2242) (@houko)
+- Always load marketplace skills even without search keyword (#2243) (@houko)
+
+### Changed
+
+- Typed enums, O(1) indexes, and typed persistence v4 (#2161) (@leszek3737)
+
+### Maintenance
+
+- Apply rustfmt formatting across bridge, router, kernel, system (#2195) (@houko)
+- Remove extra blank line in agent_loop.rs (#2203) (@houko)
+- Remove mempalace-indexer from contrib — moved to registry (#2247) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-7</id>
+      <title>LibreFang 2026.4.7</title>
+      <link href="https://librefang.ai/changelog/#2026-4-7" />
+      <updated>2026-04-07T00:00:00Z</updated>
+      <summary type="text">2026.4.7 — 2026-04-07</summary>
+      <content type="text"><![CDATA[### Fixed
+
+- Resume agent loops after approval without blocking (#2101) (@leszek3737)
+- Skip Discord notification when release workflows are cancelled (#2129) (@houko)
+- Embed dashboard in release binaries (#2132) (@houko)
+
+### Maintenance
+
+- Add desktop build/dev recipes to justfile (#2134) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-6</id>
+      <title>LibreFang 2026.4.6</title>
+      <link href="https://librefang.ai/changelog/#2026-4-6" />
+      <updated>2026-04-06T00:00:00Z</updated>
+      <summary type="text">2026.4.6 — 2026-04-06</summary>
+      <content type="text"><![CDATA[### Added
+
+- Hot-reload skills dir and per-agent manifest (#2069) (@houko)
+- Unify full-section empty/error states (#2088) (@houko)
+- Focus trap + aria-modal + more n-shortcut coverage (#2092) (@houko)
+- Add send-audio endpoint for voice notes and audio files (#2099) (@f-liva)
+- Language-agnostic hook runtime (V / Go / Deno / Node / native) (#2100) (@houko)
+
+### Fixed
+
+- Allow tool retry on failure instead of early loop termination (#2065) (@neo-wanderer)
+- Sync openclaw/openfang with current KernelConfig schema (#2066) (@houko)
+- Stop stale messages_before index from breaking auto_memorize & append_canonical (#2068) (@houko)
+- Agent_send/kill fall through to name lookup for stale UUIDs (#2070) (@houko)
+- Reject missing required tool params instead of silent empty (#2071) (@houko)
+- Surface silent session-cleanup failures and panic on empty chunks (#2072) (@houko)
+- Return 404 for missing agents and reject malformed target_agent_id (#2073) (@houko)
+- Log when webhook/dingtalk bridge drops incoming messages (#2074) (@houko)
+- Surface agent tick panics instead of silent join drop (#2075) (@houko)
+- Emit skills/workspace/tool_blocklist during OpenClaw import (#2076) (@houko)
+- Providers.rs persistence failures + expect() panic (#2077) (@houko)
+- Surface silent DB errors and wrap merge updates in tx (#2078) (@houko)
+- Surface episodic memory persist failures in agent_loop (#2079) (@houko)
+- Sanitize user-controlled identity fields in prompt builder (#2080) (@houko)
+- Reload path must clamp bounds and clamp max_cron_jobs=0 (#2081) (@houko)
+- Close SSRF via redirect + URL-encoding bypass in taint (#2082) (@houko)
+- Route media tools through workspace sandbox (#2083) (@houko)
+- Guard sandbox ptr arithmetic with checked_add (#2084) (@houko)
+- ChatPage session-cache save effect + tool call keys (#2085) (@houko)
+- Cascade agent-scoped tables on remove_agent (#2086) (@houko)
+- Authorize cron_cancel + cap knowledge_query depth (#2087) (@houko)
+- Use PAT for release creation so dashboard-build fires (#2094) (@houko)
+- Suppress error messages in groups, show rate-limit in DMs only (#2095) (@f-liva)
+- Auto-close unclosed HTML tags, plain-text fallback, and reply-to photo support (#2096) (@f-liva)
+- Drop Ubuntu RUST_TEST_THREADS to 1 (#2117) (@houko)
+- Unify agent manifest path on workspaces/agents/ (#2118) (@houko)
+
+### Changed
+
+- Align URL hierarchy with sidebar nav groups (#2119) (@houko)
+
+### Maintenance
+
+- Fix test_image_analyze_missing_file after sandbox wiring (#2103) (@houko)
+- Ignore plugin scaffold templates (#2120) (@houko)
+
+### Reverted
+
+- V2026.4.6 stable release (was meant to be beta15) (#2126) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-5</id>
+      <title>LibreFang 2026.4.5</title>
+      <link href="https://librefang.ai/changelog/#2026-4-5" />
+      <updated>2026-04-05T00:00:00Z</updated>
+      <summary type="text">2026.4.5 — 2026-04-05</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add inline tool use display to chat UI (#2031) (@neo-wanderer)
+- Support username and @username in allowed_users filter (#2036) (@leszek3737)
+- Add alibaba coding plan as provider (#2040) (@joshuachong)
+- Add hidden models — hide/unhide models from selectors (#2045) (@leszek3737)
+- HITL notification engine, batch ops, modify-and-retry, audit log (#2046) (@houko)
+- Add media generation page (#2051) (@houko)
+- Redesign Hands page with running strip and richer cards (#2052) (@houko)
+- Redesign Hands detail modal with hero, action bar, metrics strip (#2053) (@houko)
+- Polish Hands list — grid skeleton, empty states, degraded (#2054) (@houko)
+- Per-channel command policy for public-facing bots (#2063) (@houko)
+
+### Fixed
+
+- Stop embedding dashboard artifacts in release commits (#2039) (@houko)
+- Remove tracked static/react/ build artifacts from git (#2041) (@houko)
+- Trigger dashboard build on release publish (#2043) (@houko)
+- Strip provider prefix from agent fallback_models (#2047) (@houko)
+- Ensure static/react dir exists for include_dir! (#2048) (@houko)
+- Defer WebSocket close until connection is established (#2050) (@houko)
+- Hands detail modal tab bar height, underline, and schedules label (#2055) (@houko)
+- Remove count pills from Hands detail tabs to guarantee equal height (#2056) (@houko)
+- Auto-wire self handle in streaming path for inter-agent tools (#2061) (@houko)
+- Scope per-turn recall by peer_id to stop cross-user leaks (#2062) (@houko)
+
+### Documentation
+
+- Update dashboard build references after static/react removal (#2042) (@houko)
+- Clarify routing lives in agent manifest, not config.toml (#2060) (@houko)
+
+### Maintenance
+
+- Fix 20 pre-existing TypeScript errors (#2049) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-4</id>
+      <title>LibreFang 2026.4.4</title>
+      <link href="https://librefang.ai/changelog/#2026-4-4" />
+      <updated>2026-04-04T00:00:00Z</updated>
+      <summary type="text">2026.4.4 — 2026-04-04</summary>
+      <content type="text"><![CDATA[### Added
+
+- Interactive model switcher dropdown in connection bar (#1995) (@neo-wanderer)
+- Custom model management, workflow scheduling, and HandsPage fixes (#2028) (@houko)
+- Wire up channel test/reload and session labels (#2030) (@houko)
+- Serve dashboard from runtime directory with auto-sync (#2032) (@houko)
+
+### Fixed
+
+- Prevent duplicate TOML keys during config upgrade (#2025) (@houko)
+- Unify scheduling system, improve dashboard and hand UX (#2026) (@houko)
+- Sync Cargo.lock for flate2/tar dependencies (#2034) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-3</id>
+      <title>LibreFang 2026.4.3</title>
+      <link href="https://librefang.ai/changelog/#2026-4-3" />
+      <updated>2026-04-03T00:00:00Z</updated>
+      <summary type="text">2026.4.3 — 2026-04-03</summary>
+      <content type="text"><![CDATA[### Fixed
+
+- Use plain reqwest client in integration tests (#2000) (@houko)
+- Add elevenlabs support to API key test endpoints (#2005) (@Chukwuebuka-2003)
+- Add retry logic to release asset upload steps (#2007) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-2</id>
+      <title>LibreFang 2026.4.2</title>
+      <link href="https://librefang.ai/changelog/#2026-4-2" />
+      <updated>2026-04-02T00:00:00Z</updated>
+      <summary type="text">2026.4.2 — 2026-04-02</summary>
+      <content type="text"><![CDATA[### Added
+
+- Press 'r' in just dev to git pull and rebuild (#1949) (@houko)
+- Inline session switcher in chat (#1953) (@houko)
+- Dev hotkeys and auto-pull (#1955) (@houko)
+
+### Fixed
+
+- Expose cleanup_orphan_sessions on MemorySubstrate (#1943) (@houko)
+- Skip non-GET requests in service worker cache (#1944) (@houko)
+- Route hand agent workspace to hands/ instead of agents/ (#1945) (@houko)
+- Preserve depends_on when instantiating templates (#1946) (@houko)
+- Add proxy timeout and WebSocket support for dev server (#1947) (@houko)
+- Respect usage_footer config in chat message footer (#1948) (@houko)
+- Git pull from origin/main in dev hotkey (#1950) (@houko)
+- Validate provider keys and model availability on boot (#1951) (@houko)
+- Use fetch+rebase for dev 'r' hotkey (#1952) (@houko)
+- Remove unused binary_clone variable (#1954) (@houko)
+- Match usage_footer values to backend snake_case (#1956) (@houko)
+- Serialize usage_footer with serde instead of Debug format (#1957) (@houko)
+- Point skillhub API to skillhub.tencent.com (#1958) (@houko)
+- Skillhub install via COS direct download (#1959) (@houko)
+- Remove hardcoded default models and add model availability probe (#1960) (@houko)
+- Install FangHub skills from local registry instead of GitHub (#1961) (@houko)
+- Infer provider from model name in fallback resolution (#1962) (@houko)
+- FangHub install and search use local registry (#1963) (@houko)
+- Mark unreachable local providers as unavailable (#1964) (@houko)
+- Assistant agent model not updated when config changes (#1965) (@houko)
+- Test provider should check CLI availability before requiring API key (#1966) (@houko)
+- Local provider status driven by probe, not detect_auth (#1967) (@houko)
+- Filter hand agents from analytics and telemetry (#1968) (@houko)
+- Rename plugin source to plugin marketplace in Chinese locale (#1969) (@houko)
+- Remove install button from plugins page header (#1970) (@houko)
+- Startup health check respects explicit api_key_env config (#1973) (@houko)
+
+### Changed
+
+- Remove bundled system and add per-hand skill install (#1942) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-4-1</id>
+      <title>LibreFang 2026.4.1</title>
+      <link href="https://librefang.ai/changelog/#2026-4-1" />
+      <updated>2026-04-01T00:00:00Z</updated>
+      <summary type="text">2026.4.1 — 2026-04-01</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add ssrf_allowed_hosts allowlist for web_fetch (#1899) (@houko)
+- Add embedding provider auto-detection (#1901) (@houko)
+- Translate built-in agent names in dashboard (#1913) (@houko)
+
+### Fixed
+
+- Sync streaming fixes (#1897) (@houko)
+- Sync config defaults (#1898) (@houko)
+- Trigger ReloadSkills on skills config TOML changes (#1900) (@houko)
+- Prevent users=[] conflict with [[users]] array-of-tables (#1904) (@houko)
+- Fix file_write failed bug when create directory with non-exists … (#1905) (@shilkazx)
+- Google_tts size check and is_ssml false-positive test coverage (#1906) (@houko)
+- Prevent NO_REPLY token from leaking in group chats (#1908) (@f-liva)
+- Resolve symlinked workspace roots on macOS (#1910) (@houko)
+
+### Maintenance
+
+- Fetch full tag history so diff link is populated (#1907) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-3-31</id>
+      <title>LibreFang 2026.3.31</title>
+      <link href="https://librefang.ai/changelog/#2026-3-31" />
+      <updated>2026-03-31T00:00:00Z</updated>
+      <summary type="text">2026.3.31 — 2026-03-31</summary>
+      <content type="text"><![CDATA[### Fixed
+
+- Replace _redirects with _worker.js for SPA routing (#1824) (@houko)
+- Add auto-init step to Windows installer (#1825) (@houko)
+- Auto-init on first run for start/chat commands (#1826) (@houko)
+- Resolve all open issues (#1827 #1828 #1829 #1830 #1832) (#1834) (@houko)
+- Add missing message_timeout_secs in test DefaultModelConfig (#1835) (@houko)
+- Add missing message_timeout_secs in DefaultModelConfig initializers (#1836) (@houko)
+- Remove needless borrow for clippy (Rust 1.94) (#1838) (@houko)
+
+### Documentation
+
+- Fix development guide with just usage and dashboard debugging (#1831) (@houko)
+- Add Windows exe manual install guide (#1833) (@houko)
+
+### Maintenance
+
+- Fix workflow trigger issues and add concurrency controls (#1822) (@houko)
+- Remove redundant web-lint workflow (#1823) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-3-30</id>
+      <title>LibreFang 2026.3.30</title>
+      <link href="https://librefang.ai/changelog/#2026-3-30" />
+      <updated>2026-03-30T00:00:00Z</updated>
+      <summary type="text">2026.3.30 — 2026-03-30</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add configurable IMAP email reader (#1322) (@devatsecure)
+- Add message debounce with shutdown flush (#1684) (@Chukwuebuka-2003)
+- Convert markdown to WhatsApp formatting (#1733) (@f-liva)
+- Add WeCom callback mode UI (#1773) (@houko)
+- Add AGENTS.md for AI assistant context (#1779) (@houko)
+- Add password change support (#1780) (@houko)
+- Add registry_mirror for faster marketplace access in China (#1783) (@houko)
+- Add wildcard pattern support for tool capabilities (#1801) (@houko)
+- Add voice channel adapter with WebSocket server (#1802) (@houko)
+- Add DingTalk stream mode support (#1804) (@houko)
+- Auto-init config and copy example on first just dev (#1808) (@houko)
+- Add Streamable HTTP transport, custom headers, and browser.enabled config (#1809) (@houko)
+
+### Fixed
+
+- Auth bootstrap for protected sessions (#1687) (@TechWizard9999)
+- Allow Windows absolute paths in secrets.env and config.toml writes (#1770) (@SenZhangAI)
+- Load full workflow detail after template instantiation (#1772) (@SenZhangAI)
+- Add event_id dedup to feishu adapter (#1776) (@houko)
+- Skip disabled agents during background startup (#1777) (@houko)
+- Stop hiding hand agents from chat sidebar (#1778) (@houko)
+- Align probe result fields with dashboard (#1781) (@houko)
+- Handle all HTTP error codes in provider test (#1782) (@houko)
+- Refresh provider catalog in-place after registry write (#1784) (@houko)
+- Add versioned migration flow with best-effort fallback (#1785) (@houko)
+- Improve NO_REPLY detection, raise history limit, preserve user messages (#1787) (@f-liva)
+- Don't cancel in-progress runs on main branch (#1788) (@houko)
+- Use per-SHA concurrency group on main to prevent SIGTERM (#1794) (@houko)
+- Install npm in runtime image (#1799) (@j5bart)
+- Route Telegram messages to correct agent (#1803) (@houko)
+- Throttle Ubuntu test to prevent OOM SIGTERM (#1805) (@houko)
+- Limit nextest to 1 concurrent test binary on Ubuntu (#1807) (@houko)
+- Respect default_agent in channel message routing (#1810) (@houko)
+- Propagate group context and @mention detection (#1811) (@houko)
+- Complete group chat support (P1-P3) (#1812) (@houko)
+- Use mutable default for non-exhaustive config struct (#1814) (@houko)
+- Add missing PromptContext fields from WhatsApp group PR (#1816) (@houko)
+- Re-apply provider URLs after runtime catalog sync (#1818) (@leszek3737)
+- Remove duplicate is_group/was_mentioned in PromptContext (#1820) (@houko)
+
+### Other
+
+- Update dashboard image in markdown (#1746) (@Jengro777)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-3-28</id>
+      <title>LibreFang 2026.3.28</title>
+      <link href="https://librefang.ai/changelog/#2026-3-28" />
+      <updated>2026-03-28T00:00:00Z</updated>
+      <summary type="text">2026.3.28 — 2026-03-28</summary>
+      <content type="text"><![CDATA[### Added
+
+- TUI guide for free provider setup on first run (#1731) (@houko)
+- Add set-as-default button to provider UI (#1753) (@houko)
+
+### Fixed
+
+- Use English for shared contacts label (#1732) (@f-liva)
+- Use live default model for provider auth checks (#1748) (@TechWizard9999)
+- Hot-reload Wecom channel config without restart (#1754) (@houko)
+- Use effective default provider instead of hardcoded OpenRouter (#1755) (@houko)
+- Add parse_mode and sanitization to streaming initial message (#1759) (@f-liva)
+- Avoid blocking_write panic in daemon on Termux/Android (#1765) (@houko)
+
+### Maintenance
+
+- Batch upgrade dependencies (#1752) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-3-26</id>
+      <title>LibreFang 2026.3.26</title>
+      <link href="https://librefang.ai/changelog/#2026-3-26" />
+      <updated>2026-03-26T00:00:00Z</updated>
+      <summary type="text">2026.3.26 — 2026-03-26</summary>
+      <content type="text"><![CDATA[### Added
+
+- Persist workflow run state to survive daemon restarts (#1657) (@houko)
+- Add nvidia/nim aliases for nvidia-nim provider (#1660) (@houko)
+- Sync and serve channel metadata from registry (#1661) (@houko)
+- Integrate goal system into agent loop and prompt builder (#1663) (@houko)
+- Migrate MCP stdio transport to rmcp SDK, fix env leak (#1667) (@houko)
+- Implement all missing hot-reload actions (#1679) (@houko)
+- Pluggable VectorStore backend with HTTP implementation (#1691) (@houko)
+- Multimodal memory schema foundation for image indexing (#1692) (@houko)
+- Add 5 operator-facing config fields (tool_timeout, upload_size, concurrency, call_depth, body_size) (#1709) (@houko)
+- Add /api/registry/schema endpoint for dashboard form generation (#1715) (@houko)
+- Add upgrade mode to librefang init (#1723) (@houko)
+- Replace WeCom app with intelligent bot WebSocket adapter (#1729) (@houko)
+
+### Fixed
+
+- Replace unsafe pointer mutation in budget config updates (#1637) (@houko)
+- Make metering quota check and usage record atomic (#1638) (@houko)
+- Add TTL-based expiration for A2A task store (#1639) (@houko)
+- Track background tasks for graceful shutdown (#1640) (@houko)
+- Use atomic DashMap entry API for agent registry name index (#1641) (@houko)
+- Replace production panics with error handling (#1642) (@houko)
+- Support multiple Hand instances with instance-scoped agent IDs (#1643) (@houko)
+- Auto-patch node-gyp on Termux/Android for better-sqlite3 native build (#1649) (@houko)
+- Use centralized http_client to avoid rustls-platform-verifier panic on Termux (#1650) (@houko)
+- Centralize registry sync to prevent parallel git clone races (#1651) (@houko)
+- Pin DNS resolution to prevent SSRF rebinding attacks (#1653) (@houko)
+- Add 8 missing fields to strict config validation (#1654) (@houko)
+- Log warnings for malformed LLM tool call arguments (#1655) (@houko)
+- Add per-trigger cooldown to prevent event storms (#1656) (@houko)
+- Resolve WhatsApp gateway config path from $HOME instead of hardcoded /data/ (#1658) (@houko)
+- Enforce workspace sandbox and tool capability checks (#1665) (@houko)
+- Dashboard auth dialog never shown when api_key is configured (#1666) (@houko)
+- Add dropped event monitoring to event bus (#1668) (@houko)
+- Docker symlink, memory merge, workflow conditions, config test (#1670) (@houko)
+- Enforce tool call and cost quotas in scheduler (#1671) (@houko)
+- Apply cache token discount and update model prices (#1672) (@houko)
+- Implement OAuth refresh token flow (#1673) (@houko)
+- Replace XOR obfuscation with Argon2 key wrapping (#1674) (@houko)
+- Make config hot-reload atomic with epoch counter (#1676) (@houko)
+- Remove dead client field from WebFetchEngine (#1678) (@houko)
+- Restore backward-compatible agent IDs for single-instance hands (#1680) (@houko)
+- Re-land SSRF DNS pinning to prevent TOCTOU rebinding attacks (#1681) (@houko)
+- Budget enforcement, complete API error migration, cache invalidation (#1683) (@houko)
+- Clippy warnings and rustfmt from recent merges (#1685) (@houko)
+- Update hand tests for legacy agent ID format (#1686) (@houko)
+- Sync workflow templates from registry on boot (#1688) (@houko)
+- Remove workflows from registry sync (kernel handles this separately) (#1689) (@houko)
+- Webchat responses silently dropped due to stream timeout and missing routing context (#1690) (@houko)
+- Resolve compilation errors from merged PR conflicts (#1712) (@houko)
+- Suppress clippy::manual_clamp in clamp_bounds (#1716) (@houko)
+- Remove dangling doc comment in ws.rs (#1717) (@houko)
+- Wrap load_templates_from_dir with block_in_place (#1719) (@houko)
+- Repair test failures from goal system merge (#1720) (@houko)
+- Recognize all available auth statuses for custom providers in WebUI (#1721) (@houko)
+- Correct test expectations for metering and workflow collect (#1722) (@houko)
+- Accept "Failed to resolve" error in Windows capability test (#1725) (@houko)
+- Auto-detect default LLM provider, fix WeChat QR flashing (#1727) (@houko)
+
+### Changed
+
+- Standardize API error response format (#1646) (@houko)
+- Deduplicate LLM driver request building and fix streaming (#1669) (@houko)
+- Deduplicate constants and auto-generate user-agent version (#1693) (@houko)
+- Remove pub const provider URLs, inline in driver registry (#1695) (@houko)
+- Extract registry cache TTL into configurable RegistryConfig (#1698) (@houko)
+- Extract API rate limiting constants into RateLimitConfig (#1701) (@houko)
+- Extract compaction constants into CompactionConfig (#1704) (@houko)
+- Extract trigger system constants into TriggersConfig (#1705) (@houko)
+- Extract channel timeout and polling constants into per-channel config (#1707) (@houko)
+- Move workflow template sync from kernel boot to registry_sync (#1713) (@houko)
+
+### Performance
+
+- Cache available_tools computation per agent (#1644) (@houko)
+
+### Maintenance
+
+- Extract build_agent_manifest_toml from tool_agent_spawn and test (#1648) (@aimlyo)
+- Remove bundled integration templates from source tree (#1659) (@houko)
+- Fix formatting issues caught by CI (#1714) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-3-25</id>
+      <title>LibreFang 2026.3.25</title>
+      <link href="https://librefang.ai/changelog/#2026-3-25" />
+      <updated>2026-03-25T00:00:00Z</updated>
+      <summary type="text">2026.3.25 — 2026-03-25</summary>
+      <content type="text"><![CDATA[### Added
+
+- TUI multi-select provider menu in deploy script (#1618) (@houko)
+- Add publish links to SDK release job summary (#1623) (@houko)
+- Limit-the-degrees-of-freedom-of-agent_spawn (#1624) (@aimlyo)
+
+### Fixed
+
+- Read from /dev/tty in deploy script for curl-pipe compatibility (#1616) (@houko)
+- TUI arrow key navigation crashes due to set -e (#1620) (@houko)
+- Add -- to grep patterns in release workflows (#1622) (@houko)
+- Use isolated test dir for model_catalog tests (#1627) (@houko)
+- Resolve DMG asset name mismatch in Homebrew Cask sync (#1628) (@houko)
+- Embed contributor avatars as base64 in SVG (#1630) (@houko)
+- Always tag Docker image as :latest (#1631) (@houko)
+
+### Maintenance
+
+- Stop marking beta/rc as GitHub prerelease (#1626) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-3-24</id>
+      <title>LibreFang 2026.3.24</title>
+      <link href="https://librefang.ai/changelog/#2026-3-24" />
+      <updated>2026-03-24T00:00:00Z</updated>
+      <summary type="text">2026.3.24 — 2026-03-24</summary>
+      <content type="text"><![CDATA[### Added
+
+- Implement depends_on DAG execution for workflow steps (#1440) (@houko)
+- Add workflow template API endpoints (#1442) (@houko)
+- Wire thinking model configuration into agent loop (#1443) (@houko)
+- Mobile responsive + PWA + login + skill output persistence (#1445) (@houko)
+- Implement session context injection with multiple sources (#1448) (@houko)
+- Save existing workflow as reusable template (#1449) (@houko)
+- Add Shell/Bash skill runtime (#1450) (@houko)
+- Add push messaging API for agents to send to channels (#1451) (@houko)
+- Add /btw ephemeral side question command (#1452) (@houko)
+- Add structured output (JSON/JSON Schema) for agents (#1453) (@houko)
+- Add session export/import for context hibernation (#1454) (@houko)
+- Configurable heartbeat timeout and pruning per agent (#1455) (@houko)
+- Cross-session wake via target_agent on triggers (#1456) (@houko)
+- Add interactive message payloads for Telegram and Slack (#1457) (@houko)
+- Add PII privacy controls with pseudonymization and redaction (#1458) (@houko)
+- Tool-level authorization with per-sender and channel-specific policies (#1459) (@houko)
+- Subagent context inheritance in workflow steps (#1460) (@houko)
+- Lazy-load LLM driver cache for improved runtime performance (#1461) (@houko)
+- Add Amazon Bedrock embedding driver with SigV4 signing (#1462) (@houko)
+- FTS5 full-text session search with API endpoint (#1463) (@houko)
+- Message injection between tool calls (mid-turn interrupt) (#1464) (@houko)
+- Render LaTeX in chat (#1467) (@TechWizard9999)
+- Automatic memory chunking for long documents (#1468) (@houko)
+- Input sanitizer for prompt injection detection (#1469) (@houko)
+- Add Android (aarch64) cross-compilation for Termux users (#1470) (@houko)
+- Time-based memory decay for hierarchical memory management (#1471) (@houko)
+- File-based input inbox for async external commands (#1472) (@houko)
+- Interactive approval dialog in dashboard chat and channel events (#1474) (@houko)
+- Telegram thread-based agent routing (#1475) (@houko)
+- Pause/resume, busy guard, AgentManifest composition (#1482) (@houko)
+- Add librefang-testing crate with mock infrastructure (#1483) (@houko)
+- Show GitHub compare link before version confirmation (#1488) (@houko)
+- Integrate Skillhub marketplace as second skill source (#1504) (@houko)
+- Add WeChat personal account adapter via iLink protocol (#1506) (@houko)
+- Comprehensive build automation CLI with 31 subcommands (#1511) (@houko)
+- Enhance Hand system with i18n, pause/resume, and dashboard overhaul (#1515) (@houko)
+- Enable by default, add Grafana, auto-start with Docker (#1520) (@houko)
+- Multi-agent hand architecture (#1521) (@houko)
+- Add regex group trigger patterns (#1529) (@TechWizard9999)
+- Generic media generation drivers (image, TTS, video, music) (#1532) (@houko)
+- Extend Prometheus metrics and add Grafana dashboards (#1533) (@houko)
+- Add LTS version support (#1535) (@houko)
+
+### Fixed
+
+- Handle paginated /api/agents response (#1233) (@f-liva)
+- Preserve caption on Telegram voice messages (#1249) (@f-liva)
+- Detect and retry when LLM skips tool execution for action requests (#1413) (@houko)
+- Stop agent loop on tool execution failure (#948) (#1415) (@houko)
+- Complete ChatGPT Responses driver streaming/tool/reasoning mapping (#1405) (#1421) (@houko)
+- Use 2-digit year in Tauri version for WiX MSI compatibility (#1439) (@houko)
+- Harden workflow permissions and catalog path validation (#1444) (@SenZhangAI)
+- Stabilize nodeTypes to fix workflow builder editing (#1447) (@houko)
+- Harden reconnect and request handling (#1465) (@TechWizard9999)
+- CI shell injection, clippy warnings, init config, and review findings (#1473) (@houko)
+- Validate tool_use.input as dict in Anthropic and OpenAI drivers (#1476) (@houko)
+- Replace plaintext password with Argon2id hashing (#1477) (@houko)
+- Replace git-based registry sync with HTTP tarball download (#1479) (@houko)
+- Hand registry race condition, state persistence, and optional requirements (#1481) (@houko)
+- Resolve clippy errors blocking all PRs (#1486) (@houko)
+- Consolidate confirmations into single final prompt (#1491) (@houko)
+- Align chat websocket contract (#1498) (@poruru-code)
+- Exempt non-autonomous agents from timeout check (#1499) (@houko)
+- Stamp last_active before LLM call (#1500) (@houko)
+- Reset last_active on agent restore (#1501) (@houko)
+- Resolve clippy and compilation errors from merged PRs (#1502) (@houko)
+- Use tokio::test for callback query tests (#1503) (@houko)
+- Resolve compilation and clippy errors from recent merges (#1507) (@houko)
+- Update tool fallback assertions for capability enforcement (#1508) (@houko)
+- Follow up merged PR regressions (#1514) (@houko)
+- Use endpoint discovery API for Feishu WebSocket connection (#1518) (@houko)
+- Gitignore, channel logging, and xtask Windows CI (#1519) (@houko)
+- Preserve coordinator role and role-bound trigger migration (#1523) (@houko)
+- Restore --release flag in Dockerfile build (#1524) (@houko)
+- Eliminate username enumeration timing side-channel (#1525) (@houko)
+- Replace deterministic session token with random generation (#1526) (@houko)
+- Prevent path traversal in skill script execution (#1527) (@houko)
+- Make init_prometheus idempotent for parallel test safety (#1528) (@houko)
+- Multi-agent parsing compat + registry sync version update (#1530) (@houko)
+- Gate unix-only test behind #[cfg(unix)] (#1534) (@houko)
+- Release tool compares against latest tag including prereleases (#1547) (@houko)
+- Release tool retries commit after formatter hook (#1548) (@houko)
+- Release tool compares against latest tag including prereleases (#1547) (#1550) (@houko)
+- Remove unused find_latest_stable_tag in release.rs (#1551) (@houko)
+
+### Changed
+
+- Add facade getters and migrate API routes (#1478) (@houko)
+- Modularize route registration into per-domain routers (#1484) (@houko)
+- Split monolithic config.rs (5566 LOC) into modular sub-modules (#1485) (@houko)
+- Registry as catalog, pre-install core content only (#1537) (@houko)
+- Unified workspaces layout + hand/agent isolation + routing fixes (#1542) (@houko)
+
+### Maintenance
+
+- Cover claude code skip permissions args (#1364) (@TechWizard9999)
+- Fix 16 Dependabot security alerts (#1438) (@SenZhangAI)
+- Translate all Chinese comments to English (#1509) (@houko)
+
+### Other
+
+- Feature/opentel (#1516) (@Chukwuebuka-2003)
+- Feature/fix gitignore (#1517) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-3-23</id>
+      <title>LibreFang 2026.3.23</title>
+      <link href="https://librefang.ai/changelog/#2026-3-23" />
+      <updated>2026-03-23T00:00:00Z</updated>
+      <summary type="text">2026.3.23 — 2026-03-23</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add pipeline runner agents + IMAP email reader script (#1307) (@devatsecure)
+- Add ChatGPT device auth flow (#1332) (@poruru-code)
+- Add Qwen International and US provider endpoints (#1370) (@houko)
+- Add custom log directory config (#1379) (@houko)
+- Enrich ClassifiedError with provider/model context (#1380) (@houko)
+- Add rustfmt.toml for consistent code formatting (#1381) (@houko)
+- Display version and git hash in startup logs (#1382) (@houko)
+- Add unfurl_links config option for Slack channel (#1383) (@houko)
+- Add DeepInfra as LLM provider (#1384) (@houko)
+- Add configurable embedding dimensions (#1386) (@houko)
+- Add config validation with tolerant mode (#1387) (@houko)
+- Add Azure OpenAI provider support (#1388) (@houko)
+- Add force_flat_replies config for Slack channels (#1390) (@houko)
+- Add fts_only mode for memory indexing without embedding (#1391) (@houko)
+- Add global workspace directory for cross-session persistence (#1392) (@houko)
+- Add mention_patterns config for Discord channels (#1394) (@houko)
+- Add WorkflowTemplate types and in-memory registry (#1395) (@houko)
+- Add configurable session reset prompt (#1396) (@houko)
+- Add per-agent plugin scoping with allowed_plugins (#1399) (@houko)
+- Add /reboot slash command for graceful context reset (#1401) (@houko)
+- Support arbitrary config keys in skill entries (#1402) (@houko)
+- Add Homebrew Cask CI sync and improve Formula generation (#1404) (@houko)
+- Comprehensive React dashboard UI/UX overhaul (#1419) (@houko)
+- Add refresh param to bypass worker cache for migration (#1426) (@houko)
+- Add Japanese dashboard localization (#1427) (@poruru-code)
+- Add a new Librefang promotional SVG banner and update the corre… (#1429) (@houko)
+- Just api starts dashboard dev server alongside API (#1434) (@houko)
+- Implement depends_on DAG execution for workflow steps (#1440) (@houko)
+- Add workflow template API endpoints (#1442) (@houko)
+- Wire thinking model configuration into agent loop (#1443) (@houko)
+- Mobile responsive + PWA + login + skill output persistence (#1445) (@houko)
+- Implement session context injection with multiple sources (#1448) (@houko)
+- Save existing workflow as reusable template (#1449) (@houko)
+- Add Shell/Bash skill runtime (#1450) (@houko)
+- Add push messaging API for agents to send to channels (#1451) (@houko)
+- Add /btw ephemeral side question command (#1452) (@houko)
+- Add structured output (JSON/JSON Schema) for agents (#1453) (@houko)
+- Add session export/import for context hibernation (#1454) (@houko)
+- Configurable heartbeat timeout and pruning per agent (#1455) (@houko)
+- Cross-session wake via target_agent on triggers (#1456) (@houko)
+- Add interactive message payloads for Telegram and Slack (#1457) (@houko)
+- Add PII privacy controls with pseudonymization and redaction (#1458) (@houko)
+- Tool-level authorization with per-sender and channel-specific policies (#1459) (@houko)
+- Subagent context inheritance in workflow steps (#1460) (@houko)
+- Lazy-load LLM driver cache for improved runtime performance (#1461) (@houko)
+- Add Amazon Bedrock embedding driver with SigV4 signing (#1462) (@houko)
+- FTS5 full-text session search with API endpoint (#1463) (@houko)
+- Message injection between tool calls (mid-turn interrupt) (#1464) (@houko)
+- Render LaTeX in chat (#1467) (@TechWizard9999)
+- Automatic memory chunking for long documents (#1468) (@houko)
+- Input sanitizer for prompt injection detection (#1469) (@houko)
+- Add Android (aarch64) cross-compilation for Termux users (#1470) (@houko)
+- Time-based memory decay for hierarchical memory management (#1471) (@houko)
+- File-based input inbox for async external commands (#1472) (@houko)
+- Interactive approval dialog in dashboard chat and channel events (#1474) (@houko)
+- Telegram thread-based agent routing (#1475) (@houko)
+- Pause/resume, busy guard, AgentManifest composition (#1482) (@houko)
+- Add librefang-testing crate with mock infrastructure (#1483) (@houko)
+- Show GitHub compare link before version confirmation (#1488) (@houko)
+- Integrate Skillhub marketplace as second skill source (#1504) (@houko)
+- Add WeChat personal account adapter via iLink protocol (#1506) (@houko)
+- Comprehensive build automation CLI with 31 subcommands (#1511) (@houko)
+- Enhance Hand system with i18n, pause/resume, and dashboard overhaul (#1515) (@houko)
+- Enable by default, add Grafana, auto-start with Docker (#1520) (@houko)
+- Multi-agent hand architecture (#1521) (@houko)
+- Add regex group trigger patterns (#1529) (@TechWizard9999)
+- Generic media generation drivers (image, TTS, video, music) (#1532) (@houko)
+- Extend Prometheus metrics and add Grafana dashboards (#1533) (@houko)
+- Add LTS version support (#1535) (@houko)
+
+### Fixed
+
+- Handle paginated /api/agents response (#1233) (@f-liva)
+- Preserve caption on Telegram voice messages (#1249) (@f-liva)
+- Correct language toggle logic in navigation sidebar (#1349) (@danilopopeye)
+- Escape < in MDX comparison table to fix build (#1350) (@houko)
+- Escape < in MDX troubleshooting page (#1351) (@houko)
+- Resolve compilation errors breaking CI clippy check (#1353) (@houko)
+- Clean stale registry dir before clone to prevent CI race condition (#1356) (@houko)
+- Handle re-release in release.sh when no files changed (#1360) (@houko)
+- Register aliases for custom models (#1366) (@TechWizard9999)
+- Knowledge_query JOIN matches entities by name or ID (#1369) (@houko)
+- Browser hand connection failure on Windows (#1371) (@houko)
+- Infinite retry guard, dead branch cleanup, body size limit (#1372) (@houko)
+- Workflow editor save handles nested mode/error_mode from frontend (#1373) (@houko)
+- Scope knowledge JOIN by agent_id and add entities.name index (#1374) (@houko)
+- Replace fragile cmd.len() < 50 heuristic in LoopGuard poll detection (#1378) (@houko)
+- Fix sidebar navigation, broken links, and i18n issues (#1385) (@houko)
+- Comprehensive website polish and bug fixes (#1389) (@houko)
+- Accept [hand] wrapper in HAND.toml format (#1393) (@houko)
+- Fix OG image, brand naming, PWA manifest, and missing i18n keys (#1397) (@houko)
+- Improve Qwen Code CLI path detection (#1398) (@houko)
+- Respect provider field when routing custom models (#1400) (@houko)
+- Remove empty sections overrides and fix mobile nav indicators (#1406) (@houko)
+- Correct Docker compose port binding for admin interface (#944) (#1407) (@houko)
+- Allow hyphens in MCP server names (#947) (#1408) (@houko)
+- Resolve GitHub stats zeros and optimize KV operations (#1409) (@houko)
+- Load .env files in desktop app (#1410) (@houko)
+- Prevent streaming interrupts during multi-tool sequences (#1411) (@houko)
+- Resolve skill file paths for installed skill execution (#1412) (@houko)
+- Detect and retry when LLM skips tool execution for action requests (#1413) (@houko)
+- Cache workspace and skill metadata to reduce per-message overhead (#1414) (@houko)
+- Stop agent loop on tool execution failure (#948) (#1415) (@houko)
+- Replace processed images with text placeholders in session history (#911) (#1416) (@houko)
+- Complete ChatGPT Responses driver streaming/tool/reasoning mapping (#1405) (#1421) (@houko)
+- Migrate old KV keys to history blob and handle sparse chart data (#1422) (@houko)
+- Complete dashboard i18n coverage for goals and analytics (#1423) (@poruru-code)
+- Correct provider counts, model numbers, and free tier status (#1424) (@houko)
+- Update Hands count to 14 and add deploy/registry links (#1428) (@houko)
+- Release.sh grep compatibility on macOS (#1431) (@houko)
+- Correct Cloudflare Pages _redirects SPA fallback format (#1432) (@houko)
+- Release.sh — macOS grep compat + full diff link (#1433) (@houko)
+- Generate anchor IDs for h3 headings and preserve TOML-style names (#1435) (@houko)
+- Use 2-digit year in Tauri version for WiX MSI compatibility (#1439) (@houko)
+- Harden workflow permissions and catalog path validation (#1444) (@SenZhangAI)
+- Stabilize nodeTypes to fix workflow builder editing (#1447) (@houko)
+- Harden reconnect and request handling (#1465) (@TechWizard9999)
+- CI shell injection, clippy warnings, init config, and review findings (#1473) (@houko)
+- Validate tool_use.input as dict in Anthropic and OpenAI drivers (#1476) (@houko)
+- Replace plaintext password with Argon2id hashing (#1477) (@houko)
+- Replace git-based registry sync with HTTP tarball download (#1479) (@houko)
+- Hand registry race condition, state persistence, and optional requirements (#1481) (@houko)
+- Resolve clippy errors blocking all PRs (#1486) (@houko)
+- Consolidate confirmations into single final prompt (#1491) (@houko)
+- Align chat websocket contract (#1498) (@poruru-code)
+- Exempt non-autonomous agents from timeout check (#1499) (@houko)
+- Stamp last_active before LLM call (#1500) (@houko)
+- Reset last_active on agent restore (#1501) (@houko)
+- Resolve clippy and compilation errors from merged PRs (#1502) (@houko)
+- Use tokio::test for callback query tests (#1503) (@houko)
+- Resolve compilation and clippy errors from recent merges (#1507) (@houko)
+- Update tool fallback assertions for capability enforcement (#1508) (@houko)
+- Follow up merged PR regressions (#1514) (@houko)
+- Use endpoint discovery API for Feishu WebSocket connection (#1518) (@houko)
+- Gitignore, channel logging, and xtask Windows CI (#1519) (@houko)
+- Preserve coordinator role and role-bound trigger migration (#1523) (@houko)
+- Restore --release flag in Dockerfile build (#1524) (@houko)
+- Eliminate username enumeration timing side-channel (#1525) (@houko)
+- Replace deterministic session token with random generation (#1526) (@houko)
+- Prevent path traversal in skill script execution (#1527) (@houko)
+- Make init_prometheus idempotent for parallel test safety (#1528) (@houko)
+- Multi-agent parsing compat + registry sync version update (#1530) (@houko)
+- Gate unix-only test behind #[cfg(unix)] (#1534) (@houko)
+- Release tool compares against latest tag including prereleases (#1547) (@houko)
+- Release tool retries commit after formatter hook (#1548) (@houko)
+
+### Changed
+
+- Switch to CalVer (YYYY.M.DDHH) (#1375) (@houko)
+- Add facade getters and migrate API routes (#1478) (@houko)
+- Modularize route registration into per-domain routers (#1484) (@houko)
+- Split monolithic config.rs (5566 LOC) into modular sub-modules (#1485) (@houko)
+- Registry as catalog, pre-install core content only (#1537) (@houko)
+- Unified workspaces layout + hand/agent isolation + routing fixes (#1542) (@houko)
+
+### Documentation
+
+- Comprehensive review — fix errors, update numbers, add missing sections (#1368) (@houko)
+
+### Maintenance
+
+- Lock api status version regression (#1363) (@TechWizard9999)
+- Cover claude code skip permissions args (#1364) (@TechWizard9999)
+- Cover hand reactivation runtime profile (#1365) (@TechWizard9999)
+- Cover local model default override routing (#1367) (@TechWizard9999)
+- Auto-update PR branches on main push (#1417) (@houko)
+- Add GitHub Stats Worker to deploy workflow (#1420) (@houko)
+- Remove deploy worker job-level if conditions that fail on squash merges (#1425) (@houko)
+- Fix 16 Dependabot security alerts (#1438) (@SenZhangAI)
+- Translate all Chinese comments to English (#1509) (@houko)
+
+### Other
+
+- Feature/opentel (#1516) (@Chukwuebuka-2003)
+- Feature/fix gitignore (#1517) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-3-22</id>
+      <title>LibreFang 2026.3.22</title>
+      <link href="https://librefang.ai/changelog/#2026-3-22" />
+      <updated>2026-03-22T00:00:00Z</updated>
+      <summary type="text">2026.3.22 — 2026-03-22</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add pipeline runner agents + IMAP email reader script (#1307) (@devatsecure)
+- Add ChatGPT device auth flow (#1332) (@poruru-code)
+- Add Qwen International and US provider endpoints (#1370) (@houko)
+- Add custom log directory config (#1379) (@houko)
+- Enrich ClassifiedError with provider/model context (#1380) (@houko)
+- Add rustfmt.toml for consistent code formatting (#1381) (@houko)
+- Display version and git hash in startup logs (#1382) (@houko)
+- Add unfurl_links config option for Slack channel (#1383) (@houko)
+- Add DeepInfra as LLM provider (#1384) (@houko)
+- Add configurable embedding dimensions (#1386) (@houko)
+- Add config validation with tolerant mode (#1387) (@houko)
+- Add Azure OpenAI provider support (#1388) (@houko)
+- Add force_flat_replies config for Slack channels (#1390) (@houko)
+- Add fts_only mode for memory indexing without embedding (#1391) (@houko)
+- Add global workspace directory for cross-session persistence (#1392) (@houko)
+- Add mention_patterns config for Discord channels (#1394) (@houko)
+- Add WorkflowTemplate types and in-memory registry (#1395) (@houko)
+- Add configurable session reset prompt (#1396) (@houko)
+- Add per-agent plugin scoping with allowed_plugins (#1399) (@houko)
+- Add /reboot slash command for graceful context reset (#1401) (@houko)
+- Support arbitrary config keys in skill entries (#1402) (@houko)
+- Add Homebrew Cask CI sync and improve Formula generation (#1404) (@houko)
+- Comprehensive React dashboard UI/UX overhaul (#1419) (@houko)
+- Add refresh param to bypass worker cache for migration (#1426) (@houko)
+- Add Japanese dashboard localization (#1427) (@poruru-code)
+- Add a new Librefang promotional SVG banner and update the corre… (#1429) (@houko)
+- Just api starts dashboard dev server alongside API (#1434) (@houko)
+
+### Fixed
+
+- Register aliases for custom models (#1366) (@TechWizard9999)
+- Knowledge_query JOIN matches entities by name or ID (#1369) (@houko)
+- Browser hand connection failure on Windows (#1371) (@houko)
+- Infinite retry guard, dead branch cleanup, body size limit (#1372) (@houko)
+- Workflow editor save handles nested mode/error_mode from frontend (#1373) (@houko)
+- Scope knowledge JOIN by agent_id and add entities.name index (#1374) (@houko)
+- Replace fragile cmd.len() < 50 heuristic in LoopGuard poll detection (#1378) (@houko)
+- Fix sidebar navigation, broken links, and i18n issues (#1385) (@houko)
+- Comprehensive website polish and bug fixes (#1389) (@houko)
+- Accept [hand] wrapper in HAND.toml format (#1393) (@houko)
+- Fix OG image, brand naming, PWA manifest, and missing i18n keys (#1397) (@houko)
+- Improve Qwen Code CLI path detection (#1398) (@houko)
+- Respect provider field when routing custom models (#1400) (@houko)
+- Remove empty sections overrides and fix mobile nav indicators (#1406) (@houko)
+- Correct Docker compose port binding for admin interface (#944) (#1407) (@houko)
+- Allow hyphens in MCP server names (#947) (#1408) (@houko)
+- Resolve GitHub stats zeros and optimize KV operations (#1409) (@houko)
+- Load .env files in desktop app (#1410) (@houko)
+- Prevent streaming interrupts during multi-tool sequences (#1411) (@houko)
+- Resolve skill file paths for installed skill execution (#1412) (@houko)
+- Cache workspace and skill metadata to reduce per-message overhead (#1414) (@houko)
+- Replace processed images with text placeholders in session history (#911) (#1416) (@houko)
+- Migrate old KV keys to history blob and handle sparse chart data (#1422) (@houko)
+- Complete dashboard i18n coverage for goals and analytics (#1423) (@poruru-code)
+- Correct provider counts, model numbers, and free tier status (#1424) (@houko)
+- Update Hands count to 14 and add deploy/registry links (#1428) (@houko)
+- Release.sh grep compatibility on macOS (#1431) (@houko)
+- Correct Cloudflare Pages _redirects SPA fallback format (#1432) (@houko)
+- Release.sh — macOS grep compat + full diff link (#1433) (@houko)
+- Generate anchor IDs for h3 headings and preserve TOML-style names (#1435) (@houko)
+
+### Changed
+
+- Switch to CalVer (YYYY.M.DDHH) (#1375) (@houko)
+
+### Documentation
+
+- Comprehensive review — fix errors, update numbers, add missing sections (#1368) (@houko)
+
+### Maintenance
+
+- Lock api status version regression (#1363) (@TechWizard9999)
+- Cover hand reactivation runtime profile (#1365) (@TechWizard9999)
+- Cover local model default override routing (#1367) (@TechWizard9999)
+- Auto-update PR branches on main push (#1417) (@houko)
+- Add GitHub Stats Worker to deploy workflow (#1420) (@houko)
+- Remove deploy worker job-level if conditions that fail on squash merges (#1425) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#2026-3-21</id>
+      <title>LibreFang 2026.3.21</title>
+      <link href="https://librefang.ai/changelog/#2026-3-21" />
+      <updated>2026-03-21T00:00:00Z</updated>
+      <summary type="text">2026.3.21 — 2026-03-21</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add pipeline runner agents + IMAP email reader script (#1307) (@devatsecure)
+- Add ChatGPT device auth flow (#1332) (@poruru-code)
+- Add Qwen International and US provider endpoints (#1370) (@houko)
+- Add custom log directory config (#1379) (@houko)
+- Enrich ClassifiedError with provider/model context (#1380) (@houko)
+- Add rustfmt.toml for consistent code formatting (#1381) (@houko)
+- Display version and git hash in startup logs (#1382) (@houko)
+- Add unfurl_links config option for Slack channel (#1383) (@houko)
+- Add DeepInfra as LLM provider (#1384) (@houko)
+- Add configurable embedding dimensions (#1386) (@houko)
+- Add config validation with tolerant mode (#1387) (@houko)
+- Add Azure OpenAI provider support (#1388) (@houko)
+- Add force_flat_replies config for Slack channels (#1390) (@houko)
+- Add fts_only mode for memory indexing without embedding (#1391) (@houko)
+- Add global workspace directory for cross-session persistence (#1392) (@houko)
+- Add mention_patterns config for Discord channels (#1394) (@houko)
+- Add WorkflowTemplate types and in-memory registry (#1395) (@houko)
+- Add configurable session reset prompt (#1396) (@houko)
+- Add per-agent plugin scoping with allowed_plugins (#1399) (@houko)
+- Add /reboot slash command for graceful context reset (#1401) (@houko)
+- Support arbitrary config keys in skill entries (#1402) (@houko)
+- Add Homebrew Cask CI sync and improve Formula generation (#1404) (@houko)
+- Comprehensive React dashboard UI/UX overhaul (#1419) (@houko)
+- Add refresh param to bypass worker cache for migration (#1426) (@houko)
+- Add Japanese dashboard localization (#1427) (@poruru-code)
+- Add a new Librefang promotional SVG banner and update the corre… (#1429) (@houko)
+
+### Fixed
+
+- Register aliases for custom models (#1366) (@TechWizard9999)
+- Knowledge_query JOIN matches entities by name or ID (#1369) (@houko)
+- Browser hand connection failure on Windows (#1371) (@houko)
+- Infinite retry guard, dead branch cleanup, body size limit (#1372) (@houko)
+- Workflow editor save handles nested mode/error_mode from frontend (#1373) (@houko)
+- Scope knowledge JOIN by agent_id and add entities.name index (#1374) (@houko)
+- Replace fragile cmd.len() < 50 heuristic in LoopGuard poll detection (#1378) (@houko)
+- Fix sidebar navigation, broken links, and i18n issues (#1385) (@houko)
+- Comprehensive website polish and bug fixes (#1389) (@houko)
+- Accept [hand] wrapper in HAND.toml format (#1393) (@houko)
+- Fix OG image, brand naming, PWA manifest, and missing i18n keys (#1397) (@houko)
+- Improve Qwen Code CLI path detection (#1398) (@houko)
+- Respect provider field when routing custom models (#1400) (@houko)
+- Remove empty sections overrides and fix mobile nav indicators (#1406) (@houko)
+- Correct Docker compose port binding for admin interface (#944) (#1407) (@houko)
+- Allow hyphens in MCP server names (#947) (#1408) (@houko)
+- Resolve GitHub stats zeros and optimize KV operations (#1409) (@houko)
+- Load .env files in desktop app (#1410) (@houko)
+- Prevent streaming interrupts during multi-tool sequences (#1411) (@houko)
+- Resolve skill file paths for installed skill execution (#1412) (@houko)
+- Cache workspace and skill metadata to reduce per-message overhead (#1414) (@houko)
+- Replace processed images with text placeholders in session history (#911) (#1416) (@houko)
+- Migrate old KV keys to history blob and handle sparse chart data (#1422) (@houko)
+- Complete dashboard i18n coverage for goals and analytics (#1423) (@poruru-code)
+- Correct provider counts, model numbers, and free tier status (#1424) (@houko)
+- Update Hands count to 14 and add deploy/registry links (#1428) (@houko)
+
+### Changed
+
+- Switch to CalVer (YYYY.M.DDHH) (#1375) (@houko)
+
+### Documentation
+
+- Comprehensive review — fix errors, update numbers, add missing sections (#1368) (@houko)
+
+### Maintenance
+
+- Lock api status version regression (#1363) (@TechWizard9999)
+- Cover hand reactivation runtime profile (#1365) (@TechWizard9999)
+- Cover local model default override routing (#1367) (@TechWizard9999)
+- Auto-update PR branches on main push (#1417) (@houko)
+- Add GitHub Stats Worker to deploy workflow (#1420) (@houko)
+- Remove deploy worker job-level if conditions that fail on squash merges (#1425) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#0-7-0</id>
+      <title>LibreFang 0.7.0</title>
+      <link href="https://librefang.ai/changelog/#0-7-0" />
+      <updated>2026-03-21T00:00:00Z</updated>
+      <summary type="text">0.7.0 — 2026-03-21</summary>
+      <content type="text"><![CDATA[### Added
+
+- Configurable CORS, channel rate limits, audit pruning, and media gates (#1331) (@houko)
+- Docs (#1334) (@houko)
+- LLM intent routing, registry single source of truth, streaming fixes (#1336) (@houko)
+- Add migrate --from openfang for OpenFang users (#1344) (@houko)
+- Unify CLI detection + add Gemini CLI, Codex CLI, Aider providers (#1347) (@houko)
+
+### Fixed
+
+- Move CLI npm/PyPI publish to Shell workflow and fix Fly.io config path (#1327) (@houko)
+- Strip provider prefix for internal LLM calls (#1330) (@houko)
+- Sync upstream improvements (#1338) (@houko)
+- Harden OpenClaw migration inputs (#1342) (@houko)
+- Complete openfang migration across init wizard, API, and dashboard (#1345) (@houko)
+- Detect Qwen Code CLI in test_connection and setup wizard (#1346) (@houko)
+- Correct language toggle logic in navigation sidebar (#1349) (@danilopopeye)
+- Escape < in MDX comparison table to fix build (#1350) (@houko)
+- Escape < in MDX troubleshooting page (#1351) (@houko)
+- Resolve compilation errors breaking CI clippy check (#1353) (@houko)
+- Clean stale registry dir before clone to prevent CI race condition (#1356) (@houko)
+- Handle re-release in release.sh when no files changed (#1360) (@houko)
+
+### Changed
+
+- Consolidate docs as Next.js deployment directory (#1335) (@houko)
+
+### Documentation
+
+- Add comparison page and clean up remaining artifacts (#1337) (@houko)
+
+### Other
+
+- Feature/fix docs (#1339) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#0-6-8</id>
+      <title>LibreFang 0.6.8</title>
+      <link href="https://librefang.ai/changelog/#0-6-8" />
+      <updated>2026-03-20T00:00:00Z</updated>
+      <summary type="text">0.6.8 — 2026-03-20</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add owner routing for external DM responses (#1266) (@f-liva)
+- Distribute CLI binary via npm and PyPI (#1323) (@houko)
+
+### Fixed
+
+- Use GitHub API to create Go SDK tag (#1321) (@houko)
+
+### Maintenance
+
+- Remove wasteful workflows and fix bugs (#1320) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#0-6-7</id>
+      <title>LibreFang 0.6.7</title>
+      <link href="https://librefang.ai/changelog/#0-6-7" />
+      <updated>2026-03-20T00:00:00Z</updated>
+      <summary type="text">0.6.7 — 2026-03-20</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add GitHub Discussions link to dashboard sidebar (#1302) (@TechWizard9999)
+
+### Fixed
+
+- Include user-installed HAND manifests in hand routing (#1205) (@TechWizard9999)
+- Pass raw JSON payloads to context hook scripts (#1207) (@TechWizard9999)
+- Pass GITHUB_TOKEN to contributor/star-history scripts (#1300) (@houko)
+- Self-heal fish config PATH entries (#1303) (@TechWizard9999)
+- Fix 3 release workflow failures from v0.6.6 (#1309) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#0-6-6</id>
+      <title>LibreFang 0.6.6</title>
+      <link href="https://librefang.ai/changelog/#0-6-6" />
+      <updated>2026-03-20T00:00:00Z</updated>
+      <summary type="text">0.6.6 — 2026-03-20</summary>
+      <content type="text"><![CDATA[### Fixed
+
+- Use 'file' instead of 'dockerfile' in docker/build-push-action@v7 (#1298) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#0-6-5</id>
+      <title>LibreFang 0.6.5</title>
+      <link href="https://librefang.ai/changelog/#0-6-5" />
+      <updated>2026-03-20T00:00:00Z</updated>
+      <summary type="text">0.6.5 — 2026-03-20</summary>
+      <content type="text"><![CDATA[### Added
+
+- Auto-initialize vault during librefang init (#1206) (@houko)
+- Add token consumption metadata and reduce default hands (#1215) (@houko)
+- Add image pipeline and subprocess management (#1223) (@f-liva)
+- Add Qwen Code CLI as LLM provider (#1224) (@f-liva)
+- Align init defaults with OpenRouter Stepfun (#1262) (@houko)
+- Replace all icons with new LibreFang branding (#1263) (@f-liva)
+- Fix shell (#1270) (@houko)
+
+### Fixed
+
+- Decrypt encrypted webhook payloads (#1208) (@TechWizard9999)
+- Bootstrap context engine during startup (#1209) (@TechWizard9999)
+- Support target ids in channel test (#1210) (@TechWizard9999)
+- Make shell installer POSIX-compatible for Linux (#1226) (@houko)
+- Web deployment issues (#1236) (@houko)
+- Web deployment issues (#1237) (@houko)
+- Create web/public/assets directory (#1238) (@houko)
+- Web deployment and CI fixes (#1239) (@houko)
+- Web deployment and CI fixes (#1243) (@houko)
+- Repair install smoke script and drop update-star-history workflow (#1255) (@houko)
+- Use web/public installer source and harden curl|sh install flow (#1259) (@houko)
+- Address code-scanning path-injection findings (follow-up) (#1260) (@houko)
+- Initialize rustls crypto provider for TLS connections (#1294) (@houko)
+
+### Documentation
+
+- Update star history (#1197) (@houko)
+- Update star history (#1198) (@houko)
+- Update star history (#1199) (@houko)
+- Update star history (#1200) (@houko)
+- Update star history (#1201) (@houko)
+- Update star history (#1202) (@houko)
+- Update star history (#1203) (@houko)
+- Update star history (#1213) (@houko)
+- Update contributors (#1214) (@houko)
+- Update star history (#1225) (@houko)
+- Update star history (#1228) (@houko)
+- Add SDK usage examples to all README files (#1229) (@houko)
+- Update star history (#1231) (@houko)
+- Update star history (#1232) (@houko)
+- Update star history (#1235) (@houko)
+- Update contributors (#1240) (@app/github-actions)
+- Update star history (#1242) (@app/github-actions)
+
+### Maintenance
+
+- Tidy repo structure (#1211) (@houko)
+- Use .nvmrc for web Node.js version and fix Dockerfile path (#1234) (@houko)
+- Bump actions/setup-node from 4 to 6 (#1280) (@app/dependabot)
+- Bump actions/download-artifact from 4 to 8 (#1281) (@app/dependabot)
+- Bump pnpm/action-setup from 4 to 5 (#1282) (@app/dependabot)
+- Bump actions/labeler from 5 to 6 (#1283) (@app/dependabot)
+- Bump zip from 8.2.0 to 8.3.0 (#1284) (@app/dependabot)
+- Bump jsonwebtoken from 9.3.1 to 10.3.0 (#1285) (@app/dependabot)
+- Bump tracing-subscriber from 0.3.22 to 0.3.23 (#1286) (@app/dependabot)
+- Bump rusqlite from 0.38.0 to 0.39.0 (#1287) (@app/dependabot)
+- Bump rumqttc from 0.24.0 to 0.25.1 (#1288) (@app/dependabot)
+- Bump tokio-tungstenite from 0.28.0 to 0.29.0 (#1289) (@app/dependabot)
+- Bump criterion from 0.5.1 to 0.8.2 (#1290) (@app/dependabot)
+- Bump rand from 0.8.5 to 0.9.2 (#1291) (@app/dependabot)
+- Bump toml_edit from 0.25.4+spec-1.1.0 to 0.25.5+spec-1.1.0 (#1292) (@app/dependabot)
+
+### Other
+
+- Clean skills (#1212) (@houko)
+- Fix/webui chat input line break failed (#1245) (@aimlyo)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#v0-6-4-20260320</id>
+      <title>LibreFang v0.6.4-20260320</title>
+      <link href="https://librefang.ai/changelog/#v0-6-4-20260320" />
+      <updated>2026-03-20T00:00:00Z</updated>
+      <summary type="text">v0.6.4-20260320 — 2026-03-20</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add image pipeline and subprocess management (#1223) (@f-liva)
+- Add Qwen Code CLI as LLM provider (#1224) (@f-liva)
+- Align init defaults with OpenRouter Stepfun (#1262) (@houko)
+- Replace all icons with new LibreFang branding (#1263) (@f-liva)
+
+### Fixed
+
+- Web deployment issues (#1236) (@houko)
+- Web deployment issues (#1237) (@houko)
+- Create web/public/assets directory (#1238) (@houko)
+- Web deployment and CI fixes (#1239) (@houko)
+- Web deployment and CI fixes (#1243) (@houko)
+- Repair install smoke script and drop update-star-history workflow (#1255) (@houko)
+- Use web/public installer source and harden curl|sh install flow (#1259) (@houko)
+- Address code-scanning path-injection findings (follow-up) (#1260) (@houko)
+
+### Documentation
+
+- Update star history (#1228) (@houko)
+- Add SDK usage examples to all README files (#1229) (@houko)
+
+### Maintenance
+
+- Use .nvmrc for web Node.js version and fix Dockerfile path (#1234) (@houko)
+
+### Other
+
+- Fix/webui chat input line break failed (#1245) (@aimlyo)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#0-6-4</id>
+      <title>LibreFang 0.6.4</title>
+      <link href="https://librefang.ai/changelog/#0-6-4" />
+      <updated>2026-03-20T00:00:00Z</updated>
+      <summary type="text">0.6.4 — 2026-03-20</summary>
+      <content type="text"><![CDATA[### Added
+
+- Add image pipeline and subprocess management (#1223) (@f-liva)
+- Add Qwen Code CLI as LLM provider (#1224) (@f-liva)
+- Align init defaults with OpenRouter Stepfun (#1262) (@houko)
+- Replace all icons with new LibreFang branding (#1263) (@f-liva)
+
+### Fixed
+
+- Web deployment issues (#1236) (@houko)
+- Web deployment issues (#1237) (@houko)
+- Create web/public/assets directory (#1238) (@houko)
+- Web deployment and CI fixes (#1239) (@houko)
+- Web deployment and CI fixes (#1243) (@houko)
+- Repair install smoke script and drop update-star-history workflow (#1255) (@houko)
+- Use web/public installer source and harden curl|sh install flow (#1259) (@houko)
+- Address code-scanning path-injection findings (follow-up) (#1260) (@houko)
+
+### Documentation
+
+- Add SDK usage examples to all README files (#1229) (@houko)
+- Update contributors (#1240) (@app/github-actions)
+- Update contributors and star history (#1244) (@app/github-actions)
+- Update contributors and star history (#1246) (@app/github-actions)
+- Update contributors and star history (#1247) (@app/github-actions)
+- Update contributors and star history (#1248) (@app/github-actions)
+- Update contributors and star history (#1250) (@app/github-actions)
+- Update contributors and star history (#1251) (@app/github-actions)
+- Update contributors and star history (#1253) (@app/github-actions)
+- Update contributors and star history (#1256) (@app/github-actions)
+- Update contributors and star history (#1257) (@app/github-actions)
+- Update contributors and star history (#1258) (@app/github-actions)
+- Update contributors and star history (#1261) (@app/github-actions)
+- Update contributors and star history (#1264) (@app/github-actions)
+- Update contributors and star history (#1265) (@app/github-actions)
+- Update contributors and star history (#1267) (@app/github-actions)
+
+### Maintenance
+
+- Use .nvmrc for web Node.js version and fix Dockerfile path (#1234) (@houko)
+
+### Other
+
+- Fix/webui chat input line break failed (#1245) (@aimlyo)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#0-6-3</id>
+      <title>LibreFang 0.6.3</title>
+      <link href="https://librefang.ai/changelog/#0-6-3" />
+      <updated>2026-03-19T00:00:00Z</updated>
+      <summary type="text">0.6.3 — 2026-03-19</summary>
+      <content type="text"><![CDATA[### Added
+
+- Auto-initialize vault during librefang init (#1206) (@houko)
+- Add token consumption metadata and reduce default hands (#1215) (@houko)
+
+### Fixed
+
+- Decrypt encrypted webhook payloads (#1208) (@TechWizard9999)
+- Bootstrap context engine during startup (#1209) (@TechWizard9999)
+- Support target ids in channel test (#1210) (@TechWizard9999)
+- Make shell installer POSIX-compatible for Linux (#1226) (@houko)
+
+### Documentation
+
+- Update contributors (#1214) (@houko)
+
+### Maintenance
+
+- Tidy repo structure (#1211) (@houko)
+
+### Other
+
+- Clean skills (#1212) (@houko)]]></content>
+    </entry>
+    <entry>
+      <id>https://librefang.ai/changelog/#0-6-2</id>
+      <title>LibreFang 0.6.2</title>
+      <link href="https://librefang.ai/changelog/#0-6-2" />
+      <updated>2026-03-19T00:00:00Z</updated>
+      <summary type="text">0.6.2 — 2026-03-19</summary>
+      <content type="text"><![CDATA[### Fixed
+
+- Prevent provider appearing in multiple tier groups (#1190) (@SenZhangAI)
+- Resolve 17 compilation errors breaking CI (#1193) (@houko)]]></content>
+    </entry>
+</feed>

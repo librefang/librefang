@@ -13,6 +13,7 @@
 - [发布到 FangHub](#publishing-to-fanghub)
 - [CLI 命令](#cli-commands)
 - [OpenClaw 兼容性](#openclaw-compatibility)
+- [技能自我进化](#skill-self-evolution)
 - [最佳实践](#best-practices)
 
 ---
@@ -580,6 +581,79 @@ librefang skill install /path/to/skill-directory
 ```
 
 通过 `librefang migrate --from openfang` 或 `librefang migrate --from openclaw` 导入的技能也会被扫描并记录在迁移报告中，附带手动重新安装的说明。
+
+---
+
+## 技能自我进化
+
+Agent 可以基于自己的执行经验自主创建、更新和打磨技能。当 Agent 在试错过程中总结出可复用的方法论时，它可以把这套做法保存为一项技能，供未来复用。
+
+### 工作原理
+
+1. **自动识别**：一项复杂任务（5 次以上工具调用）完成后，内核通过一次后台 LLM 评审来判断这次的做法是否值得沉淀为技能。
+2. **Agent 工具**：Agent 直接拥有一组演化工具，可用于创建和维护技能。
+3. **热加载**：新增或更新的技能立即生效，无需重启守护进程。
+4. **安全扫描**：所有变更都会经过提示注入检测。若命中关键威胁，会触发自动回滚。
+
+### 进化工具
+
+| 工具 | 用途 |
+|------|------|
+| `skill_evolve_create` | 根据一次成功的任务方法创建一个新的 prompt-only 技能 |
+| `skill_evolve_update` | 整体重写一项技能的提示词内容 |
+| `skill_evolve_patch` | 带模糊匹配的精准查找-替换（容忍空白/缩进差异） |
+| `skill_evolve_delete` | 删除本地创建的技能（不含市场安装的技能） |
+| `skill_evolve_rollback` | 回滚到上一个版本 |
+| `skill_evolve_write_file` | 新增附属文件（references、templates、scripts、assets） |
+| `skill_evolve_remove_file` | 删除附属文件 |
+
+### 版本管理
+
+每项技能都会在与 `skill.toml` 同级的 `.evolution.json` 中记录进化轨迹：
+
+- **版本历史**：最多保留 10 条版本记录，包含时间戳、变更说明和内容哈希。
+- **回滚快照**：历史版本的提示词内容保存在 `.rollback/` 目录，便于恢复。
+- **使用度量**：每项技能记录 `use_count`（调用次数）和 `evolution_count`（进化次数）。
+
+### 模糊补丁
+
+`skill_evolve_patch` 采用 5 级匹配流水线（从严到宽）：
+
+1. **精确匹配** -- 字面子串匹配
+2. **按行裁剪** -- 逐行去除首尾空白
+3. **空白规范化** -- 合并空白序列
+4. **缩进容忍** -- 去除所有前导空白
+5. **块锚点** -- 匹配首尾行并验证中间相似度 &ge;60%
+
+这能容忍 LLM 生成编辑时常见的格式波动。
+
+### 附属文件
+
+技能可以在四个子目录下包含附属文件：
+
+- `references/` -- API 文档、外部参考资料
+- `templates/` -- 代码或配置模板
+- `scripts/` -- 辅助脚本
+- `assets/` -- 图片、数据文件
+
+单个文件上限 1 MiB，拦截路径穿越攻击，写入时同步进行安全扫描。
+
+### 仪表盘
+
+仪表盘的"技能"页面提供：
+
+- **创建技能**按钮：从 Web UI 直接创建 prompt-only 技能
+- **技能详情**弹窗：展示版本历史、工具、附属文件和使用度量
+- **分类过滤**：通过 `?category=` 查询参数筛选
+
+### API 端点
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/skills` | GET | 列出技能（支持 `?category=` 过滤） |
+| `/api/skills/create` | POST | 通过演化模块创建技能 |
+| `/api/skills/{name}` | GET | 获取技能详情，包含进化历史 |
+| `/api/skills/reload` | POST | 热加载技能注册表 |
 
 ---
 

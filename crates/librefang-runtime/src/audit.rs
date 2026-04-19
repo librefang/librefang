@@ -28,6 +28,9 @@ pub enum AuditAction {
     AuthAttempt,
     WireConnect,
     ConfigChange,
+    /// Auto-dream memory consolidation events (start / complete / fail /
+    /// abort). The detail string carries the lifecycle phase and task id.
+    DreamConsolidation,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -281,6 +284,7 @@ impl AuditLog {
                         "AuthAttempt" => AuditAction::AuthAttempt,
                         "WireConnect" => AuditAction::WireConnect,
                         "ConfigChange" => AuditAction::ConfigChange,
+                        "DreamConsolidation" => AuditAction::DreamConsolidation,
                         _ => AuditAction::ToolInvoke, // fallback
                     };
                     let seq_raw: i64 = row.get(0)?;

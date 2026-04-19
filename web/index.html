@@ -6,6 +6,7 @@
     <link rel="icon" type="image/png" href="/logo.png" />
     <link rel="apple-touch-icon" href="/logo.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="alternate" type="application/atom+xml" title="LibreFang Changelog" href="/feed.xml" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="LibreFang - The Agent Operating System. Run autonomous AI agents 24/7. Built in Rust for production workloads." />
     <meta name="theme-color" content="#070b14" />
@@ -20,6 +21,8 @@
     <meta name="twitter:image" content="https://librefang.ai/og-image.svg" />
     <link rel="canonical" href="https://librefang.ai/" />
     <link rel="dns-prefetch" href="https://api.github.com" />
+    <link rel="preconnect" href="https://stats.librefang.ai" crossorigin />
+    <link rel="dns-prefetch" href="https://raw.githubusercontent.com" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
@@ -50,6 +53,25 @@
         else if (path.startsWith('/es')) lang = 'es';
         document.documentElement.lang = lang;
         window.__INITIAL_LANG__ = lang;
+
+        // Localized meta description before React hydrates, so crawlers /
+        // link-unfurls that don't execute JS still see the right language.
+        var metaDesc = {
+          'zh':    'LibreFang — Agent 操作系统。基于 Rust，生产级运行时，7x24 运行自主 AI Agent。',
+          'zh-TW': 'LibreFang — Agent 作業系統。基於 Rust，生產級執行環境，7x24 運行自主 AI Agent。',
+          'ja':    'LibreFang — Agent オペレーティングシステム。Rust 製の本番グレードランタイムで自律 AI エージェントを 24 時間稼働。',
+          'ko':    'LibreFang — Agent 운영체제. Rust로 만든 프로덕션급 런타임으로 자율 AI 에이전트 24시간 운영.',
+          'de':    'LibreFang — Das Agent-Betriebssystem. Produktionsreife Rust-Laufzeit für autonome KI-Agenten rund um die Uhr.',
+          'es':    'LibreFang — El sistema operativo para Agents. Runtime Rust de grado de producción para agentes IA autónomos 24/7.',
+        };
+        if (metaDesc[lang]) {
+          var d = document.querySelector('meta[name="description"]');
+          if (d) d.setAttribute('content', metaDesc[lang]);
+          var og = document.querySelector('meta[property="og:description"]');
+          if (og) og.setAttribute('content', metaDesc[lang]);
+          var tw = document.querySelector('meta[name="twitter:description"]');
+          if (tw) tw.setAttribute('content', metaDesc[lang]);
+        }
 
         // Initialize theme
         var theme = localStorage.getItem('theme') || 'dark';

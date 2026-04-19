@@ -57,9 +57,13 @@ export function SchedulerPage() {
   const schedules = useMemo(() => [...(schedulesQuery.data ?? [])].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")), [schedulesQuery.data]);
   const triggers = triggersQuery.data ?? [];
 
+  const canSubmit = !name.trim() ? false
+    : targetType === "agent" ? !!agentId
+    : !!workflowId;
+
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!canSubmit) return;
     try {
       await createMut.mutateAsync({
         name, cron, tz: cronTz, message, enabled: true,
@@ -158,7 +162,7 @@ export function SchedulerPage() {
                     <button
                       onClick={() => toggleScheduleMut.mutate({ id: s.id, data: { enabled: !isEnabled } })}
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition-colors ${isEnabled ? "bg-success/10 text-success hover:bg-success/20" : "bg-main text-text-dim/40 hover:text-text-dim"}`}
-                      disabled={toggleScheduleMut.isPending}
+                      disabled={toggleScheduleMut.isPending && toggleScheduleMut.variables?.id === s.id}
                     >
                       {isEnabled ? t("common.active") : t("common.disabled", { defaultValue: "OFF" })}
                     </button>
@@ -216,7 +220,7 @@ export function SchedulerPage() {
                     <button
                       onClick={() => toggleTriggerMut.mutate({ id: tr.id, data: { enabled: !isEnabled } })}
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition-colors ${isEnabled ? "bg-success/10 text-success hover:bg-success/20" : "bg-main text-text-dim/40 hover:text-text-dim"}`}
-                      disabled={toggleTriggerMut.isPending}
+                      disabled={toggleTriggerMut.isPending && toggleTriggerMut.variables?.id === tr.id}
                     >
                       {isEnabled ? t("common.active") : t("common.disabled", { defaultValue: "OFF" })}
                     </button>
@@ -313,7 +317,7 @@ export function SchedulerPage() {
                 <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(createMut.error as any)?.message}</div>
               )}
               <div className="flex gap-2 pt-2">
-                <Button type="submit" variant="primary" className="flex-1" disabled={createMut.isPending || !name.trim()}>
+                <Button type="submit" variant="primary" className="flex-1" disabled={createMut.isPending || !canSubmit}>
                   {createMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
                   {t("scheduler.create_job")}
                 </Button>

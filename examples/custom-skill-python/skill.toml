@@ -3,7 +3,7 @@
 ## This skill counts words in a given text and returns basic statistics.
 ## To test: librefang skill test ./examples/custom-skill-python --input '{"text": "Hello world"}'
 ##
-## For the full reference, see: docs/skill-development.md
+## For the full reference, see: https://docs.librefang.ai/agent/skills
 
 [skill]
 name = "word-counter"

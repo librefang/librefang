@@ -34,9 +34,40 @@ function addHeaders(response, url) {
   });
 }
 
+const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es'];
+
+// Canonicalize URLs: locale roots get a trailing slash ( /zh → /zh/ ), while
+// sub-paths stay un-slashed ( /zh/skills/ → /zh/skills ). Returns the
+// canonical pathname, or null if the request is already canonical.
+function canonicalPath(pathname) {
+  if (pathname === '/') return null;
+  // Locale root without trailing slash — add one.
+  for (const loc of LOCALES) {
+    if (pathname === '/' + loc) return '/' + loc + '/';
+  }
+  // Anything else with a trailing slash and more than one segment — strip it.
+  // Keeps /zh/ and /deploy/ alone but redirects /zh/skills/ → /zh/skills.
+  if (pathname.length > 1 && pathname.endsWith('/')) {
+    const segs = pathname.split('/').filter(Boolean);
+    const isLocaleRoot = segs.length === 1 && LOCALES.includes(segs[0]);
+    const isBlessedTrailingSlashPath = /^\/(deploy|changelog|privacy)\/?$/.test(pathname);
+    if (!isLocaleRoot && !isBlessedTrailingSlashPath) {
+      return pathname.replace(/\/+$/, '');
+    }
+  }
+  return null;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    // 301 redirect to canonical URL before serving. Preserves query + hash.
+    const canonical = canonicalPath(url.pathname);
+    if (canonical !== null) {
+      const target = canonical + url.search + url.hash;
+      return Response.redirect(new URL(target, url).toString(), 301);
+    }
 
     // Try serving static asset first
     const assetResponse = await env.ASSETS.fetch(request);

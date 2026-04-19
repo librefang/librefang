@@ -22,7 +22,6 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const [content, setContent] = useState("");
   const [agentId, setAgentId] = useState("");
-  const [level, setLevel] = useState("episodic");
 
   const addMutation = useAddMemory();
 
@@ -48,29 +47,15 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
             />
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-bold text-text-dim mb-1 block">{t("memory.level")}</label>
-              <select
-                value={level}
-                onChange={(e) => setLevel(e.target.value)}
-                className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
-              >
-                <option value="episodic">{t("memory.episodic")}</option>
-                <option value="semantic">{t("memory.semantic")}</option>
-                <option value="working">{t("memory.working")}</option>
-              </select>
-            </div>
-            <div>
-              <label className="text-xs font-bold text-text-dim mb-1 block">{t("memory.agent_id")}</label>
-              <input
-                type="text"
-                value={agentId}
-                onChange={(e) => setAgentId(e.target.value)}
-                placeholder={t("memory.agent_optional")}
-                className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
-              />
-            </div>
+          <div>
+            <label className="text-xs font-bold text-text-dim mb-1 block">{t("memory.agent_id")}</label>
+            <input
+              type="text"
+              value={agentId}
+              onChange={(e) => setAgentId(e.target.value)}
+              placeholder={t("memory.agent_optional")}
+              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+            />
           </div>
         </div>
 
