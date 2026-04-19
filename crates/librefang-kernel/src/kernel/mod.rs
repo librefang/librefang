@@ -4364,7 +4364,11 @@ system_prompt = "You are a helpful assistant."
         // `loop_opts` is already a local — the spawned async move will
         // capture it. Agent loop reads these at each turn-end / save /
         // tool-exec checkpoint (see `LoopOptions::is_fork` and
-        // `LoopOptions::allowed_tools`).
+        // `LoopOptions::allowed_tools`). Also snapshot `is_fork` here
+        // because we need it after the spawn (to gate `running_tasks`
+        // insertion) but `loop_opts` itself gets moved into the async
+        // block — can't be re-read outside.
+        let is_fork = loop_opts.is_fork;
 
         // All config-derived values have been snapshotted above; release the
         // reload barrier before spawning the async task.
@@ -4441,8 +4445,18 @@ system_prompt = "You are a helpful assistant."
                     let _ = phase_tx.try_send(event);
                 });
 
-            // Set up mid-turn injection channel (#956)
-            let injection_rx = kernel_clone.setup_injection_channel(agent_id);
+            // Set up mid-turn injection channel (#956). Fork turns skip —
+            // inserting into `injection_senders[agent_id]` would overwrite
+            // the parent turn's channel, and external code trying to
+            // inject into the parent during the fork window would land on
+            // the fork's (about-to-be-dropped) sender instead. Forks are
+            // by design short synchronous derivative calls that don't
+            // need mid-turn injection themselves.
+            let injection_rx = if loop_opts.is_fork {
+                None
+            } else {
+                Some(kernel_clone.setup_injection_channel(agent_id))
+            };
 
             let start_time = std::time::Instant::now();
             // Snapshot config for the duration of the agent loop call
@@ -4482,13 +4496,17 @@ system_prompt = "You are a helpful assistant."
                 None, // content_blocks (streaming path uses text only for now)
                 kernel_clone.proactive_memory.get().cloned(),
                 kernel_clone.context_engine_for_agent(&manifest),
-                Some(&injection_rx),
+                injection_rx.as_deref(),
                 &loop_opts,
             )
             .await;
 
-            // Tear down injection channel after loop finishes
-            kernel_clone.teardown_injection_channel(agent_id);
+            // Tear down injection channel after loop finishes (skipped for
+            // forks since they never set one up — tearing down would
+            // remove the parent turn's entry).
+            if !loop_opts.is_fork {
+                kernel_clone.teardown_injection_channel(agent_id);
+            }
 
             let latency_ms = start_time.elapsed().as_millis() as u64;
 
@@ -4666,8 +4684,16 @@ system_prompt = "You are a helpful assistant."
             }
         });
 
-        // Store abort handle for cancellation support
-        self.running_tasks.insert(agent_id, handle.abort_handle());
+        // Store abort handle for cancellation support. Fork turns skip —
+        // registering the fork's handle under `agent_id` would overwrite
+        // the parent turn's handle, so a caller invoking
+        // `stop_agent_run(agent_id)` during the fork window would abort
+        // the fork instead of the parent. Forks are driven by their own
+        // caller (auto_memorize, dream) which has its own join handle
+        // and doesn't need external cancellation via `agent_id` key.
+        if !is_fork {
+            self.running_tasks.insert(agent_id, handle.abort_handle());
+        }
 
         Ok((rx, handle))
     }
