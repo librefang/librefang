@@ -317,6 +317,7 @@ fn is_process_running(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::time::Duration;
 
     fn tmpfile(name: &str) -> PathBuf {

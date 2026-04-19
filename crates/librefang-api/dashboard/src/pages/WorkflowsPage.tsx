@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -68,6 +68,16 @@ export function WorkflowsPage() {
       .filter(wf => !searchQuery || wf.name?.toLowerCase().includes(searchQuery.toLowerCase()) || wf.description?.toLowerCase().includes(searchQuery.toLowerCase())),
     [workflowsQuery.data, searchQuery]
   );
+
+  useEffect(() => {
+    if (!selectedWorkflowId) return;
+    const all = workflowsQuery.data ?? [];
+    if (all.some(wf => wf.id === selectedWorkflowId)) return;
+    setSelectedWorkflowId("");
+    setSelectedRunId(null);
+    setRunInput("");
+    setDryRunResult(null);
+  }, [workflowsQuery.data, selectedWorkflowId]);
 
   const handleRun = async () => {
     if (!selectedWorkflowId) return;

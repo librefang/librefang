@@ -138,7 +138,8 @@ export function RuntimePage() {
   const refreshAll = () => {
     snapshotQuery.refetch(); versionQuery.refetch(); queueQuery.refetch();
     healthDetailQuery.refetch(); securityQuery.refetch();
-    auditQuery.refetch(); backupsQuery.refetch(); taskStatusQuery.refetch();
+    auditQuery.refetch(); auditVerifyQuery.refetch(); backupsQuery.refetch();
+    taskStatusQuery.refetch(); taskListQuery.refetch();
   };
 
   return (

@@ -1228,13 +1228,6 @@ export function SkillsPage() {
             <span className="hidden sm:inline">{t("skills.evo_create", { defaultValue: "Create Skill" })}</span>
           </button>
           <button
-            className="flex h-8 items-center gap-1.5 rounded-xl border border-brand/30 bg-brand/10 px-3 text-xs font-bold text-brand hover:bg-brand/20 transition-colors"
-            onClick={() => setShowCreateModal(true)}
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">{t("skills.evo_create", { defaultValue: "Create Skill" })}</span>
-          </button>
-          <button
             className="flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-colors"
             onClick={async () => {
               // Rescan the skills directory on disk before refetching the list.

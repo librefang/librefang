@@ -349,7 +349,7 @@ export function OverviewPage() {
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0"><HardDrive className="w-4 h-4 text-brand" /></div>
                 <span className="text-xs text-text-dim flex-1">{t("overview.memory_usage")}</span>
-                <span className="text-sm font-mono font-black">{snapshot?.status?.memory_used_mb ? `${snapshot.status.memory_used_mb} MB` : "-"}</span>
+                <span className="text-sm font-mono font-black">{snapshot?.status?.memory_used_mb != null ? `${snapshot.status.memory_used_mb} MB` : "-"}</span>
               </div>
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-warning/10 flex items-center justify-center shrink-0"><Activity className="w-4 h-4 text-warning" /></div>
