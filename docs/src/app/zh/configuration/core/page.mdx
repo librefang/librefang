@@ -95,14 +95,14 @@ decay_rate = 0.1
 
 ### `[auto_dream]`
 
-后台记忆整固（"梦境"）—— 一个时间门控的调度器，周期性地让选择开启的 agent 通过 4 阶段提示词（定位 / 收集 / 整固 / 修剪）反思并整理自己的记忆。默认关闭；每个 agent 还需在 manifest 中通过 `auto_dream_enabled = true` 单独开启。
+后台记忆整固（"梦境"）—— 让选择开启的 agent 通过 4 阶段提示词（定位 / 收集 / 整固 / 修剪）反思并整理自己的记忆。梦境触发是 **事件驱动** 的：agent 每完成一次 turn，kernel 立刻检查闸门是否放行；同时保留一个稀疏的兜底调度器（默认每天一次），用于那些开启了 auto-dream 却长期不活动的 agent。默认关闭；每个 agent 还需在 manifest 中通过 `auto_dream_enabled = true` 单独开启。
 
 ```toml
 [auto_dream]
 enabled = false
 min_hours = 24
 min_sessions = 5
-check_interval_secs = 600
+check_interval_secs = 86400
 timeout_secs = 600
 # lock_dir = ""   # 默认为 <data_dir>/auto_dream/
 ```
@@ -112,7 +112,7 @@ timeout_secs = 600
 | `enabled` | bool | `false` | 全局开关。为 `false` 时即使单个 agent 已开启也不会触发。 |
 | `min_hours` | f64 | `24.0` | 距离该 agent 上次整固的最小小时数，满足后才会再次触发。 |
 | `min_sessions` | u32 | `5` | 距离该 agent 上次整固之后，被触及的最少会话数，满足后才会再次触发。设为 `0` 则禁用该闸门。 |
-| `check_interval_secs` | u64 | `600` | 调度器检查闸门的唤醒间隔（秒）。 |
+| `check_interval_secs` | u64 | `86400` | *兜底* 调度器的唤醒间隔（秒）。主触发路径是 `AgentLoopEnd` 钩子，该字段仅控制"从不 turn 的 agent"的兜底节奏。 |
 | `timeout_secs` | u64 | `600` | 单次梦境调用的超时时间（秒）。 |
 | `lock_dir` | string | `""` | 锁目录的可选覆盖路径。为空则使用 `<data_dir>/auto_dream/`，每个 agent 的锁存储为 `<dir>/<agent_id>.lock`。 |
 
@@ -121,7 +121,7 @@ timeout_secs = 600
 **每个 Agent 的加入状态** 可以无需重启在运行时切换：
 
 - **Web Dashboard**：设置页 → 梦境模式卡片 → 每个 agent 旁的勾选框。
-- **API**：`PUT /api/auto-dream/agents/{id}/enabled`，请求体 `{"enabled": true | false}`。调度器会在下一次 tick 读取新状态。
+- **API**：`PUT /api/auto-dream/agents/{id}/enabled`，请求体 `{"enabled": true | false}`。新状态在下一次 turn 结束（事件驱动）或下一次兜底 tick 时生效，以先到者为准。
 - **Manifest**：在 agent 的 `.toml` 里设置 `auto_dream_enabled = true`，获得重启后仍生效的持久加入状态。
 
 **每个 Agent 的阈值覆盖**（可选）允许异构调度。在 agent manifest 里任一字段不填（`None`）就继承全局默认：
