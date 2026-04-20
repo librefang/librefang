@@ -321,24 +321,6 @@ install() {
         echo ""
         echo "  Running setup wizard..."
         "$INSTALL_DIR/librefang" init || true
-    else
-        echo ""
-        echo "  Next step — run the setup wizard to configure providers and API keys:"
-        echo "    librefang init"
-        if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
-            echo ""
-            echo "  (First refresh your PATH:"
-            case "$USER_SHELL" in
-                */fish|fish)
-                    echo "    fish_add_path \"$INSTALL_DIR\""
-                    ;;
-                *)
-                    echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
-                    ;;
-            esac
-            echo "  )"
-        fi
-        echo ""
     fi
 
     AUTO_START="${LIBREFANG_AUTO_START:-1}"
@@ -348,16 +330,80 @@ install() {
         "$INSTALL_DIR/librefang" service install 2>/dev/null || true
 
         echo "  Starting daemon in background..."
-        if start_daemon_if_needed; then
-            echo ""
-            echo "  Next steps:"
-            echo "    1. Chat:              $INSTALL_DIR/librefang chat"
-            echo "    2. Stop daemon:       $INSTALL_DIR/librefang stop"
-        else
+        start_daemon_if_needed || {
             echo ""
             echo "  Warning: automatic daemon start failed."
             echo "  Start it manually with:"
             echo "    $INSTALL_DIR/librefang start"
+        }
+    fi
+
+    # -- Post-install: activate PATH in current session ------------------------
+    #
+    # Interactive mode (user ran `sh install.sh`):
+    #   Restart the shell via `exec` so the rc file is re-read and PATH
+    #   takes effect immediately — no manual action required.
+    #
+    # Pipe mode (`curl … | sh`):
+    #   `exec` would replace the sh subshell with a login shell whose stdin
+    #   is still the pipe (already drained) — the shell would exit or hang.
+    #   Print a prominent banner instead.
+
+    if [ -t 0 ]; then
+        # Interactive --------------------------------------------------------
+        echo ""
+        echo "  Next steps:"
+        echo "    librefang chat     # start chatting"
+        echo "    librefang stop     # stop the daemon"
+
+        if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
+            # Pick a shell to exec into.  Prefer $SHELL (login shell, survives
+            # subshells) over the detected USER_SHELL.  Only exec when we
+            # actually wrote the PATH to an rc file the shell will read.
+            RESTART_SHELL="${SHELL:-}"
+            [ -n "$RESTART_SHELL" ] || RESTART_SHELL="$USER_SHELL"
+
+            if [ -n "$RESTART_SHELL" ] && [ -n "$SHELL_RC" ] && command_exists "$RESTART_SHELL"; then
+                echo ""
+                echo "  Restarting your shell to activate PATH..."
+                case "$RESTART_SHELL" in
+                    */fish|fish) exec "$RESTART_SHELL" --login ;;
+                    *)           exec "$RESTART_SHELL" -l ;;
+                esac
+            else
+                # Cannot exec — fall back to a manual hint.
+                echo ""
+                echo "  To activate PATH in this session, run:"
+                case "$USER_SHELL" in
+                    */fish|fish) echo "    fish_add_path \"$INSTALL_DIR\"" ;;
+                    *)           echo "    export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
+                esac
+            fi
+        fi
+        echo ""
+    else
+        # Pipe mode ----------------------------------------------------------
+        echo ""
+        echo "  Next steps:"
+        echo "    1. Refresh your PATH (see below)"
+        echo "    2. librefang init     # setup wizard"
+        echo "    3. librefang chat     # start chatting"
+
+        if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
+            echo ""
+            echo "  ========================================================"
+            echo "  To use 'librefang', first refresh your PATH:"
+            echo ""
+            case "$USER_SHELL" in
+                */fish|fish) echo "    fish_add_path \"$INSTALL_DIR\"" ;;
+                *)           echo "    export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
+            esac
+            echo ""
+            if [ -n "$SHELL_RC" ]; then
+                echo "  Or just open a new terminal — $SHELL_RC already"
+                echo "  has the PATH entry and new shells will pick it up."
+            fi
+            echo "  ========================================================"
         fi
         echo ""
     fi

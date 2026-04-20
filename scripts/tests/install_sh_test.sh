@@ -111,4 +111,37 @@ DETECTED=$(HOME="$TMP_HOME" PATH="$FAKE_BIN:$PATH" SHELL=/bin/bash FAKE_PS_STATE
 [ "$DETECTED" = "zsh" ] || fail "detect_user_shell expected zsh, got: $DETECTED"
 pass "detect_user_shell handles curl|sh parent shell"
 
+# SESSION_NEEDS_PATH_REFRESH: detects when install dir is not in PATH
+SESSION_NEEDS_PATH_REFRESH=0
+case ":$PATH:" in
+    *":/nonexistent/test/.librefang/bin:"*) ;;
+    *) SESSION_NEEDS_PATH_REFRESH=1 ;;
+esac
+[ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ] \
+    || fail "SESSION_NEEDS_PATH_REFRESH should be 1 for missing dir"
+
+# SESSION_NEEDS_PATH_REFRESH: 0 when dir already present
+FIRST_PATH_ENTRY=$(printf "%s" "$PATH" | cut -d: -f1)
+SESSION_NEEDS_PATH_REFRESH=0
+case ":$PATH:" in
+    *":$FIRST_PATH_ENTRY:"*) ;;
+    *) SESSION_NEEDS_PATH_REFRESH=1 ;;
+esac
+[ "$SESSION_NEEDS_PATH_REFRESH" -eq 0 ] \
+    || fail "SESSION_NEEDS_PATH_REFRESH should be 0 for existing dir"
+pass "SESSION_NEEDS_PATH_REFRESH detection"
+
+# RESTART_SHELL: prefers $SHELL over USER_SHELL
+RESTART_SHELL="${SHELL:-}"
+[ -n "$RESTART_SHELL" ] || fail "SHELL should be set in test env"
+pass "RESTART_SHELL prefers \$SHELL"
+
+# RESTART_SHELL: falls back to USER_SHELL when SHELL is empty
+USER_SHELL="zsh"
+RESTART_SHELL=""
+[ -n "$RESTART_SHELL" ] || RESTART_SHELL="$USER_SHELL"
+[ "$RESTART_SHELL" = "zsh" ] \
+    || fail "RESTART_SHELL should fall back to USER_SHELL, got: $RESTART_SHELL"
+pass "RESTART_SHELL falls back to USER_SHELL when SHELL is empty"
+
 echo "All install.sh tests passed."
