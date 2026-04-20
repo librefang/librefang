@@ -2,7 +2,13 @@
 //!
 //! Provides an `EmbeddingDriver` trait and implementations:
 //! - `OpenAIEmbeddingDriver` — works with any provider offering a `/v1/embeddings`
-//!   endpoint (OpenAI, Groq, Together, Fireworks, Ollama, etc.).
+//!   endpoint (OpenAI, OpenRouter, Together, Fireworks, Mistral, Ollama, vLLM,
+//!   LM Studio, etc.). **Groq is intentionally excluded**: it does not expose an
+//!   embeddings endpoint (`/v1/models` lists only chat + Whisper), so autowiring
+//!   Groq here would produce silent 404s.
+//! - `CohereEmbeddingDriver` — Cohere's native `/v2/embed` endpoint, which
+//!   differs from OpenAI's shape (`texts` + required `input_type`, embeddings
+//!   returned in `{ "embeddings": { "float": [[...]] } }`).
 //! - `BedrockEmbeddingDriver` — Amazon Bedrock embedding models via SigV4-signed
 //!   REST calls (no heavy `aws-sdk-*` dependency).
 
@@ -26,6 +32,8 @@ pub enum EmbeddingError {
     Parse(String),
     #[error("Missing API key: {0}")]
     MissingApiKey(String),
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
     #[error("Unsupported: {0}")]
     Unsupported(String),
 }
@@ -33,7 +41,7 @@ pub enum EmbeddingError {
 /// Configuration for creating an embedding driver.
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
-    /// Provider name (openai, groq, together, ollama, etc.).
+    /// Provider name (openai, together, mistral, cohere, ollama, etc.).
     pub provider: String,
     /// Model name (e.g., "text-embedding-3-small", "all-MiniLM-L6-v2").
     pub model: String,
@@ -83,7 +91,9 @@ pub trait EmbeddingDriver: Send + Sync {
 /// OpenAI-compatible embedding driver.
 ///
 /// Works with any provider that implements the `/v1/embeddings` endpoint:
-/// OpenAI, Groq, Together, Fireworks, Ollama, vLLM, LM Studio, etc.
+/// OpenAI, OpenRouter, Together, Fireworks, Mistral, Ollama, vLLM, LM Studio,
+/// etc.  Cohere uses `CohereEmbeddingDriver` (different endpoint + shape) and
+/// Groq is intentionally excluded because its API has no embeddings route.
 pub struct OpenAIEmbeddingDriver {
     api_key: Zeroizing<String>,
     base_url: String,
@@ -191,6 +201,210 @@ impl EmbeddingDriver for OpenAIEmbeddingDriver {
 
         debug!(
             "Embedded {} texts (dims={})",
+            embeddings.len(),
+            embeddings.first().map(|e| e.len()).unwrap_or(0)
+        );
+
+        Ok(embeddings)
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dims
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cohere embedding driver (native `/v2/embed` endpoint)
+// ---------------------------------------------------------------------------
+
+/// Cohere native embedding driver.
+///
+/// Cohere's embed API is **not** OpenAI-compatible — it uses a different
+/// endpoint (`/v2/embed` vs. `/v1/embeddings`), a different request shape
+/// (`texts` + required `input_type`), and v2 returns embeddings grouped by
+/// embedding type (`{ "embeddings": { "float": [[...]] } }`) rather than a
+/// flat array.  A dedicated driver is therefore necessary; sending Cohere
+/// requests through `OpenAIEmbeddingDriver` produces 404s.
+///
+/// The driver targets Cohere's **v2** API for consistency with
+/// `librefang-llm-drivers` (the chat driver also uses `api.cohere.com/v2`)
+/// and because v2 is the path Cohere recommends for new integrations.
+pub struct CohereEmbeddingDriver {
+    api_key: Zeroizing<String>,
+    base_url: String,
+    model: String,
+    /// `input_type` sent to Cohere's v2 API for every request from this
+    /// driver instance. Cohere's `embed-*` v3 model family uses this to
+    /// produce asymmetric embeddings: callers are supposed to send
+    /// `search_document` when embedding the corpus and `search_query` when
+    /// embedding a live user query, which measurably improves retrieval
+    /// quality.
+    ///
+    /// **Known limitation:** `EmbeddingDriver` in librefang today doesn't
+    /// distinguish "indexing" from "querying" — both go through the same
+    /// `embed()` method — so we pin a single `input_type` per driver.  The
+    /// default (`search_document`) is optimized for the indexing path,
+    /// which is the dominant call pattern for memory ingest.  Deployments
+    /// whose primary path is query-time embedding or clustering can
+    /// override the per-process default via the
+    /// `LIBREFANG_COHERE_INPUT_TYPE` env var (`search_document` |
+    /// `search_query` | `classification` | `clustering`); invalid values
+    /// are ignored with a warning because Cohere returns a cryptic 400
+    /// otherwise.  Per-call overrides would require a trait change and
+    /// are tracked as follow-up work.
+    input_type: String,
+    client: reqwest::Client,
+    dims: usize,
+}
+
+/// Valid values for Cohere v3 `input_type`, per the official API reference.
+const COHERE_VALID_INPUT_TYPES: &[&str] = &[
+    "search_document",
+    "search_query",
+    "classification",
+    "clustering",
+];
+
+/// Resolve `input_type` for Cohere v3 models, applying the
+/// `LIBREFANG_COHERE_INPUT_TYPE` env var override if present and valid.
+fn resolve_cohere_input_type() -> String {
+    match std::env::var("LIBREFANG_COHERE_INPUT_TYPE") {
+        Ok(v) if COHERE_VALID_INPUT_TYPES.contains(&v.as_str()) => v,
+        Ok(v) if !v.trim().is_empty() => {
+            warn!(
+                invalid = %v,
+                valid = ?COHERE_VALID_INPUT_TYPES,
+                "LIBREFANG_COHERE_INPUT_TYPE is not one of the valid Cohere input_type values; ignoring"
+            );
+            "search_document".to_string()
+        }
+        _ => "search_document".to_string(),
+    }
+}
+
+#[derive(Serialize)]
+struct CohereEmbedRequest<'a> {
+    texts: &'a [&'a str],
+    model: &'a str,
+    input_type: &'a str,
+    /// Required by the v2 API — tells Cohere which numeric representation to
+    /// return. We only ever want `float`; the other options (`int8`, `uint8`,
+    /// `binary`, `ubinary`, `base64`) are for bandwidth-sensitive deployments
+    /// that we don't support yet.
+    embedding_types: &'a [&'a str],
+}
+
+/// v2 response wraps embeddings in an object keyed by embedding type —
+/// we always request `float`, so we extract `embeddings.float`.
+#[derive(Deserialize)]
+struct CohereEmbedResponse {
+    embeddings: CohereEmbeddingsByType,
+}
+
+#[derive(Deserialize)]
+struct CohereEmbeddingsByType {
+    float: Vec<Vec<f32>>,
+}
+
+impl CohereEmbeddingDriver {
+    /// Create a new Cohere embedding driver.
+    ///
+    /// Returns [`EmbeddingError::MissingApiKey`] when `config.api_key` is
+    /// empty, because Cohere's API rejects unauthenticated calls outright
+    /// and a misleading 401 at the first real `embed` call would be harder
+    /// to diagnose than failing at boot.
+    pub fn new(config: EmbeddingConfig) -> Result<Self, EmbeddingError> {
+        if config.api_key.is_empty() {
+            return Err(EmbeddingError::MissingApiKey(
+                "Cohere embedding driver requires a non-empty API key (COHERE_API_KEY)".to_string(),
+            ));
+        }
+
+        let dims = config
+            .dimensions_override
+            .unwrap_or_else(|| infer_cohere_dimensions(&config.model));
+
+        Ok(Self {
+            api_key: Zeroizing::new(config.api_key),
+            base_url: config.base_url,
+            model: config.model,
+            input_type: resolve_cohere_input_type(),
+            client: crate::http_client::proxied_client(),
+            dims,
+        })
+    }
+}
+
+/// Cohere embed v3 model limit. Requests over this size get rejected by the
+/// API; we fail fast with a clearer error instead of letting the server return
+/// a cryptic 400.
+const COHERE_EMBED_MAX_BATCH: usize = 96;
+
+/// Infer embedding dimensions from a Cohere model name.
+///
+/// Cohere publishes these dimensions in their official model list.  The
+/// default for unknown names is 1024, which matches the most common v3
+/// models; callers who need a different size should pass
+/// `dimensions_override` explicitly.
+fn infer_cohere_dimensions(model: &str) -> usize {
+    match model {
+        "embed-english-v3.0" | "embed-multilingual-v3.0" => 1024,
+        "embed-english-light-v3.0" | "embed-multilingual-light-v3.0" => 384,
+        "embed-english-v2.0" => 4096,
+        "embed-english-light-v2.0" => 1024,
+        "embed-multilingual-v2.0" => 768,
+        _ => 1024,
+    }
+}
+
+#[async_trait]
+impl EmbeddingDriver for CohereEmbeddingDriver {
+    async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
+        if texts.len() > COHERE_EMBED_MAX_BATCH {
+            return Err(EmbeddingError::InvalidInput(format!(
+                "Cohere embed API accepts at most {} texts per request (got {})",
+                COHERE_EMBED_MAX_BATCH,
+                texts.len()
+            )));
+        }
+
+        let url = format!("{}/embed", self.base_url);
+        let body = CohereEmbedRequest {
+            texts,
+            model: &self.model,
+            input_type: &self.input_type,
+            embedding_types: &["float"],
+        };
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key.as_str()))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EmbeddingError::Http(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if status != 200 {
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(EmbeddingError::Api {
+                status,
+                message: body_text,
+            });
+        }
+
+        let data: CohereEmbedResponse = resp
+            .json()
+            .await
+            .map_err(|e| EmbeddingError::Parse(e.to_string()))?;
+        let embeddings = data.embeddings.float;
+
+        debug!(
+            "Cohere embedded {} texts (dims={})",
             embeddings.len(),
             embeddings.first().map(|e| e.len()).unwrap_or(0)
         );
@@ -444,20 +658,24 @@ impl EmbeddingDriver for BedrockEmbeddingDriver {
 /// embedding provider.
 ///
 /// Checks in priority order:
-/// 1. `OPENAI_API_KEY`    → `"openai"`
-/// 2. `GROQ_API_KEY`      → `"groq"`
-/// 3. `MISTRAL_API_KEY`   → `"mistral"`
-/// 4. `TOGETHER_API_KEY`  → `"together"`
-/// 5. `FIREWORKS_API_KEY` → `"fireworks"`
-/// 6. `COHERE_API_KEY`    → `"cohere"`
+/// 1. `OPENAI_API_KEY`     → `"openai"`
+/// 2. `OPENROUTER_API_KEY` → `"openrouter"`
+/// 3. `MISTRAL_API_KEY`    → `"mistral"`
+/// 4. `TOGETHER_API_KEY`   → `"together"`
+/// 5. `FIREWORKS_API_KEY`  → `"fireworks"`
+/// 6. `COHERE_API_KEY`     → `"cohere"`
 /// 7. `OLLAMA_HOST` set, or Ollama running on localhost → `"ollama"`
 /// 8. `None` if nothing is available
+///
+/// `GROQ_API_KEY` is deliberately **not** in this list. Groq has no
+/// `/v1/embeddings` endpoint (verify with `GET api.groq.com/openai/v1/models`
+/// — only chat + Whisper models are returned), so picking it for embeddings
+/// would produce silent 404s at the first real call.
 pub fn detect_embedding_provider() -> Option<&'static str> {
     // Cloud providers — check API key env vars in priority order.
     let cloud_providers: &[(&str, &str)] = &[
         ("OPENAI_API_KEY", "openai"),
         ("OPENROUTER_API_KEY", "openrouter"),
-        ("GROQ_API_KEY", "groq"),
         ("MISTRAL_API_KEY", "mistral"),
         ("TOGETHER_API_KEY", "together"),
         ("FIREWORKS_API_KEY", "fireworks"),
@@ -498,9 +716,10 @@ pub fn create_embedding_driver(
     if provider == "auto" {
         let detected = detect_embedding_provider().ok_or_else(|| {
             EmbeddingError::MissingApiKey(
-                "No embedding provider available. Set one of: OPENAI_API_KEY, GROQ_API_KEY, \
-                 MISTRAL_API_KEY, TOGETHER_API_KEY, FIREWORKS_API_KEY, COHERE_API_KEY, \
-                 or configure Ollama."
+                "No embedding provider available. Set one of: OPENAI_API_KEY, \
+                 OPENROUTER_API_KEY, MISTRAL_API_KEY, TOGETHER_API_KEY, FIREWORKS_API_KEY, \
+                 COHERE_API_KEY, or configure Ollama. (GROQ_API_KEY is not accepted here — \
+                 Groq does not expose an embeddings endpoint.)"
                     .to_string(),
             )
         })?;
@@ -530,6 +749,81 @@ pub fn create_embedding_driver(
             .filter(|u| !u.is_empty())
             .map(|s| s.to_string());
         let driver = BedrockEmbeddingDriver::new(model.to_string(), region, dimensions_override)?;
+        return Ok(Box::new(driver));
+    }
+
+    // Cohere uses its native `/v2/embed` endpoint with a different request
+    // shape than OpenAI's `/v1/embeddings`. Handle it before the OpenAI-
+    // compatible fall-through so a generic OpenAI driver doesn't 404.
+    if provider == "cohere" {
+        let resolved_key_env = if api_key_env.is_empty() {
+            "COHERE_API_KEY"
+        } else {
+            api_key_env
+        };
+        let api_key = std::env::var(resolved_key_env).unwrap_or_default();
+        if api_key.is_empty() {
+            return Err(EmbeddingError::MissingApiKey(format!(
+                "Cohere embedding driver requires {resolved_key_env} (currently unset or empty)"
+            )));
+        }
+
+        // Model name fallback: auto-detect hands us the model from config,
+        // which is often OpenAI-shaped ("text-embedding-3-small"). Cohere
+        // rejects those with a 404 at request time, so transparently
+        // substitute a sensible default and log a warn so the user notices
+        // and can pin a real Cohere model in config.
+        let cohere_model = if model.starts_with("embed-") {
+            model.to_string()
+        } else {
+            // Default to the **multilingual** v3 model rather than English-only:
+            // librefang is used in non-English deployments, and
+            // `embed-multilingual-v3.0` has the same 1024 dims, the same per-
+            // token price, and supports 100+ languages (English quality is
+            // only marginally lower than `embed-english-v3.0`). A silent
+            // fallback that treats Chinese/Japanese/Korean corpora as English
+            // would degrade retrieval quality in ways the user can't see.
+            warn!(
+                provider = "cohere",
+                requested_model = %model,
+                fallback_model = "embed-multilingual-v3.0",
+                "Requested model is not a Cohere embed-* model; falling back to embed-multilingual-v3.0. \
+                 Set `[memory].embedding_model` in config.toml to pick a specific Cohere model \
+                 (e.g. `embed-english-v3.0` for English-only corpora, or `embed-*-light-v3.0` \
+                 for the 384-dim light variants)."
+            );
+            "embed-multilingual-v3.0".to_string()
+        };
+
+        // Cohere is a cloud provider — require the catalog (or caller) to
+        // supply the base URL. No hardcoded fallback: that's exactly the
+        // trap that split v1 vs v2 and caused this PR in the first place.
+        let base_url = custom_base_url
+            .filter(|u| !u.is_empty())
+            .map(|u| u.trim_end_matches('/').to_string())
+            .ok_or_else(|| {
+                EmbeddingError::InvalidInput(
+                    "Cohere embedding driver requires a base URL. Expected it from the model \
+                     catalog (`providers/cohere.toml`) or `config.toml` `provider_urls.cohere`, \
+                     but got none."
+                        .to_string(),
+                )
+            })?;
+
+        warn!(
+            provider = "cohere",
+            base_url = %base_url,
+            "Embedding driver configured to send data to external API — text content will leave this machine"
+        );
+
+        let config = EmbeddingConfig {
+            provider: "cohere".to_string(),
+            model: cohere_model,
+            api_key,
+            base_url,
+            dimensions_override,
+        };
+        let driver = CohereEmbeddingDriver::new(config)?;
         return Ok(Box::new(driver));
     }
 
@@ -564,21 +858,23 @@ pub fn create_embedding_driver(
                 trimmed.to_string()
             }
         })
+        .map(Ok)
         .unwrap_or_else(|| match provider {
-            "openai" => "https://api.openai.com/v1".to_string(),
-            "openrouter" => "https://openrouter.ai/api/v1".to_string(),
-            "groq" => "https://api.groq.com/openai/v1".to_string(),
-            "together" => "https://api.together.xyz/v1".to_string(),
-            "fireworks" => "https://api.fireworks.ai/inference/v1".to_string(),
-            "mistral" => "https://api.mistral.ai/v1".to_string(),
-            "ollama" => "http://localhost:11434/v1".to_string(),
-            "vllm" => "http://localhost:8000/v1".to_string(),
-            "lmstudio" => "http://localhost:1234/v1".to_string(),
-            other => {
-                warn!("Unknown embedding provider '{other}', using OpenAI-compatible format");
-                format!("https://{other}/v1")
-            }
-        });
+            // Local providers keep hardcoded defaults: their localhost URLs
+            // aren't registry-tracked and the ports are stable by convention.
+            "ollama" => Ok("http://localhost:11434/v1".to_string()),
+            "vllm" => Ok("http://localhost:8000/v1".to_string()),
+            "lmstudio" => Ok("http://localhost:1234/v1".to_string()),
+            // Cloud providers MUST come from the model catalog or an explicit
+            // override. A hardcoded fallback is exactly the bug class this
+            // plumbing is trying to eliminate (stale baked-in URL silently
+            // overriding a registry entry pinned to a newer version).
+            cloud => Err(EmbeddingError::InvalidInput(format!(
+                "Embedding provider '{cloud}' requires a base URL. Expected it from the \
+                 model catalog (`providers/{cloud}.toml`) or `config.toml` \
+                 `provider_urls.{cloud}`, but got none."
+            ))),
+        })?;
 
     // SECURITY: Warn when embedding requests will be sent to an external API
     let is_local = base_url.contains("localhost")
@@ -964,6 +1260,350 @@ mod tests {
         match had_secret {
             Some(v) => std::env::set_var("AWS_SECRET_ACCESS_KEY", v),
             None => std::env::remove_var("AWS_SECRET_ACCESS_KEY"),
+        }
+    }
+
+    // ── Cohere native driver tests ─────────────────────────────────────
+
+    #[test]
+    fn test_infer_cohere_dimensions_v3() {
+        assert_eq!(infer_cohere_dimensions("embed-english-v3.0"), 1024);
+        assert_eq!(infer_cohere_dimensions("embed-multilingual-v3.0"), 1024);
+        assert_eq!(infer_cohere_dimensions("embed-english-light-v3.0"), 384);
+        assert_eq!(
+            infer_cohere_dimensions("embed-multilingual-light-v3.0"),
+            384
+        );
+    }
+
+    #[test]
+    fn test_infer_cohere_dimensions_v2_and_default() {
+        assert_eq!(infer_cohere_dimensions("embed-english-v2.0"), 4096);
+        assert_eq!(infer_cohere_dimensions("embed-english-light-v2.0"), 1024);
+        assert_eq!(infer_cohere_dimensions("embed-multilingual-v2.0"), 768);
+        // Unknown Cohere model names fall back to 1024 (the v3 default).
+        assert_eq!(infer_cohere_dimensions("embed-some-future-model"), 1024);
+    }
+
+    #[test]
+    fn test_cohere_driver_requires_api_key() {
+        let cfg = EmbeddingConfig {
+            provider: "cohere".to_string(),
+            model: "embed-english-v3.0".to_string(),
+            api_key: String::new(),
+            base_url: "https://api.cohere.com/v2".to_string(),
+            dimensions_override: None,
+        };
+        // `.unwrap_err()` would require `CohereEmbeddingDriver: Debug`, which
+        // it deliberately doesn't derive (would leak the api_key). Match on
+        // the Result directly instead so we only need `EmbeddingError: Debug`.
+        let result = CohereEmbeddingDriver::new(cfg);
+        assert!(
+            matches!(&result, Err(EmbeddingError::MissingApiKey(_))),
+            "expected MissingApiKey, got {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn test_cohere_driver_dims_from_model() {
+        let cfg = EmbeddingConfig {
+            provider: "cohere".to_string(),
+            model: "embed-english-light-v3.0".to_string(),
+            api_key: "bogus".to_string(),
+            base_url: "https://api.cohere.com/v2".to_string(),
+            dimensions_override: None,
+        };
+        let driver = CohereEmbeddingDriver::new(cfg).unwrap();
+        assert_eq!(driver.dimensions(), 384);
+    }
+
+    #[test]
+    fn test_cohere_driver_dimensions_override() {
+        let cfg = EmbeddingConfig {
+            provider: "cohere".to_string(),
+            model: "embed-english-v3.0".to_string(),
+            api_key: "bogus".to_string(),
+            base_url: "https://api.cohere.com/v2".to_string(),
+            dimensions_override: Some(512),
+        };
+        let driver = CohereEmbeddingDriver::new(cfg).unwrap();
+        assert_eq!(driver.dimensions(), 512);
+    }
+
+    #[tokio::test]
+    async fn test_cohere_driver_empty_input_returns_empty() {
+        let cfg = EmbeddingConfig {
+            provider: "cohere".to_string(),
+            model: "embed-english-v3.0".to_string(),
+            api_key: "bogus".to_string(),
+            base_url: "https://api.cohere.com/v2".to_string(),
+            dimensions_override: None,
+        };
+        let driver = CohereEmbeddingDriver::new(cfg).unwrap();
+        // Empty batch must not hit the network.
+        let out = driver.embed(&[]).await.unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cohere_driver_batch_over_limit_fails_fast() {
+        let cfg = EmbeddingConfig {
+            provider: "cohere".to_string(),
+            model: "embed-english-v3.0".to_string(),
+            api_key: "bogus".to_string(),
+            base_url: "https://api.cohere.com/v2".to_string(),
+            dimensions_override: None,
+        };
+        let driver = CohereEmbeddingDriver::new(cfg).unwrap();
+        let texts: Vec<&str> = vec!["x"; COHERE_EMBED_MAX_BATCH + 1];
+        let err = driver.embed(&texts).await.unwrap_err();
+        assert!(
+            matches!(err, EmbeddingError::InvalidInput(_)),
+            "expected InvalidInput, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_create_embedding_driver_cohere_missing_key() {
+        let had = std::env::var("COHERE_API_KEY").ok();
+        std::env::remove_var("COHERE_API_KEY");
+
+        let result = create_embedding_driver("cohere", "embed-english-v3.0", "", None, None);
+        assert!(matches!(result, Err(EmbeddingError::MissingApiKey(_))));
+
+        if let Some(v) = had {
+            std::env::set_var("COHERE_API_KEY", v);
+        }
+    }
+
+    #[test]
+    fn test_create_embedding_driver_cohere_with_key() {
+        let had = std::env::var("COHERE_API_KEY").ok();
+        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+
+        let driver = create_embedding_driver(
+            "cohere",
+            "embed-english-v3.0",
+            "",
+            Some("https://api.cohere.com/v2"),
+            None,
+        )
+        .expect("cohere driver should build with key present");
+        assert_eq!(driver.dimensions(), 1024);
+
+        match had {
+            Some(v) => std::env::set_var("COHERE_API_KEY", v),
+            None => std::env::remove_var("COHERE_API_KEY"),
+        }
+    }
+
+    #[test]
+    fn test_create_embedding_driver_cohere_remaps_openai_model_name() {
+        // When auto-detect sends us an OpenAI-flavored model name, the Cohere
+        // branch should fall back to `embed-multilingual-v3.0` rather than
+        // passing the unknown name through (which would 404 at request
+        // time). The assertion below checks dims == 1024, which holds for
+        // both `embed-multilingual-v3.0` and `embed-english-v3.0`; the
+        // actual fallback choice is pinned in code and documented in the
+        // warn!() call inside `create_embedding_driver`.
+        let had = std::env::var("COHERE_API_KEY").ok();
+        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+
+        let driver = create_embedding_driver(
+            "cohere",
+            "text-embedding-3-small",
+            "",
+            Some("https://api.cohere.com/v2"),
+            None,
+        )
+        .unwrap();
+        // After remap, dims should match embed-english-v3.0 (1024), NOT the
+        // 1536 that text-embedding-3-small would have inferred.
+        assert_eq!(driver.dimensions(), 1024);
+
+        match had {
+            Some(v) => std::env::set_var("COHERE_API_KEY", v),
+            None => std::env::remove_var("COHERE_API_KEY"),
+        }
+    }
+
+    #[test]
+    fn test_create_embedding_driver_cloud_providers_require_base_url() {
+        // Cloud providers no longer have hardcoded URL fallbacks — the catalog
+        // (or an explicit override) must supply the base_url. Pin the
+        // behavior across every cloud provider so a regression can't
+        // silently re-introduce the version-drift bug for any of them.
+        //
+        // Cohere has an earlier api_key check that would preempt the URL
+        // check, so we set COHERE_API_KEY here to force the URL branch to
+        // fire. Other cloud providers don't reject empty api_key at
+        // construction, so they reach the URL check regardless.
+        let had = std::env::var("COHERE_API_KEY").ok();
+        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+
+        // `.unwrap_err()` would require `Box<dyn EmbeddingDriver + Send + Sync>: Debug`,
+        // which the trait object doesn't provide. Match on Result directly.
+        for (provider, model) in [
+            ("openai", "text-embedding-3-small"),
+            ("openrouter", "openai/text-embedding-3-small"),
+            ("mistral", "mistral-embed"),
+            ("together", "BAAI/bge-large-en-v1.5"),
+            ("fireworks", "nomic-ai/nomic-embed-text-v1.5"),
+            ("cohere", "embed-english-v3.0"),
+        ] {
+            let result = create_embedding_driver(provider, model, "", None, None);
+            assert!(
+                matches!(&result, Err(EmbeddingError::InvalidInput(_))),
+                "expected InvalidInput for {provider} when no base_url is available, got {:?}",
+                result.as_ref().err()
+            );
+        }
+
+        match had {
+            Some(v) => std::env::set_var("COHERE_API_KEY", v),
+            None => std::env::remove_var("COHERE_API_KEY"),
+        }
+    }
+
+    /// Clear every env var that `detect_embedding_provider` inspects. Each
+    /// detect-priority test must call this first and restore the vars after
+    /// so host env state doesn't pollute the priority it exercises.
+    fn clear_detect_env() -> Vec<(&'static str, Option<String>)> {
+        let keys = [
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GROQ_API_KEY",
+            "MISTRAL_API_KEY",
+            "TOGETHER_API_KEY",
+            "FIREWORKS_API_KEY",
+            "COHERE_API_KEY",
+            "OLLAMA_HOST",
+        ];
+        let saved = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        saved
+    }
+
+    fn restore_detect_env(saved: Vec<(&'static str, Option<String>)>) {
+        for (k, v) in saved {
+            match v {
+                Some(value) => std::env::set_var(k, value),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_ignores_groq() {
+        // Regression guard: Groq has no /v1/embeddings endpoint (confirmed
+        // empirically — `GET api.groq.com/openai/v1/models` returns only
+        // chat + Whisper). Auto-detect MUST NOT pick Groq, otherwise users
+        // who only set GROQ_API_KEY get silent 404s at the first embed call.
+        let saved = clear_detect_env();
+        std::env::set_var("GROQ_API_KEY", "test-groq-key");
+
+        assert_eq!(
+            detect_embedding_provider(),
+            None,
+            "GROQ_API_KEY alone must not auto-select any embedding provider"
+        );
+
+        restore_detect_env(saved);
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_picks_cohere_when_only_cohere_set() {
+        let saved = clear_detect_env();
+        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+
+        assert_eq!(detect_embedding_provider(), Some("cohere"));
+
+        restore_detect_env(saved);
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_priority_openai_beats_cohere() {
+        // OpenAI is still #1 in the priority list; setting both keys picks OpenAI.
+        let saved = clear_detect_env();
+        std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+
+        assert_eq!(detect_embedding_provider(), Some("openai"));
+
+        restore_detect_env(saved);
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_none_when_nothing_set() {
+        let saved = clear_detect_env();
+        assert_eq!(detect_embedding_provider(), None);
+        restore_detect_env(saved);
+    }
+
+    #[test]
+    fn test_resolve_cohere_input_type_default() {
+        let had = std::env::var("LIBREFANG_COHERE_INPUT_TYPE").ok();
+        std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE");
+
+        assert_eq!(resolve_cohere_input_type(), "search_document");
+
+        if let Some(v) = had {
+            std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v);
+        }
+    }
+
+    #[test]
+    fn test_resolve_cohere_input_type_valid_override() {
+        let had = std::env::var("LIBREFANG_COHERE_INPUT_TYPE").ok();
+        std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", "search_query");
+
+        assert_eq!(resolve_cohere_input_type(), "search_query");
+
+        match had {
+            Some(v) => std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v),
+            None => std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_cohere_input_type_invalid_falls_back() {
+        let had = std::env::var("LIBREFANG_COHERE_INPUT_TYPE").ok();
+        std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", "not-a-real-type");
+
+        // Invalid values must not leak through to the Cohere API (it would
+        // 400 with a cryptic message). Fall back to search_document.
+        assert_eq!(resolve_cohere_input_type(), "search_document");
+
+        match had {
+            Some(v) => std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v),
+            None => std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE"),
+        }
+    }
+
+    #[test]
+    fn test_create_embedding_driver_cohere_custom_base_url() {
+        // Users running behind a proxy / Cohere-compatible gateway should be
+        // able to override the base URL.
+        let had = std::env::var("COHERE_API_KEY").ok();
+        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+
+        let driver = create_embedding_driver(
+            "cohere",
+            "embed-english-v3.0",
+            "",
+            Some("https://cohere-proxy.internal/v2/"),
+            None,
+        )
+        .unwrap();
+        // Trailing slash must be stripped so `{base}/embed` is well-formed.
+        assert_eq!(driver.dimensions(), 1024);
+
+        match had {
+            Some(v) => std::env::set_var("COHERE_API_KEY", v),
+            None => std::env::remove_var("COHERE_API_KEY"),
         }
     }
 }
