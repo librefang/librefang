@@ -2907,10 +2907,19 @@ async fn dispatch_message(
                                 AgentPhase::Error
                             };
                             send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
-                            // Prefer kernel error string when present; fall
-                            // back to the adapter HTTP error so we never
-                            // claim success on a failed kernel run.
-                            let err_str = kernel_err_str.clone().or_else(|| Some(e.to_string()));
+                            // Pair the err field with the success flag — when
+                            // kernel succeeded, the fallback send_response
+                            // delivered the real reply, so the transport-side
+                            // stream error is irrelevant to delivery accounting
+                            // (record_delivery=true with err=Some is a
+                            // contradictory signal). When kernel failed, keep
+                            // the kernel error string so metrics know why.
+                            let _ = e; // stream transport error is logged via warn! above
+                            let err_str = if kernel_ok {
+                                None
+                            } else {
+                                kernel_err_str.clone()
+                            };
                             handle
                                 .record_delivery(
                                     agent_id,

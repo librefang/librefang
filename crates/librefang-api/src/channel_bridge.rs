@@ -453,34 +453,34 @@ fn start_stream_text_bridge_with_status(
                         }
                     }
                 }
-                StreamEvent::ToolExecutionResult { name, is_error, .. } => {
-                    // Only surface failures — successes are followed by the
-                    // model's next prose iteration which is signal enough.
-                    if show_progress && is_error && !name.is_empty() {
-                        let pretty = prettify_tool_name(&name);
-                        let line = format!("\n⚠️ {pretty} {failed_word}\n");
-                        if tx.send(line).await.is_err() {
-                            break;
-                        }
+                // Only surface failures — successes are followed by the
+                // model's next prose iteration which is signal enough.
+                StreamEvent::ToolExecutionResult { name, is_error, .. }
+                    if show_progress && is_error && !name.is_empty() =>
+                {
+                    let pretty = prettify_tool_name(&name);
+                    let line = format!("\n⚠️ {pretty} {failed_word}\n");
+                    if tx.send(line).await.is_err() {
+                        break;
                     }
                 }
-                StreamEvent::PhaseChange { phase, detail } => {
-                    // Most PhaseChange events (`thinking`, `tool_use`,
-                    // `streaming`, `done`) fire every iteration and are too
-                    // noisy for inline display — they still flow through the
-                    // SSE endpoint for the dashboard.
-                    //
-                    // We only surface phases that carry actionable user-facing
-                    // information:
-                    //   - `context_warning`: agent's context window was
-                    //     trimmed or overflowed; user needs to know quality
-                    //     may degrade and that /reset or /compact may help
-                    if show_progress && phase == "context_warning" {
-                        let body = detail.as_deref().unwrap_or("Context window trimmed");
-                        let line = format!("\n⚠️ {body}\n");
-                        if tx.send(line).await.is_err() {
-                            break;
-                        }
+                // Most PhaseChange events (`thinking`, `tool_use`,
+                // `streaming`, `done`) fire every iteration and are too
+                // noisy for inline display — they still flow through the
+                // SSE endpoint for the dashboard.
+                //
+                // We only surface phases that carry actionable user-facing
+                // information:
+                //   - `context_warning`: agent's context window was
+                //     trimmed or overflowed; user needs to know quality
+                //     may degrade and that /reset or /compact may help
+                StreamEvent::PhaseChange { phase, detail }
+                    if show_progress && phase == "context_warning" =>
+                {
+                    let body = detail.as_deref().unwrap_or("Context window trimmed");
+                    let line = format!("\n⚠️ {body}\n");
+                    if tx.send(line).await.is_err() {
+                        break;
                     }
                 }
                 _ => {}
@@ -511,9 +511,9 @@ fn start_stream_text_bridge_with_status(
             Ok(Err(e)) => {
                 let err_str = e.to_string();
                 error!("Streaming kernel task returned error: {err_str}");
-                let user_msg = if err_str
-                    .contains(librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER)
-                {
+                let is_timeout =
+                    err_str.contains(librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER);
+                let user_msg = if is_timeout {
                     Some(
                         "\n\n---\n[Task timed out. The output above may be incomplete.]"
                             .to_string(),
@@ -542,7 +542,15 @@ fn start_stream_text_bridge_with_status(
                         Some(sanitize_channel_error(&err_str))
                     }
                 };
-                (user_msg, Err(err_str))
+                // Timeout-with-partial-output is a soft success: the model
+                // emitted a useful chunk before the inactivity timer fired,
+                // and the user already saw it streamed in. Reporting status
+                // = Err here would flip the lifecycle reaction to ❌ and
+                // record_delivery to success=false, which is a UX regression
+                // — pre-V2 the bridge had no status channel and treated
+                // these turns as Done. Keep that semantics by reporting Ok.
+                let status = if is_timeout { Ok(()) } else { Err(err_str) };
+                (user_msg, status)
             }
             Ok(Ok(result)) => {
                 debug!(
