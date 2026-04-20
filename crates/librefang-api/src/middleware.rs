@@ -367,6 +367,12 @@ pub async fn auth(
     // Pattern: /api/mcp/servers/{name}/auth/callback — GET only.
     let is_mcp_oauth_callback =
         is_get && path.starts_with("/api/mcp/servers/") && path.ends_with("/auth/callback");
+    // Path has been trimmed of trailing slashes above, so `/dashboard/` is
+    // normalized to `/dashboard`. Match the bare root as well as any
+    // descendant so the login gate (and cookie session lookup below) don't
+    // silently miss the root navigation.
+    let is_dashboard_path = path == "/dashboard" || path.starts_with("/dashboard/");
+
     // Compute `auth_configured` early so we can decide whether the SPA
     // shell at `/dashboard/*` stays publicly reachable. When *any* form of
     // auth is configured, shell access goes behind the session cookie and
@@ -376,7 +382,12 @@ pub async fn auth(
     let auth_configured = !api_key.trim().is_empty()
         || !auth_state.user_api_keys.is_empty()
         || auth_state.dashboard_auth_enabled;
-    let dashboard_shell_public = !auth_configured && path.starts_with("/dashboard/");
+    // The inline login page (`login_page.html`) only speaks username/password,
+    // so only gate the shell when *that* mode is actually enabled. API-key-only
+    // deployments keep a public shell so the SPA can load its own API-key
+    // entry UI; the individual `/api/*` endpoints still require a Bearer
+    // token, which is the real security boundary.
+    let dashboard_shell_public = !auth_state.dashboard_auth_enabled && is_dashboard_path;
 
     let always_public_get_only = is_get
         && (matches!(
@@ -463,7 +474,7 @@ pub async fn auth(
     // a cross-site request that auto-forwards the cookie cannot trigger a
     // write. Pair with `SameSite=Lax` on the Set-Cookie (issued by
     // `dashboard_login`) for the usual CSRF posture.
-    let cookie_session_token = if path.starts_with("/dashboard/") {
+    let cookie_session_token = if is_dashboard_path {
         request
             .headers()
             .get("cookie")
@@ -585,7 +596,7 @@ pub async fn auth(
     // minimal self-contained login page instead of a JSON error, so the SPA
     // bundle (and whatever it imports) never reaches an unauthenticated
     // caller.
-    if is_get && path.starts_with("/dashboard/") {
+    if is_get && is_dashboard_path && auth_state.dashboard_auth_enabled {
         return Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header("content-type", "text/html; charset=utf-8")
