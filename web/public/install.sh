@@ -366,6 +366,9 @@ install() {
             if [ -n "$RESTART_SHELL" ] && [ -n "$SHELL_RC" ] && command_exists "$RESTART_SHELL"; then
                 echo ""
                 echo "  Restarting your shell to activate PATH..."
+                # exec replaces the process — EXIT trap won't fire.
+                # Clean up the download temp dir manually.
+                rm -rf "$TMPDIR" 2>/dev/null || true
                 case "$RESTART_SHELL" in
                     */fish|fish) exec "$RESTART_SHELL" --login ;;
                     *)           exec "$RESTART_SHELL" -l ;;
