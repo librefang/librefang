@@ -56,7 +56,7 @@ const MAX_CONTINUATIONS: u32 = 5;
 /// Maximum message history size before auto-trimming to prevent context overflow.
 /// With tool calls each user turn can consume 4-6 messages, so 40 gives roughly
 /// 7-10 real conversation turns instead of the previous 3-5.
-const MAX_HISTORY_MESSAGES: usize = 40;
+const MAX_HISTORY_MESSAGES: usize = 400;
 
 /// Maximum consecutive iterations where every executed tool failed before
 /// the loop exits with `RepeatedToolFailures`. Catches expensive wheel-spinning
