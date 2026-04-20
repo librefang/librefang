@@ -112,7 +112,7 @@ describe("useUpdateTrigger", () => {
     vi.mocked(http.updateTrigger).mockResolvedValue(actionResponse);
   });
 
-  it("invalidates triggerKeys.all", async () => {
+  it("invalidates triggerKeys.all and cronKeys.all", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -120,8 +120,14 @@ describe("useUpdateTrigger", () => {
 
     await result.current.mutateAsync({ id: "trig-1", data: { enabled: true } });
 
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+    });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: triggerKeys.all,
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: cronKeys.all,
     });
   });
 });
@@ -131,7 +137,7 @@ describe("useDeleteTrigger", () => {
     vi.mocked(http.deleteTrigger).mockResolvedValue(actionResponse);
   });
 
-  it("invalidates triggerKeys.all", async () => {
+  it("invalidates triggerKeys.all and cronKeys.all", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -139,8 +145,14 @@ describe("useDeleteTrigger", () => {
 
     await result.current.mutateAsync("trig-1");
 
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+    });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: triggerKeys.all,
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: cronKeys.all,
     });
   });
 });

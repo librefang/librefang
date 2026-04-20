@@ -14,6 +14,7 @@ export function useSetSessionLabel() {
       setSessionLabel(sessionId, label),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: sessionKeys.lists() });
+      qc.invalidateQueries({ queryKey: sessionKeys.detail(variables.sessionId) });
       if (variables.agentId) {
         qc.invalidateQueries({ queryKey: agentKeys.sessions(variables.agentId) });
       }
