@@ -1126,7 +1126,6 @@ export function AgentsPage() {
                 </Button>
               </div>
             </div>
-          </div>
         </Modal>
         );
       })()}

@@ -409,12 +409,22 @@ export function ConfigPage({ category }: { category: string }) {
         const data = await setConfigValue(path, value);
         const reloadFailed = data.status === "saved_reload_failed";
         const restartRequired = data.status === "applied_partial" || data.restart_required;
+        // When reload fails, prefer the kernel's specific error message
+        // (e.g. "Validation failed: network_enabled is true but
+        // shared_secret is empty") over the generic
+        // "Saved but reload failed" — without the cause the user can't
+        // tell apart "transient kernel hiccup" from "permanently
+        // invalid config that breaks the next restart too".
+        const reloadErr = reloadFailed && data.reload_error ? data.reload_error : null;
         const msg = reloadFailed
-          ? t("config.saved_reload_failed", "Saved but reload failed")
+          ? reloadErr
+            ? `${t("config.saved_reload_failed", "Saved but reload failed")}: ${reloadErr}`
+            : t("config.saved_reload_failed", "Saved but reload failed")
           : restartRequired
             ? t("config.saved_restart", "Saved (restart required)")
             : t("common.saved", "Saved");
         setSaveStatus((s) => ({ ...s, [path]: { ok: !reloadFailed, msg } }));
+        if (reloadFailed) errors++;
       } catch (err: any) {
         setSaveStatus((s) => ({ ...s, [path]: { ok: false, msg: err.message || t("config.save_failed") } }));
         errors++;

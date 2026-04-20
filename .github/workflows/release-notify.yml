@@ -3,10 +3,7 @@ name: "Release / Notify"
 on:
   workflow_run:
     workflows:
-      - "Release / Shell"
-      - "Release / Desktop"
-      - "Release / Docker"
-      - "Release / SDK"
+      - "Release"
     types: [completed]
 
 permissions:
