@@ -2914,7 +2914,8 @@ async fn dispatch_message(
                             // (record_delivery=true with err=Some is a
                             // contradictory signal). When kernel failed, keep
                             // the kernel error string so metrics know why.
-                            let _ = e; // stream transport error is logged via warn! above
+                            // (`e`, the stream transport error, was already
+                            // logged via warn! above.)
                             let err_str = if kernel_ok {
                                 None
                             } else {
