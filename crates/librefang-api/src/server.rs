@@ -1122,12 +1122,19 @@ pub async fn run_daemon(
     // Auto-start observability stack (Prometheus + Grafana) if Docker is available
     let observability_started = if kernel.config_ref().telemetry.enabled {
         match start_observability_stack() {
-            Ok(true) => {
+            Ok(ObservabilityStartup::Started) => {
                 info!("Observability stack started (Prometheus :9090, Grafana :3000)");
                 true
             }
-            Ok(false) => {
+            Ok(ObservabilityStartup::DockerUnavailable) => {
                 info!("Docker not available, skipping observability stack");
+                false
+            }
+            Ok(ObservabilityStartup::ComposeFailed { stderr }) => {
+                tracing::warn!(
+                    "Observability stack failed to start (likely a port conflict on 9090/3000 or an existing stack): {}",
+                    stderr.trim()
+                );
                 false
             }
             Err(e) => {
@@ -1312,10 +1319,21 @@ pub async fn run_daemon(
     Ok(())
 }
 
+/// Outcome of attempting to bring up the observability stack.
+enum ObservabilityStartup {
+    /// `docker compose up -d` exited successfully.
+    Started,
+    /// No working `docker` CLI reachable from this process.
+    DockerUnavailable,
+    /// `docker compose up -d` exited non-zero (port conflict, pre-existing
+    /// stack, image pull failure, etc.). `stderr` carries docker's output so
+    /// the operator can see why.
+    ComposeFailed { stderr: String },
+}
+
 /// Check if Docker is available and start the observability stack.
-/// Returns Ok(true) if started, Ok(false) if Docker not available.
-fn start_observability_stack() -> Result<bool, Box<dyn std::error::Error>> {
-    // Check if docker CLI exists
+fn start_observability_stack() -> Result<ObservabilityStartup, Box<dyn std::error::Error>> {
+    // Check if docker CLI exists and daemon is reachable
     let docker_check = std::process::Command::new("docker")
         .arg("version")
         .stdout(std::process::Stdio::null())
@@ -1324,22 +1342,26 @@ fn start_observability_stack() -> Result<bool, Box<dyn std::error::Error>> {
 
     match docker_check {
         Ok(status) if status.success() => {}
-        _ => return Ok(false),
+        _ => return Ok(ObservabilityStartup::DockerUnavailable),
     }
 
     // Find the compose file relative to the executable or well-known paths
     let compose_file = find_compose_file()?;
 
-    std::process::Command::new("docker")
+    let output = std::process::Command::new("docker")
         .args(["compose", "-f"])
         .arg(&compose_file)
         .args(["up", "-d"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("docker compose up failed: {e}"))?;
+        .output()
+        .map_err(|e| format!("docker compose up failed to spawn: {e}"))?;
 
-    Ok(true)
+    if output.status.success() {
+        Ok(ObservabilityStartup::Started)
+    } else {
+        Ok(ObservabilityStartup::ComposeFailed {
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
 }
 
 /// Stop the observability stack.
