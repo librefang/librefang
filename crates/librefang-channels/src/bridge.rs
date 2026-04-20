@@ -955,12 +955,17 @@ impl BridgeManager {
         adapter: Arc<dyn ChannelAdapter>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Sweep stale files (>24h) from the download directory on startup.
+        // Use Once so that registering multiple adapters doesn't trigger
+        // redundant cleanup sweeps.
         {
+            static CLEANUP_ONCE: std::sync::Once = std::sync::Once::new();
             let dir = self
                 .handle
                 .channels_download_dir()
                 .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
-            cleanup_old_uploads(&dir).await;
+            CLEANUP_ONCE.call_once(|| {
+                tokio::spawn(async move { cleanup_old_uploads(&dir).await });
+            });
         }
 
         // Prefer shared webhook routes over adapter-managed HTTP servers.
@@ -3389,6 +3394,18 @@ async fn download_file_to_blocks(
 
     if let Err(e) = file.flush().await {
         warn!("Failed to flush file {}: {e}", file_path.display());
+    }
+
+    // Probabilistic cleanup — avoids unbounded disk growth between restarts.
+    // Triggers on ~1/256 downloads without a rand dependency.
+    if std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos()
+        .is_multiple_of(256)
+    {
+        let sweep_dir = download_dir.to_path_buf();
+        tokio::spawn(async move { cleanup_old_uploads(&sweep_dir).await });
     }
 
     info!(
