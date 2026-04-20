@@ -424,14 +424,19 @@ impl CronScheduler {
     /// Increments the consecutive error counter. If it reaches
     /// [`MAX_CONSECUTIVE_ERRORS`], the job is automatically disabled.
     pub fn record_failure(&self, id: CronJobId, error_msg: &str) {
-        if let Some(mut meta) = self.jobs.get_mut(&id) {
+        let should_remove = if let Some(mut meta) = self.jobs.get_mut(&id) {
             meta.job.last_run = Some(Utc::now());
             meta.last_status = Some(format!(
                 "error: {}",
                 librefang_types::truncate_str(error_msg, 256)
             ));
             meta.consecutive_errors += 1;
-            if meta.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+            if meta.one_shot {
+                // one_shot jobs (e.g. At-schedule) are removed after the first
+                // failure too — there is no meaningful retry for a one-time job
+                // whose scheduled moment has already passed (#2808).
+                true
+            } else if meta.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                 warn!(
                     job_id = %id,
                     errors = meta.consecutive_errors,
@@ -439,9 +444,16 @@ impl CronScheduler {
                 );
                 meta.job.enabled = false;
                 meta.auto_disabled = true;
+                false
             } else {
                 meta.job.next_run = Some(compute_next_run_after(&meta.job.schedule, Utc::now()));
+                false
             }
+        } else {
+            false
+        };
+        if should_remove {
+            self.jobs.remove(&id);
         }
     }
 }
@@ -744,6 +756,27 @@ mod tests {
         let id = sched.add_job(job, true).unwrap();
         sched.record_success(id);
         assert_eq!(sched.total_jobs(), 0);
+    }
+
+    #[test]
+    fn test_at_schedule_removed_on_failure() {
+        // one_shot At-schedule job must be removed on first failure too
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let mut job = make_job(agent);
+        job.schedule = CronSchedule::At {
+            at: Utc::now() + chrono::Duration::seconds(60),
+        };
+
+        let id = sched.add_job(job, false).unwrap();
+        assert_eq!(sched.total_jobs(), 1);
+
+        sched.record_failure(id, "something went wrong");
+        assert_eq!(
+            sched.total_jobs(),
+            0,
+            "At-schedule job must be removed after failure"
+        );
     }
 
     // -- test_record_failure_auto_disable -----------------------------------
