@@ -1725,6 +1725,7 @@
     "session": "会话",
     "sessions_title": "会话列表",
     "send_hint": "Enter 发送 · ⌘+↵ 换行",
+    "stop_hint": "停止生成",
     "voice_input": "语音输入",
     "voice_stop": "停止录音",
     "voice_recording": "正在聆听...",
@@ -1810,9 +1811,11 @@
     "pick_template": "选择模板",
     "pick_template_desc": "选择一个模板，快速创建预定义的目标。",
     "use_template": "使用模板",
+    "apply_template_partial": "已创建 {{succeeded}}/{{total}} 个目标，失败 {{failed}} 个。",
     "overall_progress": "总体进度",
     "clear_all": "清空全部",
     "clear_all_confirm": "确认删除所有目标？",
+    "clear_all_partial": "已删除 {{succeeded}}/{{total}} 个目标，失败 {{failed}} 个。",
     "help": "设定战略目标并跟踪进度。创建目标层级、应用模板，监控完成状态。"
   },
   "sessions": {

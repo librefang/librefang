@@ -329,6 +329,8 @@ pub enum SystemEvent {
     TaskCompleted {
         /// The task ID.
         task_id: String,
+        /// Agent that completed the task.
+        completed_by: String,
         /// The task result/verdict.
         result: String,
     },

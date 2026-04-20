@@ -1,6 +1,5 @@
 import { useTranslation } from "react-i18next";
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -14,9 +13,11 @@ import {
   useFullConfig,
   useRawConfigToml,
 } from "../lib/queries/config";
-import { useSetConfigValue, useReloadConfig } from "../lib/mutations/config";
-import { configKeys } from "../lib/queries/keys";
-import { setConfigValue } from "../lib/http/client";
+import {
+  useBatchSetConfigValues,
+  useSetConfigValue,
+  useReloadConfig,
+} from "../lib/mutations/config";
 import { TomlViewer } from "../components/TomlViewer";
 
 /* ------------------------------------------------------------------ */
@@ -291,7 +292,6 @@ function ConfigFieldInput({
 
 export function ConfigPage({ category }: { category: string }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const router = useRouter();
 
   const schemaQuery = useConfigSchema();
@@ -399,32 +399,97 @@ export function ConfigPage({ category }: { category: string }) {
   });
 
   const [batchSaving, setBatchSaving] = useState(false);
+  const batchStatusTimeoutRefs = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const clearBatchStatuses = useCallback((paths: string[], statuses: Record<string, { ok: boolean; msg: string }>, delay: number) => {
+    for (const path of paths) {
+      const existingTimeout = batchStatusTimeoutRefs.current[path];
+      if (existingTimeout) clearTimeout(existingTimeout);
+      batchStatusTimeoutRefs.current[path] = setTimeout(() => {
+        setSaveStatus((current) => {
+          if (current[path]?.msg !== statuses[path]?.msg) return current;
+          const next = { ...current };
+          delete next[path];
+          return next;
+        });
+        delete batchStatusTimeoutRefs.current[path];
+      }, delay);
+    }
+  }, []);
+
+  useEffect(() => () => {
+    for (const timeoutId of Object.values(batchStatusTimeoutRefs.current)) {
+      clearTimeout(timeoutId);
+    }
+  }, []);
+
+  const batchSaveMutation = useBatchSetConfigValues({
+    onSuccess: (results) => {
+      let errors = 0;
+      const nextStatuses: Record<string, { ok: boolean; msg: string }> = {};
+      for (const result of results) {
+        if (result.error) {
+          nextStatuses[result.path] = {
+            ok: false,
+            msg: result.error?.message || t("config.save_failed"),
+          };
+          errors++;
+          continue;
+        }
+
+        const reloadFailed = result.data?.status === "saved_reload_failed";
+        const restartRequired = result.data?.status === "applied_partial" || result.data?.restart_required;
+        const reloadErr = reloadFailed && result.data?.reload_error ? result.data.reload_error : null;
+        const msg = reloadFailed
+          ? reloadErr
+            ? `${t("config.saved_reload_failed", "Saved but reload failed")}: ${reloadErr}`
+            : t("config.saved_reload_failed", "Saved but reload failed")
+          : restartRequired
+            ? t("config.saved_restart", "Saved (restart required)")
+            : t("common.saved", "Saved");
+        nextStatuses[result.path] = { ok: !reloadFailed, msg };
+        if (reloadFailed) errors++;
+      }
+
+      setSaveStatus((current) => ({ ...current, ...nextStatuses }));
+
+      setPendingChanges((current) => {
+        const next = { ...current };
+        for (const result of results) {
+          if (!result.error && JSON.stringify(current[result.path]) === JSON.stringify(result.value)) {
+            delete next[result.path];
+          }
+        }
+        return next;
+      });
+      setBatchSaving(false);
+      clearBatchStatuses(results.map((result) => result.path), nextStatuses, errors > 0 ? 5000 : 3000);
+    },
+    onError: (err: Error) => {
+      setBatchSaving(false);
+      setSaveStatus((s) => ({
+        ...s,
+        __batch__: { ok: false, msg: err.message || t("config.save_failed") },
+      }));
+      setTimeout(() => setSaveStatus((s) => {
+        const next = { ...s };
+        delete next.__batch__;
+        return next;
+      }), 5000);
+    },
+  });
   const handleBatchSave = useCallback(async () => {
     const entries = Object.entries(pendingChanges);
     if (entries.length === 0) return;
     setBatchSaving(true);
-    let errors = 0;
-    for (const [path, value] of entries) {
-      try {
-        const data = await setConfigValue(path, value);
-        const reloadFailed = data.status === "saved_reload_failed";
-        const restartRequired = data.status === "applied_partial" || data.restart_required;
-        const msg = reloadFailed
-          ? t("config.saved_reload_failed", "Saved but reload failed")
-          : restartRequired
-            ? t("config.saved_restart", "Saved (restart required)")
-            : t("common.saved", "Saved");
-        setSaveStatus((s) => ({ ...s, [path]: { ok: !reloadFailed, msg } }));
-      } catch (err: any) {
-        setSaveStatus((s) => ({ ...s, [path]: { ok: false, msg: err.message || t("config.save_failed") } }));
-        errors++;
-      }
+    try {
+      // Per-entry failures are folded into the successful batch result.
+      // Mutation-level failures are handled in the hook's onError; await here
+      // so batchSaving tracks the full request and no rejection is left unhandled.
+      await batchSaveMutation.mutateAsync(entries.map(([path, value]) => ({ path, value })));
+    } catch {
+      // onError already mapped the batch-level failure into UI state.
     }
-    setPendingChanges({});
-    queryClient.invalidateQueries({ queryKey: configKeys.all });
-    setBatchSaving(false);
-    setTimeout(() => setSaveStatus({}), errors > 0 ? 5000 : 3000);
-  }, [pendingChanges, queryClient, t]);
+  }, [batchSaveMutation, pendingChanges]);
 
   const handleResetField = useCallback(
     (sectionKey: string, fieldKey: string, rootLevel?: boolean) => {

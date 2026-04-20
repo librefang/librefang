@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, ChevronRight, Loader2, CheckCircle, XCircle } from "lucide-react";
 import type { AgentTool } from "../../api";
+import { prettifyToolName } from "../../lib/string";
 
 function formatToolContent(value: unknown): string {
   if (value == null) return "";
@@ -43,7 +44,7 @@ export function ToolCallCard({ tool }: { tool: AgentTool }) {
           : <ChevronRight className="w-3 h-3 text-text-dim/60 shrink-0" />
         }
         <span className="text-[10px] font-bold text-brand uppercase tracking-wider truncate">
-          {tool.name || "tool"}
+          {prettifyToolName(tool.name)}
         </span>
         <span className="ml-auto shrink-0">
           {isRunning ? (

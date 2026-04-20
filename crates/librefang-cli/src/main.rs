@@ -252,12 +252,21 @@ enum Commands {
     },
     /// Show kernel status.
     #[command(
-        long_about = "Show the current status of the LibreFang kernel daemon.\n\nDisplays uptime, active agents, loaded skills, and resource usage.\n\nExamples:\n  librefang status          # Pretty-printed status\n  librefang status --json   # JSON output for scripting"
+        long_about = "Show the current status of the LibreFang kernel daemon.\n\nDisplays uptime, version, default provider/model, health checks, and (when an\n`api_key` is configured) agent list, sessions, and memory usage. Without a key\nthe command still works — only the protected detail section is hidden.\n\nExit codes:\n  0  daemon running and healthy\n  1  daemon not running (in-process fallback)\n  2  daemon running but reporting a degraded status\n  3  daemon port claims to be open but /api/health is unreachable\n\nExamples:\n  librefang status             # Pretty-printed status\n  librefang status --json      # JSON output for scripting\n  librefang status -v          # Verbose: config warnings, auth, MCP, peers\n  librefang status -q          # Quiet: one-line summary\n  librefang status --watch 2   # Refresh every 2 seconds (Ctrl+C to stop)"
     )]
     Status {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
+        /// Verbose mode: include config warnings, auth mode, MCP server list, peers.
+        #[arg(long, short = 'v', conflicts_with_all = ["quiet", "json"])]
+        verbose: bool,
+        /// Quiet mode: single-line summary, no section layout.
+        #[arg(long, short = 'q', conflicts_with_all = ["verbose", "json"])]
+        quiet: bool,
+        /// Refresh every N seconds until Ctrl+C. Conflicts with --json / --quiet.
+        #[arg(long, value_name = "SECS", conflicts_with_all = ["json", "quiet"])]
+        watch: Option<u64>,
     },
     /// Run diagnostic health checks.
     #[command(
@@ -1357,6 +1366,19 @@ enum SecurityCommands {
         long_about = "Verify the integrity of the audit trail using its Merkle chain.\n\nReports whether the chain is intact or has been tampered with.\n\nExamples:\n  librefang security verify"
     )]
     Verify,
+    /// Reset the audit trail: truncate `audit_entries` and remove the anchor file.
+    ///
+    /// Destructive. Use only when the chain is already broken (tampering, manual
+    /// DB edits, partial restore) and you want to start a fresh chain. Requires
+    /// `--confirm` and refuses to run while a daemon holds the database.
+    #[command(
+        long_about = "DESTRUCTIVE: wipe the audit trail and restart the chain from empty.\n\nOnly needed when `librefang security verify` reports a chain break that you can't recover — e.g. after a manual SQL edit, partial DB restore, or a crash that left the anchor file ahead of `audit_entries`.\n\nRefuses to run if the daemon is still holding the database. Requires `--confirm`.\n\nExamples:\n  librefang security audit-reset --confirm"
+    )]
+    AuditReset {
+        /// Required. Without this flag the command prints what it would do and exits non-zero.
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1519,10 +1541,50 @@ fn init_tracing_stderr(log_level: &str) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
+    // One-shot CLI commands (status, stop, doctor, …) load config.toml as a
+    // side effect. librefang_kernel::config emits INFO on every load and WARN
+    // for every unknown field; in a CLI context those lines leak into the
+    // user's stdout flow and make basic commands look broken. Keep them out
+    // of the default stderr budget — users who set RUST_LOG explicitly still
+    // see everything, and daemon/foreground boots route through a different
+    // initialiser where the full log is expected.
+    let user_set_rust_log = std::env::var("RUST_LOG").is_ok();
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+    let env_filter = if user_set_rust_log {
+        env_filter
+    } else {
+        // For one-shot CLI commands, downgrade library-level chatter so the
+        // user sees only their command's own output. WARN and above still
+        // surface everywhere — the filter is per-target verbosity, not a
+        // global mute. Setting RUST_LOG restores full detail.
+        env_filter
+            .add_directive("librefang_kernel=warn".parse().expect("static directive"))
+            .add_directive("librefang_runtime=warn".parse().expect("static directive"))
+            .add_directive(
+                "librefang_extensions=warn"
+                    .parse()
+                    .expect("static directive"),
+            )
+            .add_directive(
+                "librefang_kernel::config=error"
+                    .parse()
+                    .expect("static directive"),
+            )
+            .add_directive(
+                "librefang_runtime::registry_sync=error"
+                    .parse()
+                    .expect("static directive"),
+            )
+    };
 
-    let fmt_layer = tracing_subscriber::fmt::layer();
+    // Compact stderr format: in a one-shot CLI context the user cares about
+    // the WARN/ERROR text, not the timestamp or the fully-qualified target.
+    // `daemon.log` keeps the full default format via the file layer below.
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .without_time()
+        .with_target(false)
+        .compact();
 
     // Also write logs to ~/.librefang/daemon.log
     let log_dir = cli_librefang_home();
@@ -1535,7 +1597,17 @@ fn init_tracing_stderr(log_level: &str) {
                 .with_writer(std::sync::Mutex::new(file))
         });
 
-    tracing_subscriber::registry()
+    // Register a no-op reload slot so `init_otel_tracing` can swap a real
+    // OTel layer in later without needing to claim the global dispatcher.
+    // The slot is stacked **first** (directly on Registry) so its boxed
+    // `Layer<Registry>` trait object matches the innermost subscriber type.
+    #[cfg(feature = "telemetry")]
+    let registry =
+        tracing_subscriber::registry().with(librefang_api::telemetry::install_otel_reload_layer());
+    #[cfg(not(feature = "telemetry"))]
+    let registry = tracing_subscriber::registry();
+
+    registry
         .with(env_filter)
         .with(fmt_layer)
         .with(file_layer)
@@ -1823,7 +1895,12 @@ fn main() {
             ConfigCommands::TestKey { provider } => cmd_config_test_key(&provider),
         },
         Some(Commands::Chat { agent }) => cmd_quick_chat(cli.config, agent),
-        Some(Commands::Status { json }) => cmd_status(cli.config, json),
+        Some(Commands::Status {
+            json,
+            verbose,
+            quiet,
+            watch,
+        }) => cmd_status(cli.config, json, verbose, quiet, watch),
         Some(Commands::Doctor { json, repair }) => cmd_doctor(json, repair),
         Some(Commands::Dashboard) => cmd_dashboard(),
         Some(Commands::Completion { shell }) => cmd_completion(shell),
@@ -1859,7 +1936,7 @@ fn main() {
                 cmd_restart(cli.config, tail, foreground)
             }
             GatewayCommands::Stop => cmd_stop(cli.config),
-            GatewayCommands::Status { json } => cmd_status(cli.config, json),
+            GatewayCommands::Status { json } => cmd_status(cli.config, json, false, false, None),
         },
         Some(Commands::Approvals(sub)) => match sub {
             ApprovalsCommands::List { json } => cmd_approvals_list(json),
@@ -1885,6 +1962,7 @@ fn main() {
             SecurityCommands::Status { json } => cmd_security_status(json),
             SecurityCommands::Audit { limit, json } => cmd_security_audit(limit, json),
             SecurityCommands::Verify => cmd_security_verify(),
+            SecurityCommands::AuditReset { confirm } => cmd_audit_reset(cli.config, confirm),
         },
         Some(Commands::Memory(sub)) => match sub {
             MemoryCommands::List { agent, json } => cmd_memory_list(&agent, json),
@@ -3592,109 +3670,746 @@ fn spawn_template_agent(
     }
 }
 
-fn cmd_status(config: Option<PathBuf>, json: bool) {
+/// Render the daemon status page.
+///
+/// Layered data model:
+/// - **Local** (always available): `daemon.json` + `config.toml` fields the
+///   CLI reads directly, so we never show `?` for information we already have.
+/// - **Public** (daemon alive, no auth): `/api/health` for liveness.
+/// - **Authenticated** (requires `api_key`): `/api/status` for agent list,
+///   session count, and memory usage. When the key is missing we show a
+///   locked section with a one-line fix hint instead of leaking empty fields.
+fn cmd_status(config: Option<PathBuf>, json: bool, verbose: bool, quiet: bool, watch: Option<u64>) {
+    if let Some(secs) = watch {
+        let interval = std::time::Duration::from_secs(secs.max(1));
+        // Watch mode: redraw indefinitely. A non-zero exit code from a single
+        // iteration just means "daemon is currently down or degraded" — we
+        // don't bail out of the watch loop for that, the whole point is to
+        // keep watching. Ctrl+C (handled upstream in main) is the exit.
+        loop {
+            // ANSI: clear screen + home cursor. Falls back to ugly output on
+            // terminals that don't speak ANSI, which is acceptable for a
+            // mode the user explicitly opted into.
+            print!("\x1b[2J\x1b[H");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let _ = render_status_once(config.clone(), false, verbose, false);
+            ui::blank();
+            println!(
+                "  {} (refreshing every {}s, Ctrl+C to exit)",
+                "hint:".dimmed(),
+                secs.max(1),
+            );
+            std::thread::sleep(interval);
+        }
+    }
+
+    let code = render_status_once(config, json, verbose, quiet);
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+fn render_status_once(config: Option<PathBuf>, json: bool, verbose: bool, quiet: bool) -> i32 {
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
-        let client = daemon_client_with_api_key(daemon.api_key.as_deref());
-        let body = daemon_json(client.get(format!("{base}/api/status")).send());
+        render_status_daemon(config.as_deref(), &base, &daemon, json, verbose, quiet)
+    } else {
+        render_status_inprocess(config, json, quiet)
+    }
+}
 
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&body).unwrap_or_default()
-            );
-            return;
-        }
+fn render_status_daemon(
+    config: Option<&std::path::Path>,
+    base: &str,
+    daemon: &DaemonConfigContext,
+    json: bool,
+    verbose: bool,
+    quiet: bool,
+) -> i32 {
+    let info = read_daemon_info(&daemon.home_dir);
+    let (health, health_latency) = fetch_health_timed(base);
+    let detail = daemon
+        .api_key
+        .as_deref()
+        .and_then(|k| fetch_status_detail(base, k));
+    let cfg = load_config(config);
 
-        ui::section(&i18n::t("section-daemon-status"));
-        ui::blank();
-        ui::kv_ok(
-            &i18n::t("label-status"),
-            body["status"].as_str().unwrap_or("?"),
+    let exit_code = classify_exit(health.as_ref());
+    let is_public_bind = info
+        .as_ref()
+        .map(|i| listener_is_public(&i.listen_addr))
+        .unwrap_or(false);
+    let (key_env, key_present, key_required) = provider_key_state(&cfg);
+    let uptime = uptime_secs(info.as_ref(), detail.as_ref());
+
+    if quiet {
+        return render_status_quiet_daemon(
+            base,
+            info.as_ref(),
+            health.as_ref(),
+            detail.as_ref(),
+            uptime,
+            exit_code,
         );
-        ui::kv(
-            &i18n::t("label-agents"),
-            &body["agent_count"].as_u64().unwrap_or(0).to_string(),
+    }
+
+    if json {
+        let merged = serde_json::json!({
+            "daemon": true,
+            "api": base,
+            "dashboard": format!("{base}/"),
+            "home": daemon.home_dir.display().to_string(),
+            "daemon_info": info.as_ref().map(|i| serde_json::json!({
+                "pid": i.pid,
+                "listen_addr": i.listen_addr,
+                "started_at": i.started_at,
+                "version": i.version,
+                "platform": i.platform,
+                "publicly_bound": listener_is_public(&i.listen_addr),
+            })),
+            "health": health,
+            "health_latency_ms": health_latency.map(|d| d.as_millis() as u64),
+            "default_provider": cfg.default_model.provider,
+            "default_model": cfg.default_model.model,
+            "default_model_api_key_env": key_env,
+            "default_model_api_key_present": key_present,
+            "default_model_api_key_required": key_required,
+            "detail": detail,
+            "uptime_seconds": uptime_secs(info.as_ref(), detail.as_ref()),
+            "authenticated": detail.is_some(),
+            "exit_code": exit_code,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&merged).unwrap_or_default()
         );
-        ui::kv(
+        return exit_code;
+    }
+
+    // --- Overview -----------------------------------------------------------
+    ui::section(&i18n::t("section-daemon-status"));
+    ui::blank();
+
+    let (status_label, status_good) = match health.as_ref() {
+        Some(h) => match h["status"].as_str() {
+            Some("ok") => ("ok".to_string(), true),
+            Some(other) => (other.to_string(), false),
+            None => ("unreachable".to_string(), false),
+        },
+        None => ("unreachable".to_string(), false),
+    };
+    if status_good {
+        ui::kv_ok(&i18n::t("label-status"), &status_label);
+    } else {
+        ui::kv_warn(&i18n::t("label-status"), &status_label);
+    }
+
+    if let Some(v) = info
+        .as_ref()
+        .map(|i| i.version.as_str())
+        .or_else(|| health.as_ref().and_then(|h| h["version"].as_str()))
+    {
+        ui::kv(&i18n::t("label-version"), v);
+    }
+    if let Some(info) = info.as_ref() {
+        ui::kv(&i18n::t("label-pid"), &info.pid.to_string());
+    }
+    if let Some(u) = uptime_secs(info.as_ref(), detail.as_ref()) {
+        ui::kv(&i18n::t("label-uptime"), &format_uptime(u));
+    }
+    if let Some(lat) = health_latency {
+        ui::kv(&i18n::t("label-response"), &format_latency(lat));
+    }
+    // (B) 0.0.0.0 listener: surface the risk inline on the API row so the
+    // user sees the bind scope without having to cross-reference anything.
+    if is_public_bind {
+        ui::kv_warn(
+            &i18n::t("label-api"),
+            &format!("{base}  \u{26A0} {}", i18n::t("warn-public-bind")),
+        );
+    } else {
+        ui::kv(&i18n::t("label-api"), base);
+    }
+    ui::kv(&i18n::t("label-dashboard"), &format!("{base}/"));
+    ui::kv(
+        &i18n::t("label-home"),
+        &daemon.home_dir.display().to_string(),
+    );
+    if let Some(info) = info.as_ref() {
+        ui::kv(&i18n::t("label-platform"), &info.platform);
+    }
+    if let Some(bytes) = dir_size_bytes(&daemon.home_dir.join("data")) {
+        ui::kv(&i18n::t("label-data-dir"), &format_bytes(bytes));
+    }
+
+    // --- Default model ------------------------------------------------------
+    ui::blank();
+    // (D) Missing provider key: show the concrete env-var name so the user
+    // knows exactly which one to set.
+    if key_required && !key_present {
+        ui::kv_warn(
             &i18n::t("label-provider"),
-            body["default_provider"].as_str().unwrap_or("?"),
+            &format!(
+                "{}  \u{26A0} {} {}",
+                cfg.default_model.provider,
+                key_env,
+                i18n::t("warn-key-missing"),
+            ),
         );
-        ui::kv(
-            &i18n::t("label-model"),
-            body["default_model"].as_str().unwrap_or("?"),
-        );
-        ui::kv(&i18n::t("label-api"), &base);
-        ui::kv(&i18n::t("label-dashboard"), &format!("{base}/"));
-        ui::kv(
-            &i18n::t("label-data-dir"),
-            body["data_dir"].as_str().unwrap_or("?"),
-        );
-        ui::kv(
-            &i18n::t("label-uptime"),
-            &format!("{}s", body["uptime_seconds"].as_u64().unwrap_or(0)),
-        );
+    } else {
+        ui::kv(&i18n::t("label-provider"), &cfg.default_model.provider);
+    }
+    ui::kv(&i18n::t("label-model"), &cfg.default_model.model);
 
-        if let Some(agents) = body["agents"].as_array() {
-            if !agents.is_empty() {
+    // --- Health checks (C: always list all, not just degraded) --------------
+    if let Some(h) = health.as_ref() {
+        if let Some(checks) = h["checks"].as_array() {
+            if !checks.is_empty() {
                 ui::blank();
-                ui::section(&i18n::t("section-active-agents"));
-                for a in agents {
-                    println!(
-                        "    {} ({}) -- {} [{}:{}]",
-                        a["name"].as_str().unwrap_or("?"),
-                        a["id"].as_str().unwrap_or("?"),
-                        a["state"].as_str().unwrap_or("?"),
-                        a["model_provider"].as_str().unwrap_or("?"),
-                        a["model_name"].as_str().unwrap_or("?"),
-                    );
+                ui::section(&i18n::t("label-checks"));
+                for c in checks {
+                    let name = c["name"].as_str().unwrap_or("?");
+                    let st = c["status"].as_str().unwrap_or("?");
+                    if st == "ok" {
+                        ui::kv_ok(name, st);
+                    } else {
+                        ui::kv_warn(name, st);
+                    }
                 }
             }
         }
-    } else {
-        let kernel = boot_kernel(config);
-        let agent_count = kernel.agent_registry().count();
-        let cfg = kernel.config_ref();
+    }
 
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "status": "in-process",
-                    "agent_count": agent_count,
-                    "data_dir": cfg.data_dir.display().to_string(),
-                    "default_provider": cfg.default_model.provider,
-                    "default_model": cfg.default_model.model,
-                    "daemon": false,
-                }))
-                .unwrap_or_default()
-            );
-            return;
+    // --- Detail tier --------------------------------------------------------
+    match detail.as_ref() {
+        Some(body) => render_detail_section(body),
+        None => {
+            ui::blank();
+            ui::section(&i18n::t("section-status-locked"));
+            ui::hint(&i18n::t("hint-status-locked"));
         }
+    }
 
-        ui::section(&i18n::t("section-status-inprocess"));
+    // --- Verbose extras -----------------------------------------------------
+    if verbose {
+        render_verbose_section(base, &cfg, detail.is_some(), daemon.api_key.as_deref());
+    }
+
+    // --- Recent errors (always, if any) -------------------------------------
+    let errors = recent_daemon_errors(&daemon.home_dir, 3);
+    if !errors.is_empty() {
         ui::blank();
-        ui::kv(&i18n::t("label-agents"), &agent_count.to_string());
-        ui::kv(&i18n::t("label-provider"), &cfg.default_model.provider);
-        ui::kv(&i18n::t("label-model"), &cfg.default_model.model);
+        ui::section(&i18n::t("section-recent-errors"));
+        for line in &errors {
+            println!("    {}", line.red());
+        }
+    }
+
+    exit_code
+}
+
+/// Map health response to a semantic exit code.
+///
+/// - `0` — daemon running and `/api/health` reports `ok`.
+/// - `2` — daemon running but `/api/health` reports a non-ok status
+///   (`degraded`, `error`, anything else the handler introduces later).
+/// - `3` — daemon claims to be listening (we got a `/api/health` URL from
+///   `daemon.json`) but the request didn't yield parseable JSON — the
+///   process is unreachable even though the port is.
+fn classify_exit(health: Option<&serde_json::Value>) -> i32 {
+    match health.and_then(|h| h["status"].as_str()) {
+        Some("ok") => 0,
+        Some(_) => 2,
+        None => 3,
+    }
+}
+
+/// Heuristic for "this port is reachable from the internet if the machine
+/// has a public IP." Catches the two common foot-guns: `0.0.0.0` (IPv4 any)
+/// and `::` / `[::]` (IPv6 any). IPv4 loopback, IPv6 loopback, and named
+/// localhost stay quiet.
+fn listener_is_public(listen_addr: &str) -> bool {
+    let host = listen_addr
+        .rsplit_once(':')
+        .map(|(h, _)| h.trim_start_matches('[').trim_end_matches(']'))
+        .unwrap_or(listen_addr);
+    matches!(host, "0.0.0.0" | "::" | "[::]")
+}
+
+/// Compute whether the configured default provider has a usable API key in
+/// the environment (or in `provider_api_keys` in config.toml). Local
+/// providers (ollama/vllm/lmstudio/lemonade) don't need one.
+fn provider_key_state(cfg: &librefang_types::config::KernelConfig) -> (String, bool, bool) {
+    let provider = cfg.default_model.provider.as_str();
+    let key_required = !librefang_runtime::provider_health::is_local_provider(provider);
+    let key_env = if cfg.default_model.api_key_env.trim().is_empty() {
+        format!("{}_API_KEY", provider.to_uppercase())
+    } else {
+        cfg.default_model.api_key_env.clone()
+    };
+    let env_has_key = std::env::var(&key_env)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let config_has_key = cfg
+        .provider_api_keys
+        .get(provider)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    (key_env, env_has_key || config_has_key, key_required)
+}
+
+fn format_latency(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1 {
+        format!("{}µs", d.as_micros())
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+/// Recursively sum file sizes under `dir`. Returns `None` if `dir` does not
+/// exist or cannot be read. Symlinks are followed because the default data
+/// directory may legitimately symlink subdirs onto another disk.
+fn dir_size_bytes(dir: &std::path::Path) -> Option<u64> {
+    if !dir.exists() {
+        return None;
+    }
+    let mut total: u64 = 0;
+    for entry in walkdir::WalkDir::new(dir)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if let Ok(md) = entry.metadata() {
+            if md.is_file() {
+                total = total.saturating_add(md.len());
+            }
+        }
+    }
+    Some(total)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[(&str, u64)] = &[
+        ("GiB", 1u64 << 30),
+        ("MiB", 1u64 << 20),
+        ("KiB", 1u64 << 10),
+    ];
+    for (unit, thresh) in UNITS {
+        if bytes >= *thresh {
+            return format!("{:.2} {}", bytes as f64 / *thresh as f64, unit);
+        }
+    }
+    format!("{bytes} B")
+}
+
+/// Scan the last chunk of `daemon.log` for ERROR-level entries. We read a
+/// capped suffix of the file so a multi-GB log doesn't blow up memory, then
+/// walk it backwards and collect the most recent N. An empty result means
+/// either the log is missing or genuinely has no recent errors — the caller
+/// treats both the same way (no section rendered).
+fn recent_daemon_errors(home_dir: &std::path::Path, limit: usize) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let log = home_dir.join("daemon.log");
+    let mut file = match std::fs::File::open(&log) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    const TAIL_BYTES: u64 = 128 * 1024;
+    let start = len.saturating_sub(TAIL_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = String::new();
+    if file.read_to_string(&mut buf).is_err() {
+        return Vec::new();
+    }
+    buf.lines()
+        .rev()
+        // Match the tracing-subscriber default format. ` ERROR ` with padding
+        // before and after is specific enough to avoid false positives from
+        // log lines that happen to contain the word "error".
+        .filter(|line| line.contains(" ERROR ") || line.starts_with("ERROR "))
+        .take(limit)
+        .map(|l| l.trim_end().to_string())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+/// One-line quiet summary for `librefang status -q`. Stays stable across
+/// releases so scripts can parse it — prefix is always `librefang`, second
+/// token is a state word, remaining tokens are `key=value`.
+fn render_status_quiet_daemon(
+    base: &str,
+    info: Option<&librefang_api::server::DaemonInfo>,
+    health: Option<&serde_json::Value>,
+    detail: Option<&serde_json::Value>,
+    uptime: Option<u64>,
+    exit_code: i32,
+) -> i32 {
+    let state = match health.and_then(|h| h["status"].as_str()) {
+        Some("ok") => "ok",
+        Some(other) => other,
+        None => "unreachable",
+    };
+    let version = info
+        .map(|i| i.version.as_str())
+        .or_else(|| health.and_then(|h| h["version"].as_str()))
+        .unwrap_or("?");
+    let uptime_s = uptime.map(format_uptime).unwrap_or_else(|| "?".to_string());
+    let auth_s = if detail.is_some() {
+        let agents = detail.and_then(|d| d["agent_count"].as_u64()).unwrap_or(0);
+        format!("agents={agents}")
+    } else {
+        "locked".to_string()
+    };
+    println!("librefang {version} {state} uptime={uptime_s} {auth_s} ({base})");
+    exit_code
+}
+
+/// Extra verbose-only section. Everything in here is best-effort: anything
+/// that fails to load just isn't shown — we never stop the main render.
+fn render_verbose_section(
+    base: &str,
+    cfg: &librefang_types::config::KernelConfig,
+    authenticated: bool,
+    api_key: Option<&str>,
+) {
+    ui::blank();
+    ui::section(&i18n::t("section-verbose"));
+
+    // --- Auth mode ----------------------------------------------------------
+    let mut auth_bits: Vec<String> = Vec::new();
+    if !cfg.api_key.trim().is_empty() {
+        auth_bits.push(i18n::t("auth-api-key"));
+    }
+    // Dashboard auth / user keys live under [auth] in config. Detect by
+    // presence of non-empty dashboard credentials so we don't depend on
+    // features that may vary across versions.
+    if !cfg.dashboard_pass_hash.trim().is_empty() || !cfg.dashboard_pass.trim().is_empty() {
+        auth_bits.push(i18n::t("auth-dashboard-login"));
+    }
+    let auth_value = if auth_bits.is_empty() {
+        i18n::t("auth-none")
+    } else {
+        auth_bits.join(" + ")
+    };
+    ui::kv(&i18n::t("label-auth"), &auth_value);
+
+    // --- MCP server count ---------------------------------------------------
+    let mcp_count = cfg.mcp_servers.len();
+    if mcp_count > 0 {
+        ui::kv(&i18n::t("label-mcp"), &mcp_count.to_string());
+    }
+
+    // --- OFP peers ----------------------------------------------------------
+    // Pass the API key when we have one: `/api/network/status` is in the
+    // dashboard-read allowlist, so it transitions from public to
+    // auth-required the moment `require_auth_for_reads` kicks in (which
+    // happens automatically as soon as *any* auth is configured).
+    if let Some((enabled, connected, total)) = fetch_peer_status(base, api_key) {
+        if enabled {
+            ui::kv(
+                &i18n::t("label-peers"),
+                &format!("{connected} connected / {total} known"),
+            );
+        }
+    }
+
+    // --- Authenticated counts ----------------------------------------------
+    if authenticated {
+        if let Some(key) = api_key {
+            if let Some(n) = fetch_array_count(base, "/api/channels", key) {
+                ui::kv(&i18n::t("label-channels"), &n.to_string());
+            }
+            if let Some(n) = fetch_array_count(base, "/api/skills", key) {
+                ui::kv(&i18n::t("label-skills"), &n.to_string());
+            }
+            if let Some(n) = fetch_array_count(base, "/api/hands", key) {
+                ui::kv(&i18n::t("label-hands"), &n.to_string());
+            }
+        }
+    }
+
+    // --- Config warnings ----------------------------------------------------
+    let warnings = cfg.validate();
+    if !warnings.is_empty() {
+        ui::blank();
+        ui::section(&i18n::t("label-config-warnings"));
+        for w in warnings {
+            ui::check_warn(&w);
+        }
+    }
+}
+
+fn fetch_peer_status(base: &str, api_key: Option<&str>) -> Option<(bool, u64, u64)> {
+    let client = daemon_client_with_api_key(api_key);
+    let resp = client
+        .get(format!("{base}/api/network/status"))
+        .send()
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().ok()?;
+    let enabled = body["enabled"].as_bool().unwrap_or(false);
+    let connected = body["connected_peers"].as_u64().unwrap_or(0);
+    let total = body["total_peers"].as_u64().unwrap_or(0);
+    Some((enabled, connected, total))
+}
+
+fn fetch_array_count(base: &str, path: &str, api_key: &str) -> Option<u64> {
+    let client = daemon_client_with_api_key(Some(api_key));
+    let resp = client.get(format!("{base}{path}")).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().ok()?;
+    // Dashboard endpoints vary: agents/skills/hands/channels each shape
+    // their list differently. Probe in order: bare array → {total} →
+    // common array keys. Whichever matches first wins; if none do we
+    // return None so the caller quietly omits the row.
+    if let Some(a) = body.as_array() {
+        return Some(a.len() as u64);
+    }
+    if let Some(n) = body["total"].as_u64() {
+        return Some(n);
+    }
+    for key in ["items", "channels", "skills", "hands", "agents"] {
+        if let Some(a) = body[key].as_array() {
+            return Some(a.len() as u64);
+        }
+    }
+    None
+}
+
+fn render_detail_section(body: &serde_json::Value) {
+    let total = body["agent_count"].as_u64().unwrap_or(0);
+    let active = body["active_agent_count"].as_u64().unwrap_or(0);
+    let sessions = body["session_count"].as_u64().unwrap_or(0);
+    let memory_mb = body["memory_used_mb"].as_u64();
+
+    ui::blank();
+    ui::kv(
+        &i18n::t("label-agents"),
+        &format!("{active} running / {total} total"),
+    );
+    ui::kv(&i18n::t("label-sessions"), &sessions.to_string());
+    if let Some(mb) = memory_mb {
+        ui::kv(&i18n::t("label-memory"), &format!("{mb} MB"));
+    }
+
+    if let Some(agents) = body["agents"].as_array() {
+        if !agents.is_empty() {
+            ui::blank();
+            ui::section(&i18n::t("section-active-agents"));
+            render_agents_table(agents);
+        }
+    }
+}
+
+/// Render the agent list as a column-aligned table. Empty input is a no-op
+/// so the caller can unconditionally call this after a non-empty check.
+fn render_agents_table(agents: &[serde_json::Value]) {
+    // Compute per-column widths so names and ids line up even when one entry
+    // is much longer than the others. Keep a minimum width so a single-row
+    // table doesn't look squashed against the header.
+    let mut rows: Vec<[String; 4]> = Vec::with_capacity(agents.len());
+    for a in agents {
+        let name = a["name"].as_str().unwrap_or("?").to_string();
+        let id = a["id"].as_str().unwrap_or("?").to_string();
+        let state = a["state"].as_str().unwrap_or("?").to_string();
+        let model = format!(
+            "{}:{}",
+            a["model_provider"].as_str().unwrap_or("?"),
+            a["model_name"].as_str().unwrap_or("?"),
+        );
+        rows.push([name, id, state, model]);
+    }
+    let headers = ["NAME", "ID", "STATE", "MODEL"];
+    let mut widths = [0usize; 4];
+    for (i, h) in headers.iter().enumerate() {
+        widths[i] = h.len();
+    }
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.len());
+        }
+    }
+    // Cap ID column at 12 so we don't push the model column off the screen
+    // — users rarely need more than a handful of id bytes for correlation.
+    widths[1] = widths[1].min(12);
+    let id_trim = |s: &str| -> String {
+        if s.len() <= widths[1] {
+            s.to_string()
+        } else {
+            s.chars().take(widths[1]).collect()
+        }
+    };
+    let header_line = format!(
+        "    {:<w0$}  {:<w1$}  {:<w2$}  {}",
+        headers[0],
+        headers[1],
+        headers[2],
+        headers[3],
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+    );
+    println!("{}", header_line.dimmed());
+    for row in &rows {
+        println!(
+            "    {:<w0$}  {:<w1$}  {:<w2$}  {}",
+            row[0],
+            id_trim(&row[1]),
+            row[2],
+            row[3],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+        );
+    }
+}
+
+fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> i32 {
+    // Quiet mode short-circuits the kernel boot — we don't need to load 22
+    // workflow templates just to print "daemon down". Pull what we can from
+    // the config file alone.
+    if quiet {
+        let cfg = load_config(config.as_deref());
+        println!(
+            "librefang down home={} default={}/{}",
+            cfg.home_dir.display(),
+            cfg.default_model.provider,
+            cfg.default_model.model,
+        );
+        return 1;
+    }
+
+    let kernel = boot_kernel(config);
+    let agent_count = kernel.agent_registry().count();
+    let cfg = kernel.config_ref();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "in-process",
+                "agent_count": agent_count,
+                "home": cfg.home_dir.display().to_string(),
+                "data_dir": cfg.data_dir.display().to_string(),
+                "data_dir_bytes": dir_size_bytes(&cfg.data_dir),
+                "default_provider": cfg.default_model.provider,
+                "default_model": cfg.default_model.model,
+                "daemon": false,
+                "exit_code": 1,
+            }))
+            .unwrap_or_default()
+        );
+        return 1;
+    }
+
+    ui::section(&i18n::t("section-status-inprocess"));
+    ui::blank();
+    ui::kv(&i18n::t("label-agents"), &agent_count.to_string());
+    ui::kv(&i18n::t("label-provider"), &cfg.default_model.provider);
+    ui::kv(&i18n::t("label-model"), &cfg.default_model.model);
+    ui::kv(&i18n::t("label-home"), &cfg.home_dir.display().to_string());
+    if let Some(bytes) = dir_size_bytes(&cfg.data_dir) {
+        ui::kv(
+            &i18n::t("label-data-dir"),
+            &format!("{} ({})", cfg.data_dir.display(), format_bytes(bytes)),
+        );
+    } else {
         ui::kv(
             &i18n::t("label-data-dir"),
             &cfg.data_dir.display().to_string(),
         );
-        ui::kv_warn(
-            &i18n::t("label-daemon"),
-            &i18n::t("label-daemon-not-running"),
-        );
-        ui::blank();
-        ui::hint(&i18n::t("hint-run-start"));
+    }
+    ui::kv_warn(
+        &i18n::t("label-daemon"),
+        &i18n::t("label-daemon-not-running"),
+    );
+    ui::blank();
+    ui::hint(&i18n::t("hint-run-start"));
 
-        if agent_count > 0 {
-            ui::blank();
-            ui::section(&i18n::t("section-persisted-agents"));
-            for entry in kernel.agent_registry().list() {
-                println!("    {} ({}) -- {:?}", entry.name, entry.id, entry.state);
-            }
+    if agent_count > 0 {
+        ui::blank();
+        ui::section(&i18n::t("section-persisted-agents"));
+        for entry in kernel.agent_registry().list() {
+            println!("    {} ({}) -- {:?}", entry.name, entry.id, entry.state);
         }
+    }
+
+    1
+}
+
+/// Fetch the public `/api/health` payload along with the round-trip time.
+/// Returns `(None, None)` on network failure and `(None, Some(_))` when the
+/// server responded but the body didn't parse, so the caller can still
+/// surface "responded in 42ms but unreadable" if needed.
+fn fetch_health_timed(base: &str) -> (Option<serde_json::Value>, Option<std::time::Duration>) {
+    let client = daemon_client_with_api_key(None);
+    let start = std::time::Instant::now();
+    let resp = match client.get(format!("{base}/api/health")).send() {
+        Ok(r) => r,
+        Err(_) => return (None, None),
+    };
+    let elapsed = start.elapsed();
+    if !resp.status().is_success() {
+        return (None, Some(elapsed));
+    }
+    (resp.json::<serde_json::Value>().ok(), Some(elapsed))
+}
+
+/// Fetch the authenticated `/api/status` payload. Returns `None` on any
+/// failure — including 401 — so the renderer falls back to the locked
+/// section rather than printing `?` for every field.
+fn fetch_status_detail(base: &str, api_key: &str) -> Option<serde_json::Value> {
+    let client = daemon_client_with_api_key(Some(api_key));
+    let resp = client.get(format!("{base}/api/status")).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json::<serde_json::Value>().ok()
+}
+
+/// Prefer authoritative uptime from the daemon; fall back to `now - started_at`
+/// from `daemon.json` when the detail tier is unavailable.
+fn uptime_secs(
+    info: Option<&librefang_api::server::DaemonInfo>,
+    detail: Option<&serde_json::Value>,
+) -> Option<u64> {
+    if let Some(body) = detail {
+        if let Some(u) = body["uptime_seconds"].as_u64() {
+            return Some(u);
+        }
+    }
+    let info = info?;
+    let started = chrono::DateTime::parse_from_rfc3339(&info.started_at).ok()?;
+    let now = chrono::Utc::now();
+    let delta = now.signed_duration_since(started.with_timezone(&chrono::Utc));
+    u64::try_from(delta.num_seconds()).ok()
+}
+
+fn format_uptime(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h {}m {}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else {
+        format!(
+            "{}d {}h {}m",
+            secs / 86400,
+            (secs % 86400) / 3600,
+            (secs % 3600) / 60
+        )
     }
 }
 
@@ -8957,6 +9672,108 @@ fn cmd_security_verify() {
         }
         std::process::exit(1);
     }
+}
+
+/// Destructively reset the local audit trail.
+///
+/// Truncates `audit_entries` in SQLite and removes the anchor file so the
+/// next daemon boot seeds a fresh Merkle chain. Refuses to run while the
+/// daemon holds the DB (SQLite WAL mode + writer lock) and without
+/// `--confirm`.
+fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
+    let daemon = daemon_config_context(config.as_deref());
+    let kernel_config = load_config(config.as_deref());
+
+    let db_path = kernel_config
+        .memory
+        .sqlite_path
+        .clone()
+        .unwrap_or_else(|| kernel_config.data_dir.join("librefang.db"));
+
+    let anchor_path = match kernel_config.audit.anchor_path.as_ref() {
+        Some(p) if p.is_absolute() => p.clone(),
+        Some(p) => kernel_config.data_dir.join(p),
+        None => kernel_config.data_dir.join("audit.anchor"),
+    };
+
+    if !confirm {
+        ui::error("audit reset is destructive — re-run with `--confirm` to proceed");
+        ui::blank();
+        println!("  Would:");
+        println!(
+            "    1. DELETE all rows from `audit_entries` in {}",
+            db_path.display()
+        );
+        println!("    2. Remove anchor file {}", anchor_path.display());
+        println!("  The Merkle chain will restart from the next audit event.");
+        std::process::exit(1);
+    }
+
+    // Refuse if daemon is running — SQLite writer lock would block or corrupt.
+    if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
+        ui::error_with_fix(
+            &format!("daemon is running at {base}; refusing to touch the audit database"),
+            "stop the daemon first: `librefang stop`",
+        );
+        std::process::exit(1);
+    }
+
+    if !db_path.exists() {
+        ui::error(&format!("database not found at {}", db_path.display()));
+        std::process::exit(1);
+    }
+
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            ui::error(&format!("failed to open {}: {e}", db_path.display()));
+            std::process::exit(1);
+        }
+    };
+
+    let rows_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM audit_entries", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    // Remove the anchor FIRST. If the subsequent DB truncation then fails,
+    // the next daemon boot sees `read_anchor = None` and re-seeds from the
+    // current DB tip — a consistent (if still broken) state the user can
+    // retry. The reverse order (DB first, anchor second) would instead
+    // leave an empty table alongside a stale anchor, which produces a
+    // fresh MISMATCH error the user didn't have before calling reset.
+    let anchor_removed = if anchor_path.exists() {
+        match std::fs::remove_file(&anchor_path) {
+            Ok(()) => true,
+            Err(e) => {
+                ui::error(&format!(
+                    "failed to remove anchor {}: {e}",
+                    anchor_path.display()
+                ));
+                std::process::exit(1);
+            }
+        }
+    } else {
+        false
+    };
+
+    if let Err(e) = conn.execute("DELETE FROM audit_entries", []) {
+        ui::error(&format!("failed to truncate audit_entries: {e}"));
+        std::process::exit(1);
+    }
+    drop(conn);
+    // `seq` is `INTEGER PRIMARY KEY` without AUTOINCREMENT, so the next
+    // insert after an empty table naturally gets seq = 1. No sqlite_sequence
+    // fiddling needed.
+
+    ui::success(&format!(
+        "Audit trail reset: removed {rows_before} row(s) from audit_entries{}.",
+        if anchor_removed {
+            format!(", deleted anchor at {}", anchor_path.display())
+        } else {
+            " (no anchor file to remove)".to_string()
+        }
+    ));
+    ui::hint("The next daemon boot will seed a fresh Merkle chain from the current tip.");
 }
 
 fn cmd_memory_list(agent: &str, json: bool) {

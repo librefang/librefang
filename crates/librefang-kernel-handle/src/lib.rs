@@ -79,8 +79,13 @@ pub trait KernelHandle: Send + Sync {
     /// Claim the next available task (optionally filtered by assignee). Returns task JSON or None.
     async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String>;
 
-    /// Mark a task as completed with a result string.
-    async fn task_complete(&self, task_id: &str, result: &str) -> Result<(), String>;
+    /// Mark a task as completed with a result string. `agent_id` identifies the completer.
+    async fn task_complete(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        result: &str,
+    ) -> Result<(), String>;
 
     /// List tasks, optionally filtered by status.
     async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String>;

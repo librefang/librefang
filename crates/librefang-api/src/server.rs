@@ -8,6 +8,7 @@ use crate::webchat;
 use axum::response::IntoResponse;
 use axum::Router;
 use librefang_kernel::LibreFangKernel;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -70,6 +71,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/auth/dashboard-check",
             axum::routing::get(dashboard_auth_check),
         )
+        .route("/auth/logout", axum::routing::post(dashboard_logout))
         .route(
             "/auth/change-password",
             axum::routing::post(change_password),
@@ -211,11 +213,42 @@ pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middlewa
         .collect()
 }
 
+/// Returns `true` if the request arrived over TLS, either directly or through
+/// a reverse proxy / tunnel that sets `X-Forwarded-Proto: https` (ngrok,
+/// cloudflared, traefik, nginx, …). Used to decide whether cookies should be
+/// issued with the `Secure` attribute.
+///
+/// Handles the multi-proxy case where the header is comma-separated — RFC 7239
+/// semantics put the client-facing proto first (`https, http` = HTTPS reached
+/// the outermost proxy, HTTP was the back-channel), so we split and check the
+/// first value only.
+fn request_is_https(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
+/// Build the base attribute list for the `librefang_session` cookie. `Secure`
+/// is added only when the request came in over HTTPS so local-HTTP dev keeps
+/// working; any public deployment should be proxied behind TLS (at which point
+/// `X-Forwarded-Proto` flips the flag on automatically).
+fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
+    if request_is_https(headers) {
+        "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
+    } else {
+        "Path=/dashboard; HttpOnly; SameSite=Lax"
+    }
+}
+
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
 /// a randomly generated session token with expiration metadata.
 async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
+    headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
     let cfg = state.kernel.config_snapshot();
@@ -322,13 +355,31 @@ async fn dashboard_login(
                 save_sessions(state.kernel.home_dir(), &sessions);
             }
 
-            axum::response::Json(serde_json::json!({
-                "ok": true,
-                "token": token.token,
-                "created_at": token.created_at,
-                "expires_at": token.created_at + crate::password_hash::DEFAULT_SESSION_TTL_SECS,
-            }))
-            .into_response()
+            // Issue a session cookie so subsequent browser navigation to
+            // `/dashboard/*` authenticates without JS sending a header.
+            // Scope to `Path=/dashboard` so the cookie never auto-attaches
+            // to `/api/*` requests — API calls keep using the Bearer token
+            // from localStorage, which neutralises cookie-borne CSRF.
+            // `Secure` is added when the request is HTTPS (direct or via a
+            // TLS-terminating proxy), so the cookie cannot leak across
+            // plaintext fallbacks of the same host.
+            let cookie = format!(
+                "librefang_session={}; {}; Max-Age={}",
+                token.token,
+                session_cookie_attrs(&headers),
+                crate::password_hash::DEFAULT_SESSION_TTL_SECS
+            );
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::SET_COOKIE, cookie)],
+                axum::response::Json(serde_json::json!({
+                    "ok": true,
+                    "token": token.token,
+                    "created_at": token.created_at,
+                    "expires_at": token.created_at + crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+                })),
+            )
+                .into_response()
         }
         crate::password_hash::VerifyResult::Denied => (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -384,6 +435,66 @@ async fn dashboard_auth_check(
         "mode": mode,
         "username": "",
     }))
+}
+
+/// Invalidate the caller's dashboard session and clear the browser cookie.
+///
+/// Accepts the token via the `librefang_session` cookie, `Authorization:
+/// Bearer ...`, or `X-API-Key`. Always clears the cookie client-side so a
+/// caller who already lost their token can still wipe it locally.
+async fn dashboard_logout(
+    axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let token_from_cookie = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| {
+            h.split(';')
+                .map(str::trim)
+                .find_map(|kv| kv.strip_prefix("librefang_session="))
+                .map(str::to_string)
+        });
+    let token_from_bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").map(str::to_string));
+    let token_from_xapi = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    // Dedup token sources: the typical case is that cookie + Bearer carry the
+    // same session string (SPA send both), so without the set we'd acquire the
+    // sessions lock and re-persist the same file up to three times per call.
+    let tokens: HashSet<String> = [token_from_cookie, token_from_bearer, token_from_xapi]
+        .into_iter()
+        .flatten()
+        .collect();
+
+    if !tokens.is_empty() {
+        let mut sessions = state.active_sessions.write().await;
+        let mut removed_any = false;
+        for token in &tokens {
+            if sessions.remove(token).is_some() {
+                removed_any = true;
+            }
+        }
+        if removed_any {
+            save_sessions(state.kernel.home_dir(), &sessions);
+        }
+    }
+
+    let expired_cookie = format!(
+        "librefang_session=; {}; Max-Age=0",
+        session_cookie_attrs(&headers),
+    );
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, expired_cookie)],
+        axum::response::Json(serde_json::json!({"ok": true})),
+    )
+        .into_response()
 }
 
 /// Request body for POST /api/auth/change-password.
@@ -1061,12 +1172,19 @@ pub async fn run_daemon(
     // Auto-start observability stack (Prometheus + Grafana) if Docker is available
     let observability_started = if kernel.config_ref().telemetry.enabled {
         match start_observability_stack() {
-            Ok(true) => {
+            Ok(ObservabilityStartup::Started) => {
                 info!("Observability stack started (Prometheus :9090, Grafana :3000)");
                 true
             }
-            Ok(false) => {
+            Ok(ObservabilityStartup::DockerUnavailable) => {
                 info!("Docker not available, skipping observability stack");
+                false
+            }
+            Ok(ObservabilityStartup::ComposeFailed { stderr }) => {
+                tracing::warn!(
+                    "Observability stack failed to start (likely a port conflict on 9090/3000 or an existing stack): {}",
+                    stderr.trim()
+                );
                 false
             }
             Err(e) => {
@@ -1251,10 +1369,21 @@ pub async fn run_daemon(
     Ok(())
 }
 
+/// Outcome of attempting to bring up the observability stack.
+enum ObservabilityStartup {
+    /// `docker compose up -d` exited successfully.
+    Started,
+    /// No working `docker` CLI reachable from this process.
+    DockerUnavailable,
+    /// `docker compose up -d` exited non-zero (port conflict, pre-existing
+    /// stack, image pull failure, etc.). `stderr` carries docker's output so
+    /// the operator can see why.
+    ComposeFailed { stderr: String },
+}
+
 /// Check if Docker is available and start the observability stack.
-/// Returns Ok(true) if started, Ok(false) if Docker not available.
-fn start_observability_stack() -> Result<bool, Box<dyn std::error::Error>> {
-    // Check if docker CLI exists
+fn start_observability_stack() -> Result<ObservabilityStartup, Box<dyn std::error::Error>> {
+    // Check if docker CLI exists and daemon is reachable
     let docker_check = std::process::Command::new("docker")
         .arg("version")
         .stdout(std::process::Stdio::null())
@@ -1263,22 +1392,26 @@ fn start_observability_stack() -> Result<bool, Box<dyn std::error::Error>> {
 
     match docker_check {
         Ok(status) if status.success() => {}
-        _ => return Ok(false),
+        _ => return Ok(ObservabilityStartup::DockerUnavailable),
     }
 
     // Find the compose file relative to the executable or well-known paths
     let compose_file = find_compose_file()?;
 
-    std::process::Command::new("docker")
+    let output = std::process::Command::new("docker")
         .args(["compose", "-f"])
         .arg(&compose_file)
         .args(["up", "-d"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("docker compose up failed: {e}"))?;
+        .output()
+        .map_err(|e| format!("docker compose up failed to spawn: {e}"))?;
 
-    Ok(true)
+    if output.status.success() {
+        Ok(ObservabilityStartup::Started)
+    } else {
+        Ok(ObservabilityStartup::ComposeFailed {
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
 }
 
 /// Stop the observability stack.

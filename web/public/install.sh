@@ -15,6 +15,18 @@ set -eu
 REPO="librefang/librefang"
 INSTALL_DIR="${LIBREFANG_INSTALL_DIR:-$HOME/.librefang/bin}"
 
+# Terminal colors — disabled when stdout is not a tty or NO_COLOR is set.
+# https://no-color.org/
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_GREEN=$(printf '\033[32m')
+    C_YELLOW=$(printf '\033[33m')
+    C_RED=$(printf '\033[31m')
+    C_BOLD=$(printf '\033[1m')
+    C_RESET=$(printf '\033[0m')
+else
+    C_GREEN='' C_YELLOW='' C_RED='' C_BOLD='' C_RESET=''
+fi
+
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -32,7 +44,7 @@ detect_platform() {
     case "$ARCH" in
         x86_64|amd64) ARCH="x86_64" ;;
         aarch64|arm64) ARCH="aarch64" ;;
-        *) echo "  Unsupported architecture: $ARCH"; exit 1 ;;
+        *) echo "  ${C_RED}Unsupported architecture: $ARCH${C_RESET}"; exit 1 ;;
     esac
 
     case "$OS" in
@@ -57,7 +69,7 @@ detect_platform() {
             exit 1
             ;;
         *)
-            echo "  Unsupported OS: $OS"
+            echo "  ${C_RED}Unsupported OS: $OS${C_RESET}"
             exit 1
             ;;
     esac
@@ -116,11 +128,23 @@ choose_shell_rc() {
         return 0
     fi
 
-    # Check bash/zsh first (more common defaults), fish last.
-    if [ -f "$HOME/.bashrc" ]; then
-        printf "%s\n" "$HOME/.bashrc"
-    elif [ -f "$HOME/.zshrc" ]; then
+    # When detect_user_shell returns empty (rare — curl|sh with unusual ps
+    # output), fall back to $SHELL before guessing by file existence. $SHELL
+    # is set by login and is usually accurate even inside the sh subshell.
+    SHELL_RC=$(shell_rc_from_shell "${SHELL:-}")
+    if [ -n "$SHELL_RC" ]; then
+        printf "%s\n" "$SHELL_RC"
+        return 0
+    fi
+
+    # Last resort: pick by file existence. Prefer .zshrc: bashrc exists on
+    # many distros by default even for zsh users, so bashrc-first would
+    # quietly write PATH into the wrong rc for anyone whose shell detection
+    # failed upstream (then zsh can't see librefang).
+    if [ -f "$HOME/.zshrc" ]; then
         printf "%s\n" "$HOME/.zshrc"
+    elif [ -f "$HOME/.bashrc" ]; then
+        printf "%s\n" "$HOME/.bashrc"
     elif [ -f "$HOME/.config/fish/config.fish" ]; then
         printf "%s\n" "$HOME/.config/fish/config.fish"
     else
@@ -130,16 +154,19 @@ choose_shell_rc() {
 
 start_daemon_if_needed() {
     START_OUTPUT=$("$INSTALL_DIR/librefang" start 2>&1) && START_EXIT=0 || START_EXIT=$?
-    if [ -n "$START_OUTPUT" ]; then
-        printf "%s\n" "$START_OUTPUT"
-    fi
 
     if [ "$START_EXIT" -eq 0 ]; then
         return 0
     fi
     if printf "%s" "$START_OUTPUT" | grep -Eiq "already running"; then
-        echo "  Daemon already running; leaving it as-is."
+        echo "  ${C_GREEN}Daemon is already running — no action needed.${C_RESET}"
         return 0
+    fi
+    # Only dump raw output on unexpected failures; filter out tracing
+    # log lines (timestamps like "2026-04-20T...") that clutter the
+    # installer output.
+    if [ -n "$START_OUTPUT" ]; then
+        printf "%s\n" "$START_OUTPUT" | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' || true
     fi
     return "$START_EXIT"
 }
@@ -148,7 +175,7 @@ install() {
     detect_platform
 
     echo ""
-    echo "  LibreFang Installer"
+    echo "  ${C_BOLD}LibreFang Installer${C_RESET}"
     echo "  ==================="
     echo ""
 
@@ -171,6 +198,12 @@ install() {
     URL="https://github.com/$REPO/releases/download/$VERSION/librefang-$PLATFORM.tar.gz"
     CHECKSUM_URL="$URL.sha256"
 
+    # Detect previous version for upgrade messaging.
+    OLD_VERSION=""
+    if [ -x "$INSTALL_DIR/librefang" ]; then
+        OLD_VERSION=$("$INSTALL_DIR/librefang" --version 2>/dev/null || true)
+    fi
+
     echo "  Installing LibreFang $VERSION for $PLATFORM..."
     mkdir -p "$INSTALL_DIR"
 
@@ -181,20 +214,30 @@ install() {
     cleanup() { rm -rf "$TMPDIR"; }
     trap cleanup 0
 
-    if ! curl -fsSL "$URL" -o "$ARCHIVE" 2>/dev/null; then
+    # Show a progress bar for the binary download (typically ~60 MB).
+    # Use --progress-bar when stderr is a terminal, otherwise stay silent.
+    if [ -t 2 ]; then
+        CURL_PROGRESS="--progress-bar"
+    else
+        CURL_PROGRESS="-s"
+    fi
+
+    if ! curl -fL $CURL_PROGRESS "$URL" -o "$ARCHIVE"; then
         if [ -n "${PLATFORM_FALLBACK:-}" ]; then
-            echo "  Static (musl) binary not available, trying glibc build..."
+            echo "  ${C_YELLOW}Static (musl) binary not available, trying glibc build...${C_RESET}"
             PLATFORM="$PLATFORM_FALLBACK"
             URL="https://github.com/$REPO/releases/download/$VERSION/librefang-$PLATFORM.tar.gz"
             CHECKSUM_URL="$URL.sha256"
-            if ! curl -fsSL "$URL" -o "$ARCHIVE" 2>/dev/null; then
-                echo "  Download failed. The release may not exist for your platform."
+            if ! curl -fL $CURL_PROGRESS "$URL" -o "$ARCHIVE"; then
+                echo "  ${C_RED}Download failed.${C_RESET}"
+                echo "    URL: $URL"
                 echo "  Install from source instead:"
                 echo "    cargo install --git https://github.com/$REPO librefang-cli"
                 exit 1
             fi
         else
-            echo "  Download failed. The release may not exist for your platform."
+            echo "  ${C_RED}Download failed.${C_RESET}"
+            echo "    URL: $URL"
             echo "  Install from source instead:"
             echo "    cargo install --git https://github.com/$REPO librefang-cli"
             exit 1
@@ -213,14 +256,14 @@ install() {
 
         if [ -n "$ACTUAL" ]; then
             if [ "$EXPECTED" != "$ACTUAL" ]; then
-                echo "  Checksum verification FAILED!"
+                echo "  ${C_RED}Checksum verification FAILED!${C_RESET}"
                 echo "    Expected: $EXPECTED"
                 echo "    Got:      $ACTUAL"
                 exit 1
             fi
-            echo "  Checksum verified."
+            echo "  ${C_GREEN}Checksum verified.${C_RESET}"
         else
-            echo "  No sha256sum/shasum found, skipping checksum verification."
+            echo "  ${C_YELLOW}No sha256sum/shasum found, skipping checksum verification.${C_RESET}"
         fi
     fi
 
@@ -236,7 +279,7 @@ install() {
         if command_exists codesign; then
             if ! codesign --force --sign - "$INSTALL_DIR/librefang"; then
                 echo ""
-                echo "  Warning: ad-hoc code signing failed."
+                echo "  ${C_YELLOW}Warning: ad-hoc code signing failed.${C_RESET}"
                 echo "  On Apple Silicon, the binary may be killed (SIGKILL) by Gatekeeper."
                 echo "  Try manually: xattr -cr $INSTALL_DIR/librefang && codesign --force --sign - $INSTALL_DIR/librefang"
                 echo ""
@@ -266,15 +309,18 @@ install() {
                     rm -f "$TMP_FISH_RC"
                 fi
 
-                if ! grep -q "librefang" "$SHELL_RC" 2>/dev/null; then
+                # Match the actual install path, not any line mentioning
+                # "librefang" — otherwise usernames, oh-my-zsh plugin paths,
+                # or comments containing the word silently skip the append.
+                if ! grep -qE "\.librefang/bin" "$SHELL_RC" 2>/dev/null; then
                     echo "fish_add_path \"$INSTALL_DIR\"" >> "$SHELL_RC"
-                    echo "  Added $INSTALL_DIR to PATH in $SHELL_RC"
+                    echo "  ${C_GREEN}Added $INSTALL_DIR to PATH in $SHELL_RC${C_RESET}"
                 fi
                 ;;
             *)
-                if ! grep -q "librefang" "$SHELL_RC" 2>/dev/null; then
+                if ! grep -qE "\.librefang/bin" "$SHELL_RC" 2>/dev/null; then
                     echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$SHELL_RC"
-                    echo "  Added $INSTALL_DIR to PATH in $SHELL_RC"
+                    echo "  ${C_GREEN}Added $INSTALL_DIR to PATH in $SHELL_RC${C_RESET}"
                 fi
                 ;;
         esac
@@ -289,7 +335,11 @@ install() {
     if "$INSTALL_DIR/librefang" --version >/dev/null 2>&1; then
         INSTALLED_VERSION=$("$INSTALL_DIR/librefang" --version 2>/dev/null || echo "$VERSION")
         echo ""
-        echo "  LibreFang installed successfully! ($INSTALLED_VERSION)"
+        if [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$INSTALLED_VERSION" ]; then
+            echo "  ${C_GREEN}LibreFang upgraded successfully!${C_RESET} ($OLD_VERSION -> ${C_BOLD}$INSTALLED_VERSION${C_RESET})"
+        else
+            echo "  ${C_GREEN}LibreFang installed successfully!${C_RESET} (${C_BOLD}$INSTALLED_VERSION${C_RESET})"
+        fi
     else
         echo ""
         echo "  LibreFang binary installed to $INSTALL_DIR/librefang"
@@ -306,43 +356,113 @@ install() {
         echo ""
         echo "  Running setup wizard..."
         "$INSTALL_DIR/librefang" init || true
-    else
-        echo ""
-        echo "  Next step — run the setup wizard to configure providers and API keys:"
-        echo "    librefang init"
-        if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
-            echo ""
-            echo "  (First refresh your PATH:"
-            case "$USER_SHELL" in
-                */fish|fish)
-                    echo "    fish_add_path \"$INSTALL_DIR\""
-                    ;;
-                *)
-                    echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
-                    ;;
-            esac
-            echo "  )"
-        fi
-        echo ""
     fi
 
     AUTO_START="${LIBREFANG_AUTO_START:-1}"
     if is_enabled "$AUTO_START"; then
-        # Register boot service so LibreFang starts on login/reboot
+        # Register boot service so LibreFang starts on login/reboot.
+        # Suppress verbose output (systemd hints, ✔ lines) — only show
+        # errors so the installer output stays clean.
         echo "  Registering boot service..."
-        "$INSTALL_DIR/librefang" service install 2>/dev/null || true
+        SVC_OUTPUT=$("$INSTALL_DIR/librefang" service install 2>&1) || {
+            echo "  ${C_YELLOW}Warning: boot service registration failed.${C_RESET}"
+            if [ -n "$SVC_OUTPUT" ]; then
+                printf "%s\n" "$SVC_OUTPUT" | sed 's/^/    /'
+            fi
+        }
 
         echo "  Starting daemon in background..."
-        if start_daemon_if_needed; then
+        start_daemon_if_needed || {
             echo ""
-            echo "  Next steps:"
-            echo "    1. Chat:              $INSTALL_DIR/librefang chat"
-            echo "    2. Stop daemon:       $INSTALL_DIR/librefang stop"
-        else
-            echo ""
-            echo "  Warning: automatic daemon start failed."
+            echo "  ${C_YELLOW}Warning: automatic daemon start failed.${C_RESET}"
             echo "  Start it manually with:"
             echo "    $INSTALL_DIR/librefang start"
+        }
+    fi
+
+    # -- Post-install: activate PATH in current session ------------------------
+    #
+    # Interactive mode (user ran `sh install.sh`):
+    #   Restart the shell via `exec` so the rc file is re-read and PATH
+    #   takes effect immediately — no manual action required.
+    #
+    # Pipe mode (`curl … | sh`):
+    #   `exec` would replace the sh subshell with a login shell whose stdin
+    #   is still the pipe (already drained) — the shell would exit or hang.
+    #   Print a prominent banner instead.
+
+    if [ -t 0 ]; then
+        # Interactive --------------------------------------------------------
+        echo ""
+        echo "  Next steps:"
+        echo "    librefang chat       # start chatting"
+        echo "    librefang stop       # stop the daemon"
+        echo ""
+        echo "  Installed to: $INSTALL_DIR"
+        if [ -n "$SHELL_RC" ]; then
+            echo "  Uninstall:    rm -rf \"\$HOME/.librefang\" && remove the PATH line from $SHELL_RC"
+        else
+            echo "  Uninstall:    rm -rf \"\$HOME/.librefang\""
+        fi
+
+        if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
+            # Pick a shell to exec into.  Prefer $SHELL (login shell, survives
+            # subshells) over the detected USER_SHELL.  Only exec when we
+            # actually wrote the PATH to an rc file the shell will read.
+            RESTART_SHELL="${SHELL:-}"
+            [ -n "$RESTART_SHELL" ] || RESTART_SHELL="$USER_SHELL"
+
+            if [ -n "$RESTART_SHELL" ] && [ -n "$SHELL_RC" ] && command_exists "$RESTART_SHELL"; then
+                echo ""
+                echo "  Restarting your shell to activate PATH..."
+                # exec replaces the process — EXIT trap won't fire.
+                # Clean up the download temp dir manually.
+                rm -rf "$TMPDIR" 2>/dev/null || true
+                case "$RESTART_SHELL" in
+                    */fish|fish) exec "$RESTART_SHELL" --login ;;
+                    *)           exec "$RESTART_SHELL" -l ;;
+                esac
+            else
+                # Cannot exec — fall back to a manual hint.
+                echo ""
+                echo "  To activate PATH in this session, run:"
+                case "$USER_SHELL" in
+                    */fish|fish) echo "    fish_add_path \"$INSTALL_DIR\"" ;;
+                    *)           echo "    export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
+                esac
+            fi
+        fi
+        echo ""
+    else
+        # Pipe mode ----------------------------------------------------------
+        echo ""
+        echo "  Next steps:"
+        echo "    1. Refresh your PATH (see below)"
+        echo "    2. librefang init       # setup wizard"
+        echo "    3. librefang chat       # start chatting"
+        echo ""
+        echo "  Installed to: $INSTALL_DIR"
+        if [ -n "$SHELL_RC" ]; then
+            echo "  Uninstall:    rm -rf \"\$HOME/.librefang\" && remove the PATH line from $SHELL_RC"
+        else
+            echo "  Uninstall:    rm -rf \"\$HOME/.librefang\""
+        fi
+
+        if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
+            echo ""
+            echo "  ========================================================"
+            echo "  ${C_BOLD}To use 'librefang', first refresh your PATH:${C_RESET}"
+            echo ""
+            case "$USER_SHELL" in
+                */fish|fish) echo "    fish_add_path \"$INSTALL_DIR\"" ;;
+                *)           echo "    export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
+            esac
+            echo ""
+            if [ -n "$SHELL_RC" ]; then
+                echo "  Or just open a new terminal — $SHELL_RC already"
+                echo "  has the PATH entry and new shells will pick it up."
+            fi
+            echo "  ========================================================"
         fi
         echo ""
     fi

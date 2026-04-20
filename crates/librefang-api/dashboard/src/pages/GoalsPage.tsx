@@ -39,6 +39,24 @@ export function GoalsPage() {
   const goals = goalsQuery.data ?? [];
   const templates = templatesQuery.data ?? [];
 
+  const runBatch = async <T,>(items: readonly T[], action: (item: T) => Promise<unknown>) => {
+    let succeeded = 0;
+    for (const item of items) {
+      try {
+        await action(item);
+        succeeded += 1;
+      } catch {
+        // Continue so batch actions report aggregate success/failure totals.
+      }
+    }
+
+    return {
+      total: items.length,
+      succeeded,
+      failed: items.length - succeeded,
+    };
+  };
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!createDraft.title.trim()) return;
@@ -54,12 +72,19 @@ export function GoalsPage() {
   const handleApplyTemplate = async (tpl: GoalTemplate) => {
     setApplyingTemplate(tpl.id);
     try {
-      for (const g of tpl.goals) {
-        await createMutation.mutateAsync(g);
+      const result = await runBatch(tpl.goals, (goal) => createMutation.mutateAsync(goal));
+      if (result.failed === 0) {
+        addToast(`${t("common.success")} (${result.succeeded}/${result.total})`, "success");
+      } else {
+        addToast(
+          t("goals.apply_template_partial", {
+            succeeded: result.succeeded,
+            total: result.total,
+            failed: result.failed,
+          }),
+          result.succeeded > 0 ? "info" : "error",
+        );
       }
-      addToast(t("common.success"), "success");
-    } catch (err: any) {
-      addToast(err.message || t("common.error"), "error");
     } finally {
       setApplyingTemplate(null);
     }
@@ -113,10 +138,20 @@ export function GoalsPage() {
 
   const handleClearAll = async () => {
     try {
-      for (const g of goals) {
-        await deleteMutation.mutateAsync(g.id);
+      const result = await runBatch(goals, (goal) => deleteMutation.mutateAsync(goal.id));
+      if (result.failed === 0) {
+        addToast(`${t("common.success")} (${result.succeeded}/${result.total})`, "success");
+        setShowClearConfirm(false);
+      } else {
+        addToast(
+          t("goals.clear_all_partial", {
+            succeeded: result.succeeded,
+            total: result.total,
+            failed: result.failed,
+          }),
+          result.succeeded > 0 ? "info" : "error",
+        );
       }
-      addToast(t("common.success"), "success");
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     }
@@ -255,7 +290,7 @@ export function GoalsPage() {
             </div>
             <div className="h-2.5 rounded-full bg-main overflow-hidden">
               <div
-                className="h-full rounded-full bg-gradient-to-r from-brand to-success transition-all duration-700"
+                className="h-full rounded-full bg-linear-to-r from-brand to-success transition-all duration-700"
                 style={{ width: `${stats.pct}%` }}
               />
             </div>
@@ -265,7 +300,7 @@ export function GoalsPage() {
                 {showClearConfirm ? (
                   <>
                     <span className="text-error">{t("goals.clear_all_confirm")}</span>
-                    <button onClick={() => { handleClearAll(); setShowClearConfirm(false); }} className="text-error font-bold hover:underline">{t("common.confirm")}</button>
+                    <button onClick={() => void handleClearAll()} className="text-error font-bold hover:underline">{t("common.confirm")}</button>
                     <button onClick={() => setShowClearConfirm(false)} className="hover:underline">{t("common.cancel")}</button>
                   </>
                 ) : (

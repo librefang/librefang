@@ -858,6 +858,13 @@ export async function patchAgentConfig(agentId: string, config: { max_tokens?: n
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 
+/** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
+ * system_prompt, mcp_servers, model). Distinct from `/agents/{id}/config`
+ * which only accepts the model-tuning subset. */
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[] }): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
+}
+
 export interface AgentToolsResponse {
   tool_allowlist?: string[] | null;
   tool_blocklist?: string[] | null;
@@ -1699,8 +1706,14 @@ export async function getConfigSchema(): Promise<{ sections: Record<string, Conf
   return get<{ sections: Record<string, ConfigSectionSchema> }>("/api/config/schema");
 }
 
-export async function setConfigValue(path: string, value: unknown): Promise<{ status: string; restart_required?: boolean }> {
-  return post<{ status: string; restart_required?: boolean }>("/api/config/set", { path, value });
+export async function setConfigValue(
+  path: string,
+  value: unknown,
+): Promise<{ status: string; restart_required?: boolean; reload_error?: string }> {
+  return post<{ status: string; restart_required?: boolean; reload_error?: string }>(
+    "/api/config/set",
+    { path, value },
+  );
 }
 
 export async function listBackups(): Promise<{ backups?: BackupItem[]; total?: number }> {
@@ -2354,6 +2367,21 @@ export function clearApiKey() {
   localStorage.removeItem("librefang-api-key");
 }
 
+/** Invalidate the server-side session + cookie, then clear the local token.
+ *  Safe to call even when the token is already gone. */
+export async function dashboardLogout(): Promise<void> {
+  try {
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: authHeader(),
+    });
+  } catch {
+    // Network failure shouldn't block local cleanup — fall through.
+  }
+  clearApiKey();
+}
+
 export function hasApiKey(): boolean {
   const key = getStoredApiKey();
   return !!key && key.length > 0;
@@ -2842,6 +2870,17 @@ export interface TerminalWindow {
   index: number;
   name: string;
   active: boolean;
+}
+
+export interface TerminalHealth {
+  ok: boolean;
+  tmux: boolean;
+  max_windows: number;
+  os: string;
+}
+
+export async function getTerminalHealth(): Promise<TerminalHealth> {
+  return get<TerminalHealth>("/api/terminal/health");
 }
 
 export async function listTerminalWindows(): Promise<TerminalWindow[]> {

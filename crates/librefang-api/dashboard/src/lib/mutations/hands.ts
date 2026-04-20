@@ -95,6 +95,7 @@ export function useUpdateHandSettings() {
 }
 
 export function useSendHandMessage() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: ({
       instanceId,
@@ -103,5 +104,8 @@ export function useSendHandMessage() {
       instanceId: string;
       message: string;
     }) => sendHandMessage(instanceId, message),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: handKeys.session(variables.instanceId) });
+    },
   });
 }

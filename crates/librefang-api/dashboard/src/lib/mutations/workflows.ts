@@ -10,15 +10,28 @@ import {
 } from "../http/client";
 import { workflowKeys } from "../queries/keys";
 
+function invalidateWorkflowLists(qc: ReturnType<typeof useQueryClient>) {
+  return qc.invalidateQueries({ queryKey: workflowKeys.lists() });
+}
+
+function invalidateWorkflowRecord(
+  qc: ReturnType<typeof useQueryClient>,
+  workflowId: string,
+) {
+  return Promise.all([
+    qc.invalidateQueries({ queryKey: workflowKeys.detail(workflowId) }),
+    qc.invalidateQueries({ queryKey: workflowKeys.runs(workflowId) }),
+  ]);
+}
+
 export function useRunWorkflow() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ workflowId, input }: { workflowId: string; input: string }) =>
       runWorkflow(workflowId, input),
     onSuccess: (_data, variables) => Promise.all([
-      qc.invalidateQueries({ queryKey: workflowKeys.runs(variables.workflowId) }),
-      qc.invalidateQueries({ queryKey: workflowKeys.lists() }),
-      qc.invalidateQueries({ queryKey: workflowKeys.detail(variables.workflowId) }),
+      invalidateWorkflowLists(qc),
+      invalidateWorkflowRecord(qc, variables.workflowId),
     ]),
   });
 }
@@ -34,7 +47,10 @@ export function useDeleteWorkflow() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteWorkflow,
-    onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.all }),
+    onSuccess: (_data, workflowId) => Promise.all([
+      invalidateWorkflowLists(qc),
+      invalidateWorkflowRecord(qc, workflowId),
+    ]),
   });
 }
 
@@ -42,7 +58,7 @@ export function useCreateWorkflow() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: createWorkflow,
-    onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.all }),
+    onSuccess: () => invalidateWorkflowLists(qc),
   });
 }
 
@@ -56,7 +72,10 @@ export function useUpdateWorkflow() {
       workflowId: string;
       payload: Parameters<typeof updateWorkflow>[1];
     }) => updateWorkflow(workflowId, payload),
-    onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.all }),
+    onSuccess: (_data, variables) => Promise.all([
+      invalidateWorkflowLists(qc),
+      invalidateWorkflowRecord(qc, variables.workflowId),
+    ]),
   });
 }
 
@@ -65,12 +84,14 @@ export function useInstantiateTemplate() {
   return useMutation({
     mutationFn: ({ id, params }: { id: string; params: Record<string, unknown> }) =>
       instantiateTemplate(id, params),
-    onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.all }),
+    onSuccess: () => invalidateWorkflowLists(qc),
   });
 }
 
 export function useSaveWorkflowAsTemplate() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: saveWorkflowAsTemplate,
+    onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.templates() }),
   });
 }
