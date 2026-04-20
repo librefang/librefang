@@ -30,7 +30,7 @@ import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
 import { useUIStore } from "../lib/store";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw, Pencil } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
 import { useDashboardSnapshot } from "../lib/queries/runtime";
@@ -62,6 +62,7 @@ import {
   useCreatePromptVersion,
   useDeleteAgent,
   useDeletePromptVersion,
+  usePatchAgent,
   usePatchAgentConfig,
   usePauseExperiment,
   useResumeAgent,
@@ -89,6 +90,11 @@ export function AgentsPage() {
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
   const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
+  // Inline-rename state for the detail/edit modal header. The agent name is
+  // the primary identifier in the UI and was previously read-only — now
+  // clicking the title swaps it for an input and PATCHes /agents/{id}.
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
   // Destructive-action confirmation dialog. We set this instead of calling
   // window.confirm() so the dialog matches the rest of the dashboard
   // styling and can slide up as a bottom-sheet on mobile.
@@ -133,6 +139,7 @@ export function AgentsPage() {
   const suspendMutation = useSuspendAgent();
   const resumeMutation = useResumeAgent();
   const patchAgentConfigMutation = usePatchAgentConfig();
+  const patchAgentMutation = usePatchAgent();
   const cloneMutation = useCloneAgent();
   const qc = useQueryClient();
 
@@ -173,7 +180,43 @@ export function AgentsPage() {
   function closeDetailModal() {
     setDetailAgent(null);
     setEditingModel(false);
+    setEditingName(false);
     closeToolsEditor();
+  }
+
+  function startNameEdit() {
+    setNameDraft(detailAgent?.name ?? "");
+    setEditingName(true);
+  }
+
+  function cancelNameEdit() {
+    setEditingName(false);
+  }
+
+  function saveName() {
+    const trimmed = nameDraft.trim();
+    if (!detailAgent || !trimmed || trimmed === detailAgent.name) {
+      setEditingName(false);
+      return;
+    }
+    patchAgentMutation.mutate(
+      { agentId: detailAgent.id, body: { name: trimmed } },
+      {
+        onSuccess: () => {
+          // Optimistic local update so the header reflects the new name
+          // before the agents query refetch lands.
+          setDetailAgent(prev => prev ? { ...prev, name: trimmed } : prev);
+          setEditingName(false);
+          addToast(t("agents.rename_success", { defaultValue: "Agent renamed" }), "success");
+        },
+        onError: (e: Error) => {
+          addToast(
+            e?.message || t("agents.rename_failed", { defaultValue: "Failed to rename agent" }),
+            "error",
+          );
+        },
+      },
+    );
   }
 
   async function refreshDetailAgent(agentId: string, fallback?: boolean) {
@@ -633,24 +676,80 @@ export function AgentsPage() {
           {coreAgents.map(agent => renderAgentCard(agent))}
         </div>
       )}
-      {/* Agent Detail Modal */}
+      {/* Agent Detail / Edit Modal — uses the shared <Modal> shell with the
+          same `size="4xl"` as the Create modal so create and edit feel
+          uniform (issue #2798). The custom rich header (avatar, status,
+          inline rename) lives inside; <Modal> provides backdrop, focus
+          trap, Escape-to-close, mobile bottom-sheet, and standard sizing. */}
       {detailAgent && (() => {
         const detailState = ((detailAgent as any).state || "").toLowerCase();
         const isDetailSuspended = detailState === "suspended";
         const statusColor = isDetailSuspended ? "bg-warning" : detailState === "crashed" ? "bg-error" : "bg-success";
+        const isBuiltin = detailAgent.is_hand
+          || t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: "" }) !== "";
         return (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm" onClick={closeDetailModal}>
-          <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[560px] sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+        <Modal
+          isOpen={!!detailAgent}
+          onClose={closeDetailModal}
+          size="4xl"
+          hideCloseButton
+        >
             {/* Modal Header */}
             <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-sm z-10">
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <div className="relative">
+                <div className="flex items-center gap-4 min-w-0 flex-1">
+                  <div className="relative shrink-0">
                     <Avatar fallback={detailAgent.name} size="lg" />
                     <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${statusColor} border-2 border-surface ${!isDetailSuspended && detailState !== "crashed" ? "animate-pulse" : ""}`} />
                   </div>
-                  <div>
-                    <h3 className="text-lg font-black tracking-tight">{t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}</h3>
+                  <div className="min-w-0 flex-1">
+                    {editingName ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          autoFocus
+                          value={nameDraft}
+                          onChange={e => setNameDraft(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === "Enter") saveName();
+                            else if (e.key === "Escape") cancelNameEdit();
+                          }}
+                          className="px-2 py-1 rounded-lg border border-brand bg-main text-lg font-black tracking-tight outline-none focus:ring-2 focus:ring-brand/30 min-w-0 flex-1"
+                          aria-label={t("agents.edit_name", { defaultValue: "Agent name" })}
+                          maxLength={64}
+                        />
+                        <button
+                          onClick={saveName}
+                          disabled={patchAgentMutation.isPending || !nameDraft.trim() || nameDraft.trim() === detailAgent.name}
+                          className="px-3 py-1 rounded-lg text-xs font-bold bg-brand text-white hover:bg-brand/90 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                        >
+                          {patchAgentMutation.isPending ? t("common.saving") : t("common.save")}
+                        </button>
+                        <button
+                          onClick={cancelNameEdit}
+                          className="px-3 py-1 rounded-lg text-xs font-bold bg-main hover:bg-main/80 text-text-dim border border-border-subtle shrink-0"
+                        >
+                          {t("common.cancel")}
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={isBuiltin ? undefined : startNameEdit}
+                        disabled={!!isBuiltin}
+                        className={`group flex items-center gap-2 text-left max-w-full ${isBuiltin ? "cursor-default" : "cursor-text hover:text-brand transition-colors"}`}
+                        title={isBuiltin
+                          ? t("agents.rename_builtin_disabled", { defaultValue: "Built-in agents cannot be renamed" })
+                          : t("agents.rename_hint", { defaultValue: "Click to rename" })}
+                      >
+                        <h3 className="text-lg font-black tracking-tight truncate">
+                          {t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}
+                        </h3>
+                        {!isBuiltin && (
+                          <Pencil className="w-3 h-3 text-text-dim opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
+                        )}
+                      </button>
+                    )}
                     <div className="flex items-center gap-2 mt-0.5">
                       <p className="text-[10px] text-text-dim font-mono">{truncateId(detailAgent.id, 16)}</p>
                       {detailAgent.is_hand && <Badge variant="info">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
@@ -660,7 +759,7 @@ export function AgentsPage() {
                     </div>
                   </div>
                 </div>
-                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
+                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors shrink-0" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
               </div>
             </div>
             <div className="p-6 space-y-5">
@@ -983,7 +1082,7 @@ export function AgentsPage() {
               </div>
             </div>
           </div>
-        </div>
+        </Modal>
         );
       })()}
 

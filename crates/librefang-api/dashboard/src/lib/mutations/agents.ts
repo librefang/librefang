@@ -6,6 +6,7 @@ import {
   suspendAgent,
   resumeAgent,
   deleteAgent,
+  patchAgent,
   patchAgentConfig,
   createAgentSession,
   switchAgentSession,
@@ -82,6 +83,35 @@ export function useResumeAgent() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: agentKeys.all });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+/**
+ * Manifest-level partial update: name, description, system_prompt,
+ * mcp_servers, model. Distinct from `usePatchAgentConfig` which targets
+ * `/agents/{id}/config` (model-tuning only).
+ */
+export function usePatchAgent() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      body,
+    }: {
+      agentId: string;
+      body: {
+        name?: string;
+        description?: string;
+        system_prompt?: string;
+        model?: string;
+        provider?: string;
+        mcp_servers?: string[];
+      };
+    }) => patchAgent(agentId, body),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
     },
   });
 }
