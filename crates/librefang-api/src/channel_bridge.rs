@@ -3888,6 +3888,52 @@ mod tests {
         );
     }
 
+    /// Inactivity-timeout errors (carrying TIMEOUT_PARTIAL_OUTPUT_MARKER)
+    /// must be reported via the status oneshot as Ok(()) — not Err. The
+    /// model emitted useful prose before the inactivity timer fired and
+    /// pre-V2 the bridge had no status channel and treated these turns as
+    /// Done. Reporting Err here would flip lifecycle reaction to Error and
+    /// record_delivery to success=false, which is a UX regression.
+    ///
+    /// We still inject the "[Task timed out…]" tail into the user-facing
+    /// text so they understand the reply may be incomplete.
+    #[tokio::test]
+    async fn test_stream_bridge_timeout_partial_output_reports_ok_status() {
+        use librefang_kernel::error::KernelError;
+        use librefang_types::error::LibreFangError;
+
+        let (_event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async {
+            // Mirror the kernel-side error format: a string that contains
+            // the timeout marker constant.
+            let err = format!(
+                "agent loop timed out: {}",
+                librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER
+            );
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
+                LibreFangError::Internal(err).into(),
+            )
+        });
+
+        let (mut rx, status_rx) =
+            start_stream_text_bridge_with_status(event_rx, kernel_handle, false, true, "en");
+
+        let mut received = String::new();
+        while let Some(chunk) = rx.recv().await {
+            received.push_str(&chunk);
+        }
+        assert!(
+            received.contains("[Task timed out"),
+            "Expected timeout tail in user-facing text, got: {received:?}"
+        );
+
+        let status = status_rx.await.expect("status oneshot dropped");
+        assert!(
+            status.is_ok(),
+            "Timeout-with-partial-output is a soft success — status must be Ok, got: {status:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();

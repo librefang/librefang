@@ -1199,3 +1199,152 @@ async fn test_bridge_streaming_adapter_kernel_and_transport_both_fail() {
 
     manager.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// Mock handle that emits text deltas + reports kernel SUCCESS via the
+// status oneshot. Combined with MockFailingStreamingAdapter (always
+// returns Err on send_streaming) this exercises the V3 Bug 1 fix:
+// outcome 3 = send_streaming Err + kernel Ok must record_delivery as
+// success=true with NO err string (the fallback send_response delivered
+// the buffered text; the transport-side stream error is not relevant to
+// delivery accounting).
+// ---------------------------------------------------------------------------
+
+struct MockKernelOkHandle {
+    agents: Mutex<Vec<(AgentId, String)>>,
+    /// Captures every record_delivery call so the test can assert on
+    /// (success, err) pairing, which is the exact contract Bug 1 broke.
+    deliveries: Arc<Mutex<Vec<(bool, Option<String>)>>>,
+}
+
+impl MockKernelOkHandle {
+    fn new(agents: Vec<(AgentId, String)>) -> Self {
+        Self {
+            agents: Mutex::new(agents),
+            deliveries: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+    fn deliveries(&self) -> Vec<(bool, Option<String>)> {
+        self.deliveries.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ChannelBridgeHandle for MockKernelOkHandle {
+    async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
+        Ok(format!("Echo: {message}"))
+    }
+    async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
+        let agents = self.agents.lock().unwrap();
+        Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
+    }
+    async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+        Ok(self.agents.lock().unwrap().clone())
+    }
+    async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+        Err("mock: spawn not implemented".to_string())
+    }
+    async fn record_delivery(
+        &self,
+        _agent_id: AgentId,
+        _channel: &str,
+        _recipient: &str,
+        success: bool,
+        error: Option<&str>,
+        _thread_id: Option<&str>,
+    ) {
+        self.deliveries
+            .lock()
+            .unwrap()
+            .push((success, error.map(String::from)));
+    }
+    async fn send_message_streaming_with_sender_status(
+        &self,
+        _agent_id: AgentId,
+        _message: &str,
+        _sender: &librefang_channels::types::SenderContext,
+    ) -> Result<
+        (
+            mpsc::Receiver<String>,
+            tokio::sync::oneshot::Receiver<Result<(), String>>,
+        ),
+        String,
+    > {
+        let (tx, rx) = mpsc::channel(16);
+        let (status_tx, status_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = tx.send("clean reply text".to_string()).await;
+            drop(tx);
+            // Kernel succeeded — bridge.rs Bug 1 path must NOT smuggle
+            // the transport-side send_streaming error into the record's
+            // err field.
+            let _ = status_tx.send(Ok(()));
+        });
+        Ok((rx, status_rx))
+    }
+}
+
+/// Bug 1 (review-driven fix): the Telegram-path outcome 3
+///   send_streaming Err + kernel Ok
+/// previously recorded delivery as (success=true, err=Some(stream_e)).
+/// Success=true + err=Some is a contradictory metric — when the kernel
+/// succeeded and the fallback send_response delivered the real reply,
+/// the transport-side stream error is irrelevant. After the fix, err
+/// must be None whenever success=true.
+#[tokio::test]
+async fn test_bridge_streaming_adapter_kernel_ok_transport_fail_records_clean_success() {
+    let agent_id = AgentId::new();
+    let handle_concrete = Arc::new(MockKernelOkHandle::new(vec![(
+        agent_id,
+        "happy-agent".to_string(),
+    )]));
+    let handle: Arc<dyn ChannelBridgeHandle> = handle_concrete.clone();
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("user1".to_string(), agent_id);
+
+    let (adapter, tx) = MockFailingStreamingAdapter::new("flaky-telegram-2", ChannelType::Telegram);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(ChannelType::Telegram, "user1", "ping"))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+    // Fallback send_response must have delivered the text.
+    let sent = adapter_ref.get_sent();
+    assert_eq!(
+        sent.len(),
+        1,
+        "Expected fallback send to fire when send_streaming Err'd, got {}",
+        sent.len()
+    );
+    assert!(
+        sent[0].1.contains("clean reply text"),
+        "Fallback should deliver the buffered text, got: {:?}",
+        sent[0].1
+    );
+
+    // The metric contract: success=true MUST come with err=None.
+    let deliveries = handle_concrete.deliveries();
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "Expected exactly one record_delivery call, got {}",
+        deliveries.len()
+    );
+    let (success, err) = &deliveries[0];
+    assert!(
+        *success,
+        "Kernel succeeded — record_delivery success must be true, got {success}"
+    );
+    assert!(
+        err.is_none(),
+        "When kernel succeeded the transport stream error must NOT leak into the err field, got {err:?}"
+    );
+
+    manager.stop().await;
+}
