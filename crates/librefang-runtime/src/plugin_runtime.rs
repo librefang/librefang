@@ -996,6 +996,9 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_readlink,
         libc::SYS_fork,
         libc::SYS_arch_prctl,
+        // Legacy resource-limit syscalls replaced by prlimit64 on aarch64
+        libc::SYS_getrlimit,
+        libc::SYS_setrlimit,
     ]);
 
     let rules: std::collections::BTreeMap<i64, Vec<SeccompRule>> =
