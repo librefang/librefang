@@ -54,7 +54,6 @@ type CanvasDraft = {
   edges: Edge[];
   workflowName: string;
   workflowDescription: string;
-  selectedWorkflowId: string | null;
 };
 
 const CANVAS_DRAFT_KEY = "canvasDraft";
@@ -70,7 +69,6 @@ function readCanvasDraft(): CanvasDraft | null {
       edges: Array.isArray(parsed.edges) ? parsed.edges : [],
       workflowName: typeof parsed.workflowName === "string" ? parsed.workflowName : "",
       workflowDescription: typeof parsed.workflowDescription === "string" ? parsed.workflowDescription : "",
-      selectedWorkflowId: typeof parsed.selectedWorkflowId === "string" ? parsed.selectedWorkflowId : null,
     };
   } catch {
     sessionStorage.removeItem(CANVAS_DRAFT_KEY);
@@ -816,12 +814,7 @@ function CanvasPageInner() {
     })));
     setWorkflowName(draft.workflowName);
     setWorkflowDescription(draft.workflowDescription);
-    setSelectedWorkflow((current) => {
-      if (!draft.selectedWorkflowId) return null;
-      return current?.id === draft.selectedWorkflowId
-        ? current
-        : ({ id: draft.selectedWorkflowId, name: draft.workflowName, description: draft.workflowDescription } as WorkflowItem);
-    });
+    setSelectedWorkflow(null);
   }, [setNodes, setEdges]);
 
   const persistDraft = useCallback((draft: CanvasDraft) => {
@@ -830,7 +823,6 @@ function CanvasPageInner() {
       && draft.edges.length === 0
       && !draft.workflowName.trim()
       && !draft.workflowDescription.trim()
-      && !draft.selectedWorkflowId
     ) {
       clearDraft();
       return;
@@ -1263,7 +1255,7 @@ function CanvasPageInner() {
           }
         }
         // 3. Blank canvas can restore the unsaved draft.
-        if (draft && !draft.selectedWorkflowId) {
+        if (draft) {
           applyCanvasState(draft);
         }
       })
@@ -1281,7 +1273,6 @@ function CanvasPageInner() {
       edges,
       workflowName,
       workflowDescription,
-      selectedWorkflowId: null,
     });
   }, [nodes, edges, workflowName, workflowDescription, selectedWorkflow, routeWorkflowId, persistDraft, clearDraft]);
 
