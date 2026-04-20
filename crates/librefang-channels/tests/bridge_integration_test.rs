@@ -1210,11 +1210,13 @@ async fn test_bridge_streaming_adapter_kernel_and_transport_both_fail() {
 // delivery accounting).
 // ---------------------------------------------------------------------------
 
+type DeliveryLog = Arc<Mutex<Vec<(bool, Option<String>)>>>;
+
 struct MockKernelOkHandle {
     agents: Mutex<Vec<(AgentId, String)>>,
     /// Captures every record_delivery call so the test can assert on
     /// (success, err) pairing, which is the exact contract Bug 1 broke.
-    deliveries: Arc<Mutex<Vec<(bool, Option<String>)>>>,
+    deliveries: DeliveryLog,
 }
 
 impl MockKernelOkHandle {
