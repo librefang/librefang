@@ -4,7 +4,7 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession, stopAgent } from "../api";
+import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession } from "../api";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
 import { useFullConfig } from "../lib/queries/config";
 import { useMediaProviders } from "../lib/queries/media";
@@ -30,6 +30,7 @@ import {
   useDeleteAgentSession,
   usePatchAgentConfig,
   useResolveApproval,
+  useStopAgent,
   useSwitchAgentSession,
 } from "../lib/mutations/agents";
 import "katex/dist/katex.min.css";
@@ -165,6 +166,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 // sessionVersion: bump to force reload after session switch
 function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void) {
   const { t } = useTranslation();
+  const stopAgentMutation = useStopAgent();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Per-agent loading state. A single shared `isLoading` would freeze the
   // ChatInput on every agent while one of them is streaming (#2322). Keyed
@@ -185,6 +187,16 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
   // is already in flight (user can now type + send while the previous turn's
   // `response` event is still pending — see `ChatInput` inputDisabled split).
   const latestTurnRef = useRef<Record<string, string>>({});
+  // Per-agent in-flight turn lifecycle state, hoisted out of sendMessage's
+  // closure so stopMessage can reach `cleanup`, `fallbackTimer`, and
+  // `responded`. Without this, stopMessage POSTs /stop but the WS fallback
+  // watchdog stays armed and 180s later re-sends the stopped message over
+  // HTTP (#2787 review).
+  const activeTurnsRef = useRef<Record<string, {
+    cleanup?: () => void;
+    fallbackTimer?: ReturnType<typeof setTimeout> | null;
+    responded: boolean;
+  }>>({});
   const finishTurnIfCurrent = useCallback((agent: string, botId: string) => {
     if (latestTurnRef.current[agent] === botId) {
       setAgentLoading(agent, false);
@@ -455,13 +467,27 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     // Try WebSocket streaming first
     if (wsConnected && ws.current && ws.current.readyState === WebSocket.OPEN) {
       try {
-        let responded = false;
-        let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+        // Hoist per-turn lifecycle state onto the ref so stopMessage can tear
+        // down the WS listener + watchdog. Any prior entry for this agent
+        // should already have been cleaned up by its own terminal path, but
+        // be defensive and clear it.
+        const prevTurn = activeTurnsRef.current[sendAgentId];
+        if (prevTurn) {
+          prevTurn.responded = true;
+          if (prevTurn.fallbackTimer) clearTimeout(prevTurn.fallbackTimer);
+          prevTurn.cleanup?.();
+        }
+        const turn: {
+          cleanup?: () => void;
+          fallbackTimer?: ReturnType<typeof setTimeout> | null;
+          responded: boolean;
+        } = { responded: false, fallbackTimer: null };
+        activeTurnsRef.current[sendAgentId] = turn;
 
         const resetFallbackTimer = () => {
-          if (fallbackTimer) clearTimeout(fallbackTimer);
-          fallbackTimer = setTimeout(() => {
-            if (!responded) {
+          if (turn.fallbackTimer) clearTimeout(turn.fallbackTimer);
+          turn.fallbackTimer = setTimeout(() => {
+            if (!turn.responded) {
               cleanup();
               sendViaHttp();
             }
@@ -469,11 +495,15 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         };
 
         const cleanup = () => {
-          responded = true;
-          if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+          turn.responded = true;
+          if (turn.fallbackTimer) { clearTimeout(turn.fallbackTimer); turn.fallbackTimer = null; }
           onDropRef.current = null;
           ws.current?.removeEventListener("message", handleMessage);
+          if (activeTurnsRef.current[sendAgentId] === turn) {
+            delete activeTurnsRef.current[sendAgentId];
+          }
         };
+        turn.cleanup = cleanup;
 
         // Set up message handler for this response
         const handleMessage = (event: MessageEvent) => {
@@ -569,9 +599,9 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               // and send a final response. Shorten the inactivity window to
               // 30s so the WS doesn't stay half-open forever if the failure
               // is terminal.
-              if (fallbackTimer) clearTimeout(fallbackTimer);
-              fallbackTimer = setTimeout(() => {
-                if (!responded) { cleanup(); sendViaHttp(); }
+              if (turn.fallbackTimer) clearTimeout(turn.fallbackTimer);
+              turn.fallbackTimer = setTimeout(() => {
+                if (!turn.responded) { cleanup(); sendViaHttp(); }
               }, 30_000);
             } else if (data.type === "response") {
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
@@ -600,8 +630,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 
         // Register fallback: if WS drops mid-stream, retry via HTTP
         onDropRef.current = () => {
-          if (!responded) {
+          if (!turn.responded) {
             ws.current?.removeEventListener("message", handleMessage);
+            if (activeTurnsRef.current[sendAgentId] === turn) {
+              delete activeTurnsRef.current[sendAgentId];
+            }
             sendViaHttp();
           }
         };
@@ -641,13 +674,29 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     ));
     const pendingBotId = latestTurnRef.current[targetId];
     if (pendingBotId) finishTurnIfCurrent(targetId, pendingBotId);
+    // Tear down the in-flight WS turn: mark responded, clear the 180s/30s
+    // watchdog, and detach the message listener. Without this the watchdog
+    // would fire after the backend aborts (WS goes silent) and re-send the
+    // stopped message over HTTP (#2787 review).
+    const turn = activeTurnsRef.current[targetId];
+    if (turn) {
+      turn.responded = true;
+      if (turn.fallbackTimer) {
+        clearTimeout(turn.fallbackTimer);
+        turn.fallbackTimer = null;
+      }
+      turn.cleanup?.();
+      // cleanup() deletes the entry itself, but guard against custom
+      // cleanup implementations.
+      delete activeTurnsRef.current[targetId];
+    }
     try {
-      await stopAgent(targetId);
+      await stopAgentMutation.mutateAsync(targetId);
     } catch {
       // Backend stop failure is non-fatal for the UI — the run may have
       // completed between user click and request. UI is already unblocked.
     }
-  }, [agentId, updateAgentMessages, finishTurnIfCurrent]);
+  }, [agentId, updateAgentMessages, finishTurnIfCurrent, stopAgentMutation]);
 
   return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected };
 }
