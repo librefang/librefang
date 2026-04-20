@@ -58,7 +58,10 @@ export function useDeleteWorkflow() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteWorkflow,
-    onSuccess: () => invalidateWorkflowLists(qc),
+    onSuccess: (_data, workflowId) => Promise.all([
+      invalidateWorkflowLists(qc),
+      invalidateWorkflowRecord(qc, workflowId),
+    ]),
   });
 }
 

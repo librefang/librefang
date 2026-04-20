@@ -1836,9 +1836,11 @@
     "pick_template": "Choose a Template",
     "pick_template_desc": "Pick a template to get started quickly with pre-defined goals.",
     "use_template": "Use Template",
+    "apply_template_partial": "Created {{succeeded}}/{{total}} goals, failed {{failed}}.",
     "overall_progress": "Overall Progress",
     "clear_all": "Clear All",
     "clear_all_confirm": "Delete all goals?",
+    "clear_all_partial": "Deleted {{succeeded}}/{{total}} goals, failed {{failed}}.",
     "help": "Set strategic goals and track progress. Create goal hierarchies, apply templates, and monitor completion status."
   },
   "sessions": {
