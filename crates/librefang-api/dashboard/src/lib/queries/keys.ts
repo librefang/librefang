@@ -67,6 +67,10 @@ export const skillKeys = {
   lists: () => [...skillKeys.all, "list"] as const,
   details: () => [...skillKeys.all, "detail"] as const,
   detail: (name: string) => [...skillKeys.details(), name] as const,
+  supportingFiles: (name: string) =>
+    [...skillKeys.detail(name), "supportingFile"] as const,
+  supportingFile: (name: string, path: string) =>
+    [...skillKeys.supportingFiles(name), path] as const,
 };
 
 export const clawhubKeys = {
@@ -262,6 +266,7 @@ export const mcpKeys = {
   all: ["mcp"] as const,
   servers: () => [...mcpKeys.all, "servers"] as const,
   server: (id: string) => [...mcpKeys.servers(), id] as const,
+  authStatus: (id: string) => [...mcpKeys.all, "authStatus", id] as const,
   catalog: () => [...mcpKeys.all, "catalog"] as const,
   catalogEntry: (id: string) => [...mcpKeys.catalog(), id] as const,
   health: () => [...mcpKeys.all, "health"] as const,
@@ -293,5 +298,6 @@ export const telemetryKeys = {
 
 export const terminalKeys = {
   all: ["terminal"] as const,
+  health: () => [...terminalKeys.all, "health"] as const,
   windows: () => [...terminalKeys.all, "windows"] as const,
 };

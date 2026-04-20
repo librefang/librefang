@@ -527,7 +527,7 @@ pub async fn execute_tool_raw(
         "agent_find" => tool_agent_find(input, *kernel),
         "task_post" => tool_task_post(input, *kernel, *caller_agent_id).await,
         "task_claim" => tool_task_claim(*kernel, *caller_agent_id).await,
-        "task_complete" => tool_task_complete(input, *kernel).await,
+        "task_complete" => tool_task_complete(input, *kernel, *caller_agent_id).await,
         "task_list" => tool_task_list(input, *kernel).await,
         "event_publish" => tool_event_publish(input, *kernel).await,
 
@@ -2605,15 +2605,17 @@ async fn tool_task_claim(
 async fn tool_task_complete(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let agent_id = caller_agent_id.ok_or("task_complete requires a calling agent context")?;
     let task_id = input["task_id"]
         .as_str()
         .ok_or("Missing 'task_id' parameter")?;
     let result = input["result"]
         .as_str()
         .ok_or("Missing 'result' parameter")?;
-    kh.task_complete(task_id, result).await?;
+    kh.task_complete(agent_id, task_id, result).await?;
     Ok(format!("Task {task_id} marked as completed."))
 }
 
@@ -5550,7 +5552,12 @@ mod tests {
             Err("not used".to_string())
         }
 
-        async fn task_complete(&self, _task_id: &str, _result: &str) -> Result<(), String> {
+        async fn task_complete(
+            &self,
+            _agent_id: &str,
+            _task_id: &str,
+            _result: &str,
+        ) -> Result<(), String> {
             Err("not used".to_string())
         }
 
@@ -7349,7 +7356,12 @@ mod tests {
             Err("not used".to_string())
         }
 
-        async fn task_complete(&self, _task_id: &str, _result: &str) -> Result<(), String> {
+        async fn task_complete(
+            &self,
+            _agent_id: &str,
+            _task_id: &str,
+            _result: &str,
+        ) -> Result<(), String> {
             Err("not used".to_string())
         }
 

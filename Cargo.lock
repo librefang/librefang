@@ -4022,6 +4022,7 @@ dependencies = [
 name = "librefang-cli"
 version = "2026.4.19-beta25"
 dependencies = [
+ "chrono",
  "clap",
  "clap_complete",
  "colored",
@@ -4039,6 +4040,7 @@ dependencies = [
  "opentelemetry_sdk",
  "ratatui",
  "reqwest 0.13.2",
+ "rusqlite",
  "rustls",
  "serde",
  "serde_json",
@@ -4050,6 +4052,7 @@ dependencies = [
  "tracing-subscriber",
  "unic-langid",
  "uuid",
+ "walkdir",
  "zeroize",
 ]
 

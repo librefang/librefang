@@ -22,7 +22,7 @@ interface TerminalTabsProps {
   ws: WebSocket | null;
   tmuxAvailable: boolean;
   maxWindows: number;
-  activeWindowId: string | null;
+  displayedActiveWindowId: string | null;
   onSwitchWindow: (windowId: string) => void;
   terminalRef: RefObject<Terminal | null>;
   fitAddonRef: RefObject<FitAddon | null>;
@@ -34,7 +34,7 @@ export function TerminalTabs({
   ws,
   tmuxAvailable,
   maxWindows,
-  activeWindowId,
+  displayedActiveWindowId,
   onSwitchWindow,
   terminalRef,
   fitAddonRef,
@@ -85,10 +85,10 @@ export function TerminalTabs({
   }, []);
 
   useEffect(() => {
-    if (activeWindowId !== null || windows.length === 0) return;
+    if (displayedActiveWindowId !== null || windows.length === 0) return;
     const active = windows.find((w) => w.active);
     onSwitchWindow(active ? active.id : windows[0].id);
-  }, [windows, activeWindowId, onSwitchWindow]);
+  }, [windows, displayedActiveWindowId, onSwitchWindow]);
 
   useEffect(() => {
     if (editingId) {
@@ -153,7 +153,7 @@ export function TerminalTabs({
       if (currentWindows.length <= 1) return;
       try {
         await deleteMutation.mutateAsync(windowId);
-        if (activeWindowId === windowId) {
+        if (displayedActiveWindowId === windowId) {
           const remaining = currentWindows.filter((w) => w.id !== windowId);
           if (remaining.length > 0) {
             const next = remaining[0];
@@ -170,7 +170,7 @@ export function TerminalTabs({
         addToast(t("terminal.tabs.delete_failed"), "error");
       }
     },
-    [deleteMutation, activeWindowId, ws, onSwitchWindow, addToast, t]
+    [deleteMutation, displayedActiveWindowId, ws, onSwitchWindow, addToast, t]
   );
 
   if (!tmuxAvailable) return null;
@@ -180,7 +180,7 @@ export function TerminalTabs({
   return (
     <div className="flex items-center gap-1 px-2 py-1 bg-gray-900/80 border-b border-gray-700/50 overflow-x-auto shrink-0">
       {windows.map((w) => {
-        const isActive = w.id === activeWindowId;
+        const isActive = w.id === displayedActiveWindowId;
         const isEditing = editingId === w.id;
         return (
           <div

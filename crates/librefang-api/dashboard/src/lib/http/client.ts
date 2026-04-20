@@ -60,6 +60,7 @@ export {
   listMcpCatalog,
   getMcpCatalogEntry,
   getMcpHealth,
+  getMcpAuthStatus,
   // memory
   listMemories,
   searchMemories,
@@ -83,6 +84,8 @@ export {
   getSessionDetails,
   // skills (local + hubs)
   listSkills,
+  getSkillDetail,
+  getSupportingFile,
   clawhubBrowse,
   clawhubSearch,
   clawhubGetSkill,
@@ -98,6 +101,7 @@ export {
   getWorkflowRun,
   listWorkflowTemplates,
   // terminal
+  getTerminalHealth,
   listTerminalWindows,
   // auto-dream
   getAutoDreamStatus,
@@ -110,9 +114,11 @@ export {
   // agents
   spawnAgent,
   cloneAgent,
+  stopAgent,
   suspendAgent,
   resumeAgent,
   deleteAgent,
+  clearAgentHistory,
   patchAgentConfig,
   createAgentSession,
   switchAgentSession,
@@ -162,6 +168,8 @@ export {
   deleteMcpServer,
   reconnectMcpServer,
   reloadMcp,
+  startMcpAuth,
+  revokeMcpAuth,
   // memory
   addMemoryFromText,
   updateMemory,
@@ -189,6 +197,14 @@ export {
   updateTrigger,
   deleteTrigger,
   // skills
+  createSkill,
+  reloadSkills,
+  evolveUpdateSkill,
+  evolvePatchSkill,
+  evolveRollbackSkill,
+  evolveDeleteSkill,
+  evolveWriteFile,
+  evolveRemoveFile,
   installSkill,
   uninstallSkill,
   clawhubInstall,
@@ -228,6 +244,8 @@ export type {
   HandSessionMessage,
   HandSettingsResponse,
   HandStatsResponse,
+  McpAuthStartResponse,
+  McpAuthStatusResponse,
   MemoryItem,
   ModelOverrides,
   MediaImageResult,
@@ -235,5 +253,6 @@ export type {
   MediaProvider,
   MediaVideoStatus,
   SpeechResult,
+  TerminalHealth,
   TerminalWindow,
 } from "../../api";

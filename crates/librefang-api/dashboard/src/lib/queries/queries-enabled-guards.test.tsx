@@ -9,6 +9,9 @@ const { mockListApprovals, mockFetchApprovalCount } = vi.hoisted(() => ({
 const { mockListPluginRegistries } = vi.hoisted(() => ({
   mockListPluginRegistries: vi.fn(),
 }));
+const { mockGetTerminalHealth } = vi.hoisted(() => ({
+  mockGetTerminalHealth: vi.fn(),
+}));
 
 vi.mock("../../api", async () => {
   const actual = await vi.importActual("../../api");
@@ -17,16 +20,19 @@ vi.mock("../../api", async () => {
 
 vi.mock("../http/client", async () => {
   const actual = await vi.importActual("../http/client");
-  return {
-    ...actual,
-    listPluginRegistries: mockListPluginRegistries,
-  };
+    return {
+      ...actual,
+      listPluginRegistries: mockListPluginRegistries,
+      getTerminalHealth: mockGetTerminalHealth,
+    };
 });
 
 // ── Import hooks after mocks are set up ──
 import { useApprovals, useApprovalCount } from "./approvals";
 import { usePluginRegistries } from "./plugins";
+import { useTerminalHealth } from "./terminal";
 import { approvalKeys, pluginKeys } from "./keys";
+import { terminalKeys } from "./keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 beforeEach(() => {
@@ -196,6 +202,43 @@ describe("useApprovalCount", () => {
 
     await vi.waitFor(() => {
       expect(queryClient.getQueryData(approvalKeys.count())).toEqual(mockData);
+    });
+  });
+});
+
+describe("useTerminalHealth", () => {
+  it("should not fetch when enabled is false", async () => {
+    const { result } = renderHook(() => useTerminalHealth({ enabled: false }), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(mockGetTerminalHealth).not.toHaveBeenCalled();
+  });
+
+  it("should fetch terminal health when enabled is true", async () => {
+    const mockData = { tmux: true, max_windows: 16, os: "linux" };
+    mockGetTerminalHealth.mockResolvedValue(mockData);
+
+    const { result } = renderHook(() => useTerminalHealth({ enabled: true }), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    await waitFor(() => expect(result.current.data).toEqual(mockData));
+    expect(mockGetTerminalHealth).toHaveBeenCalledTimes(1);
+  });
+
+  it("should use terminalKeys.health() as queryKey", async () => {
+    const mockData = { tmux: true, max_windows: 16, os: "macos" };
+    mockGetTerminalHealth.mockResolvedValue(mockData);
+
+    const { wrapper, queryClient } = createQueryClientWrapper();
+    renderHook(() => useTerminalHealth({ enabled: true }), { wrapper });
+
+    await waitFor(() => {
+      expect(queryClient.getQueryData(terminalKeys.health())).toEqual(mockData);
     });
   });
 });

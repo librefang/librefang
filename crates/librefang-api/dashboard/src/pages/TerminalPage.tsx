@@ -1,6 +1,6 @@
 import "@xterm/xterm/css/xterm.css";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { useTranslation } from "react-i18next";
@@ -13,12 +13,13 @@ import {
   Minimize2,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
-import { buildAuthenticatedWebSocketUrl, authHeader } from "../api";
+import { buildAuthenticatedWebSocketUrl } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { TerminalTabs } from "../components/TerminalTabs";
+import { useTerminalHealth } from "../lib/queries/terminal";
 
 interface ServerMessage {
   type: "started" | "output" | "exit" | "error" | "active_window";
@@ -31,13 +32,6 @@ interface ServerMessage {
   content?: string;
   isRoot?: boolean;
   window_id?: string;
-}
-
-interface TerminalHealth {
-  ok: boolean;
-  tmux: boolean;
-  max_windows: number;
-  os: string;
 }
 
 const RECONNECT_DELAY_MS = 2000;
@@ -64,17 +58,29 @@ export function TerminalPage() {
   const intentionalDisconnectRef = useRef(false);
   const connectRef = useRef<() => void>(() => {});
   const attemptRef = useRef(0);
+  const desiredWindowIdRef = useRef<string | null>(null);
 
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isRoot, setIsRoot] = useState(false);
-  const [tmuxAvailable, setTmuxAvailable] = useState(false);
-  const [maxWindows, setMaxWindows] = useState(16);
   const [activeWindowId, setActiveWindowId] = useState<string | null>(null);
+  const [pendingWindowId, setPendingWindowId] = useState<string | null>(null);
   const [serverOs, setServerOs] = useState<string>("linux");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const terminalEnabled = useUIStore((s) => s.terminalEnabled);
+  const {
+    data: terminalHealth,
+    isError: terminalHealthError,
+  } = useTerminalHealth({ enabled: terminalEnabled === true });
+
+  const tmuxAvailable = !terminalHealthError && (terminalHealth?.tmux ?? false);
+  const maxWindows = terminalHealth?.max_windows ?? 16;
+
+  const displayedActiveWindowId = useMemo(
+    () => pendingWindowId ?? activeWindowId,
+    [pendingWindowId, activeWindowId]
+  );
 
   useEffect(() => {
     if (terminalEnabled === false) {
@@ -82,20 +88,11 @@ export function TerminalPage() {
     }
   }, [terminalEnabled, navigate]);
 
-  // Fetch terminal health for tmux feature flag.
   useEffect(() => {
-    if (terminalEnabled !== true) return;
-    fetch("/api/terminal/health", { headers: authHeader() })
-      .then((r) => r.json())
-      .then((data: TerminalHealth) => {
-        setTmuxAvailable(data.tmux ?? false);
-        setMaxWindows(data.max_windows ?? 16);
-        if (data.os) setServerOs(data.os);
-      })
-      .catch(() => {
-        setTmuxAvailable(false);
-      });
-  }, [terminalEnabled]);
+    if (terminalHealth?.os) {
+      setServerOs(terminalHealth.os);
+    }
+  }, [terminalHealth]);
 
   const sendCloseMessage = useCallback((ws: WebSocket | null) => {
     if (ws?.readyState === WebSocket.OPEN) {
@@ -131,6 +128,9 @@ export function TerminalPage() {
       if (terminalRef.current && fitAddonRef.current) {
         const { cols, rows } = terminalRef.current;
         ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      }
+      if (desiredWindowIdRef.current) {
+        ws.send(JSON.stringify({ type: "switch_window", window: desiredWindowIdRef.current }));
       }
     };
 
@@ -172,11 +172,14 @@ export function TerminalPage() {
           setError(typeof msg.content === "string" && msg.content
             ? msg.content
             : t("terminal.error_unknown"));
+          setPendingWindowId(null);
           break;
         case "active_window":
           if (msg.window_id) {
+            desiredWindowIdRef.current = msg.window_id;
             setActiveWindowId(msg.window_id);
-            queryClient.invalidateQueries({ queryKey: terminalKeys.all });
+            setPendingWindowId(null);
+            queryClient.invalidateQueries({ queryKey: terminalKeys.windows() });
           }
           break;
       }
@@ -235,9 +238,19 @@ export function TerminalPage() {
       wsRef.current.close();
       wsRef.current = null;
     }
+    if (activeWindowId) {
+      desiredWindowIdRef.current = activeWindowId;
+    }
+    setPendingWindowId(null);
     setIsConnected(false);
     setIsConnecting(false);
-  }, [sendCloseMessage]);
+  }, [sendCloseMessage, activeWindowId]);
+
+  useEffect(() => {
+    if (terminalEnabled === true) return;
+    desiredWindowIdRef.current = null;
+    setPendingWindowId(null);
+  }, [terminalEnabled]);
 
   const handleInstallTmux = useCallback(() => {
     const cmd = getTmuxInstallCommand(serverOs);
@@ -247,7 +260,8 @@ export function TerminalPage() {
   }, [serverOs]);
 
   const handleSwitchWindow = useCallback((id: string) => {
-    setActiveWindowId(id);
+    desiredWindowIdRef.current = id;
+    setPendingWindowId(id);
   }, []);
 
   const toggleFullscreen = useCallback(() => {
@@ -440,7 +454,7 @@ export function TerminalPage() {
         ws={wsRef.current}
         tmuxAvailable={tmuxAvailable}
         maxWindows={maxWindows}
-        activeWindowId={activeWindowId}
+        displayedActiveWindowId={displayedActiveWindowId}
         onSwitchWindow={handleSwitchWindow}
         terminalRef={terminalRef}
         fitAddonRef={fitAddonRef}

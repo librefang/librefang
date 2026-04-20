@@ -638,8 +638,12 @@ fn describe_event(event: &Event) -> String {
             } => {
                 format!("Task claimed: {task_id} by {claimed_by}")
             }
-            SystemEvent::TaskCompleted { task_id, result } => {
-                format!("Task completed: {task_id} result={result}")
+            SystemEvent::TaskCompleted {
+                task_id,
+                completed_by,
+                result,
+            } => {
+                format!("Task completed: {task_id} by {completed_by} result={result}")
             }
         },
         EventPayload::ApprovalRequested(ar) => {

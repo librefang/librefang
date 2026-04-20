@@ -36,6 +36,21 @@ function addHeaders(response, url) {
 
 const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es'];
 
+// Pretty installer URL → actual asset, chosen by client User-Agent so that
+// `curl -fsSL https://librefang.ai/install | sh` and the PowerShell one-liner
+// both work without the file extension. Browsers without a CLI-shaped UA fall
+// through to the SPA so a human pasting /install into the address bar still
+// sees a page instead of a shell script.
+const CLI_INSTALLER_UA = /(curl|wget|fetch|libfetch|httpie)/i;
+const POWERSHELL_INSTALLER_UA = /(powershell|pwsh)/i;
+
+function installerAssetFor(pathname, userAgent) {
+  if (pathname !== '/install') return null;
+  if (POWERSHELL_INSTALLER_UA.test(userAgent)) return '/install.ps1';
+  if (CLI_INSTALLER_UA.test(userAgent)) return '/install.sh';
+  return null;
+}
+
 // Canonicalize URLs: locale roots get a trailing slash ( /zh → /zh/ ), while
 // sub-paths stay un-slashed ( /zh/skills/ → /zh/skills ). Returns the
 // canonical pathname, or null if the request is already canonical.
@@ -67,6 +82,20 @@ export default {
     if (canonical !== null) {
       const target = canonical + url.search + url.hash;
       return Response.redirect(new URL(target, url).toString(), 301);
+    }
+
+    // Rewrite /install → /install.sh or /install.ps1 for CLI clients so the
+    // suffix-less install one-liners work. Must happen before the asset fetch
+    // (which would 404 on /install) and before the SPA fallback (which would
+    // hand the CLI an HTML page, causing `sh: newline unexpected`).
+    const installerAsset = installerAssetFor(
+      url.pathname,
+      request.headers.get('user-agent') || '',
+    );
+    if (installerAsset) {
+      const installerUrl = new URL(installerAsset, request.url);
+      const installerResponse = await env.ASSETS.fetch(new Request(installerUrl, request));
+      return addHeaders(installerResponse, url);
     }
 
     // Try serving static asset first

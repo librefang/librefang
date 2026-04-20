@@ -56,24 +56,32 @@ describe("useDryRunWorkflow", () => {
 });
 
 describe.each([
-  { name: "useDeleteWorkflow", hook: useDeleteWorkflow, arg: "wf-1" },
+  {
+    name: "useDeleteWorkflow",
+    hook: useDeleteWorkflow,
+    arg: "wf-1",
+    expectedKeys: [workflowKeys.lists()],
+  },
   {
     name: "useCreateWorkflow",
     hook: useCreateWorkflow,
     arg: { name: "New workflow", steps: [] },
+    expectedKeys: [workflowKeys.lists()],
   },
   {
     name: "useUpdateWorkflow",
     hook: useUpdateWorkflow,
     arg: { workflowId: "wf-1", payload: { name: "Updated workflow" } },
+    expectedKeys: [workflowKeys.lists(), workflowKeys.detail("wf-1"), workflowKeys.runs("wf-1")],
   },
   {
     name: "useInstantiateTemplate",
     hook: useInstantiateTemplate,
     arg: { id: "tmpl-1", params: {} },
+    expectedKeys: [workflowKeys.lists()],
   },
-])("$name", ({ hook, arg }) => {
-  it("invalidates workflowKeys.all", async () => {
+])("$name", ({ hook, arg, expectedKeys }) => {
+  it("invalidates the expected workflow query keys", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -81,6 +89,8 @@ describe.each([
 
     await result.current.mutateAsync(arg as never);
 
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workflowKeys.all });
+    for (const queryKey of expectedKeys) {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey });
+    }
   });
 });
