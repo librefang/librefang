@@ -445,9 +445,15 @@ fn start_stream_text_bridge_with_status(
                     // live message; non-streaming adapters fall back to plain
                     // text and the line just becomes part of the reply.
                     // Skip entirely when the agent has show_progress=false.
+                    //
+                    // All progress lines use `\n\n…\n\n` so adjacent markers
+                    // (e.g. `🔧 X` followed by `⚠️ X failed`) render with a
+                    // blank line between them on every renderer that respects
+                    // markdown blank-line semantics, instead of being
+                    // collapsed into one paragraph.
                     if show_progress && !name.is_empty() && iter_tools_seen.insert(name.clone()) {
                         let pretty = prettify_tool_name(&name);
-                        let line = format!("\n\n🔧 {pretty}\n");
+                        let line = format!("\n\n🔧 {pretty}\n\n");
                         if tx.send(line).await.is_err() {
                             break;
                         }
@@ -459,7 +465,7 @@ fn start_stream_text_bridge_with_status(
                     if show_progress && is_error && !name.is_empty() =>
                 {
                     let pretty = prettify_tool_name(&name);
-                    let line = format!("\n⚠️ {pretty} {failed_word}\n");
+                    let line = format!("\n\n⚠️ {pretty} {failed_word}\n\n");
                     if tx.send(line).await.is_err() {
                         break;
                     }
@@ -478,7 +484,7 @@ fn start_stream_text_bridge_with_status(
                     if show_progress && phase == "context_warning" =>
                 {
                     let body = detail.as_deref().unwrap_or("Context window trimmed");
-                    let line = format!("\n⚠️ {body}\n");
+                    let line = format!("\n\n⚠️ {body}\n\n");
                     if tx.send(line).await.is_err() {
                         break;
                     }

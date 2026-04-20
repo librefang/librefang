@@ -76,15 +76,65 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Pick the first agent that already has a working LLM driver. The test does
-# not create a dedicated agent because that would require knowing which
-# model the user has keys for.
-AGENT_ID=$(curl -fsS "$API_BASE/agents" | python3 -c "import sys,json; data=json.load(sys.stdin); print(next((a['id'] for a in data if a.get('enabled', True)), ''))")
+# Try to reuse an existing enabled agent. If none, spawn a minimal one
+# inline using the SpawnRequest manifest_toml field so the script is
+# runnable on a fresh daemon without manual setup.
+AGENT_ID=$(curl -fsS "$API_BASE/agents" | python3 -c "import sys,json; data=json.load(sys.stdin); print(next((a['id'] for a in data if a.get('enabled', True)), ''))" || echo "")
+SPAWNED_AGENT=""
 if [[ -z "$AGENT_ID" ]]; then
-  echo "ERROR: no enabled agent found via $API_BASE/agents — create one first" >&2
-  exit 1
+  echo "[smoke] no enabled agent — spawning a temporary one"
+  SPAWN_NAME="channel-progress-smoke-$(date +%s)"
+  # Pick the first available LLM key as the provider so the smoke agent
+  # can actually answer.
+  if [[ -n "${GROQ_API_KEY:-}" ]]; then PROVIDER="groq"; MODEL="llama-3.1-70b-versatile"; API_KEY_ENV="GROQ_API_KEY"
+  elif [[ -n "${OPENAI_API_KEY:-}" ]]; then PROVIDER="openai"; MODEL="gpt-4o-mini"; API_KEY_ENV="OPENAI_API_KEY"
+  elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then PROVIDER="anthropic"; MODEL="claude-haiku-4-5"; API_KEY_ENV="ANTHROPIC_API_KEY"
+  else PROVIDER="minimax"; MODEL="MiniMax-M2.7"; API_KEY_ENV="MINIMAX_API_KEY"
+  fi
+  MANIFEST_TOML=$(cat <<MANIFEST
+name = "${SPAWN_NAME}"
+version = "1.0.0"
+description = "Ephemeral smoke-test agent"
+author = "smoke"
+module = "builtin:chat"
+
+[model]
+provider = "${PROVIDER}"
+model = "${MODEL}"
+api_key_env = "${API_KEY_ENV}"
+max_tokens = 1024
+temperature = 0.0
+system_prompt = "You answer concisely. Use the web_search tool when asked."
+
+[capabilities]
+tools = ["web_search"]
+MANIFEST
+)
+  SPAWN_BODY=$(python3 -c "import json,sys; print(json.dumps({'manifest_toml': sys.stdin.read()}))" <<< "$MANIFEST_TOML")
+  AGENT_ID=$(curl -fsS -X POST "$API_BASE/agents" \
+    -H "Content-Type: application/json" \
+    -d "$SPAWN_BODY" \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('agent_id', ''))" || echo "")
+  if [[ -z "$AGENT_ID" ]]; then
+    echo "ERROR: failed to spawn temporary agent — check daemon logs" >&2
+    exit 1
+  fi
+  SPAWNED_AGENT="$AGENT_ID"
+  echo "[smoke] spawned temporary agent $AGENT_ID ($SPAWN_NAME, $PROVIDER/$MODEL)"
 fi
 echo "[smoke] using agent $AGENT_ID"
+
+# Cleanup: stop daemon AND despawn any temporary agent we created.
+# We re-define the trap here to run agent cleanup BEFORE daemon cleanup
+# (DELETE needs the daemon up).
+cleanup_full() {
+  if [[ -n "$SPAWNED_AGENT" ]]; then
+    echo "[smoke] removing temporary agent $SPAWNED_AGENT"
+    curl -fsS -X DELETE "$API_BASE/agents/${SPAWNED_AGENT}" >/dev/null 2>&1 || true
+  fi
+  cleanup
+}
+trap cleanup_full EXIT
 
 # Send a message likely to trigger web_search. Result body itself is not
 # the assertion — we ALSO check the agent's last conversation log for the
