@@ -4,7 +4,7 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession } from "../api";
+import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession, stopAgent } from "../api";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
 import { useFullConfig } from "../lib/queries/config";
 import { useMediaProviders } from "../lib/queries/media";
@@ -16,7 +16,7 @@ import { approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe } from "lucide-react";
+import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -629,7 +629,27 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 
   const clearHistory = useCallback(() => setMessages([]), []);
 
-  return { messages, isLoading, sendMessage, clearHistory, wsConnected };
+  // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
+  // the tokio task on the kernel side) and optimistically finalizes any
+  // streaming messages for this agent so the input re-enables immediately —
+  // we don't wait for the WS to emit a terminal event.
+  const stopMessage = useCallback(async () => {
+    if (!agentId) return;
+    const targetId = agentId;
+    updateAgentMessages(targetId, prev => prev.map(m =>
+      m.isStreaming ? { ...m, isStreaming: false } : m,
+    ));
+    const pendingBotId = latestTurnRef.current[targetId];
+    if (pendingBotId) finishTurnIfCurrent(targetId, pendingBotId);
+    try {
+      await stopAgent(targetId);
+    } catch {
+      // Backend stop failure is non-fatal for the UI — the run may have
+      // completed between user click and request. UI is already unblocked.
+    }
+  }, [agentId, updateAgentMessages, finishTurnIfCurrent]);
+
+  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected };
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
@@ -842,7 +862,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 });
 
 // Input box - with shortcut hints
-function ChatInput({ onSend, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { onSend: (msg: string) => void; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
+function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { onSend: (msg: string) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -1057,16 +1077,30 @@ function ChatInput({ onSend, disabled, inputDisabled, placeholder, authMissing, 
             {voiceInput.isRecording ? <MicOff className="h-4 w-4" /> : voiceInput.isTranscribing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mic className="h-4 w-4" />}
           </button>
         )}
-        <button
-          type="submit"
-          disabled={!message.trim() || effectiveDisabled}
-          className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
-        >
-          <Send className="h-4 w-4" />
-          <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
-            {t("chat.send_hint")}
-          </span>
-        </button>
+        {isStreaming && onStop ? (
+          <button
+            type="button"
+            onClick={onStop}
+            title={t("chat.stop_hint")}
+            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-error to-error/90 text-white font-bold text-sm shadow-lg shadow-error/20 hover:shadow-error/40 hover:-translate-y-0.5 transition-all duration-300"
+          >
+            <Square className="h-4 w-4 fill-current" />
+            <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
+              {t("chat.stop_hint")}
+            </span>
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!message.trim() || effectiveDisabled}
+            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+          >
+            <Send className="h-4 w-4" />
+            <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
+              {t("chat.send_hint")}
+            </span>
+          </button>
+        )}
       </div>
     </form>
   );
@@ -1731,7 +1765,7 @@ export function ChatPage() {
   );
   // Session state — bump version to force message reload after switch
   const [sessionVersion, setSessionVersion] = useState(0);
-  const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(
+  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected } = useChatMessages(
     selectedAgentId || null,
     agents,
     sessionVersion,
@@ -2085,6 +2119,8 @@ export function ChatPage() {
           <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
               onSend={sendMessage}
+              onStop={stopMessage}
+              isStreaming={isStreaming}
               disabled={isLoading}
               inputDisabled={isStreaming}
               placeholder={isStreaming ? t("chat.generating") : selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
