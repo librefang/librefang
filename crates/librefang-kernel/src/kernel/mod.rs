@@ -8500,9 +8500,25 @@ system_prompt = "You are a helpful assistant."
             });
         }
 
-        // Probe local providers for reachability and model discovery
+        // Probe local providers for reachability and model discovery.
+        //
+        // The set of providers the user actually relies on (default + fallback
+        // chain) gets a `warn!` when offline — those are real misconfigurations
+        // or stopped services. Every other local provider in the built-in
+        // catalog drops to `debug!`: it's informational (the catalog still
+        // records `LocalOffline` so the dashboard shows the right state), but
+        // an unconfigured provider being offline is the expected case and
+        // shouldn't spam every boot.
         {
             let kernel = Arc::clone(self);
+            let relevant_providers: std::collections::HashSet<String> =
+                std::iter::once(cfg.default_model.provider.to_lowercase())
+                    .chain(
+                        cfg.fallback_providers
+                            .iter()
+                            .map(|fb| fb.provider.to_lowercase()),
+                    )
+                    .collect();
             tokio::spawn(async move {
                 let local_providers: Vec<(String, String)> = {
                     let catalog = kernel
@@ -8544,11 +8560,20 @@ system_prompt = "You are a helpful assistant."
                             }
                         }
                     } else {
-                        warn!(
-                            provider = %provider_id,
-                            error = result.error.as_deref().unwrap_or("unknown"),
-                            "Local provider offline"
-                        );
+                        let err = result.error.as_deref().unwrap_or("unknown");
+                        if relevant_providers.contains(&provider_id.to_lowercase()) {
+                            warn!(
+                                provider = %provider_id,
+                                error = err,
+                                "Configured local provider offline"
+                            );
+                        } else {
+                            debug!(
+                                provider = %provider_id,
+                                error = err,
+                                "Local provider offline (not configured as default/fallback)"
+                            );
+                        }
                         // Mark unreachable local providers as LocalOffline (not Missing).
                         // Using Missing would cause detect_auth() to reset the status back
                         // to NotRequired on the next unrelated auth check, making offline

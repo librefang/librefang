@@ -152,7 +152,14 @@ pub fn init_proactive_memory_with_defaults(
 
 const MAX_MEMORY_CONTENT_LENGTH: usize = 2000;
 
-const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a memory extraction system. Your goal: help a future assistant feel like it truly knows this person — their style, preferences, expertise, and what matters to them.
+fn build_extraction_prompt(categories: &[String]) -> String {
+    let categories_list = if categories.is_empty() {
+        "any relevant category".to_string()
+    } else {
+        categories.join(", ")
+    };
+    format!(
+        r#"You are a memory extraction system. Your goal: help a future assistant feel like it truly knows this person — their style, preferences, expertise, and what matters to them.
 
 Extract ONLY clearly stated or strongly demonstrated facts. Do NOT infer personality traits from single messages. Prioritize what would most change how you interact with someone.
 
@@ -188,7 +195,7 @@ Respond with a JSON object containing two arrays:
 
 1. "memories" - Facts and preferences to remember:
    - "content": the extracted memory (concise, one natural sentence with actionable nuance)
-   - "category": one of: communication_style, preference, expertise, work_style, project_context, personal_detail, frustration
+   - "category": one of: {categories_list}
    - "level": "user" for personal/preference info, "session" for current task context, "agent" for agent-specific learnings
 
 2. "relations" - Entity relationships (knowledge graph triples):
@@ -199,19 +206,28 @@ Respond with a JSON object containing two arrays:
    - "object_type": same types as subject_type
 
 Example:
-{
+{{
   "memories": [
-    {"content": "Experienced Rust developer who works on the LibreFang project — treat as expert, skip beginner explanations", "category": "expertise", "level": "user"},
-    {"content": "Prefers concise code reviews — skip obvious comments, focus on logic and correctness issues only", "category": "work_style", "level": "user"},
-    {"content": "Uses dark mode and minimal UI everywhere — avoid suggesting light themes or busy layouts", "category": "preference", "level": "user"}
+    {{"content": "Experienced Rust developer who works on the LibreFang project — treat as expert, skip beginner explanations", "category": "{first_cat}", "level": "user"}},
+    {{"content": "Prefers concise code reviews — skip obvious comments, focus on logic and correctness issues only", "category": "{second_cat}", "level": "user"}}
   ],
   "relations": [
-    {"subject": "User", "subject_type": "person", "relation": "experienced_with", "object": "Rust", "object_type": "tool"},
-    {"subject": "User", "subject_type": "person", "relation": "works_at", "object": "LibreFang", "object_type": "project"}
+    {{"subject": "User", "subject_type": "person", "relation": "experienced_with", "object": "Rust", "object_type": "tool"}}
   ]
-}
+}}
 
-If nothing worth extracting: {"memories": [], "relations": []}"#;
+If nothing worth extracting: {{"memories": [], "relations": []}}"#,
+        categories_list = categories_list,
+        first_cat = categories
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("preference"),
+        second_cat = categories
+            .get(1)
+            .map(|s| s.as_str())
+            .unwrap_or("preference"),
+    )
+}
 
 const DECISION_SYSTEM_PROMPT: &str = r#"You are a memory conflict resolution system. Given a NEW memory and a list of EXISTING memories, decide what action to take.
 
@@ -316,6 +332,7 @@ impl LlmMemoryExtractor {
         &self,
         conversation_text: &str,
         agent_id: &str,
+        categories: &[String],
     ) -> Result<Option<String>, LibreFangError> {
         let weak = {
             let guard = self
@@ -332,8 +349,9 @@ impl LlmMemoryExtractor {
             return Ok(Some(String::new()));
         };
         let prompt = format!(
-            "{EXTRACTION_SYSTEM_PROMPT}\n\nExtract memories from this conversation. \
-             Return JSON only, no commentary.\n\n{conversation_text}"
+            "{}\n\nExtract memories from this conversation. \
+             Return JSON only, no commentary.\n\n{conversation_text}",
+            build_extraction_prompt(categories)
         );
         match kernel
             .run_forked_agent_oneshot(agent_id, &prompt, Some(Vec::new()))
@@ -353,6 +371,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
     async fn extract_memories(
         &self,
         messages: &[serde_json::Value],
+        categories: &[String],
     ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
         // Build a condensed version of the conversation for the LLM.
         // Skip system messages — only include user and assistant roles.
@@ -445,7 +464,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             tools: Vec::new(),
             max_tokens: 1024,
             temperature: 0.1,
-            system: Some(EXTRACTION_SYSTEM_PROMPT.to_string()),
+            system: Some(build_extraction_prompt(categories)),
             thinking: None,
             prompt_caching: self.prompt_caching,
             response_format: Some(ResponseFormat::Json),
@@ -472,6 +491,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
         &self,
         messages: &[serde_json::Value],
         agent_id: &str,
+        categories: &[String],
     ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
         // Re-run the conversation-text builder from `extract_memories`
         // so the fork prompt gets the same truncation / role filtering.
@@ -538,7 +558,10 @@ impl MemoryExtractor for LlmMemoryExtractor {
         // handle is configured or the fork call fails (transient provider
         // error, rate limit, etc). Standalone path has `prompt_caching =
         // true` so the system prompt still caches across calls.
-        match self.try_forked_extract(&conversation_text, agent_id).await {
+        match self
+            .try_forked_extract(&conversation_text, agent_id, categories)
+            .await
+        {
             Ok(Some(text)) if text.is_empty() => Ok(ExtractionResult {
                 has_content: false,
                 memories: Vec::new(),
@@ -554,7 +577,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             // No kernel handle configured (init didn't wire it) or fork
             // call failed — fall back to the standalone path so we still
             // get extraction, just without cache alignment.
-            Ok(None) | Err(_) => self.extract_memories(messages).await,
+            Ok(None) | Err(_) => self.extract_memories(messages, categories).await,
         }
     }
 
