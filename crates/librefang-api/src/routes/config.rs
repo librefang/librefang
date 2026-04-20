@@ -1945,14 +1945,41 @@ pub async fn config_set(
         }
     }
 
-    // Validate by parsing the result as KernelConfig before writing
+    // Validate by parsing the result as KernelConfig before writing.
+    // This is the *schema* check (types deserialize cleanly), not the
+    // *business* check (e.g. cross-field invariants).
     let new_toml_str = doc.to_string();
-    if let Err(e) = toml::from_str::<librefang_types::config::KernelConfig>(&new_toml_str) {
+    let mut parsed_config =
+        match toml::from_str::<librefang_types::config::KernelConfig>(&new_toml_str) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "error": format!("invalid config after edit: {e}")
+                    })),
+                );
+            }
+        };
+
+    // Business-level validation BEFORE writing to disk. Without this
+    // check, edits like `network_enabled = true` (without setting
+    // `shared_secret`) would persist a definitely-broken config to disk
+    // and only fail at the post-write reload step, leaving the user
+    // with a `saved_reload_failed` status and a TOML file that will
+    // also fail the next daemon startup. Apply clamp_bounds first to
+    // mirror the reload-side preprocessing — otherwise a user-set
+    // out-of-range value would be flagged here even though reload
+    // would silently fix it.
+    parsed_config.clamp_bounds();
+    if let Err(errors) = librefang_kernel::config_reload::validate_config_for_reload(&parsed_config)
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "status": "error",
-                "error": format!("invalid config after edit: {e}")
+                "error": format!("invalid config: {}", errors.join("; "))
             })),
         );
     }
