@@ -1706,8 +1706,14 @@ export async function getConfigSchema(): Promise<{ sections: Record<string, Conf
   return get<{ sections: Record<string, ConfigSectionSchema> }>("/api/config/schema");
 }
 
-export async function setConfigValue(path: string, value: unknown): Promise<{ status: string; restart_required?: boolean }> {
-  return post<{ status: string; restart_required?: boolean }>("/api/config/set", { path, value });
+export async function setConfigValue(
+  path: string,
+  value: unknown,
+): Promise<{ status: string; restart_required?: boolean; reload_error?: string }> {
+  return post<{ status: string; restart_required?: boolean; reload_error?: string }>(
+    "/api/config/set",
+    { path, value },
+  );
 }
 
 export async function listBackups(): Promise<{ backups?: BackupItem[]; total?: number }> {

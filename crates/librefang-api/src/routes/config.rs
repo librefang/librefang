@@ -1945,14 +1945,41 @@ pub async fn config_set(
         }
     }
 
-    // Validate by parsing the result as KernelConfig before writing
+    // Validate by parsing the result as KernelConfig before writing.
+    // This is the *schema* check (types deserialize cleanly), not the
+    // *business* check (e.g. cross-field invariants).
     let new_toml_str = doc.to_string();
-    if let Err(e) = toml::from_str::<librefang_types::config::KernelConfig>(&new_toml_str) {
+    let mut parsed_config =
+        match toml::from_str::<librefang_types::config::KernelConfig>(&new_toml_str) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "error": format!("invalid config after edit: {e}")
+                    })),
+                );
+            }
+        };
+
+    // Business-level validation BEFORE writing to disk. Without this
+    // check, edits like `network_enabled = true` (without setting
+    // `shared_secret`) would persist a definitely-broken config to disk
+    // and only fail at the post-write reload step, leaving the user
+    // with a `saved_reload_failed` status and a TOML file that will
+    // also fail the next daemon startup. Apply clamp_bounds first to
+    // mirror the reload-side preprocessing — otherwise a user-set
+    // out-of-range value would be flagged here even though reload
+    // would silently fix it.
+    parsed_config.clamp_bounds();
+    if let Err(errors) = librefang_kernel::config_reload::validate_config_for_reload(&parsed_config)
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "status": "error",
-                "error": format!("invalid config after edit: {e}")
+                "error": format!("invalid config: {}", errors.join("; "))
             })),
         );
     }
@@ -1972,16 +1999,30 @@ pub async fn config_set(
     }
 
     // Trigger reload
-    let reload_status = match state.kernel.reload_config().await {
-        Ok(plan) => {
-            if plan.restart_required {
-                "applied_partial"
-            } else {
-                "applied"
+    let (reload_status, reload_error): (&'static str, Option<String>) =
+        match state.kernel.reload_config().await {
+            Ok(plan) => {
+                let s = if plan.restart_required {
+                    "applied_partial"
+                } else {
+                    "applied"
+                };
+                (s, None)
             }
-        }
-        Err(_) => "saved_reload_failed",
-    };
+            Err(e) => {
+                // Surface the actual reload failure reason so the dashboard
+                // can show users what's wrong (e.g. "validation failed:
+                // network_enabled is true but shared_secret is empty"
+                // instead of an opaque "saved but reload failed"). The TOML
+                // file has already been written at this point, so leaving
+                // the user without a reason is doubly bad — they can't
+                // distinguish "transient kernel hiccup, restart will pick
+                // it up" from "permanently invalid config that breaks
+                // restart too".
+                tracing::warn!(error = %e, %path, "config reload failed after write");
+                ("saved_reload_failed", Some(e))
+            }
+        };
 
     state.kernel.audit().record(
         "system",
@@ -1990,10 +2031,11 @@ pub async fn config_set(
         "completed",
     );
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": reload_status, "path": path})),
-    )
+    let mut body = serde_json::json!({"status": reload_status, "path": path});
+    if let Some(err) = reload_error {
+        body["reload_error"] = serde_json::Value::String(err);
+    }
+    (StatusCode::OK, Json(body))
 }
 
 /// Convert a serde_json::Value to a toml_edit::Value (format-preserving).
