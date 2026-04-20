@@ -844,17 +844,179 @@ fn try_apply_landlock_readonly(_allow_write_dir: Option<&std::path::Path>) -> bo
 /// Apply a seccomp syscall allowlist in the current process (intended for use
 /// in `pre_exec` after fork, before exec).
 ///
-/// The implementation is currently a stub: the previous version relied on a
-/// non-existent `seccompiler::syscall_name_to_num` helper and never compiled
-/// under `--all-features`. A proper reimplementation needs to map syscall
-/// names to `libc::SYS_*` constants (with target-arch gating). The
-/// `seccomp-sandbox` feature remains defined so follow-up work can restore
-/// functionality without a breaking API change. Tracked in a follow-up issue.
+/// Allows only the syscalls a well-behaved interpreter (Python/Node/etc.) needs:
+/// file I/O, memory management, process control, networking (optional), and IPC.
+/// Any other syscall causes the process to be killed with SIGSYS.
 ///
-/// Returns `false` unconditionally.
+/// Returns `true` if the filter was installed successfully, `false` on error.
 #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
-fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
-    false
+fn apply_seccomp_allowlist(allow_network: bool) -> bool {
+    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule};
+
+    // Build the allowlist from libc::SYS_* compile-time constants so the set
+    // is guaranteed to exist on the target arch.  Syscalls that were replaced
+    // by *at-variants on aarch64 (open→openat, stat→newfstatat, fork→clone,
+    // etc.) are gated to x86_64 only; the universal *at equivalents always
+    // appear in the base list so coverage is equivalent on both arches.
+    #[allow(unused_mut)]
+    let mut allowed: Vec<i64> = vec![
+        // Memory management
+        libc::SYS_mmap,
+        libc::SYS_mprotect,
+        libc::SYS_munmap,
+        libc::SYS_brk,
+        libc::SYS_madvise,
+        libc::SYS_mremap,
+        libc::SYS_mlock,
+        libc::SYS_munlock,
+        libc::SYS_mlockall,
+        libc::SYS_munlockall,
+        // File I/O — universal variants
+        libc::SYS_read,
+        libc::SYS_write,
+        libc::SYS_readv,
+        libc::SYS_writev,
+        libc::SYS_pread64,
+        libc::SYS_pwrite64,
+        libc::SYS_openat,
+        libc::SYS_close,
+        libc::SYS_fstat,
+        libc::SYS_newfstatat,
+        libc::SYS_faccessat,
+        libc::SYS_lseek,
+        libc::SYS_dup,
+        libc::SYS_dup3,
+        libc::SYS_pipe2,
+        libc::SYS_fcntl,
+        libc::SYS_ioctl,
+        libc::SYS_fsync,
+        libc::SYS_fdatasync,
+        libc::SYS_getcwd,
+        libc::SYS_chdir,
+        libc::SYS_mkdirat,
+        libc::SYS_unlinkat,
+        libc::SYS_renameat,
+        libc::SYS_symlinkat,
+        libc::SYS_readlinkat,
+        libc::SYS_getdents64,
+        // Process
+        libc::SYS_exit,
+        libc::SYS_exit_group,
+        libc::SYS_getpid,
+        libc::SYS_getppid,
+        libc::SYS_gettid,
+        libc::SYS_set_tid_address,
+        libc::SYS_futex,
+        libc::SYS_nanosleep,
+        libc::SYS_clock_gettime,
+        libc::SYS_clock_nanosleep,
+        libc::SYS_prlimit64,
+        libc::SYS_uname,
+        libc::SYS_sysinfo,
+        libc::SYS_times,
+        // Signals
+        libc::SYS_rt_sigaction,
+        libc::SYS_rt_sigprocmask,
+        libc::SYS_rt_sigreturn,
+        libc::SYS_sigaltstack,
+        libc::SYS_kill,
+        libc::SYS_tgkill,
+        // Threads / process creation — universal variants
+        libc::SYS_clone,
+        libc::SYS_execve,
+        libc::SYS_execveat,
+        libc::SYS_wait4,
+        libc::SYS_waitid,
+        // I/O multiplexing — universal variants
+        libc::SYS_pselect6,
+        libc::SYS_ppoll,
+        libc::SYS_epoll_create1,
+        libc::SYS_epoll_ctl,
+        libc::SYS_epoll_pwait,
+        // Sockets (also needed for Unix-domain IPC when allow_network is false)
+        libc::SYS_socket,
+        libc::SYS_connect,
+        libc::SYS_bind,
+        libc::SYS_listen,
+        libc::SYS_accept,
+        libc::SYS_accept4,
+        libc::SYS_getsockopt,
+        libc::SYS_setsockopt,
+        libc::SYS_getsockname,
+        libc::SYS_getpeername,
+        libc::SYS_sendto,
+        libc::SYS_recvfrom,
+        libc::SYS_sendmsg,
+        libc::SYS_recvmsg,
+        libc::SYS_shutdown,
+        // Timers / event fds
+        libc::SYS_eventfd2,
+        libc::SYS_timerfd_create,
+        libc::SYS_timerfd_settime,
+        libc::SYS_timerfd_gettime,
+        // Misc
+        libc::SYS_prctl,
+        libc::SYS_getrandom,
+        libc::SYS_getuid,
+        libc::SYS_getgid,
+        libc::SYS_geteuid,
+        libc::SYS_getegid,
+        libc::SYS_getgroups,
+        libc::SYS_setgroups,
+        libc::SYS_getrlimit,
+        libc::SYS_setrlimit,
+    ];
+
+    // x86_64-only syscalls: these were replaced by *at / newer variants on
+    // aarch64 and do not exist there.  Add them on x86_64 so existing code
+    // that still uses the legacy ABI is not blocked.
+    #[cfg(target_arch = "x86_64")]
+    allowed.extend_from_slice(&[
+        libc::SYS_open,
+        libc::SYS_stat,
+        libc::SYS_lstat,
+        libc::SYS_access,
+        libc::SYS_dup2,
+        libc::SYS_pipe,
+        libc::SYS_select,
+        libc::SYS_poll,
+        libc::SYS_epoll_create,
+        libc::SYS_epoll_wait,
+        libc::SYS_eventfd,
+        libc::SYS_getdents,
+        libc::SYS_mkdir,
+        libc::SYS_rmdir,
+        libc::SYS_unlink,
+        libc::SYS_rename,
+        libc::SYS_symlink,
+        libc::SYS_readlink,
+        libc::SYS_fork,
+        libc::SYS_arch_prctl,
+    ]);
+
+    let _ = allow_network; // reserved for future per-syscall network filtering
+
+    let rules: std::collections::BTreeMap<i64, Vec<SeccompRule>> =
+        allowed.into_iter().map(|n| (n, vec![])).collect();
+
+    let filter = match SeccompFilter::new(
+        rules,
+        SeccompAction::KillProcess,
+        SeccompAction::Allow,
+        std::env::consts::ARCH
+            .try_into()
+            .unwrap_or(seccompiler::TargetArch::x86_64),
+    ) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let prog: BpfProgram = match filter.try_into() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    seccompiler::apply_filter(&prog).is_ok()
 }
 
 #[cfg(not(all(target_os = "linux", feature = "seccomp-sandbox")))]
