@@ -8,6 +8,7 @@ use crate::webchat;
 use axum::response::IntoResponse;
 use axum::Router;
 use librefang_kernel::LibreFangKernel;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -212,11 +213,36 @@ pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middlewa
         .collect()
 }
 
+/// Returns `true` if the request arrived over TLS, either directly or through
+/// a reverse proxy / tunnel that sets `X-Forwarded-Proto: https` (ngrok,
+/// cloudflared, traefik, nginx, …). Used to decide whether cookies should be
+/// issued with the `Secure` attribute.
+fn request_is_https(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
+/// Build the base attribute list for the `librefang_session` cookie. `Secure`
+/// is added only when the request came in over HTTPS so local-HTTP dev keeps
+/// working; any public deployment should be proxied behind TLS (at which point
+/// `X-Forwarded-Proto` flips the flag on automatically).
+fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
+    if request_is_https(headers) {
+        "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
+    } else {
+        "Path=/dashboard; HttpOnly; SameSite=Lax"
+    }
+}
+
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
 /// a randomly generated session token with expiration metadata.
 async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
+    headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
     let cfg = state.kernel.config_snapshot();
@@ -328,9 +354,13 @@ async fn dashboard_login(
             // Scope to `Path=/dashboard` so the cookie never auto-attaches
             // to `/api/*` requests — API calls keep using the Bearer token
             // from localStorage, which neutralises cookie-borne CSRF.
+            // `Secure` is added when the request is HTTPS (direct or via a
+            // TLS-terminating proxy), so the cookie cannot leak across
+            // plaintext fallbacks of the same host.
             let cookie = format!(
-                "librefang_session={}; Path=/dashboard; HttpOnly; SameSite=Lax; Max-Age={}",
+                "librefang_session={}; {}; Max-Age={}",
                 token.token,
+                session_cookie_attrs(&headers),
                 crate::password_hash::DEFAULT_SESSION_TTL_SECS
             );
             (
@@ -428,17 +458,31 @@ async fn dashboard_logout(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
-    for token in [token_from_cookie, token_from_bearer, token_from_xapi]
+    // Dedup token sources: the typical case is that cookie + Bearer carry the
+    // same session string (SPA send both), so without the set we'd acquire the
+    // sessions lock and re-persist the same file up to three times per call.
+    let tokens: HashSet<String> = [token_from_cookie, token_from_bearer, token_from_xapi]
         .into_iter()
         .flatten()
-    {
+        .collect();
+
+    if !tokens.is_empty() {
         let mut sessions = state.active_sessions.write().await;
-        if sessions.remove(&token).is_some() {
+        let mut removed_any = false;
+        for token in &tokens {
+            if sessions.remove(token).is_some() {
+                removed_any = true;
+            }
+        }
+        if removed_any {
             save_sessions(state.kernel.home_dir(), &sessions);
         }
     }
 
-    let expired_cookie = "librefang_session=; Path=/dashboard; HttpOnly; SameSite=Lax; Max-Age=0";
+    let expired_cookie = format!(
+        "librefang_session=; {}; Max-Age=0",
+        session_cookie_attrs(&headers),
+    );
     (
         axum::http::StatusCode::OK,
         [(axum::http::header::SET_COOKIE, expired_cookie)],
