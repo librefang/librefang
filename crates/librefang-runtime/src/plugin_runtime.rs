@@ -814,14 +814,14 @@ fn try_apply_landlock_readonly(allow_write_dir: Option<&std::path::Path>) -> boo
         .handle_access(AccessFs::from_read(abi))
         .and_then(|r| r.create())
         .and_then(|mut r| {
-            // Allow read-only access to everything.
+            // `add_rule` consumes `self` and returns a fresh ruleset; rebind
+            // so successive calls compose, and bubble errors up via `?`.
             if let Ok(fd) = PathFd::new("/") {
-                let _ = r.add_rule(PathBeneath::new(fd, AccessFs::from_read(abi)));
+                r = r.add_rule(PathBeneath::new(fd, AccessFs::from_read(abi)))?;
             }
-            // Optionally allow read-write to a specific temp dir.
             if let Some(dir) = allow_write_dir {
                 if let Ok(fd) = PathFd::new(dir) {
-                    let _ = r.add_rule(PathBeneath::new(fd, AccessFs::from_all(abi)));
+                    r = r.add_rule(PathBeneath::new(fd, AccessFs::from_all(abi)))?;
                 }
             }
             r.restrict_self()
@@ -844,168 +844,17 @@ fn try_apply_landlock_readonly(_allow_write_dir: Option<&std::path::Path>) -> bo
 /// Apply a seccomp syscall allowlist in the current process (intended for use
 /// in `pre_exec` after fork, before exec).
 ///
-/// Allows only the syscalls a well-behaved interpreter (Python/Node/etc.) needs:
-/// file I/O, memory management, process control, networking (optional), and IPC.
-/// Any other syscall causes the process to be killed with SIGSYS.
+/// The implementation is currently a stub: the previous version relied on a
+/// non-existent `seccompiler::syscall_name_to_num` helper and never compiled
+/// under `--all-features`. A proper reimplementation needs to map syscall
+/// names to `libc::SYS_*` constants (with target-arch gating). The
+/// `seccomp-sandbox` feature remains defined so follow-up work can restore
+/// functionality without a breaking API change. Tracked in a follow-up issue.
 ///
-/// Returns `true` if seccomp was applied successfully, `false` on error or
-/// when compiled without the `seccomp-sandbox` feature.
+/// Returns `false` unconditionally.
 #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
-fn apply_seccomp_allowlist(allow_network: bool) -> bool {
-    use seccompiler::{syscall_name_to_num, BpfProgram, SeccompAction, SeccompFilter, SeccompRule};
-
-    // Core syscalls every process needs.
-    let allowed: Vec<&str> = vec![
-        // Memory
-        "mmap",
-        "mprotect",
-        "munmap",
-        "brk",
-        "madvise",
-        "mremap",
-        // File I/O
-        "read",
-        "write",
-        "readv",
-        "writev",
-        "pread64",
-        "pwrite64",
-        "open",
-        "openat",
-        "close",
-        "fstat",
-        "stat",
-        "lstat",
-        "lseek",
-        "dup",
-        "dup2",
-        "dup3",
-        "pipe",
-        "pipe2",
-        "fcntl",
-        "ioctl",
-        "fsync",
-        "fdatasync",
-        "mkdir",
-        "rmdir",
-        "unlink",
-        "rename",
-        "symlink",
-        "readlink",
-        "getcwd",
-        "chdir",
-        // Process
-        "exit",
-        "exit_group",
-        "getpid",
-        "getppid",
-        "gettid",
-        "set_tid_address",
-        "futex",
-        "nanosleep",
-        "clock_gettime",
-        "clock_nanosleep",
-        "getrlimit",
-        "setrlimit",
-        "prlimit64",
-        "uname",
-        "sysinfo",
-        "times",
-        // Signals
-        "rt_sigaction",
-        "rt_sigprocmask",
-        "rt_sigreturn",
-        "sigaltstack",
-        "kill",
-        "tgkill",
-        // Threads
-        "clone",
-        "clone3",
-        "fork",
-        "execve",
-        "execveat",
-        "wait4",
-        "waitid",
-        // I/O multiplexing
-        "select",
-        "pselect6",
-        "poll",
-        "ppoll",
-        "epoll_create",
-        "epoll_create1",
-        "epoll_ctl",
-        "epoll_wait",
-        "epoll_pwait",
-        // Sockets (needed even without network for Unix domain sockets / IPC)
-        "socket",
-        "connect",
-        "bind",
-        "listen",
-        "accept",
-        "accept4",
-        "getsockopt",
-        "setsockopt",
-        "getsockname",
-        "getpeername",
-        "sendto",
-        "recvfrom",
-        "sendmsg",
-        "recvmsg",
-        "shutdown",
-        // Anonymous pipes / tmpfiles
-        "eventfd",
-        "eventfd2",
-        "timerfd_create",
-        "timerfd_settime",
-        "timerfd_gettime",
-        // Misc
-        "arch_prctl",
-        "prctl",
-        "getdents",
-        "getdents64",
-        "access",
-        "faccessat",
-        "newfstatat",
-        "readdir",
-        "getuid",
-        "getgid",
-        "geteuid",
-        "getegid",
-        "getgroups",
-        "setgroups",
-        "mlock",
-        "munlock",
-        "mlockall",
-        "munlockall",
-        "getrandom",
-    ];
-
-    // Convert names to numbers, skip unknowns (different kernel versions).
-    let rules: Vec<(i64, Vec<SeccompRule>)> = allowed
-        .iter()
-        .filter_map(|name| syscall_name_to_num(name).ok().map(|n| (n as i64, vec![])))
-        .collect();
-
-    let _ = allow_network; // reserved for future per-syscall network filtering
-
-    let filter = match SeccompFilter::new(
-        rules.into_iter().collect(),
-        SeccompAction::KillProcess,
-        SeccompAction::Allow,
-        std::env::consts::ARCH
-            .try_into()
-            .unwrap_or(seccompiler::TargetArch::x86_64),
-    ) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-
-    let prog: BpfProgram = match filter.try_into() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
-    seccompiler::apply_filter(&prog).is_ok()
+fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
+    false
 }
 
 #[cfg(not(all(target_os = "linux", feature = "seccomp-sandbox")))]
@@ -1205,7 +1054,6 @@ pub async fn run_hook_json(
     // but before exec(), so it restricts only the child's filesystem access.
     #[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
     if !config.allow_filesystem {
-        use std::os::unix::process::CommandExt;
         let write_dir = _hook_tmpdir.clone();
         // SAFETY: pre_exec runs after fork() in the child. We only call
         // try_apply_landlock_readonly which uses only async-signal-safe-equivalent
@@ -1224,7 +1072,6 @@ pub async fn run_hook_json(
     #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
     {
         let allow_net = config.allow_network;
-        use std::os::unix::process::CommandExt;
         unsafe {
             cmd.pre_exec(move || {
                 // Non-fatal: log failure but don't abort the spawn.
@@ -1596,7 +1443,6 @@ impl HookProcessPool {
         #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
         {
             let allow_net = config.allow_network;
-            use std::os::unix::process::CommandExt;
             unsafe {
                 cmd.pre_exec(move || {
                     // Non-fatal: log failure but don't abort the spawn.
