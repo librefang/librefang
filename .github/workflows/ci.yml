@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
 
-# On PRs: only one run per branch, cancel stale runs.
+# On PRs: one run per branch, cancel stale runs.
 # On main: each push gets its own group (by SHA) so parallel runs never interfere.
 concurrency:
   group: ${{ github.ref == 'refs/heads/main' && format('{0}-{1}', github.workflow, github.sha) || format('{0}-{1}', github.workflow, github.ref) }}
@@ -21,7 +21,12 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ── Detect changed files to skip unnecessary jobs ──────────────────────────────────
+  # ── Detect changes + compute affected crate subset ─────────────────────────────
+  # The CI pipeline splits into two lanes:
+  # - PR lane: only test crates the PR touches (plus their transitive reverse
+  #   deps). Windows/macOS are skipped entirely; they run only after merge.
+  # - Main lane (push to main, or PR that touches the workspace root / xtask /
+  #   CI itself): full workspace test on all three platforms.
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
@@ -30,11 +35,13 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       ci: ${{ steps.filter.outputs.ci }}
       install: ${{ steps.filter.outputs.install }}
-      crates: ${{ steps.crates.outputs.crates }}
+      full_run: ${{ steps.decide.outputs.full_run }}
+      crates: ${{ steps.affected.outputs.crates }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -53,49 +60,89 @@ jobs:
               - 'web/public/install.sh'
               - 'web/public/install.ps1'
               - 'scripts/tests/install_sh_test.sh'
-      - name: Detect affected crates
-        id: crates
-        if: steps.filter.outputs.rust == 'true'
-        run: |
-          BASE_REF="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
-          CHANGED=$(git diff --name-only "$BASE_REF" HEAD -- crates/ | sed 's|crates/\([^/]*\)/.*|\1|' | sort -u)
-          # Map directory names to crate names (replace - with -)
-          ALL_CRATES="librefang-types librefang-wire librefang-telemetry librefang-memory librefang-channels librefang-skills librefang-hands librefang-extensions librefang-kernel librefang-api librefang-runtime librefang-migrate librefang-testing librefang-cli librefang-desktop"
-          # If Cargo.toml/lock changed or CI changed, test everything
-          if git diff --name-only "$BASE_REF" HEAD | grep -qE '^(Cargo\.(toml|lock)|xtask/)'; then
-            echo "crates=$ALL_CRATES" >> "$GITHUB_OUTPUT"
-          elif [ -z "$CHANGED" ]; then
-            echo "crates=$ALL_CRATES" >> "$GITHUB_OUTPUT"
-          else
-            # Include changed crates + their reverse dependencies
-            AFFECTED=""
-            for dir in $CHANGED; do
-              AFFECTED="$AFFECTED $dir"
-            done
-            # Always include downstream crates when upstream changes
-            # Dependency order: types -> memory -> runtime -> kernel -> api -> cli
-            if echo "$AFFECTED" | grep -q "librefang-types"; then
-              AFFECTED="$ALL_CRATES"
-            elif echo "$AFFECTED" | grep -q "librefang-memory"; then
-              AFFECTED="$AFFECTED librefang-runtime librefang-kernel librefang-api librefang-cli librefang-testing"
-            elif echo "$AFFECTED" | grep -q "librefang-runtime"; then
-              AFFECTED="$AFFECTED librefang-kernel librefang-api librefang-cli librefang-testing"
-            elif echo "$AFFECTED" | grep -q "librefang-kernel"; then
-              AFFECTED="$AFFECTED librefang-api librefang-cli librefang-testing"
-            fi
-            # Deduplicate and filter to valid crate names
-            AFFECTED=$(echo "$AFFECTED" | tr ' ' '\n' | sort -u | tr '\n' ' ')
-            VALID=""
-            for crate in $AFFECTED; do
-              if echo "$ALL_CRATES" | grep -qw "$crate"; then
-                VALID="$VALID $crate"
-              fi
-            done
-            echo "crates=${VALID:-$ALL_CRATES}" >> "$GITHUB_OUTPUT"
-          fi
-          echo "Affected crates: $(cat "$GITHUB_OUTPUT" | grep crates)"
+            root_cargo:
+              - 'Cargo.toml'
+              - 'xtask/**'
 
-  # ── Reject dashboard build artifacts in PRs ─────────────────────────────────────────
+      - name: Decide full vs selective run
+        id: decide
+        run: |
+          # Full run is required when:
+          # 1. Pushing directly to main (this is what "merge" looks like to CI)
+          # 2. CI itself changed (we want to exercise the new pipeline on all platforms)
+          # 3. Workspace root Cargo.toml or xtask changed (can restructure the graph
+          #    in ways our per-crate logic can't predict safely)
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "full_run=true" >> "$GITHUB_OUTPUT"
+            echo "Full run: push to main"
+          elif [ "${{ steps.filter.outputs.ci }}" = "true" ]; then
+            echo "full_run=true" >> "$GITHUB_OUTPUT"
+            echo "Full run: CI workflow changed"
+          elif [ "${{ steps.filter.outputs.root_cargo }}" = "true" ]; then
+            echo "full_run=true" >> "$GITHUB_OUTPUT"
+            echo "Full run: workspace Cargo.toml or xtask changed"
+          else
+            echo "full_run=false" >> "$GITHUB_OUTPUT"
+            echo "Selective run"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.decide.outputs.full_run == 'false' && steps.filter.outputs.rust == 'true'
+
+      - name: Compute affected crates (PR selective)
+        id: affected
+        if: steps.decide.outputs.full_run == 'false' && steps.filter.outputs.rust == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # Direct hits: crate directories touched by the diff.
+          DIRECT=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- 'crates/*/' \
+            | sed -n 's|crates/\([^/]*\)/.*|\1|p' \
+            | sort -u | tr '\n' ' ')
+          echo "Direct hits: ${DIRECT:-<none>}"
+
+          if [ -z "${DIRECT// /}" ]; then
+            # No crate changed and we already know it's not a root/CI change
+            # (decide step ruled that out). Probably a doc-only diff slipped
+            # past the outer rust filter. Nothing to test.
+            echo "crates=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          cargo metadata --format-version 1 --no-deps > /tmp/meta.json
+
+          # Reverse-dep BFS in python to keep the shell readable. Only
+          # workspace-local deps count (source = null).
+          python3 - "$DIRECT" <<'PY' > /tmp/affected.txt
+          import json, sys
+          direct = sys.argv[1].split()
+          with open('/tmp/meta.json') as f:
+              meta = json.load(f)
+          names = {p['name'] for p in meta['packages']}
+          rev = {n: set() for n in names}
+          for p in meta['packages']:
+              for d in p.get('dependencies', []):
+                  if d['name'] in names and d.get('source') is None:
+                      rev[d['name']].add(p['name'])
+          seen = set(n for n in direct if n in names)
+          stack = list(seen)
+          while stack:
+              cur = stack.pop()
+              for nxt in rev.get(cur, ()):
+                  if nxt not in seen:
+                      seen.add(nxt)
+                      stack.append(nxt)
+          print(' '.join(sorted(seen)))
+          PY
+
+          AFFECTED=$(cat /tmp/affected.txt)
+          echo "With downstream:  $AFFECTED"
+          echo "crates=$AFFECTED" >> "$GITHUB_OUTPUT"
+
+  # ── Reject dashboard build artifacts in PRs ────────────────────────────────────
   no-build-artifacts:
     name: No Build Artifacts
     if: github.event_name == 'pull_request'
@@ -114,7 +161,7 @@ jobs:
             exit 1
           fi
 
-  # ── Code quality checks (fast, run in parallel) ─────────────────────────────────────
+  # ── Code quality checks (always full: fmt + clippy are fast) ───────────────────
   quality:
     name: Quality
     needs: changes
@@ -142,7 +189,7 @@ jobs:
       - name: Run clippy
         run: cargo xtask ci --no-test --no-web
 
-  # ── Security audit (independent) ─────────────────────────────────────────────────────
+  # ── Security audit (independent) ───────────────────────────────────────────────
   security:
     name: Security
     needs: changes
@@ -178,7 +225,7 @@ jobs:
             --ignore RUSTSEC-2026-0098 \
             --ignore RUSTSEC-2026-0099
 
-  # ── Secrets scanning (independent) ────────────────────────────────────────────────────
+  # ── Secrets scanning (independent) ─────────────────────────────────────────────
   secrets:
     name: Secrets Scan
     runs-on: ubuntu-latest
@@ -197,7 +244,7 @@ jobs:
             --only-verified \
             --exclude-paths=<(echo -e "target/\n.git/\nCargo.lock")
 
-  # ── Installer smoke test (fast, independent) ────────────────────────────────────────
+  # ── Installer smoke test (fast, independent) ───────────────────────────────────
   install-smoke:
     name: Install Smoke
     needs: changes
@@ -214,44 +261,7 @@ jobs:
       - name: Parse PowerShell installer
         run: pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("web/public/install.ps1",[ref]$tokens,[ref]$errors); if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }'
 
-  # ── Tests ─────────────────────────────────────
-  test-windows:
-    name: Test / Windows
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: test-windows-${{ hashFiles('**/Cargo.lock') }}
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - name: Ensure dashboard build dir exists
-        run: mkdir -p crates/librefang-api/static/react
-        shell: bash
-      - name: Run tests
-        run: cargo nextest run --workspace --no-fail-fast
-
-  test-macos:
-    name: Test / macOS
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: test-macos-${{ hashFiles('**/Cargo.lock') }}
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - name: Ensure dashboard build dir exists
-        run: mkdir -p crates/librefang-api/static/react
-      - name: Run tests
-        run: cargo nextest run --workspace --no-fail-fast
-
+  # ── Ubuntu tests: selective on PR, full on main ────────────────────────────────
   test-ubuntu:
     name: Test / Ubuntu
     needs: changes
@@ -277,18 +287,76 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-      - name: Build tests (throttled to reduce peak memory)
-        run: cargo test --workspace --no-run -j 2
-      - name: Run tests per crate
+      - name: Build tests
+        run: |
+          if [ "${{ needs.changes.outputs.full_run }}" = "true" ]; then
+            echo "Building workspace tests (full run)…"
+            cargo test --workspace --no-run -j 2
+          else
+            CRATES="${{ needs.changes.outputs.crates }}"
+            if [ -z "$CRATES" ]; then
+              echo "No crates affected — skipping build."
+              exit 0
+            fi
+            echo "Building tests for: $CRATES"
+            PFLAGS=""
+            for c in $CRATES; do PFLAGS="$PFLAGS -p $c"; done
+            cargo test $PFLAGS --no-run -j 2
+          fi
+      - name: Run tests
         env:
           RUST_TEST_THREADS: "1"
         run: |
-          CRATES="${{ needs.changes.outputs.crates }}"
-          if [ -z "$CRATES" ]; then
-            CRATES="librefang-types librefang-wire librefang-telemetry librefang-memory librefang-channels librefang-skills librefang-hands librefang-extensions librefang-kernel librefang-api librefang-runtime librefang-migrate librefang-testing librefang-cli librefang-desktop xtask"
+          if [ "${{ needs.changes.outputs.full_run }}" = "true" ]; then
+            echo "Running workspace tests (full run)…"
+            cargo nextest run --workspace --no-fail-fast
+          else
+            CRATES="${{ needs.changes.outputs.crates }}"
+            if [ -z "$CRATES" ]; then
+              echo "No crates affected — nothing to run."
+              exit 0
+            fi
+            echo "Running tests for: $CRATES"
+            PFLAGS=""
+            for c in $CRATES; do PFLAGS="$PFLAGS -p $c"; done
+            cargo nextest run $PFLAGS --no-fail-fast
           fi
-          for crate in $CRATES; do
-            echo "::group::Testing $crate"
-            cargo test -p "$crate" && echo "✓ $crate" || exit 1
-            echo "::endgroup::"
-          done
+
+  # ── Windows tests: full workspace, push-to-main only ───────────────────────────
+  test-windows:
+    name: Test / Windows
+    needs: changes
+    if: needs.changes.outputs.full_run == 'true' && needs.changes.outputs.rust == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-windows-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Ensure dashboard build dir exists
+        run: mkdir -p crates/librefang-api/static/react
+        shell: bash
+      - name: Run tests
+        run: cargo nextest run --workspace --no-fail-fast
+
+  # ── macOS tests: full workspace, push-to-main only ─────────────────────────────
+  test-macos:
+    name: Test / macOS
+    needs: changes
+    if: needs.changes.outputs.full_run == 'true' && needs.changes.outputs.rust == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-macos-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Ensure dashboard build dir exists
+        run: mkdir -p crates/librefang-api/static/react
+      - name: Run tests
+        run: cargo nextest run --workspace --no-fail-fast
