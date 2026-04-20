@@ -1190,12 +1190,16 @@ fn filter_to_comms_event(
                     target_name: String::new(),
                     detail: format!("Task claimed: {}", task_id),
                 }),
-                SystemEvent::TaskCompleted { task_id, result } => Some(CommsEvent {
+                SystemEvent::TaskCompleted {
+                    task_id,
+                    completed_by,
+                    result,
+                } => Some(CommsEvent {
                     id: event.id.to_string(),
                     timestamp: event.timestamp.to_rfc3339(),
                     kind: CommsEventKind::TaskCompleted,
-                    source_id: event.source.to_string(),
-                    source_name: resolve_name(&event.source.to_string()),
+                    source_id: completed_by.clone(),
+                    source_name: resolve_name(completed_by),
                     target_id: String::new(),
                     target_name: String::new(),
                     detail: format!(
