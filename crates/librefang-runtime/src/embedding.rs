@@ -776,14 +776,23 @@ pub fn create_embedding_driver(
         let cohere_model = if model.starts_with("embed-") {
             model.to_string()
         } else {
+            // Default to the **multilingual** v3 model rather than English-only:
+            // librefang is used in non-English deployments, and
+            // `embed-multilingual-v3.0` has the same 1024 dims, the same per-
+            // token price, and supports 100+ languages (English quality is
+            // only marginally lower than `embed-english-v3.0`). A silent
+            // fallback that treats Chinese/Japanese/Korean corpora as English
+            // would degrade retrieval quality in ways the user can't see.
             warn!(
                 provider = "cohere",
                 requested_model = %model,
-                fallback_model = "embed-english-v3.0",
-                "Requested model is not a Cohere embed-* model; falling back to embed-english-v3.0. \
-                 Set `[memory].embedding_model` in config.toml to pick a specific Cohere model."
+                fallback_model = "embed-multilingual-v3.0",
+                "Requested model is not a Cohere embed-* model; falling back to embed-multilingual-v3.0. \
+                 Set `[memory].embedding_model` in config.toml to pick a specific Cohere model \
+                 (e.g. `embed-english-v3.0` for English-only corpora, or `embed-*-light-v3.0` \
+                 for the 384-dim light variants)."
             );
-            "embed-english-v3.0".to_string()
+            "embed-multilingual-v3.0".to_string()
         };
 
         // Cohere is a cloud provider — require the catalog (or caller) to
