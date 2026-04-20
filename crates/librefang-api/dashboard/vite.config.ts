@@ -65,6 +65,21 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     allowedHosts: true,
+    // When the dev server sits behind a TLS reverse proxy (ngrok, cloudflare
+    // tunnel, etc.), the HMR client by default connects to `ws://<host>:5173`
+    // which the proxy does not forward — so when Vite re-optimizes deps
+    // mid-session the "full reload" signal never reaches the browser, and the
+    // page ends up holding a mix of old+new pre-bundle chunks (the
+    // "Cannot read properties of null (reading 'useContext')" crash).
+    // Export VITE_HMR_CLIENT_PORT=443 (plus VITE_HMR_PROTOCOL=wss if not the
+    // default) before `npm run dev` when tunneling through ngrok:
+    //   VITE_HMR_CLIENT_PORT=443 npm run dev
+    hmr: process.env.VITE_HMR_CLIENT_PORT
+      ? {
+          clientPort: Number.parseInt(process.env.VITE_HMR_CLIENT_PORT, 10),
+          protocol: process.env.VITE_HMR_PROTOCOL ?? "wss",
+        }
+      : true,
     // Eagerly transform every lazy page at startup so any React-coupled
     // dep they drag in gets folded into the initial optimize pass instead
     // of triggering a mid-session re-optimization.
