@@ -2298,10 +2298,11 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(50 * 1024 * 1024);
         let blocks = download_file_to_blocks(url, filename, max_bytes, &download_dir).await;
-        if blocks
-            .iter()
-            .any(|b| matches!(b, ContentBlock::ImageFile { .. }))
-        {
+        if blocks.iter().any(|b| match b {
+            ContentBlock::ImageFile { .. } => true,
+            ContentBlock::Text { text, .. } => text.starts_with("[File: "),
+            _ => false,
+        }) {
             dispatch_with_blocks(
                 blocks,
                 message,
@@ -3398,10 +3399,18 @@ async fn download_file_to_blocks(
         "Downloaded channel file to disk"
     );
 
-    vec![ContentBlock::ImageFile {
-        media_type,
-        path: file_path.to_string_lossy().into_owned(),
-    }]
+    let path_str = file_path.to_string_lossy().into_owned();
+    if media_type.starts_with("image/") {
+        vec![ContentBlock::ImageFile {
+            media_type,
+            path: path_str,
+        }]
+    } else {
+        vec![ContentBlock::Text {
+            text: format!("[File: {filename}] saved to {path_str}"),
+            provider_metadata: None,
+        }]
+    }
 }
 
 /// Remove files older than 24 hours from the upload/download directory.
