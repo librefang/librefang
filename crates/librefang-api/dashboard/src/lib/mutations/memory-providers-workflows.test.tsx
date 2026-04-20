@@ -4,7 +4,7 @@ import { useAddMemory } from "./memory";
 import { useSetDefaultProvider } from "./providers";
 import { useRunWorkflow } from "./workflows";
 import { createQueryClientWrapper } from "../test/query-client";
-import { providerKeys, runtimeKeys, workflowKeys } from "../queries/keys";
+import { modelKeys, providerKeys, runtimeKeys, workflowKeys } from "../queries/keys";
 import * as api from "../../api";
 import * as httpClient from "../http/client";
 
@@ -21,7 +21,7 @@ vi.mock("../http/client", async () => {
   const actual = await vi.importActual<typeof import("../http/client")>("../http/client");
   return {
     ...actual,
-    runWorkflow: vi.fn().mockResolvedValue({ status: "ok" }),
+    runWorkflow: vi.fn().mockResolvedValue({ status: "ok", run_id: "run-1" }),
   };
 });
 
@@ -44,7 +44,7 @@ describe("useAddMemory", () => {
 });
 
 describe("useSetDefaultProvider", () => {
-  it("invalidates providerKeys.all and runtimeKeys.status", async () => {
+  it("invalidates providerKeys.all, modelKeys.lists, and runtimeKeys.status", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(() => useSetDefaultProvider(), { wrapper });
@@ -54,12 +54,13 @@ describe("useSetDefaultProvider", () => {
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: providerKeys.all });
     });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: modelKeys.lists() });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: runtimeKeys.status() });
   });
 });
 
 describe("useRunWorkflow", () => {
-  it("invalidates lists, runs and runDetails", async () => {
+  it("invalidates lists, runs and returned run detail", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(() => useRunWorkflow(), { wrapper });
@@ -70,7 +71,7 @@ describe("useRunWorkflow", () => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workflowKeys.lists() });
     });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workflowKeys.runs("wf-1") });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workflowKeys.runDetails() });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workflowKeys.runDetail("run-1") });
     expect(httpClient.runWorkflow).toHaveBeenCalledWith("wf-1", "{}");
   });
 });

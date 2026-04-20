@@ -30,14 +30,15 @@ export function useRunWorkflow() {
     mutationFn: ({ workflowId, input }: { workflowId: string; input: string }) =>
       runWorkflow(workflowId, input),
     onSuccess: (data, variables) => {
-      const invalidations = [
+      const invalidations: Array<Promise<unknown>> = [
         invalidateWorkflowLists(qc),
         qc.invalidateQueries({ queryKey: workflowKeys.runs(variables.workflowId) }),
       ];
+      const runId = typeof data.run_id === "string" ? data.run_id : undefined;
 
-      if (data.run_id) {
+      if (runId) {
         invalidations.push(
-          qc.invalidateQueries({ queryKey: workflowKeys.runDetail(data.run_id) }),
+          qc.invalidateQueries({ queryKey: workflowKeys.runDetail(runId) }),
         );
       }
 

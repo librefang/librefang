@@ -217,6 +217,17 @@ describe("useApprovalCount", () => {
 });
 
 describe("usePendingApprovals", () => {
+  it("should not fetch when agentId is undefined", async () => {
+    const { result } = renderHook(() => usePendingApprovals(undefined), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(mockListPendingApprovals).not.toHaveBeenCalled();
+  });
+
   it("should not fetch when enabled is false", async () => {
     const { result } = renderHook(() => usePendingApprovals("agent-1", { enabled: false }), {
       wrapper: createQueryClientWrapper().wrapper,
