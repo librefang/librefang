@@ -1970,10 +1970,22 @@ impl LibreFangKernel {
                     configured_model.as_str()
                 };
                 let api_key_env = config.memory.embedding_api_key_env.as_deref().unwrap_or("");
-                let custom_url = config
-                    .provider_urls
-                    .get(provider.as_str())
-                    .map(|s| s.as_str());
+                // Prefer the catalog's provider base_url (which already has
+                // `config.provider_urls` overrides applied at this point, see
+                // `apply_url_overrides` above). Falls back to `provider_urls`
+                // directly if the catalog has no entry for this provider —
+                // and ultimately to the hardcoded default baked into
+                // `create_embedding_driver` if neither source knows.
+                let custom_url = model_catalog
+                    .get_provider(provider)
+                    .map(|p| p.base_url.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        config
+                            .provider_urls
+                            .get(provider.as_str())
+                            .map(|s| s.as_str())
+                    });
                 match create_embedding_driver(
                     provider,
                     model,
@@ -2001,7 +2013,17 @@ impl LibreFangKernel {
                     } else {
                         configured_model.as_str()
                     };
-                    let provider_url = config.provider_urls.get(detected).map(|s| s.as_str());
+                    // Prefer catalog-derived base_url (with user overrides
+                    // already applied) over raw `config.provider_urls`, so a
+                    // provider entry from the registry with a non-default
+                    // base URL (e.g. Cohere's `api.cohere.com/v2`) is actually
+                    // honored rather than silently falling back to the
+                    // hardcoded default inside `create_embedding_driver`.
+                    let provider_url = model_catalog
+                        .get_provider(detected)
+                        .map(|p| p.base_url.as_str())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| config.provider_urls.get(detected).map(|s| s.as_str()));
                     // Determine the API key env var for the detected provider.
                     let key_env = match detected {
                         "openai" => "OPENAI_API_KEY",

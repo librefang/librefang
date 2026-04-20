@@ -206,16 +206,21 @@ impl EmbeddingDriver for OpenAIEmbeddingDriver {
 }
 
 // ---------------------------------------------------------------------------
-// Cohere embedding driver (native `/v1/embed` endpoint)
+// Cohere embedding driver (native `/v2/embed` endpoint)
 // ---------------------------------------------------------------------------
 
 /// Cohere native embedding driver.
 ///
 /// Cohere's embed API is **not** OpenAI-compatible — it uses a different
-/// endpoint (`/v1/embed` vs. `/v1/embeddings`), a different request shape
-/// (`texts` instead of `input`), and v3 models require an `input_type`
-/// parameter.  A dedicated driver is therefore necessary; sending Cohere
+/// endpoint (`/v2/embed` vs. `/v1/embeddings`), a different request shape
+/// (`texts` + required `input_type`), and v2 returns embeddings grouped by
+/// embedding type (`{ "embeddings": { "float": [[...]] } }`) rather than a
+/// flat array.  A dedicated driver is therefore necessary; sending Cohere
 /// requests through `OpenAIEmbeddingDriver` produces 404s.
+///
+/// The driver targets Cohere's **v2** API for consistency with
+/// `librefang-llm-drivers` (the chat driver also uses `api.cohere.com/v2`)
+/// and because v2 is the path Cohere recommends for new integrations.
 pub struct CohereEmbeddingDriver {
     api_key: Zeroizing<String>,
     base_url: String,
@@ -261,11 +266,23 @@ struct CohereEmbedRequest<'a> {
     texts: &'a [&'a str],
     model: &'a str,
     input_type: &'a str,
+    /// Required by the v2 API — tells Cohere which numeric representation to
+    /// return. We only ever want `float`; the other options (`int8`, `uint8`,
+    /// `binary`, `ubinary`, `base64`) are for bandwidth-sensitive deployments
+    /// that we don't support yet.
+    embedding_types: &'a [&'a str],
+}
+
+/// v2 response wraps embeddings in an object keyed by embedding type —
+/// we always request `float`, so we extract `embeddings.float`.
+#[derive(Deserialize)]
+struct CohereEmbedResponse {
+    embeddings: CohereEmbeddingsByType,
 }
 
 #[derive(Deserialize)]
-struct CohereEmbedResponse {
-    embeddings: Vec<Vec<f32>>,
+struct CohereEmbeddingsByType {
+    float: Vec<Vec<f32>>,
 }
 
 impl CohereEmbeddingDriver {
@@ -338,6 +355,7 @@ impl EmbeddingDriver for CohereEmbeddingDriver {
             texts,
             model: &self.model,
             input_type: &self.input_type,
+            embedding_types: &["float"],
         };
 
         let resp = self
@@ -362,14 +380,15 @@ impl EmbeddingDriver for CohereEmbeddingDriver {
             .json()
             .await
             .map_err(|e| EmbeddingError::Parse(e.to_string()))?;
+        let embeddings = data.embeddings.float;
 
         debug!(
             "Cohere embedded {} texts (dims={})",
-            data.embeddings.len(),
-            data.embeddings.first().map(|e| e.len()).unwrap_or(0)
+            embeddings.len(),
+            embeddings.first().map(|e| e.len()).unwrap_or(0)
         );
 
-        Ok(data.embeddings)
+        Ok(embeddings)
     }
 
     fn dimensions(&self) -> usize {
@@ -707,7 +726,7 @@ pub fn create_embedding_driver(
         return Ok(Box::new(driver));
     }
 
-    // Cohere uses its native `/v1/embed` endpoint with a different request
+    // Cohere uses its native `/v2/embed` endpoint with a different request
     // shape than OpenAI's `/v1/embeddings`. Handle it before the OpenAI-
     // compatible fall-through so a generic OpenAI driver doesn't 404.
     if provider == "cohere" {
@@ -744,7 +763,7 @@ pub fn create_embedding_driver(
         let base_url = custom_base_url
             .filter(|u| !u.is_empty())
             .map(|u| u.trim_end_matches('/').to_string())
-            .unwrap_or_else(|| "https://api.cohere.com/v1".to_string());
+            .unwrap_or_else(|| "https://api.cohere.com/v2".to_string());
 
         warn!(
             provider = "cohere",
@@ -1225,7 +1244,7 @@ mod tests {
             provider: "cohere".to_string(),
             model: "embed-english-v3.0".to_string(),
             api_key: String::new(),
-            base_url: "https://api.cohere.com/v1".to_string(),
+            base_url: "https://api.cohere.com/v2".to_string(),
             dimensions_override: None,
         };
         let err = CohereEmbeddingDriver::new(cfg).unwrap_err();
@@ -1241,7 +1260,7 @@ mod tests {
             provider: "cohere".to_string(),
             model: "embed-english-light-v3.0".to_string(),
             api_key: "bogus".to_string(),
-            base_url: "https://api.cohere.com/v1".to_string(),
+            base_url: "https://api.cohere.com/v2".to_string(),
             dimensions_override: None,
         };
         let driver = CohereEmbeddingDriver::new(cfg).unwrap();
@@ -1254,7 +1273,7 @@ mod tests {
             provider: "cohere".to_string(),
             model: "embed-english-v3.0".to_string(),
             api_key: "bogus".to_string(),
-            base_url: "https://api.cohere.com/v1".to_string(),
+            base_url: "https://api.cohere.com/v2".to_string(),
             dimensions_override: Some(512),
         };
         let driver = CohereEmbeddingDriver::new(cfg).unwrap();
@@ -1267,7 +1286,7 @@ mod tests {
             provider: "cohere".to_string(),
             model: "embed-english-v3.0".to_string(),
             api_key: "bogus".to_string(),
-            base_url: "https://api.cohere.com/v1".to_string(),
+            base_url: "https://api.cohere.com/v2".to_string(),
             dimensions_override: None,
         };
         let driver = CohereEmbeddingDriver::new(cfg).unwrap();
@@ -1282,7 +1301,7 @@ mod tests {
             provider: "cohere".to_string(),
             model: "embed-english-v3.0".to_string(),
             api_key: "bogus".to_string(),
-            base_url: "https://api.cohere.com/v1".to_string(),
+            base_url: "https://api.cohere.com/v2".to_string(),
             dimensions_override: None,
         };
         let driver = CohereEmbeddingDriver::new(cfg).unwrap();
@@ -1393,7 +1412,7 @@ mod tests {
             "cohere",
             "embed-english-v3.0",
             "",
-            Some("https://cohere-proxy.internal/v1/"),
+            Some("https://cohere-proxy.internal/v2/"),
             None,
         )
         .unwrap();
