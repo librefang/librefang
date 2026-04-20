@@ -142,16 +142,19 @@ choose_shell_rc() {
 
 start_daemon_if_needed() {
     START_OUTPUT=$("$INSTALL_DIR/librefang" start 2>&1) && START_EXIT=0 || START_EXIT=$?
-    if [ -n "$START_OUTPUT" ]; then
-        printf "%s\n" "$START_OUTPUT"
-    fi
 
     if [ "$START_EXIT" -eq 0 ]; then
         return 0
     fi
     if printf "%s" "$START_OUTPUT" | grep -Eiq "already running"; then
-        echo "  Daemon already running; leaving it as-is."
+        echo "  Daemon is already running — no action needed."
         return 0
+    fi
+    # Only dump raw output on unexpected failures; filter out tracing
+    # log lines (timestamps like "2026-04-20T...") that clutter the
+    # installer output.
+    if [ -n "$START_OUTPUT" ]; then
+        printf "%s\n" "$START_OUTPUT" | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' || true
     fi
     return "$START_EXIT"
 }
@@ -183,6 +186,12 @@ install() {
     URL="https://github.com/$REPO/releases/download/$VERSION/librefang-$PLATFORM.tar.gz"
     CHECKSUM_URL="$URL.sha256"
 
+    # Detect previous version for upgrade messaging.
+    OLD_VERSION=""
+    if [ -x "$INSTALL_DIR/librefang" ]; then
+        OLD_VERSION=$("$INSTALL_DIR/librefang" --version 2>/dev/null || true)
+    fi
+
     echo "  Installing LibreFang $VERSION for $PLATFORM..."
     mkdir -p "$INSTALL_DIR"
 
@@ -193,13 +202,21 @@ install() {
     cleanup() { rm -rf "$TMPDIR"; }
     trap cleanup 0
 
-    if ! curl -fsSL "$URL" -o "$ARCHIVE" 2>/dev/null; then
+    # Show a progress bar for the binary download (typically ~60 MB).
+    # Use --progress-bar when stderr is a terminal, otherwise stay silent.
+    if [ -t 2 ]; then
+        CURL_PROGRESS="--progress-bar"
+    else
+        CURL_PROGRESS="-s"
+    fi
+
+    if ! curl -fL $CURL_PROGRESS "$URL" -o "$ARCHIVE"; then
         if [ -n "${PLATFORM_FALLBACK:-}" ]; then
             echo "  Static (musl) binary not available, trying glibc build..."
             PLATFORM="$PLATFORM_FALLBACK"
             URL="https://github.com/$REPO/releases/download/$VERSION/librefang-$PLATFORM.tar.gz"
             CHECKSUM_URL="$URL.sha256"
-            if ! curl -fsSL "$URL" -o "$ARCHIVE" 2>/dev/null; then
+            if ! curl -fL $CURL_PROGRESS "$URL" -o "$ARCHIVE"; then
                 echo "  Download failed. The release may not exist for your platform."
                 echo "  Install from source instead:"
                 echo "    cargo install --git https://github.com/$REPO librefang-cli"
@@ -304,7 +321,11 @@ install() {
     if "$INSTALL_DIR/librefang" --version >/dev/null 2>&1; then
         INSTALLED_VERSION=$("$INSTALL_DIR/librefang" --version 2>/dev/null || echo "$VERSION")
         echo ""
-        echo "  LibreFang installed successfully! ($INSTALLED_VERSION)"
+        if [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$INSTALLED_VERSION" ]; then
+            echo "  LibreFang upgraded successfully! ($OLD_VERSION -> $INSTALLED_VERSION)"
+        else
+            echo "  LibreFang installed successfully! ($INSTALLED_VERSION)"
+        fi
     else
         echo ""
         echo "  LibreFang binary installed to $INSTALL_DIR/librefang"
@@ -325,9 +346,16 @@ install() {
 
     AUTO_START="${LIBREFANG_AUTO_START:-1}"
     if is_enabled "$AUTO_START"; then
-        # Register boot service so LibreFang starts on login/reboot
+        # Register boot service so LibreFang starts on login/reboot.
+        # Suppress verbose output (systemd hints, ✔ lines) — only show
+        # errors so the installer output stays clean.
         echo "  Registering boot service..."
-        "$INSTALL_DIR/librefang" service install 2>/dev/null || true
+        SVC_OUTPUT=$("$INSTALL_DIR/librefang" service install 2>&1) || {
+            echo "  Warning: boot service registration failed."
+            if [ -n "$SVC_OUTPUT" ]; then
+                printf "%s\n" "$SVC_OUTPUT" | sed 's/^/    /'
+            fi
+        }
 
         echo "  Starting daemon in background..."
         start_daemon_if_needed || {
@@ -353,8 +381,15 @@ install() {
         # Interactive --------------------------------------------------------
         echo ""
         echo "  Next steps:"
-        echo "    librefang chat     # start chatting"
-        echo "    librefang stop     # stop the daemon"
+        echo "    librefang chat       # start chatting"
+        echo "    librefang stop       # stop the daemon"
+        echo ""
+        echo "  Installed to: $INSTALL_DIR"
+        if [ -n "$SHELL_RC" ]; then
+            echo "  Uninstall:    rm -rf \"\$HOME/.librefang\" && remove the PATH line from $SHELL_RC"
+        else
+            echo "  Uninstall:    rm -rf \"\$HOME/.librefang\""
+        fi
 
         if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
             # Pick a shell to exec into.  Prefer $SHELL (login shell, survives
@@ -389,8 +424,15 @@ install() {
         echo ""
         echo "  Next steps:"
         echo "    1. Refresh your PATH (see below)"
-        echo "    2. librefang init     # setup wizard"
-        echo "    3. librefang chat     # start chatting"
+        echo "    2. librefang init       # setup wizard"
+        echo "    3. librefang chat       # start chatting"
+        echo ""
+        echo "  Installed to: $INSTALL_DIR"
+        if [ -n "$SHELL_RC" ]; then
+            echo "  Uninstall:    rm -rf \"\$HOME/.librefang\" && remove the PATH line from $SHELL_RC"
+        else
+            echo "  Uninstall:    rm -rf \"\$HOME/.librefang\""
+        fi
 
         if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
             echo ""
