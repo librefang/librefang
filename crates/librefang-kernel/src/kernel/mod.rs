@@ -12302,7 +12302,10 @@ impl KernelHandle for LibreFangKernel {
             // Issue #2338.
             CronDelivery::LastChannel
         };
-        let one_shot = job_json["one_shot"].as_bool().unwrap_or(false);
+        // At-schedules are inherently single-execution; default one_shot=true for them
+        // so the job auto-deletes after firing instead of lingering as a zombie (#2808).
+        let is_at_schedule = matches!(schedule, CronSchedule::At { .. });
+        let one_shot = job_json["one_shot"].as_bool().unwrap_or(is_at_schedule);
 
         let aid = librefang_types::agent::AgentId(
             uuid::Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?,
