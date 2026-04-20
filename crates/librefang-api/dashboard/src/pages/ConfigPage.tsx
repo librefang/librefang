@@ -438,12 +438,16 @@ export function ConfigPage({ category }: { category: string }) {
 
         const reloadFailed = result.data?.status === "saved_reload_failed";
         const restartRequired = result.data?.status === "applied_partial" || result.data?.restart_required;
+        const reloadErr = reloadFailed && result.data?.reload_error ? result.data.reload_error : null;
         const msg = reloadFailed
-          ? t("config.saved_reload_failed", "Saved but reload failed")
+          ? reloadErr
+            ? `${t("config.saved_reload_failed", "Saved but reload failed")}: ${reloadErr}`
+            : t("config.saved_reload_failed", "Saved but reload failed")
           : restartRequired
             ? t("config.saved_restart", "Saved (restart required)")
             : t("common.saved", "Saved");
         nextStatuses[result.path] = { ok: !reloadFailed, msg };
+        if (reloadFailed) errors++;
       }
 
       setSaveStatus((current) => ({ ...current, ...nextStatuses }));

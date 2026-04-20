@@ -6,7 +6,11 @@ import {
 import { setConfigValue, reloadConfig } from "../http/client";
 import { configKeys, overviewKeys } from "../queries/keys";
 
-type SetConfigResult = { status: string; restart_required?: boolean };
+type SetConfigResult = {
+  status: string;
+  restart_required?: boolean;
+  reload_error?: string;
+};
 type SetConfigVars = { path: string; value: unknown };
 type BatchSetConfigResult = Array<{
   path: string;
