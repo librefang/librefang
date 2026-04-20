@@ -86,9 +86,6 @@ jobs:
             echo "Selective run"
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
-        if: steps.decide.outputs.full_run == 'false' && steps.filter.outputs.rust == 'true'
-
       - name: Compute affected crates (PR selective)
         id: affected
         if: steps.decide.outputs.full_run == 'false' && steps.filter.outputs.rust == 'true'
@@ -97,50 +94,15 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-
-          # Direct hits: crate directories touched by the diff.
+          # Crate directories the diff touched, full stop. No transitive
+          # fan-out: if a PR changes a leaf crate and breaks a downstream
+          # consumer, the breakage surfaces on the post-merge full run.
+          # That trade — fast PRs, occasional main hotfix — is intentional.
           DIRECT=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- 'crates/*/' \
             | sed -n 's|crates/\([^/]*\)/.*|\1|p' \
             | sort -u | tr '\n' ' ')
-          echo "Direct hits: ${DIRECT:-<none>}"
-
-          if [ -z "${DIRECT// /}" ]; then
-            # No crate changed and we already know it's not a root/CI change
-            # (decide step ruled that out). Probably a doc-only diff slipped
-            # past the outer rust filter. Nothing to test.
-            echo "crates=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          cargo metadata --format-version 1 --no-deps > /tmp/meta.json
-
-          # Reverse-dep BFS in python to keep the shell readable. Only
-          # workspace-local deps count (source = null).
-          python3 - "$DIRECT" <<'PY' > /tmp/affected.txt
-          import json, sys
-          direct = sys.argv[1].split()
-          with open('/tmp/meta.json') as f:
-              meta = json.load(f)
-          names = {p['name'] for p in meta['packages']}
-          rev = {n: set() for n in names}
-          for p in meta['packages']:
-              for d in p.get('dependencies', []):
-                  if d['name'] in names and d.get('source') is None:
-                      rev[d['name']].add(p['name'])
-          seen = set(n for n in direct if n in names)
-          stack = list(seen)
-          while stack:
-              cur = stack.pop()
-              for nxt in rev.get(cur, ()):
-                  if nxt not in seen:
-                      seen.add(nxt)
-                      stack.append(nxt)
-          print(' '.join(sorted(seen)))
-          PY
-
-          AFFECTED=$(cat /tmp/affected.txt)
-          echo "With downstream:  $AFFECTED"
-          echo "crates=$AFFECTED" >> "$GITHUB_OUTPUT"
+          echo "Affected crates: ${DIRECT:-<none>}"
+          echo "crates=$DIRECT" >> "$GITHUB_OUTPUT"
 
   # ── Reject dashboard build artifacts in PRs ────────────────────────────────────
   no-build-artifacts:
@@ -161,7 +123,12 @@ jobs:
             exit 1
           fi
 
-  # ── Code quality checks (always full: fmt + clippy are fast) ───────────────────
+  # ── Code quality: fmt (always full, it's a text scan), build + clippy
+  # (selective on PR, full on main). The full-run branch delegates to
+  # `cargo xtask ci` which keeps web-bundle / dashboard hooks wired; the
+  # selective branch skips that because a PR only touching a subset of
+  # crates doesn't need to rebuild the dashboard or re-run workspace-wide
+  # build steps.
   quality:
     name: Quality
     needs: changes
@@ -186,8 +153,24 @@ jobs:
         run: cargo xtask fmt
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
-      - name: Run clippy
-        run: cargo xtask ci --no-test --no-web
+      - name: Build + clippy
+        run: |
+          if [ "${{ needs.changes.outputs.full_run }}" = "true" ]; then
+            echo "Full build + clippy (workspace)…"
+            cargo xtask ci --no-test --no-web
+          else
+            CRATES="${{ needs.changes.outputs.crates }}"
+            if [ -z "$CRATES" ]; then
+              echo "No crates affected — skipping build + clippy."
+              exit 0
+            fi
+            PFLAGS=""
+            for c in $CRATES; do PFLAGS="$PFLAGS -p $c"; done
+            echo "Selective build for:  $CRATES"
+            cargo build $PFLAGS --lib
+            echo "Selective clippy for: $CRATES"
+            cargo clippy $PFLAGS --all-targets --all-features -- -D warnings
+          fi
 
   # ── Security audit (independent) ───────────────────────────────────────────────
   security:
