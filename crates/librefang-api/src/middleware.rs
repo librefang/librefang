@@ -312,12 +312,13 @@ pub async fn auth(
     } else {
         after_version.strip_suffix('/').unwrap_or(&after_version)
     };
-    if path == "/api/shutdown" {
+    // Loopback requests (CLI on the same machine) bypass auth entirely.
+    {
         let is_loopback = request
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|ci| ci.0.ip().is_loopback())
-            .unwrap_or(false); // SECURITY: default-deny — unknown origin is NOT loopback
+            .unwrap_or(false);
         if is_loopback {
             return next.run(request).await;
         }
