@@ -217,11 +217,17 @@ pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middlewa
 /// a reverse proxy / tunnel that sets `X-Forwarded-Proto: https` (ngrok,
 /// cloudflared, traefik, nginx, …). Used to decide whether cookies should be
 /// issued with the `Secure` attribute.
+///
+/// Handles the multi-proxy case where the header is comma-separated — RFC 7239
+/// semantics put the client-facing proto first (`https, http` = HTTPS reached
+/// the outermost proxy, HTTP was the back-channel), so we split and check the
+/// first value only.
 fn request_is_https(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("https"))
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().eq_ignore_ascii_case("https"))
         .unwrap_or(false)
 }
 

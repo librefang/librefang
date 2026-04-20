@@ -34,8 +34,22 @@ static OTEL_RELOAD_HANDLE: OnceLock<reload::Handle<Option<OtelBoxedLayer>, Regis
 /// to install it.
 pub fn install_otel_reload_layer() -> reload::Layer<Option<OtelBoxedLayer>, Registry> {
     let (layer, handle) = reload::Layer::new(None);
-    // Silently ignore a second call — tests may exercise init paths twice.
-    let _ = OTEL_RELOAD_HANDLE.set(handle);
+    if OTEL_RELOAD_HANDLE.set(handle).is_err() {
+        // A second call creates a fresh `(layer, handle)` pair, but the
+        // `OnceLock` already holds the *first* handle — meaning
+        // `init_otel_tracing` will `modify` the first layer, not this one.
+        // If the caller registers this second layer as the active subscriber
+        // layer, OTel spans would silently never reach it.
+        //
+        // Tracing isn't up yet (we're still building the subscriber), so
+        // `tracing::warn!` would be lost. Use stderr directly so a confused
+        // future reader has a lead to pull on.
+        eprintln!(
+            "warning: install_otel_reload_layer called more than once; the \
+             second layer is NOT wired to the OTel reload handle and will \
+             not receive spans. Only the first call's layer is live."
+        );
+    }
     layer
 }
 
