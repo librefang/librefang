@@ -2354,6 +2354,21 @@ export function clearApiKey() {
   localStorage.removeItem("librefang-api-key");
 }
 
+/** Invalidate the server-side session + cookie, then clear the local token.
+ *  Safe to call even when the token is already gone. */
+export async function dashboardLogout(): Promise<void> {
+  try {
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: authHeader(),
+    });
+  } catch {
+    // Network failure shouldn't block local cleanup — fall through.
+  }
+  clearApiKey();
+}
+
 export function hasApiKey(): boolean {
   const key = getStoredApiKey();
   return !!key && key.length > 0;

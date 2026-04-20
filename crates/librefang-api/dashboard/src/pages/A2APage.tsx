@@ -167,7 +167,7 @@ export function A2APage() {
                   <Card key={agent.url || idx} hover padding="md">
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent/20 to-brand/20 flex items-center justify-center">
+                        <div className="w-10 h-10 rounded-xl bg-linear-to-br from-accent/20 to-brand/20 flex items-center justify-center">
                           <ExternalLink className="w-5 h-5 text-accent" />
                         </div>
                         <div className="min-w-0">

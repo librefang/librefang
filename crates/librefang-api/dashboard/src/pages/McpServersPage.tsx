@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import {
@@ -30,6 +30,45 @@ import {
   Shield, ShieldCheck, ShieldAlert, ShieldX, Check, ExternalLink,
   Search, Clock, Filter, Store, Key, Download, RefreshCw, Activity,
 } from "lucide-react";
+import { DynamicIcon } from "lucide-react/dynamic";
+import type { IconName } from "lucide-react/dynamic";
+
+// Wraps `DynamicIcon` so a catalog entry with a stale or mistyped
+// `lucide:xxx` name (backend-controlled, but still human-edited) falls back
+// to a neutral icon instead of throwing and blowing up the surrounding card.
+// `DynamicIcon` lazy-imports the icon module — if the name isn't a real
+// lucide icon the import rejects and the `Suspense` fallback doesn't catch
+// that; it bubbles up as a render error, which this boundary converts into
+// `fallback`.
+class DynamicIconBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error) {
+    // eslint-disable-next-line no-console
+    console.warn("CatalogIcon: DynamicIcon failed to load, using fallback.", error);
+  }
+  render() {
+    return this.state.hasError ? this.props.fallback : this.props.children;
+  }
+}
+
+function CatalogIcon({ icon, className }: { icon: string; className?: string }) {
+  if (icon.startsWith("lucide:")) {
+    const name = icon.slice("lucide:".length) as IconName;
+    const fallback = <Plug className={className} />;
+    return (
+      <DynamicIconBoundary fallback={fallback}>
+        <DynamicIcon name={name} className={className} fallback={() => fallback} />
+      </DynamicIconBoundary>
+    );
+  }
+  return <span className="text-xl">{icon}</span>;
+}
 
 type TransportType = "stdio" | "sse" | "http";
 type StatusFilter = "all" | "connected" | "disconnected";
@@ -421,7 +460,7 @@ function ServerCard({
   return (
     <Card hover padding="none" className="flex flex-col overflow-hidden group">
       {/* Gradient top bar */}
-      <div className={`h-1.5 bg-gradient-to-r ${
+      <div className={`h-1.5 bg-linear-to-r ${
         isConnected
           ? "from-success via-success/60 to-success/30"
           : "from-error via-error/60 to-error/30"
@@ -433,8 +472,8 @@ function ServerCard({
           <div className="flex items-center gap-3 min-w-0">
             <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
               isConnected
-                ? "bg-gradient-to-br from-success/10 to-success/5 border border-success/20"
-                : "bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20"
+                ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20"
+                : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"
             }`}>
               <Plug className={`w-5 h-5 ${isConnected ? "text-success" : "text-brand"}`} />
             </div>
@@ -457,14 +496,14 @@ function ServerCard({
 
         {/* Stats */}
         <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="p-3 rounded-xl bg-gradient-to-br from-main/60 to-main/30 border border-border-subtle/50">
+          <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
             <div className="flex items-center gap-1.5 mb-1">
               <Wrench className={`w-3 h-3 ${isConnected ? "text-success" : "text-brand"}`} />
               <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("mcp.tools")}</p>
             </div>
             <p className="text-xl font-black text-text-main">{toolsCount}</p>
           </div>
-          <div className="p-3 rounded-xl bg-gradient-to-br from-main/60 to-main/30 border border-border-subtle/50">
+          <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
             <div className="flex items-center gap-1.5 mb-1">
               <Clock className="w-3 h-3 text-warning" />
               <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("mcp.timeout")}</p>
@@ -959,7 +998,7 @@ export function McpServersPage() {
                 const alreadyAdded = tpl.installed || installedTemplateIds.has(tpl.id);
                 return (
                   <Card key={tpl.id} hover={!alreadyAdded} padding="none" className={`flex flex-col overflow-hidden group ${alreadyAdded ? "opacity-75" : ""}`}>
-                    <div className={`h-1.5 bg-gradient-to-r ${
+                    <div className={`h-1.5 bg-linear-to-r ${
                       alreadyAdded
                         ? "from-success via-success/60 to-success/30"
                         : "from-brand via-brand/60 to-brand/30"
@@ -970,11 +1009,11 @@ export function McpServersPage() {
                         <div className="flex items-center gap-3 min-w-0">
                           <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
                             alreadyAdded
-                              ? "bg-gradient-to-br from-success/10 to-success/5 border border-success/20"
-                              : "bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20"
+                              ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20"
+                              : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"
                           }`}>
                             {tpl.icon
-                              ? <span className="text-xl">{tpl.icon}</span>
+                              ? <CatalogIcon icon={tpl.icon} className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-brand"}`} />
                               : <Plug className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-brand"}`} />
                             }
                           </div>

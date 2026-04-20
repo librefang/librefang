@@ -682,9 +682,9 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
     return (
       <div className="flex justify-center py-6">
         <div className="flex items-center gap-4">
-          <div className="h-px w-16 bg-gradient-to-r from-transparent to-border-subtle" />
+          <div className="h-px w-16 bg-linear-to-r from-transparent to-border-subtle" />
           <span className="text-[10px] font-medium text-text-dim/40 tracking-[0.2em] uppercase">{message.content}</span>
-          <div className="h-px w-16 bg-gradient-to-l from-transparent to-border-subtle" />
+          <div className="h-px w-16 bg-linear-to-l from-transparent to-border-subtle" />
         </div>
       </div>
     );
@@ -970,7 +970,7 @@ function ChatInput({ onSend, disabled, inputDisabled, placeholder, authMissing, 
       {/* Auth missing warning */}
       {authMissing && (
         <div className="flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 px-4 py-2.5 text-sm text-warning">
-          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          <AlertCircle className="h-4 w-4 shrink-0" />
           <span>{authStatus === "local_offline"
             ? t("chat.provider_offline", { provider: providerName || "unknown" })
             : t("chat.auth_missing", { provider: providerName || "unknown" })}</span>
@@ -1079,7 +1079,7 @@ function ChatInput({ onSend, disabled, inputDisabled, placeholder, authMissing, 
         <button
           type="submit"
           disabled={!message.trim() || effectiveDisabled}
-          className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+          className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-linear-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
         >
           <Send className="h-4 w-4" />
           <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
@@ -1218,7 +1218,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   }
 
   return (
-    <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface to-transparent flex items-center justify-between">
+    <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-linear-to-r from-surface to-transparent flex items-center justify-between">
       <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
         <div className="relative">
           <Wifi className="h-3.5 w-3.5 text-success" />
@@ -1875,7 +1875,7 @@ export function ChatPage() {
     >
       <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
         selectedAgentId === agent.id ? "bg-white/20"
-        : (agent.state || "").toLowerCase() === "running" ? "bg-gradient-to-br from-brand/20 to-accent/20 text-brand"
+        : (agent.state || "").toLowerCase() === "running" ? "bg-linear-to-br from-brand/20 to-accent/20 text-brand"
         : "bg-main text-text-dim/40"
       }`}>
         {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name }).charAt(0).toUpperCase()}
@@ -1890,10 +1890,10 @@ export function ChatPage() {
           <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>
             {role ?? t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
           </p>
-          {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
-          {agent.auth_status === "configured_cli" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
-          {agent.auth_status === "auto_detected" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-warning/10 text-warning"}`}>AUTO</span>}
-          {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning flex-shrink-0" />}
+          {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
+          {agent.auth_status === "configured_cli" && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
+          {agent.auth_status === "auto_detected" && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-warning/10 text-warning"}`}>AUTO</span>}
+          {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning shrink-0" />}
         </div>
         {isCoordinator ? (
           <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
@@ -1905,7 +1905,7 @@ export function ChatPage() {
           </p>
         )}
       </div>
-      <ArrowRight className={`h-4 w-4 flex-shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
+      <ArrowRight className={`h-4 w-4 shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
     </button>
   );
 
@@ -1934,7 +1934,7 @@ export function ChatPage() {
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
         {/* Left sidebar - Agent list */}
-        <aside className="hidden md:flex w-64 flex-shrink-0 border-r border-border-subtle bg-main flex-col">
+        <aside className="hidden md:flex w-64 shrink-0 border-r border-border-subtle bg-main flex-col">
           <div className="p-4 border-b border-border-subtle space-y-2">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
             <button
@@ -2056,9 +2056,9 @@ export function ChatPage() {
             <div className="w-full space-y-4 sm:space-y-6">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
-                <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-main/50" />
+                <div className="absolute inset-0 bg-linear-to-b from-transparent via-transparent to-main/50" />
                 <div className="relative">
-                  <div className="w-24 h-24 rounded-3xl bg-gradient-to-br from-brand/20 to-accent/20 flex items-center justify-center mb-6 ring-4 ring-brand/10">
+                  <div className="w-24 h-24 rounded-3xl bg-linear-to-br from-brand/20 to-accent/20 flex items-center justify-center mb-6 ring-4 ring-brand/10">
                     <MessageCircle className="h-12 w-12 text-brand" />
                   </div>
                   <div className="absolute inset-0 rounded-3xl bg-brand/10 animate-pulse" />
@@ -2068,7 +2068,7 @@ export function ChatPage() {
               </div>
             ) : messages.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center">
-                <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-brand/10 to-accent/10 flex items-center justify-center mb-4 ring-2 ring-brand/10">
+                <div className="w-20 h-20 rounded-2xl bg-linear-to-br from-brand/10 to-accent/10 flex items-center justify-center mb-4 ring-2 ring-brand/10">
                   <Bot className="h-10 w-10 text-brand" />
                 </div>
                 <h3 className="text-xl font-black">{selectedAgent?.name}</h3>
