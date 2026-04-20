@@ -876,3 +876,124 @@ async fn test_default_send_streaming_collects_and_sends() {
     assert_eq!(sent[0].0, "u1");
     assert_eq!(sent[0].1, "Hello world!");
 }
+
+// ---------------------------------------------------------------------------
+// Mock Handle that emits PROGRESS lines on the streaming-with-status path.
+// ---------------------------------------------------------------------------
+
+/// MockHandle whose `send_message_streaming_with_sender_status` synthesises
+/// a delta stream containing a "🔧 tool_name" progress line followed by the
+/// model's prose — mirroring what `start_stream_text_bridge_with_status`
+/// would produce in production. Lets us verify that the
+/// dispatch_message non-streaming-adapter branch (V2) actually surfaces
+/// progress markers to adapters like Discord/Slack/Matrix.
+struct MockProgressHandle {
+    agents: Mutex<Vec<(AgentId, String)>>,
+}
+
+impl MockProgressHandle {
+    fn new(agents: Vec<(AgentId, String)>) -> Self {
+        Self {
+            agents: Mutex::new(agents),
+        }
+    }
+}
+
+#[async_trait]
+impl ChannelBridgeHandle for MockProgressHandle {
+    async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
+        Ok(format!("Echo: {message}"))
+    }
+
+    async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
+        let agents = self.agents.lock().unwrap();
+        Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
+    }
+
+    async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+        Ok(self.agents.lock().unwrap().clone())
+    }
+
+    async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+        Err("mock: spawn not implemented".to_string())
+    }
+
+    async fn send_message_streaming_with_sender_status(
+        &self,
+        _agent_id: AgentId,
+        _message: &str,
+        _sender: &librefang_channels::types::SenderContext,
+    ) -> Result<
+        (
+            mpsc::Receiver<String>,
+            tokio::sync::oneshot::Receiver<Result<(), String>>,
+        ),
+        String,
+    > {
+        let (tx, rx) = mpsc::channel(16);
+        let (status_tx, status_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            // Mirror what start_stream_text_bridge would inject for a real
+            // ToolUseStart followed by post-tool prose.
+            let _ = tx.send("\n\n🔧 `web_search`\n".to_string()).await;
+            let _ = tx.send("Found 3 results.".to_string()).await;
+            drop(tx);
+            let _ = status_tx.send(Ok(()));
+        });
+        Ok((rx, status_rx))
+    }
+}
+
+/// Verify that a non-streaming adapter (Discord/Slack/Matrix/...) receives
+/// the progress markers as part of the consolidated response message.
+/// This is the V2 contract: progress is surfaced on every channel, not
+/// just Telegram, via the shared dispatch_message → streaming-with-status
+/// → send_response pipeline.
+#[tokio::test]
+async fn test_bridge_non_streaming_adapter_sees_progress_markers() {
+    let agent_id = AgentId::new();
+    let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockProgressHandle::new(vec![(
+        agent_id,
+        "tool-user".to_string(),
+    )]));
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("user1".to_string(), agent_id);
+
+    let (adapter, tx) = MockAdapter::new("discord-mock", ChannelType::Discord);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(
+        ChannelType::Discord,
+        "user1",
+        "search for rust async",
+    ))
+    .await
+    .unwrap();
+
+    // Allow the dispatch pipeline to settle.
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+    let sent = adapter_ref.get_sent();
+    assert_eq!(
+        sent.len(),
+        1,
+        "Expected 1 consolidated reply, got {}",
+        sent.len()
+    );
+    assert_eq!(sent[0].0, "user1");
+    assert!(
+        sent[0].1.contains("🔧") && sent[0].1.contains("web_search"),
+        "Expected progress marker in non-streaming reply, got: {:?}",
+        sent[0].1
+    );
+    assert!(
+        sent[0].1.contains("Found 3 results."),
+        "Expected post-tool prose in reply, got: {:?}",
+        sent[0].1
+    );
+
+    manager.stop().await;
+}

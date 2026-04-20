@@ -2791,12 +2791,26 @@ async fn dispatch_message(
 
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
+    //
+    // We use the `_status` variant of the streaming kernel call so we can
+    // distinguish four outcomes once both `send_streaming` and the kernel
+    // have settled:
+    //   1. send_streaming Ok + kernel Ok  → real success
+    //   2. send_streaming Ok + kernel Err → adapter delivered partial text
+    //      but the agent loop ultimately failed; emit Error reaction and
+    //      record_delivery(false) so metrics reflect reality
+    //   3. send_streaming Err + kernel Ok → adapter HTTP failed mid-stream
+    //      but the agent loop produced a clean response; fall back to
+    //      send_response(buffered_text) and emit Done
+    //   4. send_streaming Err + kernel Err → both failed; honor
+    //      suppress_error_responses when delivering the buffered error
+    //      text via the fallback path
     if adapter.supports_streaming() {
         match handle
-            .send_message_streaming_with_sender(agent_id, &text, &sender_ctx)
+            .send_message_streaming_with_sender_status(agent_id, &text, &sender_ctx)
             .await
         {
-            Ok(mut delta_rx) => {
+            Ok((mut delta_rx, status_rx)) => {
                 send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Streaming)
                     .await;
 
@@ -2827,25 +2841,42 @@ async fn dispatch_message(
                     buffered_text = text;
                 }
 
+                // Status is sent after the text channel fully drains, so
+                // awaiting here will not block longer than the stream itself.
+                let kernel_status = status_rx.await.unwrap_or(Ok(()));
+                let kernel_ok = kernel_status.is_ok();
+                let kernel_err_str = kernel_status.as_ref().err().cloned();
+
                 match &stream_result {
                     Ok(()) => {
-                        send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done)
-                            .await;
+                        // Adapter delivered. Final state depends on whether
+                        // the agent loop itself succeeded.
+                        let phase = if kernel_ok {
+                            AgentPhase::Done
+                        } else {
+                            AgentPhase::Error
+                        };
+                        send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
                         handle
                             .record_delivery(
                                 agent_id,
                                 ct_str,
                                 &message.sender.platform_id,
-                                true,
-                                None,
+                                kernel_ok,
+                                kernel_err_str.as_deref(),
                                 thread_id,
                             )
                             .await;
                         if let Some(j) = journal {
+                            let jstatus = if kernel_ok {
+                                crate::message_journal::JournalStatus::Completed
+                            } else {
+                                crate::message_journal::JournalStatus::Failed
+                            };
                             j.update_status(
                                 &message.platform_message_id,
-                                crate::message_journal::JournalStatus::Completed,
-                                None,
+                                jstatus,
+                                kernel_err_str.clone(),
                             )
                             .await;
                         }
@@ -2853,9 +2884,15 @@ async fn dispatch_message(
                     }
                     Err(e) => {
                         warn!("Streaming send failed, falling back to non-streaming: {e}");
-                        // Fall back: re-send the full accumulated text via the
-                        // non-streaming path so the user still gets a response.
-                        if !buffered_text.is_empty() {
+                        // Fall back: re-send the full accumulated text via
+                        // send_response so the user still gets a response.
+                        // Honor suppress_error_responses when the kernel
+                        // failed — the buffered text will contain a
+                        // sanitized error string we should not leak to
+                        // public-feed adapters.
+                        if !buffered_text.is_empty()
+                            && (kernel_ok || !adapter.suppress_error_responses())
+                        {
                             send_response(
                                 adapter,
                                 &message.sender,
@@ -2864,34 +2901,39 @@ async fn dispatch_message(
                                 output_format,
                             )
                             .await;
-                            send_lifecycle_reaction(
-                                adapter,
-                                &message.sender,
-                                msg_id,
-                                AgentPhase::Done,
-                            )
-                            .await;
+                            let phase = if kernel_ok {
+                                AgentPhase::Done
+                            } else {
+                                AgentPhase::Error
+                            };
+                            send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
+                            // Prefer kernel error string when present; fall
+                            // back to the adapter HTTP error so we never
+                            // claim success on a failed kernel run.
+                            let err_str = kernel_err_str.clone().or_else(|| Some(e.to_string()));
                             handle
                                 .record_delivery(
                                     agent_id,
                                     ct_str,
                                     &message.sender.platform_id,
-                                    true,
-                                    None,
+                                    kernel_ok,
+                                    err_str.as_deref(),
                                     thread_id,
                                 )
                                 .await;
                             if let Some(j) = journal {
-                                j.update_status(
-                                    &message.platform_message_id,
-                                    crate::message_journal::JournalStatus::Completed,
-                                    None,
-                                )
-                                .await;
+                                let jstatus = if kernel_ok {
+                                    crate::message_journal::JournalStatus::Completed
+                                } else {
+                                    crate::message_journal::JournalStatus::Failed
+                                };
+                                j.update_status(&message.platform_message_id, jstatus, err_str)
+                                    .await;
                             }
                             return;
                         }
-                        // Buffer was empty — fall through to non-streaming path.
+                        // Buffer was empty OR kernel errored on a
+                        // suppress_error_responses adapter — give up cleanly.
                         send_lifecycle_reaction(
                             adapter,
                             &message.sender,
@@ -2899,13 +2941,14 @@ async fn dispatch_message(
                             AgentPhase::Error,
                         )
                         .await;
+                        let err_str = kernel_err_str.unwrap_or_else(|| e.to_string());
                         handle
                             .record_delivery(
                                 agent_id,
                                 ct_str,
                                 &message.sender.platform_id,
                                 false,
-                                Some(&e.to_string()),
+                                Some(&err_str),
                                 thread_id,
                             )
                             .await;
@@ -2913,7 +2956,7 @@ async fn dispatch_message(
                             j.update_status(
                                 &message.platform_message_id,
                                 crate::message_journal::JournalStatus::Failed,
-                                Some(e.to_string()),
+                                Some(err_str),
                             )
                             .await;
                         }

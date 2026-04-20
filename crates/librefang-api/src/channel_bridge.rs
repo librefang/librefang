@@ -321,8 +321,10 @@ fn start_stream_text_bridge(
         KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
     >,
     is_group: bool,
+    show_progress: bool,
 ) -> mpsc::Receiver<String> {
-    let (rx, _status) = start_stream_text_bridge_with_status(event_rx, kernel_handle, is_group);
+    let (rx, _status) =
+        start_stream_text_bridge_with_status(event_rx, kernel_handle, is_group, show_progress);
     rx
 }
 
@@ -331,12 +333,19 @@ fn start_stream_text_bridge(
 /// drained. Callers use this to drive proper lifecycle reactions, accurate
 /// `record_delivery` metrics, and `suppress_error_responses` honor for
 /// public-feed adapters.
+///
+/// `show_progress` controls whether tool-invocation lines (`🔧 tool_name`)
+/// and tool-failure lines (`⚠️ tool_name failed`) are injected into the
+/// text stream. When `false`, the stream is pure model output — useful for
+/// agents whose responses are consumed by parsers or whose channel context
+/// must not have inline status markers.
 fn start_stream_text_bridge_with_status(
     mut event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
         KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
     >,
     is_group: bool,
+    show_progress: bool,
 ) -> (
     mpsc::Receiver<String>,
     tokio::sync::oneshot::Receiver<Result<(), String>>,
@@ -387,7 +396,11 @@ fn start_stream_text_bridge_with_status(
                     // line. Streaming adapters (Telegram) edit this into the
                     // live message; non-streaming adapters fall back to plain
                     // text and the line just becomes part of the reply.
-                    if !name.is_empty() && last_progress_tool.as_deref() != Some(name.as_str()) {
+                    // Skip entirely when the agent has show_progress=false.
+                    if show_progress
+                        && !name.is_empty()
+                        && last_progress_tool.as_deref() != Some(name.as_str())
+                    {
                         let line = format!("\n\n🔧 `{name}`\n");
                         if tx.send(line).await.is_err() {
                             break;
@@ -398,7 +411,7 @@ fn start_stream_text_bridge_with_status(
                 StreamEvent::ToolExecutionResult { name, is_error, .. } => {
                     // Only surface failures — successes are followed by the
                     // model's next prose iteration which is signal enough.
-                    if is_error && !name.is_empty() {
+                    if show_progress && is_error && !name.is_empty() {
                         let line = format!("\n⚠️ `{name}` failed\n");
                         if tx.send(line).await.is_err() {
                             break;
@@ -573,12 +586,23 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         agent_id: AgentId,
         message: &str,
     ) -> Result<mpsc::Receiver<String>, String> {
+        let show_progress = self
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|e| e.manifest.show_progress)
+            .unwrap_or(true);
         let (event_rx, kernel_handle) = self
             .kernel
             .send_message_streaming_with_routing(agent_id, message, None)
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(start_stream_text_bridge(event_rx, kernel_handle, false))
+        Ok(start_stream_text_bridge(
+            event_rx,
+            kernel_handle,
+            false,
+            show_progress,
+        ))
     }
 
     async fn send_message_streaming_with_sender(
@@ -587,6 +611,12 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         message: &str,
         sender: &SenderContext,
     ) -> Result<mpsc::Receiver<String>, String> {
+        let show_progress = self
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|e| e.manifest.show_progress)
+            .unwrap_or(true);
         let (event_rx, kernel_handle) = self
             .kernel
             .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
@@ -596,6 +626,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             event_rx,
             kernel_handle,
             sender.is_group,
+            show_progress,
         ))
     }
 
@@ -611,6 +642,12 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         ),
         String,
     > {
+        let show_progress = self
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|e| e.manifest.show_progress)
+            .unwrap_or(true);
         let (event_rx, kernel_handle) = self
             .kernel
             .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
@@ -620,6 +657,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             event_rx,
             kernel_handle,
             sender.is_group,
+            show_progress,
         ))
     }
 
@@ -3364,7 +3402,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
-        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true);
 
         // Simulate a provider emitting an agent_send tool call as plain text
         // (no ToolUseStart event) followed by ContentComplete.
@@ -3403,7 +3441,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
-        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true);
 
         event_tx
             .send(StreamEvent::ToolUseStart {
@@ -3466,7 +3504,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
-        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true);
 
         event_tx
             .send(StreamEvent::ToolUseStart {
@@ -3508,7 +3546,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
-        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true);
 
         event_tx
             .send(StreamEvent::ToolExecutionResult {
@@ -3531,6 +3569,69 @@ mod tests {
         );
     }
 
+    /// When `show_progress=false`, neither tool-invocation nor failure
+    /// markers should be injected into the user-facing text — the stream
+    /// must be pure model output. This is what `agent.toml show_progress
+    /// = false` opts agents into for parser-consumed or pristine-output
+    /// scenarios.
+    #[tokio::test]
+    async fn test_stream_bridge_show_progress_false_suppresses_all_markers() {
+        use librefang_runtime::agent_loop::AgentLoopResult;
+
+        let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+
+        let mut rx = start_stream_text_bridge(
+            event_rx,
+            kernel_handle,
+            false,
+            /* show_progress */ false,
+        );
+
+        event_tx
+            .send(StreamEvent::ToolUseStart {
+                id: "tool_1".to_string(),
+                name: "web_search".to_string(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::ToolExecutionResult {
+                name: "web_search".to_string(),
+                result_preview: "irrelevant".to_string(),
+                is_error: true,
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::TextDelta {
+                text: "Final answer.".to_string(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::ContentComplete {
+                stop_reason: librefang_types::message::StopReason::EndTurn,
+                usage: librefang_types::message::TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+        drop(event_tx);
+
+        let mut received = String::new();
+        while let Some(msg) = rx.recv().await {
+            received.push_str(&msg);
+        }
+        assert!(
+            !received.contains("🔧") && !received.contains("⚠️"),
+            "Expected no progress/failure markers when show_progress=false, got: {received:?}"
+        );
+        assert!(
+            received.contains("Final answer."),
+            "Expected actual model prose to still flow through, got: {received:?}"
+        );
+    }
+
     /// Back-to-back duplicate ToolUseStart events for the same tool name
     /// should produce only one progress line — some drivers double-fire.
     #[tokio::test]
@@ -3540,7 +3641,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
-        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true);
 
         for _ in 0..3 {
             event_tx
@@ -3577,7 +3678,7 @@ mod tests {
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
         let (mut rx, status_rx) =
-            start_stream_text_bridge_with_status(event_rx, kernel_handle, false);
+            start_stream_text_bridge_with_status(event_rx, kernel_handle, false, true);
 
         event_tx
             .send(StreamEvent::TextDelta {
@@ -3621,7 +3722,7 @@ mod tests {
         });
 
         let (mut rx, status_rx) =
-            start_stream_text_bridge_with_status(event_rx, kernel_handle, false);
+            start_stream_text_bridge_with_status(event_rx, kernel_handle, false, true);
 
         // Drain text channel — will include sanitized error message
         let mut received = String::new();
@@ -3664,8 +3765,12 @@ mod tests {
             )
         });
 
-        let (mut rx, status_rx) =
-            start_stream_text_bridge_with_status(event_rx, kernel_handle, /* is_group */ true);
+        let (mut rx, status_rx) = start_stream_text_bridge_with_status(
+            event_rx,
+            kernel_handle,
+            /* is_group */ true,
+            true,
+        );
 
         let mut received = String::new();
         while let Some(chunk) = rx.recv().await {
