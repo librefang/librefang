@@ -152,7 +152,7 @@ export function OverviewPage() {
 
       {/* Setup Banner */}
       {needsInit && (
-        <Card padding="lg" className="border-brand/30 bg-gradient-to-r from-brand/5 via-brand/10 to-brand/5">
+        <Card padding="lg" className="border-brand/30 bg-linear-to-r from-brand/5 via-brand/10 to-brand/5">
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
             <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand/15">
               <Rocket className="h-6 w-6 text-brand" />
@@ -235,7 +235,7 @@ export function OverviewPage() {
                   onClick={() => navigate({ to: action.to as any })}
                   className={`group flex flex-col items-center gap-2 sm:gap-3 rounded-2xl border p-3 sm:p-5 transition-all duration-300 hover:-translate-y-1 hover:shadow-lg ${
                     action.primary
-                      ? "border-brand/20 bg-gradient-to-b from-brand/5 to-brand/10 text-brand hover:shadow-brand/15"
+                      ? "border-brand/20 bg-linear-to-b from-brand/5 to-brand/10 text-brand hover:shadow-brand/15"
                       : "border-border-subtle bg-surface text-text-dim hover:border-brand/30 hover:text-brand"
                   }`}
                 >
@@ -264,7 +264,7 @@ export function OverviewPage() {
             {isLoading ? (
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 {[1, 2].map(i => (
-                  <div key={i} className="h-16 rounded-xl bg-gradient-to-r from-main via-surface-hover to-main bg-[length:200%_100%]" style={{ animation: "shimmer 1.5s ease-in-out infinite" }} />
+                  <div key={i} className="h-16 rounded-xl bg-linear-to-r from-main via-surface-hover to-main bg-[length:200%_100%]" style={{ animation: "shimmer 1.5s ease-in-out infinite" }} />
                 ))}
               </div>
             ) : snapshot?.agents && snapshot.agents.length > 0 ? (
@@ -403,7 +403,7 @@ export function OverviewPage() {
       </div>
 
       {/* Pro Tip */}
-      <div className="hidden sm:flex items-center gap-3 rounded-xl border border-brand/10 bg-gradient-to-r from-brand/5 to-transparent px-4 py-3">
+      <div className="hidden sm:flex items-center gap-3 rounded-xl border border-brand/10 bg-linear-to-r from-brand/5 to-transparent px-4 py-3">
         <Sparkles className="h-4 w-4 text-brand shrink-0" />
         <span className="text-xs text-text-dim flex-1">
           <span className="font-bold text-brand">{t("overview.pro_tip")}</span> — {t("overview.pro_tip_shortcut")}

@@ -768,7 +768,7 @@ const OPERATIONAL_GUIDELINES: &str = "\
 - Plan your approach before executing multiple tool calls.
 - If you cannot accomplish a task after a few attempts, explain what went wrong instead of looping.
 - Never call the same tool more than 3 times with the same parameters.
-- If a message requires no response (simple acknowledgments, reactions, messages not directed at you), respond with exactly NO_REPLY.";
+- If a turn requires no response (simple acknowledgments, reactions, messages not directed at you), return an empty message. The runtime recognizes the internal signal `NO_REPLY` for legacy providers that cannot emit an empty response; do not repeat this token in conversation history or memory notes.";
 
 // ---------------------------------------------------------------------------
 // Tool metadata helpers

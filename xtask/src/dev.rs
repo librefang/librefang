@@ -431,9 +431,14 @@ fn run_watch(
     // `pnpm dev`, so changes there must NOT trigger a Rust rebuild +
     // daemon restart. Ignore the dashboard directory and any editor
     // scratch files that could otherwise bounce cargo-watch in a loop.
+    // `--postpone` skips cargo-watch's default "run once at startup" behavior.
+    // Without it the initial daemon (started above) races this first invocation,
+    // and whichever reaches run_daemon's daemon.json check second errors out
+    // with "Another daemon (PID X) is already running" (see server.rs:1077).
     let cargo_watch_status = Command::new("cargo")
         .args([
             "watch",
+            "--postpone",
             "--watch",
             "crates",
             "--ignore",

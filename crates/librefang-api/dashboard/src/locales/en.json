@@ -1750,6 +1750,7 @@
     "session": "Session",
     "sessions_title": "Sessions",
     "send_hint": "Enter to send, Cmd+Enter for newline",
+    "stop_hint": "Stop generating",
     "voice_input": "Voice input",
     "voice_stop": "Stop recording",
     "voice_recording": "Listening...",

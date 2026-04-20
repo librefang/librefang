@@ -220,6 +220,30 @@ describe("query key factories", () => {
     });
   });
 
+  describe("skillKeys", () => {
+    it("supporting files are nested under detail", () => {
+      expect(skillKeys.supportingFiles("demo")).toEqual([
+        "skills",
+        "detail",
+        "demo",
+        "supportingFile",
+      ]);
+      expect(skillKeys.supportingFile("demo", "references/file.md")).toEqual([
+        "skills",
+        "detail",
+        "demo",
+        "supportingFile",
+        "references/file.md",
+      ]);
+      expect(
+        skillKeys.supportingFile("demo", "references/file.md").slice(
+          0,
+          skillKeys.supportingFiles("demo").length,
+        ),
+      ).toEqual(skillKeys.supportingFiles("demo"));
+    });
+  });
+
   describe("runtimeKeys anchoring", () => {
     it("all sub-keys are prefixed with runtimeKeys.all", () => {
       const prefix = runtimeKeys.all;
@@ -302,6 +326,14 @@ describe("query key factories", () => {
         expect(Array.isArray(f.all)).toBe(true);
         expect((f.all as readonly string[]).length).toBeGreaterThan(0);
       }
+    });
+  });
+
+  describe("terminalKeys anchoring", () => {
+    it("health and windows are prefixed with terminalKeys.all", () => {
+      const prefix = terminalKeys.all;
+      expect(terminalKeys.health().slice(0, prefix.length)).toEqual(prefix);
+      expect(terminalKeys.windows().slice(0, prefix.length)).toEqual(prefix);
     });
   });
 });

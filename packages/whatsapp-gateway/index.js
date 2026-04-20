@@ -762,28 +762,180 @@ function extractNotifyOwner(responseText) {
 }
 
 // ---------------------------------------------------------------------------
-// NO_REPLY sentinel — agent-side convention to silently decline to answer.
+// Silent-response sentinel — gateway-side mirror of the canonical Rust
+// detector at crates/librefang-runtime/src/silent_response.rs.
 // ---------------------------------------------------------------------------
-// The agent prompts instruct the LLM to emit a bare `NO_REPLY` token when it
-// decides a message doesn't warrant a reply. Ideally it is the entire
-// response, but in practice we see two leaks:
-//   1. Trailing token:  "Tutto bene, Signore.\nNO_REPLY"
-//   2. Concatenated:    "...a Sua disposizione. 🎩NO_REPLY"   ← no separator
-// Both must be scrubbed before the text hits WhatsApp. The helper returns
-// the cleaned text, or `''` when the entire response was a NO_REPLY sentinel
-// and the caller should suppress delivery entirely.
+// Two-layer protection (Phase 2 §B, OB-02 / OB-03 / OB-07):
+//
+//   1. `isSilentResponse(text)` classifies a complete (or accumulated)
+//      response as silent — case-insensitive, with trailing punctuation /
+//      whitespace / emoji tolerance, and proper word boundaries. Mirrors
+//      the Rust canonical detector so both layers of the stack agree.
+//
+//   2. `createHoldbackAccumulator({onFlush, onSilent})` is the streaming
+//      gate: it BUFFERS deltas instead of forwarding them and only
+//      releases a flush once it can prove the cumulative text is NOT
+//      sentinel-shaped (length threshold + classifier check). If the
+//      stream ends silent, NO partial chunk ever escaped. This replaces
+//      the post-hoc `stripNoReply` scrub which had a window where a
+//      mid-stream "[no reply" prefix would already have been forwarded
+//      as a WhatsApp message edit before the trailing " needed]" arrived.
+//
+// Toggle: `LIBREFANG_SILENT_V2=off` reverts to the legacy regex-scrub
+// path, kept for one release as the rollback hatch.
+const SILENT_V2_ENABLED = !['off', '0', 'false', 'no'].includes(
+  String(process.env.LIBREFANG_SILENT_V2 || '').toLowerCase(),
+);
+
+// Hold-back window: the accumulator will not flush until the buffer has
+// grown past this many chars OR the stream has ended. 32 is empirically
+// long enough to cover the longest sentinel form ("[no reply needed]" =
+// 18 chars) plus comfortable headroom for emoji/punctuation tolerance.
+const SILENT_HOLDBACK_MIN_CHARS = 32;
+
+// Match a buffer that LOOKS like it is becoming a silent sentinel.
+// Used by the hold-back accumulator to keep buffering when the prefix
+// is still ambiguous (e.g. the model has streamed `"Ok [no reply"` and
+// we don't yet know whether the next delta closes it or extends into
+// real text).
+const SILENT_PREFIX_RE = /^\s*(\[?\s*no[_\s]?reply(?:\s*needed)?\s*\]?\s*[\s.!?]*)$/i;
+
+function isSilentResponse(text) {
+  if (typeof text !== 'string' || text.length === 0) return false;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+
+  if (!SILENT_V2_ENABLED) {
+    // Legacy detector — bit-for-bit equivalent to pre-Phase-2 behaviour.
+    return (
+      trimmed === 'NO_REPLY' ||
+      trimmed.endsWith('NO_REPLY') ||
+      trimmed === '[no reply needed]' ||
+      trimmed.endsWith('[no reply needed]') ||
+      trimmed === 'no reply needed' ||
+      trimmed.endsWith('no reply needed')
+    );
+  }
+
+  // Strip trailing punctuation, whitespace, and any non-ASCII (emoji).
+  // Walk by code points (handles surrogate pairs for emojis correctly).
+  let end = trimmed.length;
+  while (end > 0) {
+    let unitStart = end - 1;
+    // If we're on a low surrogate, the actual code point starts one earlier.
+    const lowUnit = trimmed.charCodeAt(unitStart);
+    if (lowUnit >= 0xDC00 && lowUnit <= 0xDFFF && unitStart > 0) {
+      const highUnit = trimmed.charCodeAt(unitStart - 1);
+      if (highUnit >= 0xD800 && highUnit <= 0xDBFF) unitStart -= 1;
+    }
+    const c = trimmed.codePointAt(unitStart);
+    const ch = String.fromCodePoint(c);
+    const isStrippable =
+      /\s/.test(ch) ||
+      ch === '.' || ch === ',' || ch === ';' || ch === ':' || ch === '!' || ch === '?' ||
+      c > 0x7F;
+    if (!isStrippable) break;
+    end = unitStart;
+  }
+  const stripped = trimmed.slice(0, end);
+  const lower = stripped.toLowerCase();
+
+  if (lower === 'no_reply' || lower === '[no reply needed]' || lower === 'no reply needed') {
+    return true;
+  }
+  for (const needle of ['no_reply', '[no reply needed]', 'no reply needed']) {
+    if (lower.endsWith(needle)) {
+      const cut = lower.length - needle.length;
+      if (cut === 0) return true;
+      const prev = lower[cut - 1];
+      // Word-boundary check: prev char must NOT be alphanumeric or _.
+      if (!/[a-z0-9_]/.test(prev)) return true;
+    }
+  }
+  return false;
+}
+
+// Legacy entry point preserved for the non-streaming and final-response
+// scrub call sites (lines that historically called stripNoReply on a
+// fully-formed response). When the response is a sentinel, returns ''
+// so callers can short-circuit delivery; otherwise returns the text
+// unchanged (the canonical V2 detector decides whole-message silence,
+// no partial scrubbing — partial scrubbing was the bug).
 function stripNoReply(text) {
   if (typeof text !== 'string' || !text) return text || '';
-  if (text.trim() === 'NO_REPLY') return '';
-  // `\bNO_REPLY\b` matches even when glued to an emoji (🎩NO_REPLY) because
-  // emoji code points are not word characters. Strip every standalone
-  // occurrence, collapse the whitespace it leaves behind.
-  const stripped = text
-    .replace(/\bNO_REPLY\b/g, '')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-  return stripped === 'NO_REPLY' ? '' : stripped;
+  if (isSilentResponse(text)) return '';
+  if (!SILENT_V2_ENABLED) {
+    // Legacy in-text scrub kept under the rollback flag.
+    const stripped = text
+      .replace(/\bNO_REPLY\b/g, '')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    return stripped === 'NO_REPLY' ? '' : stripped;
+  }
+  return text;
+}
+
+/**
+ * Streaming hold-back accumulator (OB-07).
+ *
+ * Buffers incoming deltas and decides — at every delta — whether the
+ * cumulative text has clearly diverged from any silent-response shape.
+ * Only then does it call `onFlush(buf)` once. After the first flush, all
+ * subsequent deltas are forwarded immediately via `onFlush(delta)` so
+ * progressive WhatsApp edits keep working unchanged.
+ *
+ * If the stream concludes silent, `onSilent(buf)` fires and `onFlush`
+ * is NEVER called — guaranteeing zero partial sentinel leaks.
+ *
+ * @param {object} cfg
+ * @param {(text: string) => (Promise<void> | void)} cfg.onFlush  forward
+ *   text to the channel (e.g. sock.sendMessage / WhatsApp edit)
+ * @param {(text: string) => (Promise<void> | void)} [cfg.onSilent] optional
+ *   notification for diagnostics / OBS-01 logging
+ * @param {number} [cfg.minChars=32] hold-back threshold
+ */
+function createHoldbackAccumulator({ onFlush, onSilent, minChars = SILENT_HOLDBACK_MIN_CHARS } = {}) {
+  if (typeof onFlush !== 'function') {
+    throw new TypeError('createHoldbackAccumulator requires onFlush callback');
+  }
+  let buf = '';
+  let flushed = false;
+
+  async function push(delta) {
+    if (typeof delta !== 'string' || delta.length === 0) return;
+    if (flushed) {
+      await onFlush(delta);
+      return;
+    }
+    buf += delta;
+    const looksLikeSentinel = SILENT_PREFIX_RE.test(buf);
+    if (buf.trim().length >= minChars && !looksLikeSentinel && !isSilentResponse(buf)) {
+      flushed = true;
+      await onFlush(buf);
+    }
+  }
+
+  async function end() {
+    if (flushed) return { silent: false, flushed: true };
+    if (buf.trim().length === 0 || isSilentResponse(buf)) {
+      if (typeof onSilent === 'function') await onSilent(buf);
+      try {
+        console.log(JSON.stringify({
+          event: 'silent_response_gateway',
+          final: true,
+          silent: true,
+          preview: buf.slice(0, 40),
+        }));
+      } catch { /* noop */ }
+      return { silent: true, flushed: false };
+    }
+    flushed = true;
+    await onFlush(buf);
+    return { silent: false, flushed: true };
+  }
+
+  return { push, end, get buffered() { return buf; }, get hasFlushed() { return flushed; } };
 }
 
 // ---------------------------------------------------------------------------
@@ -1478,9 +1630,32 @@ async function startConnection() {
               .replace(RELAY_RE, '')
               .replace(/\[no reply needed\]/gi, '');
           }
-          // Also scrub the plain `NO_REPLY` sentinel — it leaks mid-stream,
-          // trailing, and glued to emojis. When the whole chunk is a
-          // NO_REPLY (or strips down to empty), skip the edit entirely.
+          // OB-07 hold-back gate: until we have already established a
+          // visible WhatsApp message (streamMsgKey != null), refuse to
+          // flush a chunk that is shorter than the hold-back threshold OR
+          // whose accumulated text still LOOKS like a silent sentinel.
+          // Once committed, subsequent edits are unconditional — the
+          // model has clearly diverged from any sentinel shape.
+          if (SILENT_V2_ENABLED && !streamMsgKey) {
+            const trimmedCum = cleaned.trim();
+            if (
+              trimmedCum.length < SILENT_HOLDBACK_MIN_CHARS ||
+              SILENT_PREFIX_RE.test(trimmedCum) ||
+              isSilentResponse(cleaned)
+            ) {
+              try {
+                console.log(JSON.stringify({
+                  event: 'silent_response_gateway',
+                  final: false,
+                  silent: true,
+                  preview: trimmedCum.slice(0, 40),
+                }));
+              } catch { /* noop */ }
+              return;
+            }
+          }
+          // Final scrub for trailing-sentinel residue (e.g. ".... NO_REPLY"
+          // arriving after the hold-back window has elapsed).
           cleaned = stripNoReply(cleaned);
           cleaned = cleaned.trim();
           if (!cleaned) return;
@@ -2823,6 +2998,10 @@ module.exports = {
   resolveLidProactively,
   checkHeartbeat,
   computeBackoffDelay,
+  isSilentResponse,
+  stripNoReply,
+  createHoldbackAccumulator,
+  SILENT_HOLDBACK_MIN_CHARS,
   getGroupParticipants,
   invalidateGroupRoster,
   groupMetadataCache,
