@@ -1357,6 +1357,19 @@ enum SecurityCommands {
         long_about = "Verify the integrity of the audit trail using its Merkle chain.\n\nReports whether the chain is intact or has been tampered with.\n\nExamples:\n  librefang security verify"
     )]
     Verify,
+    /// Reset the audit trail: truncate `audit_entries` and remove the anchor file.
+    ///
+    /// Destructive. Use only when the chain is already broken (tampering, manual
+    /// DB edits, partial restore) and you want to start a fresh chain. Requires
+    /// `--confirm` and refuses to run while a daemon holds the database.
+    #[command(
+        long_about = "DESTRUCTIVE: wipe the audit trail and restart the chain from empty.\n\nOnly needed when `librefang security verify` reports a chain break that you can't recover — e.g. after a manual SQL edit, partial DB restore, or a crash that left the anchor file ahead of `audit_entries`.\n\nRefuses to run if the daemon is still holding the database. Requires `--confirm`.\n\nExamples:\n  librefang security audit-reset --confirm"
+    )]
+    AuditReset {
+        /// Required. Without this flag the command prints what it would do and exits non-zero.
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1535,7 +1548,17 @@ fn init_tracing_stderr(log_level: &str) {
                 .with_writer(std::sync::Mutex::new(file))
         });
 
-    tracing_subscriber::registry()
+    // Register a no-op reload slot so `init_otel_tracing` can swap a real
+    // OTel layer in later without needing to claim the global dispatcher.
+    // The slot is stacked **first** (directly on Registry) so its boxed
+    // `Layer<Registry>` trait object matches the innermost subscriber type.
+    #[cfg(feature = "telemetry")]
+    let registry =
+        tracing_subscriber::registry().with(librefang_api::telemetry::install_otel_reload_layer());
+    #[cfg(not(feature = "telemetry"))]
+    let registry = tracing_subscriber::registry();
+
+    registry
         .with(env_filter)
         .with(fmt_layer)
         .with(file_layer)
@@ -1885,6 +1908,7 @@ fn main() {
             SecurityCommands::Status { json } => cmd_security_status(json),
             SecurityCommands::Audit { limit, json } => cmd_security_audit(limit, json),
             SecurityCommands::Verify => cmd_security_verify(),
+            SecurityCommands::AuditReset { confirm } => cmd_audit_reset(cli.config, confirm),
         },
         Some(Commands::Memory(sub)) => match sub {
             MemoryCommands::List { agent, json } => cmd_memory_list(&agent, json),
@@ -8957,6 +8981,108 @@ fn cmd_security_verify() {
         }
         std::process::exit(1);
     }
+}
+
+/// Destructively reset the local audit trail.
+///
+/// Truncates `audit_entries` in SQLite and removes the anchor file so the
+/// next daemon boot seeds a fresh Merkle chain. Refuses to run while the
+/// daemon holds the DB (SQLite WAL mode + writer lock) and without
+/// `--confirm`.
+fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
+    let daemon = daemon_config_context(config.as_deref());
+    let kernel_config = load_config(config.as_deref());
+
+    let db_path = kernel_config
+        .memory
+        .sqlite_path
+        .clone()
+        .unwrap_or_else(|| kernel_config.data_dir.join("librefang.db"));
+
+    let anchor_path = match kernel_config.audit.anchor_path.as_ref() {
+        Some(p) if p.is_absolute() => p.clone(),
+        Some(p) => kernel_config.data_dir.join(p),
+        None => kernel_config.data_dir.join("audit.anchor"),
+    };
+
+    if !confirm {
+        ui::error("audit reset is destructive — re-run with `--confirm` to proceed");
+        ui::blank();
+        println!("  Would:");
+        println!(
+            "    1. DELETE all rows from `audit_entries` in {}",
+            db_path.display()
+        );
+        println!("    2. Remove anchor file {}", anchor_path.display());
+        println!("  The Merkle chain will restart from the next audit event.");
+        std::process::exit(1);
+    }
+
+    // Refuse if daemon is running — SQLite writer lock would block or corrupt.
+    if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
+        ui::error_with_fix(
+            &format!("daemon is running at {base}; refusing to touch the audit database"),
+            "stop the daemon first: `librefang stop`",
+        );
+        std::process::exit(1);
+    }
+
+    if !db_path.exists() {
+        ui::error(&format!("database not found at {}", db_path.display()));
+        std::process::exit(1);
+    }
+
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            ui::error(&format!("failed to open {}: {e}", db_path.display()));
+            std::process::exit(1);
+        }
+    };
+
+    let rows_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM audit_entries", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    // Remove the anchor FIRST. If the subsequent DB truncation then fails,
+    // the next daemon boot sees `read_anchor = None` and re-seeds from the
+    // current DB tip — a consistent (if still broken) state the user can
+    // retry. The reverse order (DB first, anchor second) would instead
+    // leave an empty table alongside a stale anchor, which produces a
+    // fresh MISMATCH error the user didn't have before calling reset.
+    let anchor_removed = if anchor_path.exists() {
+        match std::fs::remove_file(&anchor_path) {
+            Ok(()) => true,
+            Err(e) => {
+                ui::error(&format!(
+                    "failed to remove anchor {}: {e}",
+                    anchor_path.display()
+                ));
+                std::process::exit(1);
+            }
+        }
+    } else {
+        false
+    };
+
+    if let Err(e) = conn.execute("DELETE FROM audit_entries", []) {
+        ui::error(&format!("failed to truncate audit_entries: {e}"));
+        std::process::exit(1);
+    }
+    drop(conn);
+    // `seq` is `INTEGER PRIMARY KEY` without AUTOINCREMENT, so the next
+    // insert after an empty table naturally gets seq = 1. No sqlite_sequence
+    // fiddling needed.
+
+    ui::success(&format!(
+        "Audit trail reset: removed {rows_before} row(s) from audit_entries{}.",
+        if anchor_removed {
+            format!(", deleted anchor at {}", anchor_path.display())
+        } else {
+            " (no anchor file to remove)".to_string()
+        }
+    ));
+    ui::hint("The next daemon boot will seed a fresh Merkle chain from the current tip.");
 }
 
 fn cmd_memory_list(agent: &str, json: bool) {

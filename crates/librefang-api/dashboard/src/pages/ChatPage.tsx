@@ -6,9 +6,10 @@ import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession } from "../api";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
+import { clearAgentHistory } from "../lib/http/client";
 import { useFullConfig } from "../lib/queries/config";
 import { useMediaProviders } from "../lib/queries/media";
-import { useModels, modelQueries } from "../lib/queries/models";
+import { useModels } from "../lib/queries/models";
 import { usePendingApprovals } from "../lib/queries/approvals";
 import { useAgents, useAgentSessions } from "../lib/queries/agents";
 import { useActiveHandsWhen } from "../lib/queries/hands";
@@ -164,7 +165,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void) {
+function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void) {
   const { t } = useTranslation();
   const stopAgentMutation = useStopAgent();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -329,6 +330,23 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       .finally(() => setAgentLoading(loadId, false));
   }, [agentId, sessionVersion]);
 
+  const clearHistory = useCallback(async () => {
+    if (!agentId) {
+      setMessages([]);
+      return;
+    }
+    try {
+      await clearAgentHistory(agentId);
+      sessionCache.delete(agentId);
+      if (prevAgentRef.current === agentId) {
+        messagesRef.current = [];
+      }
+      setMessages([]);
+    } catch (error) {
+      onClearError?.(error instanceof Error ? error.message : t("common.error"));
+    }
+  }, [agentId, onClearError, t]);
+
   // Send message - WS first, HTTP fallback
   const sendMessage = useCallback(async (content: string) => {
     if (!content.trim()) return;
@@ -348,7 +366,10 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         ).join("\n"));
         return;
       }
-      if (trimmed === "/clear") { setMessages([]); return; }
+      if (trimmed === "/clear") {
+        void clearHistory();
+        return;
+      }
       if (trimmed === "/agents") {
         const names = agents.map(a => `- **${a.name}** (${a.state || "unknown"})`).join("\n");
         sysMsg(names || t("chat.no_agents_available"));
@@ -658,9 +679,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent]);
-
-  const clearHistory = useCallback(() => setMessages([]), []);
+  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent, clearHistory]);
 
   // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
   // the tokio task on the kernel side) and optimistically finalizes any
@@ -732,9 +751,9 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
     return (
       <div className="flex justify-center py-6">
         <div className="flex items-center gap-4">
-          <div className="h-px w-16 bg-gradient-to-r from-transparent to-border-subtle" />
+          <div className="h-px w-16 bg-linear-to-r from-transparent to-border-subtle" />
           <span className="text-[10px] font-medium text-text-dim/40 tracking-[0.2em] uppercase">{message.content}</span>
-          <div className="h-px w-16 bg-gradient-to-l from-transparent to-border-subtle" />
+          <div className="h-px w-16 bg-linear-to-l from-transparent to-border-subtle" />
         </div>
       </div>
     );
@@ -1020,7 +1039,7 @@ function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, place
       {/* Auth missing warning */}
       {authMissing && (
         <div className="flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 px-4 py-2.5 text-sm text-warning">
-          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          <AlertCircle className="h-4 w-4 shrink-0" />
           <span>{authStatus === "local_offline"
             ? t("chat.provider_offline", { provider: providerName || "unknown" })
             : t("chat.auth_missing", { provider: providerName || "unknown" })}</span>
@@ -1131,7 +1150,7 @@ function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, place
             type="button"
             onClick={onStop}
             title={t("chat.stop_hint")}
-            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-error to-error/90 text-white font-bold text-sm shadow-lg shadow-error/20 hover:shadow-error/40 hover:-translate-y-0.5 transition-all duration-300"
+            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-linear-to-r from-error to-error/90 text-white font-bold text-sm shadow-lg shadow-error/20 hover:shadow-error/40 hover:-translate-y-0.5 transition-all duration-300"
           >
             <Square className="h-4 w-4 fill-current" />
             <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
@@ -1142,7 +1161,7 @@ function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, place
           <button
             type="submit"
             disabled={!message.trim() || effectiveDisabled}
-            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-linear-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
           >
             <Send className="h-4 w-4" />
             <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
@@ -1156,26 +1175,23 @@ function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, place
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
   agentId: string; onModelChange: () => void;
   webSearchAugmentation?: "off" | "auto" | "always"; onWebSearchChange?: (mode: "off" | "auto" | "always") => void;
   webSearchAvailable?: boolean;
+  onOpenConfig: () => void;
 }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [sessionOpen, setSessionOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Model popover state
   const [modelOpen, setModelOpen] = useState(false);
   const modelRef = useRef<HTMLDivElement>(null);
-  const [models, setModels] = useState<ModelItem[]>([]);
   const [modelSearch, setModelSearch] = useState("");
-  const [modelLoading, setModelLoading] = useState(false);
-  const [modelFetchError, setModelFetchError] = useState<string | null>(null);
   const [patchError, setPatchError] = useState<string | null>(null);
   const [patchPending, setPatchPending] = useState(false);
   const [optimisticModel, setOptimisticModel] = useState<string | null>(null);
@@ -1184,6 +1200,14 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
   const patchAgentConfigMutation = usePatchAgentConfig();
+  const modelsQuery = useModels(
+    { available: true },
+    {
+      enabled: modelOpen,
+      // Model picker opens on demand. Keep query idle until popover visible.
+      staleTime: 0,
+    },
+  );
 
   // Clear optimistic model once the real modelName catches up
   useEffect(() => {
@@ -1218,17 +1242,9 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     return () => document.removeEventListener("mousedown", handler);
   }, [modelOpen]);
 
-  // Fetch available models lazily when popover first opens
-  useEffect(() => {
-    if (!modelOpen || models.length > 0 || modelLoading) return;
-    setModelLoading(true);
-    setModelFetchError(null);
-    queryClient.fetchQuery(modelQueries.list({ available: true }))
-      .then((res: { models: ModelItem[] }) => setModels(res.models))
-      .catch(() => setModelFetchError(t("chat.unable_to_load_models")))
-      .finally(() => setModelLoading(false));
-  }, [modelOpen, models.length, modelLoading, queryClient, t]);
-
+  const models = modelsQuery.data?.models ?? [];
+  const modelLoading = modelsQuery.isLoading || modelsQuery.isFetching;
+  const modelFetchError = modelsQuery.error ? t("chat.unable_to_load_models") : null;
   const visibleModels = useMemo(() => filterVisible(models, hiddenSet), [models, hiddenSet]);
 
   // Unique providers derived from loaded models, sorted alphabetically
@@ -1285,7 +1301,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   }
 
   return (
-    <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface to-transparent flex items-center justify-between">
+    <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-linear-to-r from-surface to-transparent flex items-center justify-between">
       <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
         <div className="relative">
           <Wifi className="h-3.5 w-3.5 text-success" />
@@ -1358,7 +1374,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                   <div className="px-2.5 py-2 space-y-1.5">
                     <p className="text-xs text-error">{modelFetchError}</p>
                     <button
-                      onClick={() => { setModels([]); setModelFetchError(null); }}
+                      onClick={() => { void modelsQuery.refetch(); }}
                       className="text-[10px] text-brand hover:underline"
                     >
                       {t("chat.retry")}
@@ -1436,11 +1452,11 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
             <div className="hidden sm:flex items-center gap-1.5">
               <button
                 onClick={() => {
-                  if (noKey && mode === "off") {
-                    // No search key configured — navigate to Config page Web section
-                    window.location.href = "/dashboard/config";
-                    return;
-                  }
+                    if (noKey && mode === "off") {
+                      // No search key configured — navigate to Config page Web section
+                      onOpenConfig();
+                      return;
+                    }
                   const cycle: Record<string, "off" | "auto" | "always"> = { off: "auto", auto: "always", always: "off" };
                   onWebSearchChange(cycle[mode] || "auto");
                 }}
@@ -1464,7 +1480,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               </button>
               {isActive && noKey && (
                 <button
-                  onClick={() => { window.location.href = "/dashboard/config"; }}
+                  onClick={onOpenConfig}
                   className="text-[9px] text-warning hover:text-warning/80 underline hidden xl:inline"
                 >
                   {t("chat.web_search_configure", { defaultValue: "Configure API key" })}
@@ -1818,7 +1834,8 @@ export function ChatPage() {
     selectedAgentId || null,
     agents,
     sessionVersion,
-      () => void agentsQuery.refetch(),
+    () => void agentsQuery.refetch(),
+    (message) => addToast(message, "error"),
   );
   // Track LLM text streaming (cleared on `typing:stop`) independently of
   // `isLoading`, which stays true through post-processing until the final
@@ -1941,7 +1958,7 @@ export function ChatPage() {
     >
       <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
         selectedAgentId === agent.id ? "bg-white/20"
-        : (agent.state || "").toLowerCase() === "running" ? "bg-gradient-to-br from-brand/20 to-accent/20 text-brand"
+        : (agent.state || "").toLowerCase() === "running" ? "bg-linear-to-br from-brand/20 to-accent/20 text-brand"
         : "bg-main text-text-dim/40"
       }`}>
         {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name }).charAt(0).toUpperCase()}
@@ -1956,10 +1973,10 @@ export function ChatPage() {
           <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>
             {role ?? t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
           </p>
-          {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
-          {agent.auth_status === "configured_cli" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
-          {agent.auth_status === "auto_detected" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-warning/10 text-warning"}`}>AUTO</span>}
-          {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning flex-shrink-0" />}
+          {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
+          {agent.auth_status === "configured_cli" && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
+          {agent.auth_status === "auto_detected" && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-warning/10 text-warning"}`}>AUTO</span>}
+          {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning shrink-0" />}
         </div>
         {isCoordinator ? (
           <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
@@ -1971,7 +1988,7 @@ export function ChatPage() {
           </p>
         )}
       </div>
-      <ArrowRight className={`h-4 w-4 flex-shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
+      <ArrowRight className={`h-4 w-4 shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
     </button>
   );
 
@@ -2000,7 +2017,7 @@ export function ChatPage() {
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
         {/* Left sidebar - Agent list */}
-        <aside className="hidden md:flex w-64 flex-shrink-0 border-r border-border-subtle bg-main flex-col">
+        <aside className="hidden md:flex w-64 shrink-0 border-r border-border-subtle bg-main flex-col">
           <div className="p-4 border-b border-border-subtle space-y-2">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
             <button
@@ -2090,7 +2107,7 @@ export function ChatPage() {
               agentName={selectedAgent?.name || ""}
               isLoading={isLoading}
               messageCount={messages.length}
-              onClear={clearHistory}
+              onClear={() => { void clearHistory(); }}
               onExport={handleExport}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
@@ -2101,7 +2118,8 @@ export function ChatPage() {
               onNewSession={handleNewSession}
               onDeleteSession={handleDeleteSession}
               agentId={selectedAgentId}
-                onModelChange={() => void agentsQuery.refetch()}
+              onModelChange={() => void agentsQuery.refetch()}
+              onOpenConfig={() => navigate({ to: "/config" })}
               webSearchAugmentation={selectedAgent?.web_search_augmentation}
               webSearchAvailable={webSearchAvailable}
               onWebSearchChange={async (mode) => {
@@ -2121,9 +2139,9 @@ export function ChatPage() {
             <div className="w-full space-y-4 sm:space-y-6">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
-                <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-main/50" />
+                <div className="absolute inset-0 bg-linear-to-b from-transparent via-transparent to-main/50" />
                 <div className="relative">
-                  <div className="w-24 h-24 rounded-3xl bg-gradient-to-br from-brand/20 to-accent/20 flex items-center justify-center mb-6 ring-4 ring-brand/10">
+                  <div className="w-24 h-24 rounded-3xl bg-linear-to-br from-brand/20 to-accent/20 flex items-center justify-center mb-6 ring-4 ring-brand/10">
                     <MessageCircle className="h-12 w-12 text-brand" />
                   </div>
                   <div className="absolute inset-0 rounded-3xl bg-brand/10 animate-pulse" />
@@ -2133,7 +2151,7 @@ export function ChatPage() {
               </div>
             ) : messages.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center">
-                <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-brand/10 to-accent/10 flex items-center justify-center mb-4 ring-2 ring-brand/10">
+                <div className="w-20 h-20 rounded-2xl bg-linear-to-br from-brand/10 to-accent/10 flex items-center justify-center mb-4 ring-2 ring-brand/10">
                   <Bot className="h-10 w-10 text-brand" />
                 </div>
                 <h3 className="text-xl font-black">{selectedAgent?.name}</h3>

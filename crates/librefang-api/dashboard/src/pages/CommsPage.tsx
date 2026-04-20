@@ -81,7 +81,7 @@ function TopologyNode({ node, onClick }: { node: { id: string; name?: string; st
       onClick={onClick}
       className="flex flex-col items-center gap-2 p-4 rounded-xl bg-surface border border-border-subtle hover:border-brand transition-colors cursor-pointer"
     >
-      <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${getNodeColor()} flex items-center justify-center shadow-lg`}>
+      <div className={`w-12 h-12 rounded-xl bg-linear-to-br ${getNodeColor()} flex items-center justify-center shadow-lg`}>
         <Users className="w-6 h-6 text-white" />
       </div>
       <div className="text-center">

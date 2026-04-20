@@ -85,7 +85,6 @@ export function WorkflowsPage() {
     try {
       await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
       addToast(t("workflows.run_started", { defaultValue: "Run started" }), "success");
-      await runsQuery.refetch();
     } catch (err) {
       addToast(
         err instanceof Error ? err.message : t("workflows.run_failed", { defaultValue: "Run failed" }),
