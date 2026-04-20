@@ -15,6 +15,18 @@ set -eu
 REPO="librefang/librefang"
 INSTALL_DIR="${LIBREFANG_INSTALL_DIR:-$HOME/.librefang/bin}"
 
+# Terminal colors — disabled when stdout is not a tty or NO_COLOR is set.
+# https://no-color.org/
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_GREEN=$(printf '\033[32m')
+    C_YELLOW=$(printf '\033[33m')
+    C_RED=$(printf '\033[31m')
+    C_BOLD=$(printf '\033[1m')
+    C_RESET=$(printf '\033[0m')
+else
+    C_GREEN='' C_YELLOW='' C_RED='' C_BOLD='' C_RESET=''
+fi
+
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -32,7 +44,7 @@ detect_platform() {
     case "$ARCH" in
         x86_64|amd64) ARCH="x86_64" ;;
         aarch64|arm64) ARCH="aarch64" ;;
-        *) echo "  Unsupported architecture: $ARCH"; exit 1 ;;
+        *) echo "  ${C_RED}Unsupported architecture: $ARCH${C_RESET}"; exit 1 ;;
     esac
 
     case "$OS" in
@@ -57,7 +69,7 @@ detect_platform() {
             exit 1
             ;;
         *)
-            echo "  Unsupported OS: $OS"
+            echo "  ${C_RED}Unsupported OS: $OS${C_RESET}"
             exit 1
             ;;
     esac
@@ -147,7 +159,7 @@ start_daemon_if_needed() {
         return 0
     fi
     if printf "%s" "$START_OUTPUT" | grep -Eiq "already running"; then
-        echo "  Daemon is already running — no action needed."
+        echo "  ${C_GREEN}Daemon is already running — no action needed.${C_RESET}"
         return 0
     fi
     # Only dump raw output on unexpected failures; filter out tracing
@@ -163,7 +175,7 @@ install() {
     detect_platform
 
     echo ""
-    echo "  LibreFang Installer"
+    echo "  ${C_BOLD}LibreFang Installer${C_RESET}"
     echo "  ==================="
     echo ""
 
@@ -212,18 +224,20 @@ install() {
 
     if ! curl -fL $CURL_PROGRESS "$URL" -o "$ARCHIVE"; then
         if [ -n "${PLATFORM_FALLBACK:-}" ]; then
-            echo "  Static (musl) binary not available, trying glibc build..."
+            echo "  ${C_YELLOW}Static (musl) binary not available, trying glibc build...${C_RESET}"
             PLATFORM="$PLATFORM_FALLBACK"
             URL="https://github.com/$REPO/releases/download/$VERSION/librefang-$PLATFORM.tar.gz"
             CHECKSUM_URL="$URL.sha256"
             if ! curl -fL $CURL_PROGRESS "$URL" -o "$ARCHIVE"; then
-                echo "  Download failed. The release may not exist for your platform."
+                echo "  ${C_RED}Download failed.${C_RESET}"
+                echo "    URL: $URL"
                 echo "  Install from source instead:"
                 echo "    cargo install --git https://github.com/$REPO librefang-cli"
                 exit 1
             fi
         else
-            echo "  Download failed. The release may not exist for your platform."
+            echo "  ${C_RED}Download failed.${C_RESET}"
+            echo "    URL: $URL"
             echo "  Install from source instead:"
             echo "    cargo install --git https://github.com/$REPO librefang-cli"
             exit 1
@@ -242,14 +256,14 @@ install() {
 
         if [ -n "$ACTUAL" ]; then
             if [ "$EXPECTED" != "$ACTUAL" ]; then
-                echo "  Checksum verification FAILED!"
+                echo "  ${C_RED}Checksum verification FAILED!${C_RESET}"
                 echo "    Expected: $EXPECTED"
                 echo "    Got:      $ACTUAL"
                 exit 1
             fi
-            echo "  Checksum verified."
+            echo "  ${C_GREEN}Checksum verified.${C_RESET}"
         else
-            echo "  No sha256sum/shasum found, skipping checksum verification."
+            echo "  ${C_YELLOW}No sha256sum/shasum found, skipping checksum verification.${C_RESET}"
         fi
     fi
 
@@ -265,7 +279,7 @@ install() {
         if command_exists codesign; then
             if ! codesign --force --sign - "$INSTALL_DIR/librefang"; then
                 echo ""
-                echo "  Warning: ad-hoc code signing failed."
+                echo "  ${C_YELLOW}Warning: ad-hoc code signing failed.${C_RESET}"
                 echo "  On Apple Silicon, the binary may be killed (SIGKILL) by Gatekeeper."
                 echo "  Try manually: xattr -cr $INSTALL_DIR/librefang && codesign --force --sign - $INSTALL_DIR/librefang"
                 echo ""
@@ -300,13 +314,13 @@ install() {
                 # or comments containing the word silently skip the append.
                 if ! grep -qE "\.librefang/bin" "$SHELL_RC" 2>/dev/null; then
                     echo "fish_add_path \"$INSTALL_DIR\"" >> "$SHELL_RC"
-                    echo "  Added $INSTALL_DIR to PATH in $SHELL_RC"
+                    echo "  ${C_GREEN}Added $INSTALL_DIR to PATH in $SHELL_RC${C_RESET}"
                 fi
                 ;;
             *)
                 if ! grep -qE "\.librefang/bin" "$SHELL_RC" 2>/dev/null; then
                     echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$SHELL_RC"
-                    echo "  Added $INSTALL_DIR to PATH in $SHELL_RC"
+                    echo "  ${C_GREEN}Added $INSTALL_DIR to PATH in $SHELL_RC${C_RESET}"
                 fi
                 ;;
         esac
@@ -322,9 +336,9 @@ install() {
         INSTALLED_VERSION=$("$INSTALL_DIR/librefang" --version 2>/dev/null || echo "$VERSION")
         echo ""
         if [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$INSTALLED_VERSION" ]; then
-            echo "  LibreFang upgraded successfully! ($OLD_VERSION -> $INSTALLED_VERSION)"
+            echo "  ${C_GREEN}LibreFang upgraded successfully!${C_RESET} ($OLD_VERSION -> ${C_BOLD}$INSTALLED_VERSION${C_RESET})"
         else
-            echo "  LibreFang installed successfully! ($INSTALLED_VERSION)"
+            echo "  ${C_GREEN}LibreFang installed successfully!${C_RESET} (${C_BOLD}$INSTALLED_VERSION${C_RESET})"
         fi
     else
         echo ""
@@ -351,7 +365,7 @@ install() {
         # errors so the installer output stays clean.
         echo "  Registering boot service..."
         SVC_OUTPUT=$("$INSTALL_DIR/librefang" service install 2>&1) || {
-            echo "  Warning: boot service registration failed."
+            echo "  ${C_YELLOW}Warning: boot service registration failed.${C_RESET}"
             if [ -n "$SVC_OUTPUT" ]; then
                 printf "%s\n" "$SVC_OUTPUT" | sed 's/^/    /'
             fi
@@ -360,7 +374,7 @@ install() {
         echo "  Starting daemon in background..."
         start_daemon_if_needed || {
             echo ""
-            echo "  Warning: automatic daemon start failed."
+            echo "  ${C_YELLOW}Warning: automatic daemon start failed.${C_RESET}"
             echo "  Start it manually with:"
             echo "    $INSTALL_DIR/librefang start"
         }
@@ -437,7 +451,7 @@ install() {
         if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
             echo ""
             echo "  ========================================================"
-            echo "  To use 'librefang', first refresh your PATH:"
+            echo "  ${C_BOLD}To use 'librefang', first refresh your PATH:${C_RESET}"
             echo ""
             case "$USER_SHELL" in
                 */fish|fish) echo "    fish_add_path \"$INSTALL_DIR\"" ;;
