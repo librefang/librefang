@@ -316,13 +316,33 @@ use tracing::{debug, error, info, warn};
 use librefang_runtime::str_utils::safe_truncate_str;
 
 fn start_stream_text_bridge(
-    mut event_rx: mpsc::Receiver<StreamEvent>,
+    event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
         KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
     >,
     is_group: bool,
 ) -> mpsc::Receiver<String> {
+    let (rx, _status) = start_stream_text_bridge_with_status(event_rx, kernel_handle, is_group);
+    rx
+}
+
+/// Same as `start_stream_text_bridge` but also returns a oneshot that
+/// resolves to the kernel's actual `Result` after the stream has fully
+/// drained. Callers use this to drive proper lifecycle reactions, accurate
+/// `record_delivery` metrics, and `suppress_error_responses` honor for
+/// public-feed adapters.
+fn start_stream_text_bridge_with_status(
+    mut event_rx: mpsc::Receiver<StreamEvent>,
+    kernel_handle: tokio::task::JoinHandle<
+        KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
+    >,
+    is_group: bool,
+) -> (
+    mpsc::Receiver<String>,
+    tokio::sync::oneshot::Receiver<Result<(), String>>,
+) {
     let (tx, rx) = mpsc::channel::<String>(64);
+    let (status_tx, status_rx) = tokio::sync::oneshot::channel();
     let error_tx = tx.clone();
 
     let bridge_handle = tokio::spawn(async move {
@@ -332,6 +352,10 @@ fn start_stream_text_bridge(
         // tool call or content-block array.
         let mut iter_buf = String::new();
         let mut saw_tool_use = false;
+        // Most recent tool name surfaced as a progress line. Used to avoid
+        // emitting back-to-back duplicate "🔧 same_tool" lines when a driver
+        // double-fires ToolUseStart for the same call.
+        let mut last_progress_tool: Option<String> = None;
 
         while let Some(event) = event_rx.recv().await {
             match event {
@@ -357,14 +381,40 @@ fn start_stream_text_bridge(
                     iter_buf.clear();
                     saw_tool_use = false;
                 }
-                StreamEvent::ToolUseStart { .. } => {
+                StreamEvent::ToolUseStart { name, .. } => {
                     saw_tool_use = true;
+                    // Surface tool invocations to the user as a short progress
+                    // line. Streaming adapters (Telegram) edit this into the
+                    // live message; non-streaming adapters fall back to plain
+                    // text and the line just becomes part of the reply.
+                    if !name.is_empty() && last_progress_tool.as_deref() != Some(name.as_str()) {
+                        let line = format!("\n\n🔧 `{name}`\n");
+                        if tx.send(line).await.is_err() {
+                            break;
+                        }
+                        last_progress_tool = Some(name);
+                    }
+                }
+                StreamEvent::ToolExecutionResult { name, is_error, .. } => {
+                    // Only surface failures — successes are followed by the
+                    // model's next prose iteration which is signal enough.
+                    if is_error && !name.is_empty() {
+                        let line = format!("\n⚠️ `{name}` failed\n");
+                        if tx.send(line).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Allow the same tool name to fire a fresh progress line
+                    // on the next ToolUseStart (e.g. retried tool calls).
+                    if last_progress_tool.as_deref() == Some(name.as_str()) {
+                        last_progress_tool = None;
+                    }
                 }
                 StreamEvent::PhaseChange { .. } => {
-                    // PhaseChange events (e.g. "long_running") are NOT injected
-                    // into the text stream — they would persist in the response.
-                    // They flow through the SSE endpoint as `event: phase` and
-                    // each adapter handles them independently.
+                    // PhaseChange events (e.g. "long_running") fire on every
+                    // iteration and are too noisy for inline display. They
+                    // still flow through the SSE endpoint as `event: phase`
+                    // for the dashboard.
                 }
                 _ => {}
             }
@@ -380,18 +430,23 @@ fn start_stream_text_bridge(
     });
 
     tokio::spawn(async move {
-        let error_msg = match kernel_handle.await {
+        let (error_msg, status): (Option<String>, Result<(), String>) = match kernel_handle.await {
             Err(e) => {
                 error!("Streaming kernel task panicked: {e}");
-                Some(
-                    "Sorry, something went wrong on my end. Please try again in a moment."
-                        .to_string(),
+                (
+                    Some(
+                        "Sorry, something went wrong on my end. Please try again in a moment."
+                            .to_string(),
+                    ),
+                    Err(format!("kernel task panicked: {e}")),
                 )
             }
             Ok(Err(e)) => {
                 let err_str = e.to_string();
                 error!("Streaming kernel task returned error: {err_str}");
-                if err_str.contains(librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER) {
+                let user_msg = if err_str
+                    .contains(librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER)
+                {
                     Some(
                         "\n\n---\n[Task timed out. The output above may be incomplete.]"
                             .to_string(),
@@ -419,7 +474,8 @@ fn start_stream_text_bridge(
                     } else {
                         Some(sanitize_channel_error(&err_str))
                     }
-                }
+                };
+                (user_msg, Err(err_str))
             }
             Ok(Ok(result)) => {
                 debug!(
@@ -428,7 +484,7 @@ fn start_stream_text_bridge(
                     iterations = result.iterations,
                     "Streaming kernel task completed"
                 );
-                None
+                (None, Ok(()))
             }
         };
         // Send error notification to the user through the channel before
@@ -443,9 +499,12 @@ fn start_stream_text_bridge(
         if let Err(e) = bridge_handle.await {
             error!("Streaming bridge task panicked: {e}");
         }
+        // Report kernel terminal status to any caller that opted in. Sent
+        // last so awaiters can be sure the text channel has fully drained.
+        let _ = status_tx.send(status);
     });
 
-    rx
+    (rx, status_rx)
 }
 
 /// Wraps `LibreFangKernel` to implement `ChannelBridgeHandle`.
@@ -534,6 +593,30 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .await
             .map_err(|e| format!("{e}"))?;
         Ok(start_stream_text_bridge(
+            event_rx,
+            kernel_handle,
+            sender.is_group,
+        ))
+    }
+
+    async fn send_message_streaming_with_sender_status(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> Result<
+        (
+            mpsc::Receiver<String>,
+            tokio::sync::oneshot::Receiver<Result<(), String>>,
+        ),
+        String,
+    > {
+        let (event_rx, kernel_handle) = self
+            .kernel
+            .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(start_stream_text_bridge_with_status(
             event_rx,
             kernel_handle,
             sender.is_group,
@@ -3307,6 +3390,296 @@ mod tests {
             msg.is_none(),
             "Expected tool call JSON to be filtered, but got: {:?}",
             msg
+        );
+    }
+
+    /// ToolUseStart should surface a short progress line so users see what
+    /// the agent is currently doing inside their channel reply (mirrors the
+    /// behavior of hermes-agent's commentary stream).
+    #[tokio::test]
+    async fn test_stream_bridge_surfaces_tool_use_progress() {
+        use librefang_runtime::agent_loop::AgentLoopResult;
+
+        let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+
+        event_tx
+            .send(StreamEvent::ToolUseStart {
+                id: "tool_1".to_string(),
+                name: "web_search".to_string(),
+            })
+            .await
+            .unwrap();
+        // Tool call syntax echoed as text — should be filtered at ContentComplete.
+        event_tx
+            .send(StreamEvent::TextDelta {
+                text: "tool_use: web_search".to_string(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::ContentComplete {
+                stop_reason: librefang_types::message::StopReason::ToolUse,
+                usage: librefang_types::message::TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+        // Next iteration: actual model prose after the tool result.
+        event_tx
+            .send(StreamEvent::TextDelta {
+                text: "Found 3 results.".to_string(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::ContentComplete {
+                stop_reason: librefang_types::message::StopReason::EndTurn,
+                usage: librefang_types::message::TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+        drop(event_tx);
+
+        let mut received: Vec<String> = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            received.push(msg);
+        }
+        let combined = received.join("");
+        assert!(
+            combined.contains("🔧") && combined.contains("web_search"),
+            "Expected tool progress line in stream, got: {combined:?}"
+        );
+        assert!(
+            combined.contains("Found 3 results."),
+            "Expected post-tool prose in stream, got: {combined:?}"
+        );
+    }
+
+    /// A failed tool execution should surface a visible warning line so the
+    /// user knows the agent's plan hit a snag.
+    #[tokio::test]
+    async fn test_stream_bridge_surfaces_tool_failure() {
+        use librefang_runtime::agent_loop::AgentLoopResult;
+
+        let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+
+        event_tx
+            .send(StreamEvent::ToolUseStart {
+                id: "tool_1".to_string(),
+                name: "shell_exec".to_string(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::ToolExecutionResult {
+                name: "shell_exec".to_string(),
+                result_preview: "permission denied".to_string(),
+                is_error: true,
+            })
+            .await
+            .unwrap();
+        drop(event_tx);
+
+        let mut received: Vec<String> = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            received.push(msg);
+        }
+        let combined = received.join("");
+        assert!(
+            combined.contains("⚠️")
+                && combined.contains("shell_exec")
+                && combined.contains("failed"),
+            "Expected failure marker in stream, got: {combined:?}"
+        );
+    }
+
+    /// Successful tool executions should NOT emit a "done" line — the model's
+    /// next prose iteration is signal enough, and adding a line per call gets
+    /// noisy fast for agents that chain many tools.
+    #[tokio::test]
+    async fn test_stream_bridge_quiet_on_tool_success() {
+        use librefang_runtime::agent_loop::AgentLoopResult;
+
+        let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+
+        event_tx
+            .send(StreamEvent::ToolExecutionResult {
+                name: "web_search".to_string(),
+                result_preview: "ok".to_string(),
+                is_error: false,
+            })
+            .await
+            .unwrap();
+        drop(event_tx);
+
+        let mut received: Vec<String> = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            received.push(msg);
+        }
+        let combined = received.join("");
+        assert!(
+            !combined.contains("✓") && !combined.contains("done"),
+            "Expected silence on tool success, got: {combined:?}"
+        );
+    }
+
+    /// Back-to-back duplicate ToolUseStart events for the same tool name
+    /// should produce only one progress line — some drivers double-fire.
+    #[tokio::test]
+    async fn test_stream_bridge_dedupes_consecutive_tool_progress() {
+        use librefang_runtime::agent_loop::AgentLoopResult;
+
+        let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+
+        for _ in 0..3 {
+            event_tx
+                .send(StreamEvent::ToolUseStart {
+                    id: "tool_1".to_string(),
+                    name: "web_search".to_string(),
+                })
+                .await
+                .unwrap();
+        }
+        drop(event_tx);
+
+        let mut received: Vec<String> = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            received.push(msg);
+        }
+        let combined = received.join("");
+        let progress_count = combined.matches("🔧").count();
+        assert_eq!(
+            progress_count, 1,
+            "Expected 1 progress line for repeated same-tool starts, got {progress_count}: {combined:?}"
+        );
+    }
+
+    /// The status oneshot must resolve to Ok(()) when the kernel handle
+    /// completes successfully — this is what bridge.rs uses to decide
+    /// `AgentPhase::Done` vs `AgentPhase::Error` and to populate
+    /// `record_delivery(success=true)`.
+    #[tokio::test]
+    async fn test_stream_bridge_status_success() {
+        use librefang_runtime::agent_loop::AgentLoopResult;
+
+        let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+
+        let (mut rx, status_rx) =
+            start_stream_text_bridge_with_status(event_rx, kernel_handle, false);
+
+        event_tx
+            .send(StreamEvent::TextDelta {
+                text: "hello".to_string(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::ContentComplete {
+                stop_reason: librefang_types::message::StopReason::EndTurn,
+                usage: librefang_types::message::TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+        drop(event_tx);
+
+        // Drain text channel
+        while rx.recv().await.is_some() {}
+
+        let status = status_rx.await.expect("status oneshot dropped");
+        assert!(
+            status.is_ok(),
+            "Expected kernel success status, got {status:?}"
+        );
+    }
+
+    /// The status oneshot must resolve to Err(...) when the agent loop
+    /// returns a KernelError. bridge.rs uses this to honor
+    /// `suppress_error_responses` (so Mastodon won't post sanitized errors
+    /// to a public timeline) and to record `success=false`.
+    #[tokio::test]
+    async fn test_stream_bridge_status_error() {
+        use librefang_kernel::error::KernelError;
+        use librefang_types::error::LibreFangError;
+
+        let (_event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async {
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
+                LibreFangError::Internal("rate limit hit".to_string()).into(),
+            )
+        });
+
+        let (mut rx, status_rx) =
+            start_stream_text_bridge_with_status(event_rx, kernel_handle, false);
+
+        // Drain text channel — will include sanitized error message
+        let mut received = String::new();
+        while let Some(chunk) = rx.recv().await {
+            received.push_str(&chunk);
+        }
+
+        let status = status_rx.await.expect("status oneshot dropped");
+        assert!(
+            status.is_err(),
+            "Expected kernel error status, got {status:?}"
+        );
+        // The original error string should be preserved in the status,
+        // letting record_delivery / journal report what actually happened.
+        assert!(
+            status.as_ref().unwrap_err().contains("rate limit"),
+            "Expected original error in status, got {status:?}"
+        );
+        // The user-facing text should still get a sanitized DM reply.
+        assert!(
+            !received.is_empty(),
+            "Expected user-facing error text, got empty stream"
+        );
+    }
+
+    /// Group conversations should suppress error TEXT (no sanitized prose
+    /// posted to the channel) but the status oneshot must still report Err
+    /// so bridge.rs can record_delivery(success=false) and emit Error
+    /// reaction. Without this distinction, group errors would silently look
+    /// like successful empty replies.
+    #[tokio::test]
+    async fn test_stream_bridge_group_error_suppresses_text_but_reports_err() {
+        use librefang_kernel::error::KernelError;
+        use librefang_types::error::LibreFangError;
+
+        let (_event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async {
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
+                LibreFangError::Internal("some internal failure".to_string()).into(),
+            )
+        });
+
+        let (mut rx, status_rx) =
+            start_stream_text_bridge_with_status(event_rx, kernel_handle, /* is_group */ true);
+
+        let mut received = String::new();
+        while let Some(chunk) = rx.recv().await {
+            received.push_str(&chunk);
+        }
+
+        assert!(
+            received.is_empty(),
+            "Group conversations must not surface sanitized errors as text, got: {received:?}"
+        );
+        let status = status_rx.await.expect("status oneshot dropped");
+        assert!(
+            status.is_err(),
+            "Group error must still be reported via status oneshot"
         );
     }
 

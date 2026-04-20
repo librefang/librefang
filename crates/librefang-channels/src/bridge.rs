@@ -353,6 +353,42 @@ pub trait ChannelBridgeHandle: Send + Sync {
         self.send_message_streaming(agent_id, message).await
     }
 
+    /// Streaming send that *also* reports the kernel's terminal success/error
+    /// once the stream completes. Callers that need accurate delivery metrics,
+    /// lifecycle reactions, and error suppression should use this variant —
+    /// the plain `send_message_streaming_with_sender` collapses everything
+    /// into the text channel, which makes it impossible to distinguish a
+    /// successful reply from a sanitized error message after the fact.
+    ///
+    /// The oneshot resolves to `Ok(())` on success and `Err(error_string)` on
+    /// failure (panic, kernel error, or LLM error). It is sent only once the
+    /// kernel join handle has resolved, so awaiting it after draining the
+    /// text receiver is safe.
+    ///
+    /// Default implementation preserves existing behavior by reporting
+    /// fake-success — implementers that can detect kernel failure (e.g. the
+    /// real `LibreFangKernel` impl) should override this to surface real
+    /// status.
+    async fn send_message_streaming_with_sender_status(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> Result<
+        (
+            mpsc::Receiver<String>,
+            tokio::sync::oneshot::Receiver<Result<(), String>>,
+        ),
+        String,
+    > {
+        let rx = self
+            .send_message_streaming_with_sender(agent_id, message, sender)
+            .await?;
+        let (status_tx, status_rx) = tokio::sync::oneshot::channel();
+        let _ = status_tx.send(Ok(()));
+        Ok((rx, status_rx))
+    }
+
     /// Push a proactive outbound message to a channel recipient.
     ///
     /// Used by the REST API push endpoint (`POST /api/agents/:id/push`) to let
@@ -2893,7 +2929,76 @@ async fn dispatch_message(
         }
     }
 
-    // Non-streaming path: send to agent and relay response (with sender identity).
+    // Non-streaming-adapter path. We route through the kernel's streaming
+    // API (via `_status` variant) so progress events (tool invocations,
+    // errors) get surfaced into the accumulated text — the channel bridge
+    // injects "🔧 tool_name" and "⚠️ tool failed" lines for streaming
+    // consumers, and we want non-streaming adapters (Discord/Slack/Matrix/...)
+    // to show those too. We accumulate deltas and send once via send_response
+    // so output_format and thread_id are still honored.
+    //
+    // The `_status` variant returns a oneshot that resolves to the kernel's
+    // terminal Result. We use it to drive the correct lifecycle reaction
+    // (Done vs Error), accurate `record_delivery` success metric, journal
+    // status, and to honor `suppress_error_responses` on public-feed adapters
+    // (Mastodon) — accumulated text contains a sanitized error string when
+    // the agent loop fails, which we must not leak to a public timeline.
+    //
+    // If the streaming kernel call is unavailable up-front we fall through
+    // to the non-streaming kernel call — preserves the pre-existing
+    // `handle_send_error` retry / re-resolution path.
+    if let Ok((mut delta_rx, status_rx)) = handle
+        .send_message_streaming_with_sender_status(agent_id, &text, &sender_ctx)
+        .await
+    {
+        let mut accumulated = String::new();
+        while let Some(delta) = delta_rx.recv().await {
+            accumulated.push_str(&delta);
+        }
+        // Status is sent after the text channel fully drains, so awaiting
+        // here will not block longer than the stream itself.
+        let kernel_status = status_rx.await.unwrap_or(Ok(()));
+        let success = kernel_status.is_ok();
+        let phase = if success {
+            AgentPhase::Done
+        } else {
+            AgentPhase::Error
+        };
+        send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
+        if !accumulated.is_empty() && (success || !adapter.suppress_error_responses()) {
+            send_response(
+                adapter,
+                &message.sender,
+                accumulated,
+                thread_id,
+                output_format,
+            )
+            .await;
+        }
+        let err_str = kernel_status.as_ref().err().cloned();
+        handle
+            .record_delivery(
+                agent_id,
+                ct_str,
+                &message.sender.platform_id,
+                success,
+                err_str.as_deref(),
+                thread_id,
+            )
+            .await;
+        if let Some(j) = journal {
+            let jstatus = if success {
+                crate::message_journal::JournalStatus::Completed
+            } else {
+                crate::message_journal::JournalStatus::Failed
+            };
+            j.update_status(&message.platform_message_id, jstatus, err_str)
+                .await;
+        }
+        return;
+    }
+
+    // Fallback: streaming kernel call unavailable for this request.
     match handle
         .send_message_with_sender(agent_id, &text, &sender_ctx)
         .await
