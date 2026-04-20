@@ -1972,16 +1972,30 @@ pub async fn config_set(
     }
 
     // Trigger reload
-    let reload_status = match state.kernel.reload_config().await {
-        Ok(plan) => {
-            if plan.restart_required {
-                "applied_partial"
-            } else {
-                "applied"
+    let (reload_status, reload_error): (&'static str, Option<String>) =
+        match state.kernel.reload_config().await {
+            Ok(plan) => {
+                let s = if plan.restart_required {
+                    "applied_partial"
+                } else {
+                    "applied"
+                };
+                (s, None)
             }
-        }
-        Err(_) => "saved_reload_failed",
-    };
+            Err(e) => {
+                // Surface the actual reload failure reason so the dashboard
+                // can show users what's wrong (e.g. "validation failed:
+                // network_enabled is true but shared_secret is empty"
+                // instead of an opaque "saved but reload failed"). The TOML
+                // file has already been written at this point, so leaving
+                // the user without a reason is doubly bad — they can't
+                // distinguish "transient kernel hiccup, restart will pick
+                // it up" from "permanently invalid config that breaks
+                // restart too".
+                tracing::warn!(error = %e, %path, "config reload failed after write");
+                ("saved_reload_failed", Some(e))
+            }
+        };
 
     state.kernel.audit().record(
         "system",
@@ -1990,10 +2004,11 @@ pub async fn config_set(
         "completed",
     );
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": reload_status, "path": path})),
-    )
+    let mut body = serde_json::json!({"status": reload_status, "path": path});
+    if let Some(err) = reload_error {
+        body["reload_error"] = serde_json::Value::String(err);
+    }
+    (StatusCode::OK, Json(body))
 }
 
 /// Convert a serde_json::Value to a toml_edit::Value (format-preserving).
