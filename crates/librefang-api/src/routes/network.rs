@@ -1155,6 +1155,58 @@ fn filter_to_comms_event(
             }),
             _ => None,
         },
+        EventPayload::System(sys) => {
+            use librefang_types::event::SystemEvent;
+            match sys {
+                SystemEvent::TaskPosted {
+                    task_id,
+                    title,
+                    assigned_to,
+                    created_by,
+                } => {
+                    let target_id = assigned_to.clone().unwrap_or_default();
+                    let source_id = created_by.clone().unwrap_or_default();
+                    Some(CommsEvent {
+                        id: event.id.to_string(),
+                        timestamp: event.timestamp.to_rfc3339(),
+                        kind: CommsEventKind::TaskPosted,
+                        source_id: source_id.clone(),
+                        source_name: resolve_name(&source_id),
+                        target_id: target_id.clone(),
+                        target_name: resolve_name(&target_id),
+                        detail: format!("Task posted: {} ({})", title, task_id),
+                    })
+                }
+                SystemEvent::TaskClaimed {
+                    task_id,
+                    claimed_by,
+                } => Some(CommsEvent {
+                    id: event.id.to_string(),
+                    timestamp: event.timestamp.to_rfc3339(),
+                    kind: CommsEventKind::TaskClaimed,
+                    source_id: claimed_by.clone(),
+                    source_name: resolve_name(claimed_by),
+                    target_id: String::new(),
+                    target_name: String::new(),
+                    detail: format!("Task claimed: {}", task_id),
+                }),
+                SystemEvent::TaskCompleted { task_id, result } => Some(CommsEvent {
+                    id: event.id.to_string(),
+                    timestamp: event.timestamp.to_rfc3339(),
+                    kind: CommsEventKind::TaskCompleted,
+                    source_id: event.source.to_string(),
+                    source_name: resolve_name(&event.source.to_string()),
+                    target_id: String::new(),
+                    target_name: String::new(),
+                    detail: format!(
+                        "Task completed: {} — {}",
+                        task_id,
+                        librefang_types::truncate_str(result, 200)
+                    ),
+                }),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1467,7 +1519,6 @@ pub async fn comms_task(
 
     match state
         .kernel
-        .memory_substrate()
         .task_post(
             &req.title,
             &req.description,
