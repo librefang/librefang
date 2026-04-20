@@ -22,87 +22,86 @@ env:
 
 jobs:
   # ── Detect changes + compute affected crate subset ─────────────────────────────
-  # The CI pipeline splits into two lanes:
-  # - PR lane: only test crates the PR touches (plus their transitive reverse
-  #   deps). Windows/macOS are skipped entirely; they run only after merge.
-  # - Main lane (push to main, or PR that touches the workspace root / xtask /
-  #   CI itself): full workspace test on all three platforms.
+  # PR lane: only test crates the PR touches (no fan-out to downstream —
+  #   main catches cross-crate breakage on merge).
+  # Main lane (push to main, or PR that touches CI / root Cargo.toml / xtask):
+  #   full workspace test on all three platforms.
+  #
+  # All detection is pure `git diff` (no external action) so `act` can run
+  # this job locally against a stock ubuntu image with no GitHub API access.
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      docs: ${{ steps.filter.outputs.docs }}
-      ci: ${{ steps.filter.outputs.ci }}
-      install: ${{ steps.filter.outputs.install }}
-      full_run: ${{ steps.decide.outputs.full_run }}
-      crates: ${{ steps.affected.outputs.crates }}
+      rust: ${{ steps.diff.outputs.rust }}
+      docs: ${{ steps.diff.outputs.docs }}
+      ci: ${{ steps.diff.outputs.ci }}
+      install: ${{ steps.diff.outputs.install }}
+      full_run: ${{ steps.diff.outputs.full_run }}
+      crates: ${{ steps.diff.outputs.crates }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - uses: dorny/paths-filter@v4
-        id: filter
-        with:
-          filters: |
-            rust:
-              - 'crates/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'xtask/**'
-            docs:
-              - 'docs/**'
-              - '*.md'
-            ci:
-              - '.github/workflows/**'
-            install:
-              - 'web/public/install.sh'
-              - 'web/public/install.ps1'
-              - 'scripts/tests/install_sh_test.sh'
-            root_cargo:
-              - 'Cargo.toml'
-              - 'xtask/**'
-
-      - name: Decide full vs selective run
-        id: decide
-        run: |
-          # Full run is required when:
-          # 1. Pushing directly to main (this is what "merge" looks like to CI)
-          # 2. CI itself changed (we want to exercise the new pipeline on all platforms)
-          # 3. Workspace root Cargo.toml or xtask changed (can restructure the graph
-          #    in ways our per-crate logic can't predict safely)
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "full_run=true" >> "$GITHUB_OUTPUT"
-            echo "Full run: push to main"
-          elif [ "${{ steps.filter.outputs.ci }}" = "true" ]; then
-            echo "full_run=true" >> "$GITHUB_OUTPUT"
-            echo "Full run: CI workflow changed"
-          elif [ "${{ steps.filter.outputs.root_cargo }}" = "true" ]; then
-            echo "full_run=true" >> "$GITHUB_OUTPUT"
-            echo "Full run: workspace Cargo.toml or xtask changed"
-          else
-            echo "full_run=false" >> "$GITHUB_OUTPUT"
-            echo "Selective run"
-          fi
-
-      - name: Compute affected crates (PR selective)
-        id: affected
-        if: steps.decide.outputs.full_run == 'false' && steps.filter.outputs.rust == 'true'
+      - name: Compute diff and route
+        id: diff
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          # Crate directories the diff touched, full stop. No transitive
-          # fan-out: if a PR changes a leaf crate and breaks a downstream
-          # consumer, the breakage surfaces on the post-merge full run.
-          # That trade — fast PRs, occasional main hotfix — is intentional.
-          DIRECT=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- 'crates/*/' \
-            | sed -n 's|crates/\([^/]*\)/.*|\1|p' \
+
+          # Range: PR → base..head, push → just the pushed commit.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            RANGE=("$BASE_SHA" "$HEAD_SHA")
+          else
+            RANGE=("HEAD~1" "HEAD")
+          fi
+
+          CHANGED=$(git diff --name-only "${RANGE[@]}")
+          echo "Changed files ($EVENT_NAME):"
+          printf '  %s\n' $CHANGED
+
+          # Boolean flags — `grep -q` and echo "true"/"false".
+          has() { printf '%s\n' "$CHANGED" | grep -qE "$1"; }
+
+          if has '^(crates/|Cargo\.toml$|Cargo\.lock$|xtask/)'; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            RUST=true
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+            RUST=false
+          fi
+          if has '^(docs/|.*\.md$)'; then echo "docs=true"  >> "$GITHUB_OUTPUT"; else echo "docs=false"  >> "$GITHUB_OUTPUT"; fi
+          if has '^\.github/workflows/';  then echo "ci=true"    >> "$GITHUB_OUTPUT"; CI=true; else echo "ci=false" >> "$GITHUB_OUTPUT"; CI=false; fi
+          if has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$'; then echo "install=true" >> "$GITHUB_OUTPUT"; else echo "install=false" >> "$GITHUB_OUTPUT"; fi
+          if has '^Cargo\.toml$|^xtask/';  then ROOT_CARGO=true;  else ROOT_CARGO=false;  fi
+
+          # Full run policy — stated plainly so it's auditable from the log:
+          # 1. Push to main (merge) → catch cross-crate breakage before it rots
+          # 2. CI file itself changed → test the new pipeline on every platform
+          # 3. Root Cargo.toml / xtask → graph-level change, per-crate logic
+          #    can't safely predict the blast radius
+          if [ "$EVENT_NAME" = "push" ]; then
+            FULL=true; REASON="push to main"
+          elif [ "$CI" = "true" ]; then
+            FULL=true; REASON="CI workflow changed"
+          elif [ "$ROOT_CARGO" = "true" ]; then
+            FULL=true; REASON="workspace Cargo.toml or xtask changed"
+          else
+            FULL=false; REASON="selective"
+          fi
+          echo "full_run=$FULL" >> "$GITHUB_OUTPUT"
+          echo "Route: full_run=$FULL ($REASON)"
+
+          # Directly-touched crates (no downstream fan-out — on purpose).
+          DIRECT=$(printf '%s\n' "$CHANGED" \
+            | sed -n 's|^crates/\([^/]*\)/.*|\1|p' \
             | sort -u | tr '\n' ' ')
-          echo "Affected crates: ${DIRECT:-<none>}"
           echo "crates=$DIRECT" >> "$GITHUB_OUTPUT"
+          echo "Affected crates: ${DIRECT:-<none>}"
 
   # ── Reject dashboard build artifacts in PRs ────────────────────────────────────
   no-build-artifacts:
