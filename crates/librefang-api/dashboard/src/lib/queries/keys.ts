@@ -260,6 +260,12 @@ export const mediaKeys = {
   videoTasks: () => [...mediaKeys.all, "videoTasks"] as const,
   videoTask: (taskId: string, provider: string) =>
     [...mediaKeys.videoTasks(), taskId, provider] as const,
+  // Stable key for the disabled state of useVideoTask — paired with skipToken
+  // so every not-yet-submitted render shares the same (unused) cache slot.
+  // Shape mirrors `videoTask(taskId, provider)` (4 segments) so both branches
+  // of the query are type-compatible under useQuery's generic inference.
+  videoTaskDisabled: () =>
+    [...mediaKeys.videoTasks(), "__disabled__", "__disabled__"] as const,
 };
 
 export const mcpKeys = {

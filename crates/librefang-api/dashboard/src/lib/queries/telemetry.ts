@@ -1,15 +1,10 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getMetricsText } from "../http/client";
 import { telemetryKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_MS = 5_000;
 const REFRESH_MS = 5_000;
-
-type UseTelemetryMetricsOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
 
 export const telemetryQueryOptions = () =>
   queryOptions({
@@ -19,16 +14,6 @@ export const telemetryQueryOptions = () =>
     refetchInterval: REFRESH_MS,
   });
 
-export function useTelemetryMetrics(
-  options: UseTelemetryMetricsOptions = {},
-) {
-  const { enabled, staleTime, refetchInterval } = options;
-  const query = telemetryQueryOptions();
-
-  return useQuery({
-    ...query,
-    ...(enabled !== undefined ? { enabled } : {}),
-    ...(staleTime !== undefined ? { staleTime } : {}),
-    ...(refetchInterval !== undefined ? { refetchInterval } : {}),
-  });
+export function useTelemetryMetrics(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(telemetryQueryOptions(), options));
 }

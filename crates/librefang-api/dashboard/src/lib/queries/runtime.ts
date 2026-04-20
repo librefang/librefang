@@ -12,30 +12,9 @@ import {
   listCronJobs,
 } from "../../api";
 import { runtimeKeys, auditKeys, cronKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 export { useDashboardSnapshot, useVersionInfo } from "./overview";
-
-type UseAuditRecentOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
-
-export const runtimePageRefreshers = [
-  "refetchSnapshot",
-  "refetchVersion",
-  "refetchQueue",
-  "refetchHealthDetail",
-  "refetchSecurity",
-  "refetchAuditRecent",
-  "refetchAuditVerify",
-  "refetchBackups",
-  "refetchTaskStatus",
-  "refetchTaskList",
-] as const;
-
-export type RuntimePageRefresherName =
-  (typeof runtimePageRefreshers)[number];
 
 export const systemStatusQueryOptions = () =>
   queryOptions({
@@ -93,19 +72,8 @@ export const auditRecentQueryOptions = (limit: number) =>
     refetchInterval: 30_000,
   });
 
-export function useAuditRecent(
-  limit: number,
-  options: UseAuditRecentOptions = {},
-) {
-  const { enabled, staleTime, refetchInterval } = options;
-  const query = auditRecentQueryOptions(limit);
-
-  return useQuery({
-    ...query,
-    ...(enabled !== undefined ? { enabled } : {}),
-    ...(staleTime !== undefined ? { staleTime } : {}),
-    ...(refetchInterval !== undefined ? { refetchInterval } : {}),
-  });
+export function useAuditRecent(limit: number, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(auditRecentQueryOptions(limit), options));
 }
 
 export const auditVerifyQueryOptions = () =>

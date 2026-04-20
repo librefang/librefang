@@ -26,8 +26,6 @@ import {
   useBackups,
   useTaskQueueStatus,
   useTaskQueue,
-  runtimePageRefreshers,
-  type RuntimePageRefresherName,
 } from "../lib/queries/runtime";
 import {
   useShutdownServer,
@@ -102,19 +100,6 @@ export function RuntimePage() {
   const taskStatusQuery = useTaskQueueStatus();
   const taskListQuery = useTaskQueue();
 
-  const refreshers: Record<RuntimePageRefresherName, () => unknown> = {
-    refetchSnapshot: () => snapshotQuery.refetch(),
-    refetchVersion: () => versionQuery.refetch(),
-    refetchQueue: () => queueQuery.refetch(),
-    refetchHealthDetail: () => healthDetailQuery.refetch(),
-    refetchSecurity: () => securityQuery.refetch(),
-    refetchAuditRecent: () => auditQuery.refetch(),
-    refetchAuditVerify: () => auditVerifyQuery.refetch(),
-    refetchBackups: () => backupsQuery.refetch(),
-    refetchTaskStatus: () => taskStatusQuery.refetch(),
-    refetchTaskList: () => taskListQuery.refetch(),
-  };
-
   const shutdownMutation = useShutdownServer({
     onSuccess: () => setShowShutdownConfirm(false),
   });
@@ -151,9 +136,20 @@ export function RuntimePage() {
   const tasks = taskListQuery.data?.tasks ?? [];
 
   const refreshAll = () => {
-    runtimePageRefreshers.forEach((name) => {
-      refreshers[name]();
-    });
+    for (const q of [
+      snapshotQuery,
+      versionQuery,
+      queueQuery,
+      healthDetailQuery,
+      securityQuery,
+      auditQuery,
+      auditVerifyQuery,
+      backupsQuery,
+      taskStatusQuery,
+      taskListQuery,
+    ]) {
+      q.refetch();
+    }
   };
 
   return (

@@ -454,7 +454,11 @@ function VideoPanel({
   const [prompt, setPrompt] = useState("");
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
-  const [status, setStatus] = useState<MediaVideoStatus | null>(null);
+  // Local draft shown immediately after submission, before the first poll
+  // returns. Once the query has data we derive status from the query instead —
+  // keeping a mirrored copy of query data in state is a React anti-pattern
+  // and can race the first fetch for a new taskId.
+  const [submittedDraft, setSubmittedDraft] = useState<MediaVideoStatus | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [taskProvider, setTaskProvider] = useState<string | null>(null);
   const completionToastShown = useRef<string | null>(null);
@@ -469,10 +473,7 @@ function VideoPanel({
     },
   );
 
-  useEffect(() => {
-    if (!videoTaskQuery.data) return;
-    setStatus(videoTaskQuery.data);
-  }, [videoTaskQuery.data]);
+  const status: MediaVideoStatus | null = videoTaskQuery.data ?? submittedDraft;
 
   useEffect(() => {
     if (!videoTaskQuery.isError) return;
@@ -516,7 +517,7 @@ function VideoPanel({
           },
           {
             onSuccess: (data) => {
-              setStatus({ status: "submitted", task_id: data.task_id });
+              setSubmittedDraft({ status: "submitted", task_id: data.task_id });
               setTaskId(data.task_id);
               setTaskProvider(data.provider);
               completionToastShown.current = null;

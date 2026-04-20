@@ -19,6 +19,7 @@ import { createQueryClientWrapper } from "../test/query-client";
 vi.mock("../http/client", () => ({
   switchAgentSession: vi.fn().mockResolvedValue({}),
   deleteSession: vi.fn().mockResolvedValue({}),
+  patchAgent: vi.fn().mockResolvedValue({}),
   patchAgentConfig: vi.fn().mockResolvedValue({}),
   spawnAgent: vi.fn().mockResolvedValue({}),
   cloneAgent: vi.fn().mockResolvedValue({}),
