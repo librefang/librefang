@@ -194,18 +194,35 @@ export function AgentsPage() {
   }
 
   function saveName() {
+    // Re-entrancy guard: Enter pressed twice in quick succession would
+    // otherwise queue a second PATCH for the same name, which the kernel's
+    // `update_name` rejects with `AgentAlreadyExists` (the name_index
+    // entry was just claimed by the first call) — surfacing as a
+    // misleading "Failed to rename" toast for the user. The Save button
+    // already has the same disable check; mirror it here for keyboard
+    // submits.
+    if (patchAgentMutation.isPending) return;
     const trimmed = nameDraft.trim();
     if (!detailAgent || !trimmed || trimmed === detailAgent.name) {
       setEditingName(false);
       return;
     }
+    // Capture the agent id we're renaming. If the user closes this modal
+    // and opens a different agent before the mutation resolves, the
+    // onSuccess handler must NOT smuggle this rename's name onto the new
+    // agent's local state.
+    const targetId = detailAgent.id;
     patchAgentMutation.mutate(
-      { agentId: detailAgent.id, body: { name: trimmed } },
+      { agentId: targetId, body: { name: trimmed } },
       {
         onSuccess: () => {
           // Optimistic local update so the header reflects the new name
-          // before the agents query refetch lands.
-          setDetailAgent(prev => prev ? { ...prev, name: trimmed } : prev);
+          // before the agents query refetch lands. Gate on id so a stale
+          // mutation completing after the user navigated to another
+          // agent doesn't overwrite that other agent's name.
+          setDetailAgent(prev =>
+            prev?.id === targetId ? { ...prev, name: trimmed } : prev,
+          );
           setEditingName(false);
           addToast(t("agents.rename_success", { defaultValue: "Agent renamed" }), "success");
         },
