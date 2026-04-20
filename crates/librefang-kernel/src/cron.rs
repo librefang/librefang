@@ -166,6 +166,10 @@ impl CronScheduler {
         // Compute initial next_run
         job.next_run = Some(compute_next_run(&job.schedule));
 
+        // Defense-in-depth: At-schedules must always be one_shot regardless of
+        // what the caller passed (#2808).
+        let one_shot = one_shot || matches!(job.schedule, CronSchedule::At { .. });
+
         let id = job.id;
         self.jobs.insert(id, JobMeta::new(job, one_shot));
         Ok(id)
@@ -699,6 +703,47 @@ mod tests {
         assert_eq!(meta.last_status.as_deref(), Some("ok"));
         assert_eq!(meta.consecutive_errors, 0);
         assert!(meta.job.last_run.is_some());
+    }
+
+    // -- test_at_schedule_defaults_to_one_shot (#2808) ----------------------
+
+    #[test]
+    fn test_at_schedule_is_forced_one_shot() {
+        // add_job with one_shot=false but At schedule → must be treated as one_shot
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let mut job = make_job(agent);
+        job.schedule = CronSchedule::At {
+            at: Utc::now() + chrono::Duration::seconds(60),
+        };
+
+        // Caller explicitly passes one_shot=false — defense-in-depth must override
+        let id = sched.add_job(job, false).unwrap();
+        assert_eq!(sched.total_jobs(), 1);
+        let meta = sched.get_meta(id).unwrap();
+        assert!(meta.one_shot, "At schedule must be forced to one_shot=true");
+
+        sched.record_success(id);
+        assert_eq!(
+            sched.total_jobs(),
+            0,
+            "At-schedule job must be removed after success"
+        );
+    }
+
+    #[test]
+    fn test_at_schedule_one_shot_true_stays_one_shot() {
+        // Explicit one_shot=true on At schedule must also be removed after firing
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let mut job = make_job(agent);
+        job.schedule = CronSchedule::At {
+            at: Utc::now() + chrono::Duration::seconds(60),
+        };
+
+        let id = sched.add_job(job, true).unwrap();
+        sched.record_success(id);
+        assert_eq!(sched.total_jobs(), 0);
     }
 
     // -- test_record_failure_auto_disable -----------------------------------
