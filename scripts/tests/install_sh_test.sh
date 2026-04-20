@@ -22,17 +22,52 @@ HOME="$TMP_HOME" LIBREFANG_INSTALLER_SOURCE_ONLY=1 . "$INSTALLER_PATH"
 [ "$(shell_rc_from_shell fish)" = "$TMP_HOME/.config/fish/config.fish" ] || fail "fish rc mapping"
 pass "shell_rc_from_shell mappings"
 
-# choose_shell_rc fallback order: bashrc -> zshrc -> fish
+# choose_shell_rc: $SHELL fallback when detect_user_shell came back empty.
+# Real-world hit: curl|sh pipelines where `ps -p $PPID -o comm=` returns
+# something unexpected and USER_SHELL ends up blank.
 mkdir -p "$TMP_HOME/.config/fish"
 : > "$TMP_HOME/.config/fish/config.fish"
 : > "$TMP_HOME/.zshrc"
 : > "$TMP_HOME/.bashrc"
-[ "$(choose_shell_rc "")" = "$TMP_HOME/.bashrc" ] || fail "fallback should prefer .bashrc"
-rm -f "$TMP_HOME/.bashrc"
-[ "$(choose_shell_rc "")" = "$TMP_HOME/.zshrc" ] || fail "fallback should pick .zshrc when .bashrc missing"
+[ "$(SHELL=/usr/bin/zsh choose_shell_rc "")" = "$TMP_HOME/.zshrc" ] \
+    || fail "empty arg + SHELL=zsh should pick .zshrc"
+[ "$(SHELL=/bin/bash choose_shell_rc "")" = "$TMP_HOME/.bashrc" ] \
+    || fail "empty arg + SHELL=bash should pick .bashrc"
+[ "$(SHELL=/usr/bin/fish choose_shell_rc "")" = "$TMP_HOME/.config/fish/config.fish" ] \
+    || fail "empty arg + SHELL=fish should pick fish config"
+pass "choose_shell_rc uses \$SHELL when detect returned empty"
+
+# File-existence fallback: when both the arg and $SHELL are unusable, prefer
+# .zshrc > .bashrc > fish. Old order (bashrc first) silently wrote PATH into
+# .bashrc for zsh users whose shell detection had failed upstream — zsh then
+# can't see librefang in new shells.
+[ "$(SHELL= choose_shell_rc "")" = "$TMP_HOME/.zshrc" ] \
+    || fail "file fallback should prefer .zshrc over .bashrc"
 rm -f "$TMP_HOME/.zshrc"
-[ "$(choose_shell_rc "")" = "$TMP_HOME/.config/fish/config.fish" ] || fail "fallback should pick fish config last"
-pass "choose_shell_rc fallback order"
+[ "$(SHELL= choose_shell_rc "")" = "$TMP_HOME/.bashrc" ] \
+    || fail "file fallback should pick .bashrc when .zshrc missing"
+rm -f "$TMP_HOME/.bashrc"
+[ "$(SHELL= choose_shell_rc "")" = "$TMP_HOME/.config/fish/config.fish" ] \
+    || fail "file fallback should pick fish config last"
+pass "choose_shell_rc file-existence fallback order"
+
+# The "already installed" check must match the install path, not any line
+# mentioning the word "librefang". Prior `grep -q "librefang"` was too loose:
+# a user named `librefang` (HOME=/home/librefang) caused any .zshrc line
+# containing that path fragment — oh-my-zsh cache vars, plugin paths, a
+# comment — to silently suppress the PATH append, leaving the shell with no
+# way to find the binary.
+: > "$TMP_HOME/.zshrc"
+: > "$TMP_HOME/.bashrc"
+echo 'ZSH_CACHE_DIR="/home/librefang/.cache/oh-my-zsh"' >> "$TMP_HOME/.zshrc"
+echo '# user note: librefang install coming soon' >> "$TMP_HOME/.zshrc"
+grep -qE "\.librefang/bin" "$TMP_HOME/.zshrc" \
+    && fail "rc with only librefang-in-path words should not match \.librefang/bin"
+
+echo 'export PATH="/home/alice/.librefang/bin:$PATH"' >> "$TMP_HOME/.zshrc"
+grep -qE "\.librefang/bin" "$TMP_HOME/.zshrc" \
+    || fail "rc with real librefang/bin PATH export should match"
+pass "already-installed check uses precise \.librefang/bin pattern"
 
 # auto-start flag parser
 for truthy in 1 true TRUE yes YES on ON; do

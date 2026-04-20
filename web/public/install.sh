@@ -116,11 +116,23 @@ choose_shell_rc() {
         return 0
     fi
 
-    # Check bash/zsh first (more common defaults), fish last.
-    if [ -f "$HOME/.bashrc" ]; then
-        printf "%s\n" "$HOME/.bashrc"
-    elif [ -f "$HOME/.zshrc" ]; then
+    # When detect_user_shell returns empty (rare — curl|sh with unusual ps
+    # output), fall back to $SHELL before guessing by file existence. $SHELL
+    # is set by login and is usually accurate even inside the sh subshell.
+    SHELL_RC=$(shell_rc_from_shell "${SHELL:-}")
+    if [ -n "$SHELL_RC" ]; then
+        printf "%s\n" "$SHELL_RC"
+        return 0
+    fi
+
+    # Last resort: pick by file existence. Prefer .zshrc: bashrc exists on
+    # many distros by default even for zsh users, so bashrc-first would
+    # quietly write PATH into the wrong rc for anyone whose shell detection
+    # failed upstream (then zsh can't see librefang).
+    if [ -f "$HOME/.zshrc" ]; then
         printf "%s\n" "$HOME/.zshrc"
+    elif [ -f "$HOME/.bashrc" ]; then
+        printf "%s\n" "$HOME/.bashrc"
     elif [ -f "$HOME/.config/fish/config.fish" ]; then
         printf "%s\n" "$HOME/.config/fish/config.fish"
     else
@@ -266,13 +278,16 @@ install() {
                     rm -f "$TMP_FISH_RC"
                 fi
 
-                if ! grep -q "librefang" "$SHELL_RC" 2>/dev/null; then
+                # Match the actual install path, not any line mentioning
+                # "librefang" — otherwise usernames, oh-my-zsh plugin paths,
+                # or comments containing the word silently skip the append.
+                if ! grep -qE "\.librefang/bin" "$SHELL_RC" 2>/dev/null; then
                     echo "fish_add_path \"$INSTALL_DIR\"" >> "$SHELL_RC"
                     echo "  Added $INSTALL_DIR to PATH in $SHELL_RC"
                 fi
                 ;;
             *)
-                if ! grep -q "librefang" "$SHELL_RC" 2>/dev/null; then
+                if ! grep -qE "\.librefang/bin" "$SHELL_RC" 2>/dev/null; then
                     echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$SHELL_RC"
                     echo "  Added $INSTALL_DIR to PATH in $SHELL_RC"
                 fi
