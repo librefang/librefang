@@ -1,18 +1,35 @@
 use crate::changelog;
 use crate::common::repo_root;
 use crate::sync_versions;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use regex::Regex;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::process::Command;
 
+/// Release channel for non-interactive version pick. Mirrors the 1/2/3/4
+/// prompt entries in the interactive flow so `just release` and
+/// `gh workflow run Release --input channel=…` pick versions identically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Channel {
+    Stable,
+    Beta,
+    Rc,
+    Lts,
+}
+
 #[derive(Parser, Debug)]
 pub struct ReleaseArgs {
     /// Explicit version (e.g. 2026.3.2114 or 2026.3.2114-beta1)
     #[arg(long)]
     pub version: Option<String>,
+
+    /// Non-interactive channel pick. When set, the 1/2/3/4 prompt is
+    /// replaced with the corresponding auto-computed version. Mutually
+    /// exclusive with `--version`.
+    #[arg(long, value_enum, conflicts_with = "version")]
+    pub channel: Option<Channel>,
 
     /// Skip confirmation prompts
     #[arg(long)]
@@ -212,77 +229,90 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let base_version = compute_calver();
 
-        if args.no_confirm {
-            // Default to stable
+        // Pre-compute every candidate up front so both the interactive
+        // prompt and the `--channel` non-interactive path pick from the
+        // same numbers. Previously this was only done inside the prompt
+        // branch, which meant `--no-confirm` silently defaulted to
+        // stable and skipped rc/beta/lts entirely.
+        let current_beta_num = Regex::new(r"-beta(\d+)$")
+            .unwrap()
+            .captures(&current)
+            .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
+            .unwrap_or(0);
+        let current_rc_num = Regex::new(r"-rc(\d+)$")
+            .unwrap()
+            .captures(&current)
+            .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let beta_re =
+            Regex::new(&format!(r"^v{}-beta(\d+)$", regex::escape(&base_version))).unwrap();
+        let max_beta_tag = Command::new("git")
+            .args(["tag", "-l", &format!("v{}-beta*", base_version)])
+            .current_dir(&root)
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|l| beta_re.captures(l.trim()))
+                    .filter_map(|cap| cap.get(1)?.as_str().parse::<u64>().ok())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        let next_beta = max_beta_tag.max(current_beta_num) + 1;
+
+        let rc_re = Regex::new(&format!(r"^v{}-rc(\d+)$", regex::escape(&base_version))).unwrap();
+        let max_rc_tag = Command::new("git")
+            .args(["tag", "-l", &format!("v{}-rc*", base_version)])
+            .current_dir(&root)
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|l| rc_re.captures(l.trim()))
+                    .filter_map(|cap| cap.get(1)?.as_str().parse::<u64>().ok())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        let next_rc = max_rc_tag.max(current_rc_num) + 1;
+
+        // Compute LTS: YYYY.M.PATCH-lts
+        let lts_base = {
+            let now = chrono::Local::now();
+            format!("{}.{}", now.format("%Y"), now.format("%-m"))
+        };
+        // Count existing LTS tags to auto-increment patch
+        let lts_count = Command::new("git")
+            .args(["tag", "-l", &format!("v{}.*-lts", lts_base)])
+            .current_dir(&root)
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .count()
+            })
+            .unwrap_or(0);
+        let next_lts_patch = lts_count;
+
+        let version_for = |ch: Channel| -> String {
+            match ch {
+                Channel::Stable => base_version.clone(),
+                Channel::Beta => format!("{}-beta{}", base_version, next_beta),
+                Channel::Rc => format!("{}-rc{}", base_version, next_rc),
+                Channel::Lts => format!("{}.{}-lts", lts_base, next_lts_patch),
+            }
+        };
+
+        if let Some(ch) = args.channel {
+            version_for(ch)
+        } else if args.no_confirm {
+            // Default to stable when the caller asked to skip prompts
+            // without committing to a channel.
             base_version
         } else {
-            // Find max existing rc/beta number for this day and increment.
-            // Also consider the current workspace version (tag may have been
-            // deleted by a previous failed release attempt).
-            let current_beta_num = Regex::new(r"-beta(\d+)$")
-                .unwrap()
-                .captures(&current)
-                .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
-                .unwrap_or(0);
-            let current_rc_num = Regex::new(r"-rc(\d+)$")
-                .unwrap()
-                .captures(&current)
-                .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
-                .unwrap_or(0);
-
-            let beta_re =
-                Regex::new(&format!(r"^v{}-beta(\d+)$", regex::escape(&base_version))).unwrap();
-            let max_beta_tag = Command::new("git")
-                .args(["tag", "-l", &format!("v{}-beta*", base_version)])
-                .current_dir(&root)
-                .output()
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .filter_map(|l| beta_re.captures(l.trim()))
-                        .filter_map(|cap| cap.get(1)?.as_str().parse::<u64>().ok())
-                        .max()
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0);
-            let next_beta = max_beta_tag.max(current_beta_num) + 1;
-
-            let rc_re =
-                Regex::new(&format!(r"^v{}-rc(\d+)$", regex::escape(&base_version))).unwrap();
-            let max_rc_tag = Command::new("git")
-                .args(["tag", "-l", &format!("v{}-rc*", base_version)])
-                .current_dir(&root)
-                .output()
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .filter_map(|l| rc_re.captures(l.trim()))
-                        .filter_map(|cap| cap.get(1)?.as_str().parse::<u64>().ok())
-                        .max()
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0);
-            let next_rc = max_rc_tag.max(current_rc_num) + 1;
-
-            // Compute LTS: YYYY.M.PATCH-lts
-            let lts_base = {
-                let now = chrono::Local::now();
-                format!("{}.{}", now.format("%Y"), now.format("%-m"))
-            };
-            // Count existing LTS tags to auto-increment patch
-            let lts_count = Command::new("git")
-                .args(["tag", "-l", &format!("v{}.*-lts", lts_base)])
-                .current_dir(&root)
-                .output()
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .count()
-                })
-                .unwrap_or(0);
-            let next_lts_patch = lts_count;
-
             println!();
             println!(
                 "Current version: {} (tag: {})",
@@ -290,18 +320,18 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
                 prev_tag.as_deref().unwrap_or("none")
             );
             println!();
-            println!("  1) stable  -> {}", base_version);
-            println!("  2) beta    -> {}-beta{}", base_version, next_beta);
-            println!("  3) rc      -> {}-rc{}", base_version, next_rc);
-            println!("  4) lts     -> {}.{}-lts", lts_base, next_lts_patch);
+            println!("  1) stable  -> {}", version_for(Channel::Stable));
+            println!("  2) beta    -> {}", version_for(Channel::Beta));
+            println!("  3) rc      -> {}", version_for(Channel::Rc));
+            println!("  4) lts     -> {}", version_for(Channel::Lts));
             println!();
 
             let choice = prompt("Choose [1/2/3/4]: ");
             match choice.as_str() {
-                "1" => base_version,
-                "2" => format!("{}-beta{}", base_version, next_beta),
-                "3" => format!("{}-rc{}", base_version, next_rc),
-                "4" => format!("{}.{}-lts", lts_base, next_lts_patch),
+                "1" => version_for(Channel::Stable),
+                "2" => version_for(Channel::Beta),
+                "3" => version_for(Channel::Rc),
+                "4" => version_for(Channel::Lts),
                 _ => return Err("Invalid choice".into()),
             }
         }

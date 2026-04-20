@@ -25,6 +25,23 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: |
+          `current` reruns the release for the tag picked by `--ref`.
+          `stable/beta/rc/lts` kicks off `cargo xtask release --channel …`
+          which opens a bump-version PR; merging that PR auto-tags and
+          re-enters this workflow via the tag push. Mirrors `just release`.
+        required: true
+        type: choice
+        default: current
+        options:
+          - current
+          - stable
+          - beta
+          - rc
+          - lts
 
 permissions:
   contents: write
@@ -71,13 +88,58 @@ jobs:
           git push origin "$TAG"
 
   # ═════════════════════════════════════════════════════════════════════════
+  # workflow_dispatch channel=stable/beta/rc/lts → run the same flow as
+  # `just release`: compute the next tag for the chosen channel and open a
+  # bump-version PR. Merging that PR auto-tags (see `tag_on_merge`) and the
+  # tag push re-enters this workflow via `create_release` and the rest of
+  # the graph.
+  #
+  # channel=current takes a different path: it does not run this job at all,
+  # and instead the `workflow_dispatch && inputs.channel == 'current'` arm
+  # of every tag-driven job reuses `github.ref` (the tag you picked with
+  # `gh workflow run Release --ref <tag>`) to re-publish without retagging.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  bump_version:
+    name: Bump Version (${{ inputs.channel }})
+    if: github.event_name == 'workflow_dispatch' && inputs.channel != 'current'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # PAT (not GITHUB_TOKEN) is required so the PR is opened by a
+          # user account and `release: published` events on the
+          # subsequent tag can trigger downstream workflows. Same reason
+          # `create_release` uses HOMEBREW_TAP_TOKEN.
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Run xtask release
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          # --no-article: skip Dev.to article generation (CI runner has no
+          # Claude CLI and we don't want to gate releases on it).
+          # --no-confirm + --channel: non-interactive version pick.
+          cargo xtask release --no-confirm --no-article --channel ${{ inputs.channel }}
+
+  # ═════════════════════════════════════════════════════════════════════════
   # Tag push → create GitHub Release entry (from release-create.yml)
   # All other tag-driven jobs `needs: [create_release]`.
   # ═════════════════════════════════════════════════════════════════════════
 
   create_release:
     name: Create Release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -207,9 +269,10 @@ jobs:
   create_lts_branch:
     name: Create LTS Branch
     if: >
-      github.event_name == 'push' &&
-      startsWith(github.ref, 'refs/tags/v') &&
-      endsWith(github.ref, '-lts')
+      ((github.event_name == 'push') ||
+       (github.event_name == 'workflow_dispatch' && inputs.channel == 'current'))
+      && startsWith(github.ref, 'refs/tags/v')
+      && endsWith(github.ref, '-lts')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -261,7 +324,9 @@ jobs:
 
   build_dashboard:
     name: Build Dashboard
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -290,7 +355,9 @@ jobs:
 
   cli_mac:
     name: CLI / ${{ matrix.target }}
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release, build_dashboard]
     runs-on: macos-latest
     strategy:
@@ -342,7 +409,9 @@ jobs:
 
   cli_linux:
     name: CLI / ${{ matrix.target }}
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release, build_dashboard]
     runs-on: ubuntu-22.04
     strategy:
@@ -402,7 +471,9 @@ jobs:
 
   cli_android:
     name: CLI / aarch64-linux-android
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release, build_dashboard]
     runs-on: ubuntu-22.04
 
@@ -444,7 +515,9 @@ jobs:
 
   cli_linux_mini:
     name: CLI / ${{ matrix.target }} (mini)
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release, build_dashboard]
     runs-on: ubuntu-22.04
     strategy:
@@ -493,7 +566,9 @@ jobs:
 
   cli_musl:
     name: CLI / ${{ matrix.target }} (static)
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release, build_dashboard]
     runs-on: ubuntu-22.04
     strategy:
@@ -551,7 +626,9 @@ jobs:
 
   cli_windows:
     name: CLI / ${{ matrix.target }}
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release, build_dashboard]
     runs-on: windows-latest
     strategy:
@@ -600,7 +677,9 @@ jobs:
 
   cli_mac_mini:
     name: CLI / ${{ matrix.target }} (mini)
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release, build_dashboard]
     runs-on: macos-latest
     strategy:
@@ -651,7 +730,9 @@ jobs:
 
   cli_windows_mini:
     name: CLI / ${{ matrix.target }} (mini)
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release, build_dashboard]
     runs-on: windows-latest
     strategy:
@@ -699,7 +780,9 @@ jobs:
 
   cli_npm:
     name: CLI / npm
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [cli_mac, cli_linux, cli_musl, cli_windows]
     runs-on: ubuntu-latest
     steps:
@@ -722,7 +805,9 @@ jobs:
 
   cli_pypi:
     name: CLI / PyPI
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [cli_mac, cli_linux, cli_musl, cli_windows]
     runs-on: ubuntu-latest
     steps:
@@ -745,7 +830,9 @@ jobs:
 
   sync_homebrew:
     name: Sync to Homebrew Tap
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     needs: [cli_mac, cli_linux]
     steps:
@@ -1028,7 +1115,9 @@ jobs:
 
   desktop:
     name: Desktop / ${{ matrix.platform.name }}
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release]
     strategy:
       fail-fast: false
@@ -1211,7 +1300,9 @@ jobs:
 
   sync_homebrew_cask:
     name: Sync Homebrew Cask
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     needs: [desktop]
     steps:
@@ -1444,7 +1535,9 @@ jobs:
 
   docker:
     name: Docker / ${{ matrix.platform }}
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release]
     timeout-minutes: 30
     strategy:
@@ -1499,7 +1592,9 @@ jobs:
 
   docker-manifest:
     name: Docker Manifest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     needs: [docker]
     steps:
@@ -1537,7 +1632,9 @@ jobs:
 
   deploy_fly:
     name: Deploy to Fly.io
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     needs: [docker-manifest]
     steps:
@@ -1550,7 +1647,9 @@ jobs:
 
   deploy_render:
     name: Deploy to Render
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     needs: [docker-manifest]
     steps:
@@ -1570,7 +1669,9 @@ jobs:
 
   sdk_javascript:
     name: SDK / JavaScript (npm)
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release]
     runs-on: ubuntu-latest
     defaults:
@@ -1628,7 +1729,9 @@ jobs:
 
   sdk_cli_npm:
     name: SDK / CLI npm (@librefang/cli)
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release]
     runs-on: ubuntu-latest
     defaults:
@@ -1667,7 +1770,9 @@ jobs:
 
   sdk_python:
     name: SDK / Python (PyPI)
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release]
     runs-on: ubuntu-latest
     defaults:
@@ -1709,7 +1814,9 @@ jobs:
 
   sdk_rust:
     name: SDK / Rust (crates.io)
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release]
     runs-on: ubuntu-latest
     defaults:
@@ -1746,7 +1853,9 @@ jobs:
 
   sdk_go:
     name: SDK / Go (tag)
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release]
     runs-on: ubuntu-latest
     steps:
