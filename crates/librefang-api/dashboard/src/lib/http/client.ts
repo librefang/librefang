@@ -119,6 +119,7 @@ export {
   resumeAgent,
   deleteAgent,
   clearAgentHistory,
+  patchAgent,
   patchAgentConfig,
   createAgentSession,
   switchAgentSession,

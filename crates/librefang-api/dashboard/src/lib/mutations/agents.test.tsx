@@ -3,6 +3,7 @@ import { renderHook } from "@testing-library/react";
 import {
   useSwitchAgentSession,
   useDeleteAgentSession,
+  usePatchAgent,
   usePatchAgentConfig,
   useSpawnAgent,
   useCloneAgent,
@@ -96,6 +97,27 @@ describe("useDeleteAgentSession", () => {
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: sessionKeys.lists(),
+    });
+  });
+});
+
+describe("usePatchAgent", () => {
+  it("invalidates agent lists and agent detail on rename", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => usePatchAgent(), { wrapper });
+
+    await result.current.mutateAsync({
+      agentId: "agent-1",
+      body: { name: "renamed-agent" },
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.lists(),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.detail("agent-1"),
     });
   });
 });
