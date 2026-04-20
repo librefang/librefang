@@ -26,6 +26,8 @@ pub enum EmbeddingError {
     Parse(String),
     #[error("Missing API key: {0}")]
     MissingApiKey(String),
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
     #[error("Unsupported: {0}")]
     Unsupported(String),
 }
@@ -218,14 +220,40 @@ pub struct CohereEmbeddingDriver {
     api_key: Zeroizing<String>,
     base_url: String,
     model: String,
-    /// `input_type` sent to Cohere v3 models. Defaults to `search_document`,
-    /// which is the right choice for indexing memory/documents. Callers that
-    /// use the driver only for query-time embeddings should eventually gain
-    /// a way to override this, but for now indexing is the primary path and
-    /// `search_document` is a safe, widely-compatible default.
+    /// `input_type` sent to Cohere v3 models. Defaults to `search_document`
+    /// (correct for indexing memory/documents, the primary path today) and
+    /// can be overridden via the `LIBREFANG_COHERE_INPUT_TYPE` env var for
+    /// deployments whose primary path is query-time embedding or
+    /// clustering.  Invalid values are ignored with a warning because
+    /// Cohere returns a cryptic 400 otherwise.
     input_type: String,
     client: reqwest::Client,
     dims: usize,
+}
+
+/// Valid values for Cohere v3 `input_type`, per the official API reference.
+const COHERE_VALID_INPUT_TYPES: &[&str] = &[
+    "search_document",
+    "search_query",
+    "classification",
+    "clustering",
+];
+
+/// Resolve `input_type` for Cohere v3 models, applying the
+/// `LIBREFANG_COHERE_INPUT_TYPE` env var override if present and valid.
+fn resolve_cohere_input_type() -> String {
+    match std::env::var("LIBREFANG_COHERE_INPUT_TYPE") {
+        Ok(v) if COHERE_VALID_INPUT_TYPES.contains(&v.as_str()) => v,
+        Ok(v) if !v.trim().is_empty() => {
+            warn!(
+                invalid = %v,
+                valid = ?COHERE_VALID_INPUT_TYPES,
+                "LIBREFANG_COHERE_INPUT_TYPE is not one of the valid Cohere input_type values; ignoring"
+            );
+            "search_document".to_string()
+        }
+        _ => "search_document".to_string(),
+    }
 }
 
 #[derive(Serialize)]
@@ -262,7 +290,7 @@ impl CohereEmbeddingDriver {
             api_key: Zeroizing::new(config.api_key),
             base_url: config.base_url,
             model: config.model,
-            input_type: "search_document".to_string(),
+            input_type: resolve_cohere_input_type(),
             client: crate::http_client::proxied_client(),
             dims,
         })
@@ -298,7 +326,7 @@ impl EmbeddingDriver for CohereEmbeddingDriver {
             return Ok(vec![]);
         }
         if texts.len() > COHERE_EMBED_MAX_BATCH {
-            return Err(EmbeddingError::Unsupported(format!(
+            return Err(EmbeddingError::InvalidInput(format!(
                 "Cohere embed API accepts at most {} texts per request (got {})",
                 COHERE_EMBED_MAX_BATCH,
                 texts.len()
@@ -1261,8 +1289,8 @@ mod tests {
         let texts: Vec<&str> = vec!["x"; COHERE_EMBED_MAX_BATCH + 1];
         let err = driver.embed(&texts).await.unwrap_err();
         assert!(
-            matches!(err, EmbeddingError::Unsupported(_)),
-            "expected Unsupported, got {err:?}"
+            matches!(err, EmbeddingError::InvalidInput(_)),
+            "expected InvalidInput, got {err:?}"
         );
     }
 
@@ -1311,6 +1339,46 @@ mod tests {
         match had {
             Some(v) => std::env::set_var("COHERE_API_KEY", v),
             None => std::env::remove_var("COHERE_API_KEY"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_cohere_input_type_default() {
+        let had = std::env::var("LIBREFANG_COHERE_INPUT_TYPE").ok();
+        std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE");
+
+        assert_eq!(resolve_cohere_input_type(), "search_document");
+
+        if let Some(v) = had {
+            std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v);
+        }
+    }
+
+    #[test]
+    fn test_resolve_cohere_input_type_valid_override() {
+        let had = std::env::var("LIBREFANG_COHERE_INPUT_TYPE").ok();
+        std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", "search_query");
+
+        assert_eq!(resolve_cohere_input_type(), "search_query");
+
+        match had {
+            Some(v) => std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v),
+            None => std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_cohere_input_type_invalid_falls_back() {
+        let had = std::env::var("LIBREFANG_COHERE_INPUT_TYPE").ok();
+        std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", "not-a-real-type");
+
+        // Invalid values must not leak through to the Cohere API (it would
+        // 400 with a cryptic message). Fall back to search_document.
+        assert_eq!(resolve_cohere_input_type(), "search_document");
+
+        match had {
+            Some(v) => std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v),
+            None => std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE"),
         }
     }
 
