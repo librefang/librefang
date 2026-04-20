@@ -1,26 +1,33 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  getSkillDetail,
-  createSkill,
-  reloadSkills,
-  evolveUpdateSkill,
-  evolvePatchSkill,
-  evolveRollbackSkill,
-  evolveDeleteSkill,
-  evolveWriteFile,
-  evolveRemoveFile,
-  getSupportingFile,
   type ClawHubBrowseItem,
   type FangHubSkill,
   type HandDefinitionItem,
 } from "../api";
-import { useSkills, skillQueries } from "../lib/queries/skills";
-import { skillKeys } from "../lib/queries/keys";
+import {
+  useSkills,
+  skillQueries,
+  useSkillDetail,
+  useSupportingFile,
+} from "../lib/queries/skills";
 import { useHands } from "../lib/queries/hands";
-import { useUninstallSkill, useClawHubInstall, useSkillHubInstall, useInstallSkill } from "../lib/mutations/skills";
+import {
+  useUninstallSkill,
+  useClawHubInstall,
+  useSkillHubInstall,
+  useInstallSkill,
+  useCreateSkill,
+  useReloadSkills,
+  useEvolveUpdateSkill,
+  useEvolvePatchSkill,
+  useEvolveRollbackSkill,
+  useEvolveDeleteSkill,
+  useEvolveWriteFile,
+  useEvolveRemoveFile,
+} from "../lib/mutations/skills";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Card } from "../components/ui/Card";
@@ -184,6 +191,7 @@ function CreateSkillModal({ isOpen, onClose, onCreated, t }: {
   onCreated: () => void;
   t: (key: string, opts?: any) => string;
 }) {
+  const createSkillMutation = useCreateSkill();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [promptContext, setPromptContext] = useState("");
@@ -247,7 +255,7 @@ function CreateSkillModal({ isOpen, onClose, onCreated, t }: {
 
     setCreating(true);
     try {
-      await createSkill({
+      await createSkillMutation.mutateAsync({
         name: name.trim(),
         description: description.trim(),
         prompt_context: promptContext.trim(),
@@ -508,9 +516,8 @@ function SupportingFileViewer({ skillName, path, onClose, t }: {
   onClose: () => void;
   t: (key: string, opts?: any) => string;
 }) {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["skill-file", skillName, path],
-    queryFn: () => getSupportingFile(skillName, path),
+  const { data, isLoading, error } = useSupportingFile(skillName, path, {
+    enabled: !!skillName && !!path,
   });
   return (
     <div className="rounded-lg border border-border bg-surface-1 p-3 space-y-2">
@@ -542,17 +549,17 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
   onClose: () => void;
   t: (key: string, opts?: any) => string;
 }) {
-  const queryClient = useQueryClient();
   const { addToast } = useUIStore();
-  const { data: detail, isLoading, refetch } = useQuery({
-    // Use the shared factory so mutations' `invalidateQueries(skillKeys.all)`
-    // also refresh open detail modals. The old `['skill-detail', name]`
-    // namespace lived outside `skillKeys.all` and was never invalidated, so
-    // users would see stale metadata after install/update/delete.
-    queryKey: skillKeys.detail(skillName ?? ""),
-    queryFn: () => getSkillDetail(skillName!),
+  const detailQuery = useSkillDetail(skillName ?? "", {
     enabled: isOpen && !!skillName,
   });
+  const { data: detail, isLoading, refetch } = detailQuery;
+  const rollbackMutation = useEvolveRollbackSkill();
+  const removeFileMutation = useEvolveRemoveFile();
+  const deleteSkillMutation = useEvolveDeleteSkill();
+  const updateSkillMutation = useEvolveUpdateSkill();
+  const patchSkillMutation = useEvolvePatchSkill();
+  const writeFileMutation = useEvolveWriteFile();
 
   const [pane, setPane] = useState<EvolvePane>("none");
   const [viewingFile, setViewingFile] = useState<string | null>(null);
@@ -570,7 +577,6 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
     try {
       await fn();
       await refetch();
-      queryClient.invalidateQueries({ queryKey: ["skills"] });
       addToast(successMsg, "success");
       setPane("none");
     } catch (e: any) {
@@ -584,7 +590,7 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
     if (!skillName) return;
     if (!confirm(t("skills.evo_rollback_confirm", { defaultValue: "Roll back to the previous version? This cannot be undone unless you patch again." }))) return;
     void runMutation(
-      () => evolveRollbackSkill(skillName),
+      () => rollbackMutation.mutateAsync({ name: skillName }),
       t("skills.evo_rolled_back", { defaultValue: "Skill rolled back" })
     );
   };
@@ -593,7 +599,7 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
     if (!skillName) return;
     if (!confirm(t("skills.evo_remove_file_confirm", { defaultValue: `Remove ${path}?`, path }))) return;
     void runMutation(
-      () => evolveRemoveFile(skillName, path),
+      () => removeFileMutation.mutateAsync({ name: skillName, path }),
       t("skills.evo_file_removed", { defaultValue: "File removed" })
     );
   };
@@ -608,8 +614,7 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
       if (!skillName) return;
       setBusy(true);
       try {
-        await evolveDeleteSkill(skillName);
-        queryClient.invalidateQueries({ queryKey: ["skills"] });
+        await deleteSkillMutation.mutateAsync({ name: skillName });
         addToast(t("skills.evo_deleted", { defaultValue: "Skill deleted" }), "success");
         onClose();
       } catch (e: any) {
@@ -676,7 +681,7 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
               skillName={skillName}
               initialContent={detail.prompt_context || ""}
               onSubmit={(params) => runMutation(
-                () => evolveUpdateSkill(skillName, params),
+                () => updateSkillMutation.mutateAsync({ name: skillName, params }),
                 t("skills.evo_updated", { defaultValue: "Skill updated" })
               )}
               onCancel={() => setPane("none")}
@@ -688,7 +693,7 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
             <EvolvePatchPane
               skillName={skillName}
               onSubmit={(params) => runMutation(
-                () => evolvePatchSkill(skillName, params),
+                () => patchSkillMutation.mutateAsync({ name: skillName, params }),
                 t("skills.evo_patched", { defaultValue: "Skill patched" })
               )}
               onCancel={() => setPane("none")}
@@ -700,7 +705,7 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
             <EvolveUploadPane
               skillName={skillName}
               onSubmit={(params) => runMutation(
-                () => evolveWriteFile(skillName, params),
+                () => writeFileMutation.mutateAsync({ name: skillName, params }),
                 t("skills.evo_file_uploaded", { defaultValue: "File uploaded" })
               )}
               onCancel={() => setPane("none")}
@@ -1016,7 +1021,6 @@ function UninstallDialog({ skillName, onClose, onConfirm, isPending }: {
 export function SkillsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
-  const queryClient = useQueryClient();
 
   // View state — default to the region-appropriate marketplace
   const [viewMode, setViewMode] = useState<ViewMode>("fanghub");
@@ -1034,6 +1038,7 @@ export function SkillsPage() {
   // Skill evolution state
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [detailSkillName, setDetailSkillName] = useState<string | null>(null);
+  const reloadSkillsMutation = useReloadSkills();
 
   const handsQuery = useHands();
   const hands = handsQuery.data ?? [];
@@ -1236,7 +1241,7 @@ export function SkillsPage() {
               // the CLI, the agent evolve tools, or direct FS edits while the
               // dashboard was open.
               try {
-                const res = await reloadSkills();
+                const res = await reloadSkillsMutation.mutateAsync();
                 addToast(
                   t("skills.reloaded", { defaultValue: "Rescanned skills directory ({{count}} loaded)", count: (res as any).count ?? 0 }),
                   "success",
@@ -1506,7 +1511,6 @@ export function SkillsPage() {
         isOpen={showCreateModal}
         onClose={() => setShowCreateModal(false)}
         onCreated={() => {
-          queryClient.invalidateQueries({ queryKey: ["skills"] });
           addToast(t("skills.evo_created", { defaultValue: "Skill created successfully" }), "success");
         }}
         t={t}

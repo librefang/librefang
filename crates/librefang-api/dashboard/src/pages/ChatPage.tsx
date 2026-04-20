@@ -6,9 +6,10 @@ import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession } from "../api";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
+import { clearAgentHistory } from "../lib/http/client";
 import { useFullConfig } from "../lib/queries/config";
 import { useMediaProviders } from "../lib/queries/media";
-import { useModels, modelQueries } from "../lib/queries/models";
+import { useModels } from "../lib/queries/models";
 import { usePendingApprovals } from "../lib/queries/approvals";
 import { useAgents, useAgentSessions } from "../lib/queries/agents";
 import { useActiveHandsWhen } from "../lib/queries/hands";
@@ -163,7 +164,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void) {
+function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void) {
   const { t } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Per-agent loading state. A single shared `isLoading` would freeze the
@@ -317,6 +318,23 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       .finally(() => setAgentLoading(loadId, false));
   }, [agentId, sessionVersion]);
 
+  const clearHistory = useCallback(async () => {
+    if (!agentId) {
+      setMessages([]);
+      return;
+    }
+    try {
+      await clearAgentHistory(agentId);
+      sessionCache.delete(agentId);
+      if (prevAgentRef.current === agentId) {
+        messagesRef.current = [];
+      }
+      setMessages([]);
+    } catch (error) {
+      onClearError?.(error instanceof Error ? error.message : t("common.error"));
+    }
+  }, [agentId, onClearError, t]);
+
   // Send message - WS first, HTTP fallback
   const sendMessage = useCallback(async (content: string) => {
     if (!content.trim()) return;
@@ -336,7 +354,10 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         ).join("\n"));
         return;
       }
-      if (trimmed === "/clear") { setMessages([]); return; }
+      if (trimmed === "/clear") {
+        void clearHistory();
+        return;
+      }
       if (trimmed === "/agents") {
         const names = agents.map(a => `- **${a.name}** (${a.state || "unknown"})`).join("\n");
         sysMsg(names || t("chat.no_agents_available"));
@@ -625,9 +646,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent]);
-
-  const clearHistory = useCallback(() => setMessages([]), []);
+  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent, clearHistory]);
 
   return { messages, isLoading, sendMessage, clearHistory, wsConnected };
 }
@@ -1073,26 +1092,23 @@ function ChatInput({ onSend, disabled, inputDisabled, placeholder, authMissing, 
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
   agentId: string; onModelChange: () => void;
   webSearchAugmentation?: "off" | "auto" | "always"; onWebSearchChange?: (mode: "off" | "auto" | "always") => void;
   webSearchAvailable?: boolean;
+  onOpenConfig: () => void;
 }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [sessionOpen, setSessionOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Model popover state
   const [modelOpen, setModelOpen] = useState(false);
   const modelRef = useRef<HTMLDivElement>(null);
-  const [models, setModels] = useState<ModelItem[]>([]);
   const [modelSearch, setModelSearch] = useState("");
-  const [modelLoading, setModelLoading] = useState(false);
-  const [modelFetchError, setModelFetchError] = useState<string | null>(null);
   const [patchError, setPatchError] = useState<string | null>(null);
   const [patchPending, setPatchPending] = useState(false);
   const [optimisticModel, setOptimisticModel] = useState<string | null>(null);
@@ -1101,6 +1117,14 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
   const patchAgentConfigMutation = usePatchAgentConfig();
+  const modelsQuery = useModels(
+    { available: true },
+    {
+      enabled: modelOpen,
+      // Model picker opens on demand. Keep query idle until popover visible.
+      staleTime: 0,
+    },
+  );
 
   // Clear optimistic model once the real modelName catches up
   useEffect(() => {
@@ -1135,17 +1159,9 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     return () => document.removeEventListener("mousedown", handler);
   }, [modelOpen]);
 
-  // Fetch available models lazily when popover first opens
-  useEffect(() => {
-    if (!modelOpen || models.length > 0 || modelLoading) return;
-    setModelLoading(true);
-    setModelFetchError(null);
-    queryClient.fetchQuery(modelQueries.list({ available: true }))
-      .then((res: { models: ModelItem[] }) => setModels(res.models))
-      .catch(() => setModelFetchError(t("chat.unable_to_load_models")))
-      .finally(() => setModelLoading(false));
-  }, [modelOpen, models.length, modelLoading, queryClient, t]);
-
+  const models = modelsQuery.data?.models ?? [];
+  const modelLoading = modelsQuery.isLoading || modelsQuery.isFetching;
+  const modelFetchError = modelsQuery.error ? t("chat.unable_to_load_models") : null;
   const visibleModels = useMemo(() => filterVisible(models, hiddenSet), [models, hiddenSet]);
 
   // Unique providers derived from loaded models, sorted alphabetically
@@ -1275,7 +1291,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                   <div className="px-2.5 py-2 space-y-1.5">
                     <p className="text-xs text-error">{modelFetchError}</p>
                     <button
-                      onClick={() => { setModels([]); setModelFetchError(null); }}
+                      onClick={() => { void modelsQuery.refetch(); }}
                       className="text-[10px] text-brand hover:underline"
                     >
                       {t("chat.retry")}
@@ -1353,11 +1369,11 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
             <div className="hidden sm:flex items-center gap-1.5">
               <button
                 onClick={() => {
-                  if (noKey && mode === "off") {
-                    // No search key configured — navigate to Config page Web section
-                    window.location.href = "/dashboard/config";
-                    return;
-                  }
+                    if (noKey && mode === "off") {
+                      // No search key configured — navigate to Config page Web section
+                      onOpenConfig();
+                      return;
+                    }
                   const cycle: Record<string, "off" | "auto" | "always"> = { off: "auto", auto: "always", always: "off" };
                   onWebSearchChange(cycle[mode] || "auto");
                 }}
@@ -1381,7 +1397,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               </button>
               {isActive && noKey && (
                 <button
-                  onClick={() => { window.location.href = "/dashboard/config"; }}
+                  onClick={onOpenConfig}
                   className="text-[9px] text-warning hover:text-warning/80 underline hidden xl:inline"
                 >
                   {t("chat.web_search_configure", { defaultValue: "Configure API key" })}
@@ -1735,7 +1751,8 @@ export function ChatPage() {
     selectedAgentId || null,
     agents,
     sessionVersion,
-      () => void agentsQuery.refetch(),
+    () => void agentsQuery.refetch(),
+    (message) => addToast(message, "error"),
   );
   // Track LLM text streaming (cleared on `typing:stop`) independently of
   // `isLoading`, which stays true through post-processing until the final
@@ -2007,7 +2024,7 @@ export function ChatPage() {
               agentName={selectedAgent?.name || ""}
               isLoading={isLoading}
               messageCount={messages.length}
-              onClear={clearHistory}
+              onClear={() => { void clearHistory(); }}
               onExport={handleExport}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
@@ -2018,7 +2035,8 @@ export function ChatPage() {
               onNewSession={handleNewSession}
               onDeleteSession={handleDeleteSession}
               agentId={selectedAgentId}
-                onModelChange={() => void agentsQuery.refetch()}
+              onModelChange={() => void agentsQuery.refetch()}
+              onOpenConfig={() => navigate({ to: "/config" })}
               webSearchAugmentation={selectedAgent?.web_search_augmentation}
               webSearchAvailable={webSearchAvailable}
               onWebSearchChange={async (mode) => {

@@ -1,16 +1,18 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import {
-  getMcpAuthStatus, startMcpAuth, revokeMcpAuth,
   type McpServerConfigured, type McpServerConnected, type McpTransport,
   type McpCatalogEntry,
 } from "../api";
-import { useMcpServers, useMcpCatalog, useMcpHealth } from "../lib/queries/mcp";
+import { useMcpServers, useMcpCatalog, useMcpHealth, mcpQueries } from "../lib/queries/mcp";
 import {
   useAddMcpServer,
   useUpdateMcpServer,
   useDeleteMcpServer,
   useReloadMcp,
+  useStartMcpAuth,
+  useRevokeMcpAuth,
 } from "../lib/mutations/mcp";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
@@ -97,6 +99,10 @@ const defaultForm: ServerFormState = {
 // Every URL operation (update / delete / auth / reconnect) should use this.
 function serverIdOf(server: McpServerConfigured): string {
   return server.id ?? server.name;
+}
+
+function serverIdentityOf(server: Pick<McpServerConfigured, "id" | "name"> | Pick<McpServerConnected, "name">): string {
+  return "id" in server && server.id ? server.id : server.name;
 }
 
 function formToPayload(form: ServerFormState): McpServerConfigured {
@@ -289,18 +295,23 @@ function AuthBadge({
 }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
+  const queryClient = useQueryClient();
   const authState = server.auth_state?.state ?? "not_required";
   const [polling, setPolling] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const serverId = serverIdOf(server);
+  const startAuthMutation = useStartMcpAuth();
+  const revokeAuthMutation = useRevokeMcpAuth();
+  const serverIdentity = serverIdentityOf(server);
 
   useEffect(() => {
     if ((authState === "pending_auth" && polling) || polling) {
       pollRef.current = setInterval(async () => {
         try {
-          const status = await getMcpAuthStatus(serverId);
+          const status = await queryClient.fetchQuery(mcpQueries.authStatus(serverIdentity));
           if (status.auth.state === "authorized") {
             setPolling(false);
+            queryClient.invalidateQueries({ queryKey: mcpQueries.servers().queryKey });
+            queryClient.invalidateQueries({ queryKey: mcpQueries.health().queryKey });
             onAuthSuccess();
           } else if (status.auth.state === "error") {
             setPolling(false);
@@ -314,12 +325,12 @@ function AuthBadge({
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [authState, polling, serverId, onAuthSuccess, addToast, t]);
+  }, [authState, polling, serverIdentity, onAuthSuccess, addToast, queryClient, t]);
 
   const handleStartAuth = useCallback(async () => {
     const authWindow = window.open("about:blank", "_blank");
     try {
-      const result = await startMcpAuth(serverId);
+      const result = await startAuthMutation.mutateAsync(serverIdentity);
       if (authWindow && !authWindow.closed) {
         authWindow.location.href = result.auth_url;
       } else {
@@ -333,17 +344,17 @@ function AuthBadge({
       }
       addToast(e?.message || t("mcp.auth_start_failed"), "error");
     }
-  }, [serverId, addToast, t]);
+  }, [serverIdentity, startAuthMutation, addToast, t]);
 
   const handleRevoke = useCallback(async () => {
     try {
-      await revokeMcpAuth(serverId);
+      await revokeAuthMutation.mutateAsync(serverIdentity);
       onAuthSuccess();
       addToast(t("mcp.auth_revoked"), "success");
     } catch (e: any) {
       addToast(e?.message || t("mcp.auth_revoke_failed"), "error");
     }
-  }, [serverId, onAuthSuccess, addToast, t]);
+  }, [serverIdentity, revokeAuthMutation, onAuthSuccess, addToast, t]);
 
   if (authState === "not_required") return null;
 
@@ -612,7 +623,7 @@ export function McpServersPage() {
 
   const connectedMap = useMemo(() => {
     const map = new Map<string, McpServerConnected>();
-    for (const c of connected) map.set(c.name, c);
+    for (const c of connected) map.set(serverIdentityOf(c), c);
     return map;
   }, [connected]);
 
@@ -628,18 +639,19 @@ export function McpServersPage() {
     }
     if (statusFilter !== "all") {
       result = result.filter(s => {
-        const isConn = connectedMap.get(s.name)?.connected ?? false;
+        const isConn = connectedMap.get(serverIdentityOf(s))?.connected ?? false;
         return statusFilter === "connected" ? isConn : !isConn;
       });
     }
     return result;
   }, [configured, searchQuery, statusFilter, connectedMap]);
 
-  function toggleTools(name: string) {
+  function toggleTools(server: McpServerConfigured) {
+    const identity = serverIdentityOf(server);
     setExpandedTools(prev => {
       const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
+      if (next.has(identity)) next.delete(identity);
+      else next.add(identity);
       return next;
     });
   }
@@ -765,7 +777,7 @@ export function McpServersPage() {
   }, [catalogEntries, catalogSearch]);
 
   const connectedCount = useMemo(
-    () => configured.filter(s => connectedMap.get(s.name)?.connected).length,
+    () => configured.filter(s => connectedMap.get(serverIdentityOf(s))?.connected).length,
     [configured, connectedMap],
   );
   const disconnectedCount = configured.length - connectedCount;
@@ -932,14 +944,14 @@ export function McpServersPage() {
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
               {filteredServers.map((server) => (
                 <ServerCard
-                  key={server.name}
+                  key={serverIdentityOf(server)}
                   server={server}
-                  conn={connectedMap.get(server.name)}
-                  isExpanded={expandedTools.has(server.name)}
-                  onToggleTools={() => toggleTools(server.name)}
+                  conn={connectedMap.get(serverIdentityOf(server))}
+                  isExpanded={expandedTools.has(serverIdentityOf(server))}
+                  onToggleTools={() => toggleTools(server)}
                   onEdit={() => openEdit(server)}
                   onDelete={() => setDeletingServer(server)}
-                  onAuthSuccess={() => serversQuery.refetch()}
+                  onAuthSuccess={() => undefined}
                   t={t}
                 />
               ))}

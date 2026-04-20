@@ -2041,7 +2041,7 @@ async fn dispatch_message(
                     debug!(
                         channel = ct_str,
                         sender = %sender,
-                        "Reply precheck: NO_REPLY — staying silent"
+                        "Reply precheck declined — staying silent"
                     );
                     return;
                 }
