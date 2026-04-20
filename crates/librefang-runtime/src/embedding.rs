@@ -1420,6 +1420,83 @@ mod tests {
         }
     }
 
+    /// Clear every env var that `detect_embedding_provider` inspects. Each
+    /// detect-priority test must call this first and restore the vars after
+    /// so host env state doesn't pollute the priority it exercises.
+    fn clear_detect_env() -> Vec<(&'static str, Option<String>)> {
+        let keys = [
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GROQ_API_KEY",
+            "MISTRAL_API_KEY",
+            "TOGETHER_API_KEY",
+            "FIREWORKS_API_KEY",
+            "COHERE_API_KEY",
+            "OLLAMA_HOST",
+        ];
+        let saved = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        saved
+    }
+
+    fn restore_detect_env(saved: Vec<(&'static str, Option<String>)>) {
+        for (k, v) in saved {
+            match v {
+                Some(value) => std::env::set_var(k, value),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_ignores_groq() {
+        // Regression guard: Groq has no /v1/embeddings endpoint (confirmed
+        // empirically — `GET api.groq.com/openai/v1/models` returns only
+        // chat + Whisper). Auto-detect MUST NOT pick Groq, otherwise users
+        // who only set GROQ_API_KEY get silent 404s at the first embed call.
+        let saved = clear_detect_env();
+        std::env::set_var("GROQ_API_KEY", "test-groq-key");
+
+        assert_eq!(
+            detect_embedding_provider(),
+            None,
+            "GROQ_API_KEY alone must not auto-select any embedding provider"
+        );
+
+        restore_detect_env(saved);
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_picks_cohere_when_only_cohere_set() {
+        let saved = clear_detect_env();
+        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+
+        assert_eq!(detect_embedding_provider(), Some("cohere"));
+
+        restore_detect_env(saved);
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_priority_openai_beats_cohere() {
+        // OpenAI is still #1 in the priority list; setting both keys picks OpenAI.
+        let saved = clear_detect_env();
+        std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+
+        assert_eq!(detect_embedding_provider(), Some("openai"));
+
+        restore_detect_env(saved);
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_none_when_nothing_set() {
+        let saved = clear_detect_env();
+        assert_eq!(detect_embedding_provider(), None);
+        restore_detect_env(saved);
+    }
+
     #[test]
     fn test_resolve_cohere_input_type_default() {
         let had = std::env::var("LIBREFANG_COHERE_INPUT_TYPE").ok();
