@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   spawnAgent,
   cloneAgent,
+  stopAgent,
   suspendAgent,
   resumeAgent,
   deleteAgent,
@@ -39,6 +40,16 @@ export function useCloneAgent() {
       qc.invalidateQueries({ queryKey: agentKeys.all });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
+  });
+}
+
+// Abort an in-flight agent run. The backend aborts the kernel task; the UI
+// side separately reconciles streaming state (see ChatPage.stopMessage), so
+// this hook intentionally doesn't invalidate queries — agent list state is
+// unchanged by a stop.
+export function useStopAgent() {
+  return useMutation({
+    mutationFn: (agentId: string) => stopAgent(agentId),
   });
 }
 

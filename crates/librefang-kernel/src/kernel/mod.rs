@@ -1970,10 +1970,22 @@ impl LibreFangKernel {
                     configured_model.as_str()
                 };
                 let api_key_env = config.memory.embedding_api_key_env.as_deref().unwrap_or("");
-                let custom_url = config
-                    .provider_urls
-                    .get(provider.as_str())
-                    .map(|s| s.as_str());
+                // Prefer the catalog's provider base_url (which already has
+                // `config.provider_urls` overrides applied at this point, see
+                // `apply_url_overrides` above). Falls back to `provider_urls`
+                // directly if the catalog has no entry for this provider —
+                // and ultimately to the hardcoded default baked into
+                // `create_embedding_driver` if neither source knows.
+                let custom_url = model_catalog
+                    .get_provider(provider)
+                    .map(|p| p.base_url.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        config
+                            .provider_urls
+                            .get(provider.as_str())
+                            .map(|s| s.as_str())
+                    });
                 match create_embedding_driver(
                     provider,
                     model,
@@ -2001,12 +2013,23 @@ impl LibreFangKernel {
                     } else {
                         configured_model.as_str()
                     };
-                    let provider_url = config.provider_urls.get(detected).map(|s| s.as_str());
+                    // Prefer catalog-derived base_url (with user overrides
+                    // already applied) over raw `config.provider_urls`, so a
+                    // provider entry from the registry with a non-default
+                    // base URL (e.g. Cohere's `api.cohere.com/v2`) is actually
+                    // honored rather than silently falling back to the
+                    // hardcoded default inside `create_embedding_driver`.
+                    let provider_url = model_catalog
+                        .get_provider(detected)
+                        .map(|p| p.base_url.as_str())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| config.provider_urls.get(detected).map(|s| s.as_str()));
                     // Determine the API key env var for the detected provider.
+                    // `detect_embedding_provider` never returns `"groq"` (Groq
+                    // has no embeddings endpoint), so it doesn't appear here.
                     let key_env = match detected {
                         "openai" => "OPENAI_API_KEY",
                         "openrouter" => "OPENROUTER_API_KEY",
-                        "groq" => "GROQ_API_KEY",
                         "mistral" => "MISTRAL_API_KEY",
                         "together" => "TOGETHER_API_KEY",
                         "fireworks" => "FIREWORKS_API_KEY",
@@ -2032,9 +2055,9 @@ impl LibreFangKernel {
                 } else {
                     warn!(
                         "No embedding provider available. Set one of: OPENAI_API_KEY, \
-                         OPENROUTER_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, \
-                         TOGETHER_API_KEY, FIREWORKS_API_KEY, COHERE_API_KEY, \
-                         or configure Ollama."
+                         OPENROUTER_API_KEY, MISTRAL_API_KEY, TOGETHER_API_KEY, \
+                         FIREWORKS_API_KEY, COHERE_API_KEY, or configure Ollama. \
+                         (GROQ_API_KEY is not accepted — Groq has no embeddings endpoint.)"
                     );
                     None
                 }
@@ -8500,9 +8523,25 @@ system_prompt = "You are a helpful assistant."
             });
         }
 
-        // Probe local providers for reachability and model discovery
+        // Probe local providers for reachability and model discovery.
+        //
+        // The set of providers the user actually relies on (default + fallback
+        // chain) gets a `warn!` when offline — those are real misconfigurations
+        // or stopped services. Every other local provider in the built-in
+        // catalog drops to `debug!`: it's informational (the catalog still
+        // records `LocalOffline` so the dashboard shows the right state), but
+        // an unconfigured provider being offline is the expected case and
+        // shouldn't spam every boot.
         {
             let kernel = Arc::clone(self);
+            let relevant_providers: std::collections::HashSet<String> =
+                std::iter::once(cfg.default_model.provider.to_lowercase())
+                    .chain(
+                        cfg.fallback_providers
+                            .iter()
+                            .map(|fb| fb.provider.to_lowercase()),
+                    )
+                    .collect();
             tokio::spawn(async move {
                 let local_providers: Vec<(String, String)> = {
                     let catalog = kernel
@@ -8544,11 +8583,20 @@ system_prompt = "You are a helpful assistant."
                             }
                         }
                     } else {
-                        warn!(
-                            provider = %provider_id,
-                            error = result.error.as_deref().unwrap_or("unknown"),
-                            "Local provider offline"
-                        );
+                        let err = result.error.as_deref().unwrap_or("unknown");
+                        if relevant_providers.contains(&provider_id.to_lowercase()) {
+                            warn!(
+                                provider = %provider_id,
+                                error = err,
+                                "Configured local provider offline"
+                            );
+                        } else {
+                            debug!(
+                                provider = %provider_id,
+                                error = err,
+                                "Local provider offline (not configured as default/fallback)"
+                            );
+                        }
                         // Mark unreachable local providers as LocalOffline (not Missing).
                         // Using Missing would cause detect_auth() to reset the status back
                         // to NotRequired on the next unrelated auth check, making offline
@@ -12115,7 +12163,23 @@ impl KernelHandle for LibreFangKernel {
         Ok(result)
     }
 
-    async fn task_complete(&self, task_id: &str, result: &str) -> Result<(), String> {
+    async fn task_complete(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        result: &str,
+    ) -> Result<(), String> {
+        let resolved = match librefang_types::agent::AgentId::from_str(agent_id) {
+            Ok(_) => agent_id.to_string(),
+            Err(_) => match self.registry.find_by_name(agent_id) {
+                Some(entry) => entry.id.to_string(),
+                None => {
+                    return Err(format!(
+                        "Task complete failed: agent {agent_id:?} not found by UUID or name"
+                    ));
+                }
+            },
+        };
         self.memory
             .task_complete(task_id, result)
             .await
@@ -12127,6 +12191,7 @@ impl KernelHandle for LibreFangKernel {
             librefang_types::event::EventPayload::System(
                 librefang_types::event::SystemEvent::TaskCompleted {
                     task_id: task_id.to_string(),
+                    completed_by: resolved,
                     result: result.to_string(),
                 },
             ),

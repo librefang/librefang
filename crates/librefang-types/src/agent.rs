@@ -704,6 +704,15 @@ pub struct AgentManifest {
     /// gate for this agent (still subject to time / lock gates).
     #[serde(default)]
     pub auto_dream_min_sessions: Option<u32>,
+    /// Whether to surface tool execution progress (`🔧 tool_name`,
+    /// `⚠️ tool_name failed`) inside the channel reply. When `true`
+    /// (default), the streaming bridge injects short progress lines into
+    /// the user-facing text so they can see what the agent is doing.
+    /// Set to `false` for agents whose output should stay pristine —
+    /// e.g. agents posting to public timelines, or agents whose responses
+    /// are consumed by downstream parsers that would choke on the markers.
+    #[serde(default = "default_true")]
+    pub show_progress: bool,
 }
 
 fn default_true() -> bool {
@@ -752,6 +761,7 @@ impl Default for AgentManifest {
             auto_dream_enabled: false,
             auto_dream_min_hours: None,
             auto_dream_min_sessions: None,
+            show_progress: true,
         }
     }
 }

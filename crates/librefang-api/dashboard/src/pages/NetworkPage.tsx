@@ -112,7 +112,7 @@ export function NetworkPage() {
                   <Card key={peer.id} hover padding="md">
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand/20 to-accent/20 flex items-center justify-center">
+                        <div className="w-10 h-10 rounded-xl bg-linear-to-br from-brand/20 to-accent/20 flex items-center justify-center">
                           <Server className="w-5 h-5 text-brand" />
                         </div>
                         <div className="min-w-0">

@@ -81,23 +81,14 @@ async fn signal_response_complete(tx: &mpsc::Sender<StreamEvent>) {
         .await;
 }
 
-/// Check if a response is a NO_REPLY. Matches:
-/// - Exact `"NO_REPLY"` (original behaviour)
-/// - Text ending with `NO_REPLY` (model sometimes adds context before it,
-///   either on the same line or on a new line)
-/// - Exact `"[no reply needed]"` — the runtime writes this placeholder back
-///   into the session when the agent chooses silence (see `agent_loop.rs`
-///   silent-turn handling), so the LLM sometimes mimics it on later turns.
-/// - Text ending with `"[no reply needed]"` (same reasoning as above)
-/// - Unbracketed `"no reply needed"` variant the model occasionally emits
+/// Check if a response is a silent-reply sentinel.
+///
+/// Thin delegate to the canonical `silent_response::is_silent_response` —
+/// the single source of truth for `NO_REPLY` / `[no reply needed]` /
+/// `no reply needed` detection (case-insensitive, punctuation- and
+/// emoji-tolerant). See `crates/librefang-runtime/src/silent_response.rs`.
 fn is_no_reply(text: &str) -> bool {
-    let t = text.trim();
-    t == "NO_REPLY"
-        || t.ends_with("NO_REPLY")
-        || t == "[no reply needed]"
-        || t.ends_with("[no reply needed]")
-        || t == "no reply needed"
-        || t.ends_with("no reply needed")
+    crate::silent_response::is_silent_response(text)
 }
 
 /// Returns true if this tool-error content is a "soft" error — one the LLM is
@@ -2714,6 +2705,18 @@ pub async fn run_agent_loop(
 
                 // NO_REPLY: agent intentionally chose not to reply
                 if is_no_reply(&text) || parsed_directives.silent {
+                    let reason = if parsed_directives.silent {
+                        crate::silent_response::SilentReason::PolicyBlock
+                    } else {
+                        crate::silent_response::SilentReason::NoReply
+                    };
+                    info!(
+                        event = "silent_response_detected",
+                        agent = %manifest.name,
+                        reason = ?reason,
+                        source = "agent_loop.non_streaming",
+                        "Agent chose silent completion"
+                    );
                     debug!(agent = %manifest.name, "Agent chose NO_REPLY/silent — silent completion");
                     session
                         .messages
@@ -3754,6 +3757,18 @@ pub async fn run_agent_loop_streaming(
 
                 // NO_REPLY: agent intentionally chose not to reply
                 if is_no_reply(&text) || parsed_directives_s.silent {
+                    let reason = if parsed_directives_s.silent {
+                        crate::silent_response::SilentReason::PolicyBlock
+                    } else {
+                        crate::silent_response::SilentReason::NoReply
+                    };
+                    info!(
+                        event = "silent_response_detected",
+                        agent = %manifest.name,
+                        reason = ?reason,
+                        source = "agent_loop.streaming",
+                        "Agent chose silent completion"
+                    );
                     debug!(agent = %manifest.name, "Agent chose NO_REPLY/silent (streaming) — silent completion");
                     session
                         .messages
@@ -4897,6 +4912,85 @@ mod tests {
     fn test_retry_constants() {
         assert_eq!(MAX_RETRIES, 3);
         assert_eq!(BASE_RETRY_DELAY_MS, 1000);
+    }
+
+    /// Invariant: when the silent flag is set on an AgentLoopResult, the
+    /// response field MUST be empty. No sentinel string ever escapes the
+    /// runtime as visible text. The shared constructor enforces this.
+    #[test]
+    fn silent_result_has_empty_response() {
+        let result = build_silent_agent_loop_result(
+            TokenUsage::default(),
+            1,
+            crate::reply_directives::DirectiveSet::default(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            0,
+        );
+        assert!(result.silent);
+        assert_eq!(
+            result.response, "",
+            "silent=true must imply response==\"\" (no sentinel leaks as text)"
+        );
+    }
+
+    /// Grep-guard: enforce that `silent_response.rs` is the SOLE owner of
+    /// the literal `NO_REPLY` token in `crates/`. Any new occurrence outside
+    /// the allow-list must be either delegated to the canonical detector or
+    /// (if it is documentation / a prompt-injection sentinel comment) added
+    /// to the allow-list with rationale.
+    ///
+    /// Allow-list rationale:
+    /// - silent_response.rs — canonical detector + tests
+    /// - agent_loop.rs — kept for the heartbeat back-write
+    ///   ("[no reply needed]") and tests
+    /// - session_repair.rs — heartbeat-prune predicate (delegates)
+    /// - reply_directives.rs — back-compat parse-through test
+    /// - prompt_builder.rs — explanatory prompt text (post-rewrite
+    ///   references the token internally)
+    /// - drivers/claude_code.rs — driver-side suppression (delegates)
+    #[test]
+    fn silent_response_single_source_of_truth() {
+        use std::process::Command;
+        let crates_dir = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.parent().map(|q| q.to_path_buf()));
+        let Some(crates_dir) = crates_dir else {
+            eprintln!("skipping grep-guard: cannot locate crates/");
+            return;
+        };
+        let output = Command::new("grep")
+            .args(["-rln", "--include=*.rs", "NO_REPLY"])
+            .arg(&crates_dir)
+            .output();
+        let Ok(output) = output else {
+            eprintln!("skipping grep-guard: grep unavailable");
+            return;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let allow = [
+            "silent_response.rs",      // canonical detector + tests
+            "agent_loop.rs",           // heartbeat back-write [no reply needed]
+            "session_repair.rs",       // delegates to canonical detector
+            "reply_directives.rs",     // back-compat parse-through test
+            "prompt_builder.rs",       // post-rewrite prompt mentions internal token
+            "claude_code.rs",          // driver-side stream suppression (cycle barrier)
+            "agent.rs",                // librefang-types: doc comment only
+            "channel_bridge.rs",       // librefang-api: doc comment, consumes silent flag
+            "agents.rs",               // librefang-api routes: doc comment only
+            "ws.rs",                   // librefang-api ws: doc comment only
+            "purge_sentinels.rs", // CLI binary that *removes* the literal — delegates to canonical detector
+            "purge_sentinels_test.rs", // fixtures for the CLI
+        ];
+        let offenders: Vec<&str> = stdout
+            .lines()
+            .filter(|line| !allow.iter().any(|a| line.ends_with(a)))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "NO_REPLY literal found outside allow-list — delegate to silent_response::is_silent_response: {offenders:?}"
+        );
     }
 
     // --- Group-chat sender prefix tests (#2262) ---

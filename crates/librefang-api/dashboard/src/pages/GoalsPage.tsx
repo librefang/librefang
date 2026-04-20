@@ -268,7 +268,7 @@ export function GoalsPage() {
             </div>
             <div className="h-2.5 rounded-full bg-main overflow-hidden">
               <div
-                className="h-full rounded-full bg-gradient-to-r from-brand to-success transition-all duration-700"
+                className="h-full rounded-full bg-linear-to-r from-brand to-success transition-all duration-700"
                 style={{ width: `${stats.pct}%` }}
               />
             </div>
