@@ -6,6 +6,17 @@ import {
 } from "../http/client";
 import { mediaKeys } from "./keys";
 
+function mergeQueryOptions<T extends { enabled?: unknown; staleTime?: unknown; refetchInterval?: unknown }>(
+  base: T,
+  overrides: { enabled?: unknown; staleTime?: unknown; refetchInterval?: unknown },
+): T {
+  const result = { ...base };
+  if (overrides.enabled !== undefined) result.enabled = overrides.enabled;
+  if (overrides.staleTime !== undefined) result.staleTime = overrides.staleTime;
+  if (overrides.refetchInterval !== undefined) result.refetchInterval = overrides.refetchInterval;
+  return result;
+}
+
 const STALE_MS = 60_000;
 const REFRESH_MS = 60_000;
 const VIDEO_TASK_STALE_MS = 1_000;
@@ -49,12 +60,7 @@ export function useMediaProviders(options: UseMediaProvidersOptions = {}) {
   const { enabled, staleTime, refetchInterval } = options;
   const query = mediaQueries.providers();
 
-  return useQuery({
-    ...query,
-    ...(enabled !== undefined ? { enabled } : {}),
-    ...(staleTime !== undefined ? { staleTime } : {}),
-    ...(refetchInterval !== undefined ? { refetchInterval } : {}),
-  });
+  return useQuery(mergeQueryOptions(query, { enabled, staleTime, refetchInterval }));
 }
 
 function shouldPollVideoTask(status?: MediaVideoStatus) {
@@ -70,7 +76,7 @@ export function useVideoTask(
   const isEnabled = Boolean(enabled ?? true) && Boolean(params?.taskId) && Boolean(params?.provider);
 
   return useQuery({
-    queryKey: params ? mediaKeys.videoTask(params.taskId, params.provider) : mediaKeys.videoTask("pending", "pending"),
+    queryKey: params ? mediaKeys.videoTask(params.taskId, params.provider) : mediaKeys.videoTask("__placeholder__", "__placeholder__"),
     queryFn: params ? () => pollVideo(params.taskId, params.provider) : skipToken,
     gcTime: 0,
     enabled: isEnabled,

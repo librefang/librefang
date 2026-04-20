@@ -497,7 +497,11 @@ function VideoPanel({
     }
   }, [onToast, status, t, taskId]);
 
-  const isPolling = videoTaskQuery.isFetching || videoTaskQuery.isLoading;
+  const isPolling = !!(taskId && taskProvider)
+    && !!status
+    && status.status !== "completed"
+    && status.status !== "failed"
+    && !status.error;
 
   return (
     <form
