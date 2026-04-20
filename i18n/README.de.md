@@ -27,6 +27,7 @@
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
   <img src="https://img.shields.io/github/v/release/librefang/librefang?style=flat-square" alt="Latest Release" />
   <a href="https://discord.gg/DzTYqAZZmc"><img src="https://img.shields.io/discord/1481633471507071129?style=flat-square&logo=discord&label=Discord" alt="Discord" /></a>
+  <a href="https://deepwiki.com/librefang/librefang"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
 ---
@@ -220,7 +221,8 @@ Siehe [Vergleich](https://docs.librefang.ai/getting-started/comparison#16-securi
 
 <p align="center">
   Wir freuen uns über Beiträge jeder Art — Code, Dokumentation, Übersetzungen, Fehlerberichte.<br/>
-  Schau dir den <a href="../CONTRIBUTING.md">Leitfaden für Mitwirkende</a> an und wähle ein <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> zum Einstieg!
+  Schau dir den <a href="../CONTRIBUTING.md">Leitfaden für Mitwirkende</a> an und wähle ein <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> zum Einstieg!<br/>
+  Du kannst auch das <a href="https://leszek3737.github.io/librefang-WIki/">inoffizielle Wiki</a> besuchen, das mit hilfreichen Informationen für neue Mitwirkende aktualisiert wird.
 </p>
 
 <p align="center">

@@ -27,6 +27,7 @@
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
   <img src="https://img.shields.io/github/v/release/librefang/librefang?style=flat-square" alt="Latest Release" />
   <a href="https://discord.gg/DzTYqAZZmc"><img src="https://img.shields.io/discord/1481633471507071129?style=flat-square&logo=discord&label=Discord" alt="Discord" /></a>
+  <a href="https://deepwiki.com/librefang/librefang"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
 ---
@@ -220,7 +221,8 @@ cargo fmt --all -- --check                               # 포맷 체크
 
 <p align="center">
   코드, 문서, 번역, 버그 리포트 등 모든 형태의 기여를 환영합니다.<br/>
-  <a href="../CONTRIBUTING.md">기여 가이드</a>를 확인하고 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a>부터 시작해 보세요!
+  <a href="../CONTRIBUTING.md">기여 가이드</a>를 확인하고 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a>부터 시작해 보세요!<br/>
+  새로운 기여자를 위한 유용한 정보가 업데이트되는 <a href="https://leszek3737.github.io/librefang-WIki/">비공식 위키</a>도 방문해 보세요.
 </p>
 
 <p align="center">

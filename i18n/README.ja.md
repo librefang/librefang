@@ -27,6 +27,7 @@
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
   <img src="https://img.shields.io/github/v/release/librefang/librefang?style=flat-square" alt="Latest Release" />
   <a href="https://discord.gg/DzTYqAZZmc"><img src="https://img.shields.io/discord/1481633471507071129?style=flat-square&logo=discord&label=Discord" alt="Discord" /></a>
+  <a href="https://deepwiki.com/librefang/librefang"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
 ---
@@ -220,7 +221,8 @@ cargo fmt --all -- --check                               # フォーマットチ
 
 <p align="center">
   コード、ドキュメント、翻訳、バグ報告など、あらゆる形の貢献を歓迎します。<br/>
-  <a href="../CONTRIBUTING.md">コントリビュートガイド</a>を確認して、<a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> から始めましょう！
+  <a href="../CONTRIBUTING.md">コントリビュートガイド</a>を確認して、<a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> から始めましょう！<br/>
+  また、新しいコントリビューター向けの役立つ情報が更新されている<a href="https://leszek3737.github.io/librefang-WIki/">非公式wiki</a>もご覧いただけます。
 </p>
 
 <p align="center">
