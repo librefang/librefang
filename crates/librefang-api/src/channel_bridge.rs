@@ -315,14 +315,55 @@ use tracing::{debug, error, info, warn};
 
 use librefang_runtime::str_utils::safe_truncate_str;
 
+/// Convert a snake_case / kebab-case / dotted tool ID into a human-readable
+/// display name. Used in progress lines so users see "Web Search" instead of
+/// "web_search". Words already containing uppercase letters keep their case
+/// after the first char (so MCP_call → MCP Call, not Mcp Call).
+fn prettify_tool_name(name: &str) -> String {
+    name.split(['_', '-', '.'])
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Localized "failed" suffix for tool-failure progress lines.
+///
+/// Falls back to English for any unsupported / unknown language.
+fn tr_progress_failed(language: &str) -> &'static str {
+    let resolved = librefang_types::i18n::resolve_language(language);
+    match resolved {
+        "zh-CN" => "失败",
+        "es" => "falló",
+        "ja" => "失敗",
+        "de" => "fehlgeschlagen",
+        "fr" => "échoué",
+        _ => "failed",
+    }
+}
+
 fn start_stream_text_bridge(
     event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
         KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
     >,
     is_group: bool,
+    show_progress: bool,
+    language: &str,
 ) -> mpsc::Receiver<String> {
-    let (rx, _status) = start_stream_text_bridge_with_status(event_rx, kernel_handle, is_group);
+    let (rx, _status) = start_stream_text_bridge_with_status(
+        event_rx,
+        kernel_handle,
+        is_group,
+        show_progress,
+        language,
+    );
     rx
 }
 
@@ -331,12 +372,20 @@ fn start_stream_text_bridge(
 /// drained. Callers use this to drive proper lifecycle reactions, accurate
 /// `record_delivery` metrics, and `suppress_error_responses` honor for
 /// public-feed adapters.
+///
+/// `show_progress` controls whether tool-invocation lines (`🔧 tool_name`)
+/// and tool-failure lines (`⚠️ tool_name failed`) are injected into the
+/// text stream. When `false`, the stream is pure model output — useful for
+/// agents whose responses are consumed by parsers or whose channel context
+/// must not have inline status markers.
 fn start_stream_text_bridge_with_status(
     mut event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
         KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
     >,
     is_group: bool,
+    show_progress: bool,
+    language: &str,
 ) -> (
     mpsc::Receiver<String>,
     tokio::sync::oneshot::Receiver<Result<(), String>>,
@@ -344,6 +393,7 @@ fn start_stream_text_bridge_with_status(
     let (tx, rx) = mpsc::channel::<String>(64);
     let (status_tx, status_rx) = tokio::sync::oneshot::channel();
     let error_tx = tx.clone();
+    let failed_word: &str = tr_progress_failed(language);
 
     let bridge_handle = tokio::spawn(async move {
         // Buffer text per iteration. Some providers emit tool call syntax
@@ -352,10 +402,14 @@ fn start_stream_text_bridge_with_status(
         // tool call or content-block array.
         let mut iter_buf = String::new();
         let mut saw_tool_use = false;
-        // Most recent tool name surfaced as a progress line. Used to avoid
-        // emitting back-to-back duplicate "🔧 same_tool" lines when a driver
-        // double-fires ToolUseStart for the same call.
-        let mut last_progress_tool: Option<String> = None;
+        // Tool names already surfaced in the current iteration. Cleared at
+        // every ContentComplete so a tool retried in a *later* iteration
+        // still gets a visible progress line. Within one iteration, repeat
+        // calls to the same tool collapse into a single "🔧 tool" line —
+        // important for batch agents that fan out to the same tool many
+        // times in one turn (e.g. parallel web searches).
+        let mut iter_tools_seen: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         while let Some(event) = event_rx.recv().await {
             match event {
@@ -380,6 +434,9 @@ fn start_stream_text_bridge_with_status(
                     }
                     iter_buf.clear();
                     saw_tool_use = false;
+                    // Iteration boundary: a tool retried in the *next*
+                    // iteration deserves its own visible "🔧 tool" line.
+                    iter_tools_seen.clear();
                 }
                 StreamEvent::ToolUseStart { name, .. } => {
                     saw_tool_use = true;
@@ -387,34 +444,50 @@ fn start_stream_text_bridge_with_status(
                     // line. Streaming adapters (Telegram) edit this into the
                     // live message; non-streaming adapters fall back to plain
                     // text and the line just becomes part of the reply.
-                    if !name.is_empty() && last_progress_tool.as_deref() != Some(name.as_str()) {
-                        let line = format!("\n\n🔧 `{name}`\n");
+                    // Skip entirely when the agent has show_progress=false.
+                    //
+                    // All progress lines use `\n\n…\n\n` so adjacent markers
+                    // (e.g. `🔧 X` followed by `⚠️ X failed`) render with a
+                    // blank line between them on every renderer that respects
+                    // markdown blank-line semantics, instead of being
+                    // collapsed into one paragraph.
+                    if show_progress && !name.is_empty() && iter_tools_seen.insert(name.clone()) {
+                        let pretty = prettify_tool_name(&name);
+                        let line = format!("\n\n🔧 {pretty}\n\n");
                         if tx.send(line).await.is_err() {
                             break;
                         }
-                        last_progress_tool = Some(name);
                     }
                 }
-                StreamEvent::ToolExecutionResult { name, is_error, .. } => {
-                    // Only surface failures — successes are followed by the
-                    // model's next prose iteration which is signal enough.
-                    if is_error && !name.is_empty() {
-                        let line = format!("\n⚠️ `{name}` failed\n");
-                        if tx.send(line).await.is_err() {
-                            break;
-                        }
-                    }
-                    // Allow the same tool name to fire a fresh progress line
-                    // on the next ToolUseStart (e.g. retried tool calls).
-                    if last_progress_tool.as_deref() == Some(name.as_str()) {
-                        last_progress_tool = None;
+                // Only surface failures — successes are followed by the
+                // model's next prose iteration which is signal enough.
+                StreamEvent::ToolExecutionResult { name, is_error, .. }
+                    if show_progress && is_error && !name.is_empty() =>
+                {
+                    let pretty = prettify_tool_name(&name);
+                    let line = format!("\n\n⚠️ {pretty} {failed_word}\n\n");
+                    if tx.send(line).await.is_err() {
+                        break;
                     }
                 }
-                StreamEvent::PhaseChange { .. } => {
-                    // PhaseChange events (e.g. "long_running") fire on every
-                    // iteration and are too noisy for inline display. They
-                    // still flow through the SSE endpoint as `event: phase`
-                    // for the dashboard.
+                // Most PhaseChange events (`thinking`, `tool_use`,
+                // `streaming`, `done`) fire every iteration and are too
+                // noisy for inline display — they still flow through the
+                // SSE endpoint for the dashboard.
+                //
+                // We only surface phases that carry actionable user-facing
+                // information:
+                //   - `context_warning`: agent's context window was
+                //     trimmed or overflowed; user needs to know quality
+                //     may degrade and that /reset or /compact may help
+                StreamEvent::PhaseChange { phase, detail }
+                    if show_progress && phase == "context_warning" =>
+                {
+                    let body = detail.as_deref().unwrap_or("Context window trimmed");
+                    let line = format!("\n\n⚠️ {body}\n\n");
+                    if tx.send(line).await.is_err() {
+                        break;
+                    }
                 }
                 _ => {}
             }
@@ -444,9 +517,9 @@ fn start_stream_text_bridge_with_status(
             Ok(Err(e)) => {
                 let err_str = e.to_string();
                 error!("Streaming kernel task returned error: {err_str}");
-                let user_msg = if err_str
-                    .contains(librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER)
-                {
+                let is_timeout =
+                    err_str.contains(librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER);
+                let user_msg = if is_timeout {
                     Some(
                         "\n\n---\n[Task timed out. The output above may be incomplete.]"
                             .to_string(),
@@ -475,7 +548,15 @@ fn start_stream_text_bridge_with_status(
                         Some(sanitize_channel_error(&err_str))
                     }
                 };
-                (user_msg, Err(err_str))
+                // Timeout-with-partial-output is a soft success: the model
+                // emitted a useful chunk before the inactivity timer fired,
+                // and the user already saw it streamed in. Reporting status
+                // = Err here would flip the lifecycle reaction to ❌ and
+                // record_delivery to success=false, which is a UX regression
+                // — pre-V2 the bridge had no status channel and treated
+                // these turns as Done. Keep that semantics by reporting Ok.
+                let status = if is_timeout { Ok(()) } else { Err(err_str) };
+                (user_msg, status)
             }
             Ok(Ok(result)) => {
                 debug!(
@@ -573,12 +654,25 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         agent_id: AgentId,
         message: &str,
     ) -> Result<mpsc::Receiver<String>, String> {
+        let show_progress = self
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|e| e.manifest.show_progress)
+            .unwrap_or(true);
+        let language = self.kernel.config_snapshot().language.clone();
         let (event_rx, kernel_handle) = self
             .kernel
             .send_message_streaming_with_routing(agent_id, message, None)
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(start_stream_text_bridge(event_rx, kernel_handle, false))
+        Ok(start_stream_text_bridge(
+            event_rx,
+            kernel_handle,
+            false,
+            show_progress,
+            &language,
+        ))
     }
 
     async fn send_message_streaming_with_sender(
@@ -587,6 +681,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         message: &str,
         sender: &SenderContext,
     ) -> Result<mpsc::Receiver<String>, String> {
+        let show_progress = self
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|e| e.manifest.show_progress)
+            .unwrap_or(true);
+        let language = self.kernel.config_snapshot().language.clone();
         let (event_rx, kernel_handle) = self
             .kernel
             .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
@@ -596,6 +697,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             event_rx,
             kernel_handle,
             sender.is_group,
+            show_progress,
+            &language,
         ))
     }
 
@@ -611,6 +714,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         ),
         String,
     > {
+        let show_progress = self
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|e| e.manifest.show_progress)
+            .unwrap_or(true);
+        let language = self.kernel.config_snapshot().language.clone();
         let (event_rx, kernel_handle) = self
             .kernel
             .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
@@ -620,6 +730,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             event_rx,
             kernel_handle,
             sender.is_group,
+            show_progress,
+            &language,
         ))
     }
 
@@ -3364,7 +3476,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
-        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
         // Simulate a provider emitting an agent_send tool call as plain text
         // (no ToolUseStart event) followed by ContentComplete.
@@ -3403,7 +3515,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
-        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
         event_tx
             .send(StreamEvent::ToolUseStart {
@@ -3448,8 +3560,8 @@ mod tests {
         }
         let combined = received.join("");
         assert!(
-            combined.contains("🔧") && combined.contains("web_search"),
-            "Expected tool progress line in stream, got: {combined:?}"
+            combined.contains("🔧") && combined.contains("Web Search"),
+            "Expected tool progress line in stream (with prettified name), got: {combined:?}"
         );
         assert!(
             combined.contains("Found 3 results."),
@@ -3466,7 +3578,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
-        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
         event_tx
             .send(StreamEvent::ToolUseStart {
@@ -3492,9 +3604,9 @@ mod tests {
         let combined = received.join("");
         assert!(
             combined.contains("⚠️")
-                && combined.contains("shell_exec")
+                && combined.contains("Shell Exec")
                 && combined.contains("failed"),
-            "Expected failure marker in stream, got: {combined:?}"
+            "Expected failure marker in stream (with prettified name), got: {combined:?}"
         );
     }
 
@@ -3508,7 +3620,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
-        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
         event_tx
             .send(StreamEvent::ToolExecutionResult {
@@ -3531,6 +3643,100 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_prettify_tool_name_snake_to_title() {
+        assert_eq!(prettify_tool_name("web_search"), "Web Search");
+        assert_eq!(prettify_tool_name("get_user_data"), "Get User Data");
+    }
+
+    #[test]
+    fn test_prettify_tool_name_kebab_and_dotted() {
+        assert_eq!(prettify_tool_name("web-search"), "Web Search");
+        assert_eq!(prettify_tool_name("http.get"), "Http Get");
+    }
+
+    #[test]
+    fn test_prettify_tool_name_preserves_internal_caps() {
+        // MCP and HTTP shouldn't be downcased to "Mcp" / "Http" by the
+        // prettifier — only the FIRST character of each word is uppercased.
+        assert_eq!(prettify_tool_name("MCP_call"), "MCP Call");
+        assert_eq!(prettify_tool_name("HTTPRequest"), "HTTPRequest");
+    }
+
+    #[test]
+    fn test_tr_progress_failed_languages() {
+        assert_eq!(tr_progress_failed("en"), "failed");
+        assert_eq!(tr_progress_failed("zh-CN"), "失败");
+        assert_eq!(tr_progress_failed("zh"), "失败");
+        assert_eq!(tr_progress_failed("ja"), "失敗");
+        // Unknown language falls back to English.
+        assert_eq!(tr_progress_failed("xx"), "failed");
+    }
+
+    /// When `show_progress=false`, neither tool-invocation nor failure
+    /// markers should be injected into the user-facing text — the stream
+    /// must be pure model output. This is what `agent.toml show_progress
+    /// = false` opts agents into for parser-consumed or pristine-output
+    /// scenarios.
+    #[tokio::test]
+    async fn test_stream_bridge_show_progress_false_suppresses_all_markers() {
+        use librefang_runtime::agent_loop::AgentLoopResult;
+
+        let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+
+        let mut rx = start_stream_text_bridge(
+            event_rx,
+            kernel_handle,
+            false,
+            /* show_progress */ false,
+            "en",
+        );
+
+        event_tx
+            .send(StreamEvent::ToolUseStart {
+                id: "tool_1".to_string(),
+                name: "web_search".to_string(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::ToolExecutionResult {
+                name: "web_search".to_string(),
+                result_preview: "irrelevant".to_string(),
+                is_error: true,
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::TextDelta {
+                text: "Final answer.".to_string(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(StreamEvent::ContentComplete {
+                stop_reason: librefang_types::message::StopReason::EndTurn,
+                usage: librefang_types::message::TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+        drop(event_tx);
+
+        let mut received = String::new();
+        while let Some(msg) = rx.recv().await {
+            received.push_str(&msg);
+        }
+        assert!(
+            !received.contains("🔧") && !received.contains("⚠️"),
+            "Expected no progress/failure markers when show_progress=false, got: {received:?}"
+        );
+        assert!(
+            received.contains("Final answer."),
+            "Expected actual model prose to still flow through, got: {received:?}"
+        );
+    }
+
     /// Back-to-back duplicate ToolUseStart events for the same tool name
     /// should produce only one progress line — some drivers double-fire.
     #[tokio::test]
@@ -3540,7 +3746,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
-        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false);
+        let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
         for _ in 0..3 {
             event_tx
@@ -3577,7 +3783,7 @@ mod tests {
         let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
 
         let (mut rx, status_rx) =
-            start_stream_text_bridge_with_status(event_rx, kernel_handle, false);
+            start_stream_text_bridge_with_status(event_rx, kernel_handle, false, true, "en");
 
         event_tx
             .send(StreamEvent::TextDelta {
@@ -3621,7 +3827,7 @@ mod tests {
         });
 
         let (mut rx, status_rx) =
-            start_stream_text_bridge_with_status(event_rx, kernel_handle, false);
+            start_stream_text_bridge_with_status(event_rx, kernel_handle, false, true, "en");
 
         // Drain text channel — will include sanitized error message
         let mut received = String::new();
@@ -3664,8 +3870,13 @@ mod tests {
             )
         });
 
-        let (mut rx, status_rx) =
-            start_stream_text_bridge_with_status(event_rx, kernel_handle, /* is_group */ true);
+        let (mut rx, status_rx) = start_stream_text_bridge_with_status(
+            event_rx,
+            kernel_handle,
+            /* is_group */ true,
+            true,
+            "en",
+        );
 
         let mut received = String::new();
         while let Some(chunk) = rx.recv().await {
@@ -3680,6 +3891,52 @@ mod tests {
         assert!(
             status.is_err(),
             "Group error must still be reported via status oneshot"
+        );
+    }
+
+    /// Inactivity-timeout errors (carrying TIMEOUT_PARTIAL_OUTPUT_MARKER)
+    /// must be reported via the status oneshot as Ok(()) — not Err. The
+    /// model emitted useful prose before the inactivity timer fired and
+    /// pre-V2 the bridge had no status channel and treated these turns as
+    /// Done. Reporting Err here would flip lifecycle reaction to Error and
+    /// record_delivery to success=false, which is a UX regression.
+    ///
+    /// We still inject the "[Task timed out…]" tail into the user-facing
+    /// text so they understand the reply may be incomplete.
+    #[tokio::test]
+    async fn test_stream_bridge_timeout_partial_output_reports_ok_status() {
+        use librefang_kernel::error::KernelError;
+        use librefang_types::error::LibreFangError;
+
+        let (_event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async {
+            // Mirror the kernel-side error format: a string that contains
+            // the timeout marker constant.
+            let err = format!(
+                "agent loop timed out: {}",
+                librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER
+            );
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
+                LibreFangError::Internal(err).into(),
+            )
+        });
+
+        let (mut rx, status_rx) =
+            start_stream_text_bridge_with_status(event_rx, kernel_handle, false, true, "en");
+
+        let mut received = String::new();
+        while let Some(chunk) = rx.recv().await {
+            received.push_str(&chunk);
+        }
+        assert!(
+            received.contains("[Task timed out"),
+            "Expected timeout tail in user-facing text, got: {received:?}"
+        );
+
+        let status = status_rx.await.expect("status oneshot dropped");
+        assert!(
+            status.is_ok(),
+            "Timeout-with-partial-output is a soft success — status must be Ok, got: {status:?}"
         );
     }
 
