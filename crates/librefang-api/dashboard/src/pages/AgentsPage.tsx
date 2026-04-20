@@ -685,14 +685,28 @@ export function AgentsPage() {
         const detailState = ((detailAgent as any).state || "").toLowerCase();
         const isDetailSuspended = detailState === "suspended";
         const statusColor = isDetailSuspended ? "bg-warning" : detailState === "crashed" ? "bg-error" : "bg-success";
-        const isBuiltin = detailAgent.is_hand
-          || t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: "" }) !== "";
+        // Only hand-managed sub-agents are locked from rename — their
+        // names are referenced by the parent hand and changing them
+        // would orphan the parent's call sites. Built-in templates
+        // (`assistant`, etc.) ARE renameable: a fresh agent spawned
+        // from a template is a regular user-owned agent that just
+        // happens to start with a translated display name. A previous
+        // i18n-key heuristic locked them too, which created a
+        // dead-end: rename to "assistant" → next open the agent looks
+        // built-in → rename UI disabled forever.
+        const lockRename = !!detailAgent.is_hand;
+        // Backdrop click closing while a rename PATCH is in flight
+        // would dismiss the modal but still toast "Agent renamed"
+        // afterward — confusing. Hold the backdrop until the user is
+        // out of the editing flow.
+        const lockBackdropDismiss = editingName || patchAgentMutation.isPending;
         return (
         <Modal
-          isOpen={!!detailAgent}
+          isOpen
           onClose={closeDetailModal}
           size="4xl"
           hideCloseButton
+          disableBackdropClose={lockBackdropDismiss}
         >
             {/* Modal Header */}
             <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-sm z-10">
@@ -711,8 +725,22 @@ export function AgentsPage() {
                           value={nameDraft}
                           onChange={e => setNameDraft(e.target.value)}
                           onKeyDown={e => {
-                            if (e.key === "Enter") saveName();
-                            else if (e.key === "Escape") cancelNameEdit();
+                            // `isComposing` guard: in CJK IMEs Enter
+                            // confirms the candidate (pinyin → hanzi),
+                            // it does NOT submit. Without this check,
+                            // Chinese/Japanese users get their input
+                            // hijacked mid-composition.
+                            if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                              saveName();
+                            } else if (e.key === "Escape") {
+                              // stopPropagation so this Escape only
+                              // cancels the inline edit — Modal also
+                              // listens for Escape on window and would
+                              // otherwise close the entire detail
+                              // modal at the same time.
+                              e.stopPropagation();
+                              cancelNameEdit();
+                            }
                           }}
                           className="px-2 py-1 rounded-lg border border-brand bg-main text-lg font-black tracking-tight outline-none focus:ring-2 focus:ring-brand/30 min-w-0 flex-1"
                           aria-label={t("agents.edit_name", { defaultValue: "Agent name" })}
@@ -735,17 +763,17 @@ export function AgentsPage() {
                     ) : (
                       <button
                         type="button"
-                        onClick={isBuiltin ? undefined : startNameEdit}
-                        disabled={!!isBuiltin}
-                        className={`group flex items-center gap-2 text-left max-w-full ${isBuiltin ? "cursor-default" : "cursor-text hover:text-brand transition-colors"}`}
-                        title={isBuiltin
-                          ? t("agents.rename_builtin_disabled", { defaultValue: "Built-in agents cannot be renamed" })
+                        onClick={lockRename ? undefined : startNameEdit}
+                        disabled={lockRename}
+                        className={`group flex items-center gap-2 text-left max-w-full ${lockRename ? "cursor-default" : "cursor-text hover:text-brand transition-colors"}`}
+                        title={lockRename
+                          ? t("agents.rename_hand_disabled", { defaultValue: "Hand-managed agents cannot be renamed" })
                           : t("agents.rename_hint", { defaultValue: "Click to rename" })}
                       >
                         <h3 className="text-lg font-black tracking-tight truncate">
                           {t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}
                         </h3>
-                        {!isBuiltin && (
+                        {!lockRename && (
                           <Pencil className="w-3 h-3 text-text-dim opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
                         )}
                       </button>
