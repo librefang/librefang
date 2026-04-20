@@ -152,7 +152,7 @@ const PROVIDERS: &[ProviderInfo] = &[
     ProviderInfo {
         name: "ollama",
         env_var: "OLLAMA_API_KEY",
-        default_model: "llama3.2",
+        default_model: "gemma4",
         needs_key: false,
     },
     ProviderInfo {
