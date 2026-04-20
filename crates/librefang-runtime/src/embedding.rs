@@ -233,12 +233,25 @@ pub struct CohereEmbeddingDriver {
     api_key: Zeroizing<String>,
     base_url: String,
     model: String,
-    /// `input_type` sent to Cohere v3 models. Defaults to `search_document`
-    /// (correct for indexing memory/documents, the primary path today) and
-    /// can be overridden via the `LIBREFANG_COHERE_INPUT_TYPE` env var for
-    /// deployments whose primary path is query-time embedding or
-    /// clustering.  Invalid values are ignored with a warning because
-    /// Cohere returns a cryptic 400 otherwise.
+    /// `input_type` sent to Cohere's v2 API for every request from this
+    /// driver instance. Cohere's `embed-*` v3 model family uses this to
+    /// produce asymmetric embeddings: callers are supposed to send
+    /// `search_document` when embedding the corpus and `search_query` when
+    /// embedding a live user query, which measurably improves retrieval
+    /// quality.
+    ///
+    /// **Known limitation:** `EmbeddingDriver` in librefang today doesn't
+    /// distinguish "indexing" from "querying" — both go through the same
+    /// `embed()` method — so we pin a single `input_type` per driver.  The
+    /// default (`search_document`) is optimized for the indexing path,
+    /// which is the dominant call pattern for memory ingest.  Deployments
+    /// whose primary path is query-time embedding or clustering can
+    /// override the per-process default via the
+    /// `LIBREFANG_COHERE_INPUT_TYPE` env var (`search_document` |
+    /// `search_query` | `classification` | `clustering`); invalid values
+    /// are ignored with a warning because Cohere returns a cryptic 400
+    /// otherwise.  Per-call overrides would require a trait change and
+    /// are tracked as follow-up work.
     input_type: String,
     client: reqwest::Client,
     dims: usize,
@@ -1403,23 +1416,36 @@ mod tests {
     }
 
     #[test]
-    fn test_create_embedding_driver_cloud_provider_requires_base_url() {
+    fn test_create_embedding_driver_cloud_providers_require_base_url() {
         // Cloud providers no longer have hardcoded URL fallbacks — the catalog
         // (or an explicit override) must supply the base_url. Pin the
-        // behavior so a regression can't silently re-introduce the
-        // version-drift bug.
+        // behavior across every cloud provider so a regression can't
+        // silently re-introduce the version-drift bug for any of them.
+        //
+        // Cohere has an earlier api_key check that would preempt the URL
+        // check, so we set COHERE_API_KEY here to force the URL branch to
+        // fire. Other cloud providers don't reject empty api_key at
+        // construction, so they reach the URL check regardless.
         let had = std::env::var("COHERE_API_KEY").ok();
         std::env::set_var("COHERE_API_KEY", "test-cohere-key");
 
         // `.unwrap_err()` would require `Box<dyn EmbeddingDriver + Send + Sync>: Debug`,
-        // which the trait object doesn't provide (the trait has no Debug
-        // supertrait). Match on the Result directly.
-        let result = create_embedding_driver("cohere", "embed-english-v3.0", "", None, None);
-        assert!(
-            matches!(&result, Err(EmbeddingError::InvalidInput(_))),
-            "expected InvalidInput when no base_url is available, got {:?}",
-            result.as_ref().err()
-        );
+        // which the trait object doesn't provide. Match on Result directly.
+        for (provider, model) in [
+            ("openai", "text-embedding-3-small"),
+            ("openrouter", "openai/text-embedding-3-small"),
+            ("mistral", "mistral-embed"),
+            ("together", "BAAI/bge-large-en-v1.5"),
+            ("fireworks", "nomic-ai/nomic-embed-text-v1.5"),
+            ("cohere", "embed-english-v3.0"),
+        ] {
+            let result = create_embedding_driver(provider, model, "", None, None);
+            assert!(
+                matches!(&result, Err(EmbeddingError::InvalidInput(_))),
+                "expected InvalidInput for {provider} when no base_url is available, got {:?}",
+                result.as_ref().err()
+            );
+        }
 
         match had {
             Some(v) => std::env::set_var("COHERE_API_KEY", v),
