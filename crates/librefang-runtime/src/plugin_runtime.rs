@@ -848,9 +848,12 @@ fn try_apply_landlock_readonly(_allow_write_dir: Option<&std::path::Path>) -> bo
 /// file I/O, memory management, process control, networking (optional), and IPC.
 /// Any other syscall causes the process to be killed with SIGSYS.
 ///
+/// `_allow_network` is reserved for future per-socket-type filtering; sockets
+/// are currently always allowed because Unix-domain IPC needs them regardless.
+///
 /// Returns `true` if the filter was installed successfully, `false` on error.
 #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
-fn apply_seccomp_allowlist(allow_network: bool) -> bool {
+fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
     use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule};
 
     // Build the allowlist from libc::SYS_* compile-time constants so the set
@@ -923,6 +926,7 @@ fn apply_seccomp_allowlist(allow_network: bool) -> bool {
         libc::SYS_tgkill,
         // Threads / process creation — universal variants
         libc::SYS_clone,
+        libc::SYS_clone3, // Go 1.23+ and newer glibc use clone3 on Linux 5.3+
         libc::SYS_execve,
         libc::SYS_execveat,
         libc::SYS_wait4,
@@ -963,8 +967,8 @@ fn apply_seccomp_allowlist(allow_network: bool) -> bool {
         libc::SYS_getegid,
         libc::SYS_getgroups,
         libc::SYS_setgroups,
-        libc::SYS_getrlimit,
-        libc::SYS_setrlimit,
+        // prlimit64 is the universal replacement for getrlimit/setrlimit;
+        // the legacy syscalls are x86_64-only (see cfg block below).
     ];
 
     // x86_64-only syscalls: these were replaced by *at / newer variants on
@@ -994,18 +998,19 @@ fn apply_seccomp_allowlist(allow_network: bool) -> bool {
         libc::SYS_arch_prctl,
     ]);
 
-    let _ = allow_network; // reserved for future per-syscall network filtering
-
     let rules: std::collections::BTreeMap<i64, Vec<SeccompRule>> =
         allowed.into_iter().map(|n| (n, vec![])).collect();
+
+    let target_arch = match std::env::consts::ARCH.try_into() {
+        Ok(arch) => arch,
+        Err(_) => return false, // unknown arch — don't apply a mismatched filter
+    };
 
     let filter = match SeccompFilter::new(
         rules,
         SeccompAction::KillProcess,
         SeccompAction::Allow,
-        std::env::consts::ARCH
-            .try_into()
-            .unwrap_or(seccompiler::TargetArch::x86_64),
+        target_arch,
     ) {
         Ok(f) => f,
         Err(_) => return false,
