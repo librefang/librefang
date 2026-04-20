@@ -5,6 +5,44 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.20] - 2026-04-20
+
+### Added
+
+- Canonical silent-response primitive, end the NO_REPLY literal leak (#2470) (@f-liva)
+- Gate /dashboard/* behind auth + tailwind v4 renames (#2785) (@houko)
+- Add stop button to interrupt in-flight agent streams (#2787) (@neo-wanderer)
+- Add native Cohere driver (#2791) (@houko)
+- Show tool execution progress in channel replies (#2792) (@houko)
+- Finish channel-progress — universal coverage, Telegram fix, show_progress, i18n, prettify, dashboard parity (#2793) (@houko)
+- Redesign `librefang status` for layered visibility (#2799) (@houko)
+- Unify create/edit modals + inline rename (#2800) (@houko)
+
+### Fixed
+
+- Make extract_categories config drive LLM prompt categories (#2761) (@neo-wanderer)
+- Sync terminal health and active window state (#2777) (@leszek3737)
+- Clear history consistently and refresh model state (#2780) (@leszek3737)
+- Align shared query flows for MCP, skills, and workflows (#2784) (@leszek3737)
+- Route comms_task through kernel wrapper; surface task system events (#2789) (@neo-wanderer)
+- Rewrite /install to /install.sh for CLI clients (#2794) (@houko)
+- Stop writing PATH into the wrong rc file (#2796) (@houko)
+- Auto-activate PATH after installation (#2797) (@houko)
+- Bypass auth for loopback connections (#2802) (@houko)
+- Drop stray </div> from #2800 modal refactor (#2803) (@houko)
+- Surface reload error to dashboard instead of opaque 'saved but reload failed' (#2805) (@houko)
+- Validate config BEFORE writing TOML so failed saves don't corrupt the file (#2806) (@houko)
+
+### Documentation
+
+- Clarify session_mode scope — cron/channels/forks ignore it (#2790) (@neo-wanderer)
+
+### Maintenance
+
+- Split PR/main pipelines; compute affected crates precisely (#2801) (@houko)
+- Merge release-* workflows into one (keep notify) (#2804) (@houko)
+
+
 ## [2026.4.19] - 2026-04-19
 
 ### Added

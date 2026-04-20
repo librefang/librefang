@@ -1,0 +1,1894 @@
+name: Release
+
+# Unified release pipeline.
+#
+# Superseded:
+# - release-create.yml
+# - release-shell.yml
+# - release-desktop.yml
+# - release-docker.yml
+# - release-sdk.yml
+# - release-lts.yml
+#
+# Kept as a separate file (different trigger):
+# - release-notify.yml
+#
+# Jobs are otherwise identical to the old per-workflow files; the only
+# structural change is that each previous `wait_for_release` poll step
+# is replaced by `needs: [create_release]`, so downstream jobs no longer
+# spin on the GitHub API waiting for the release entry to appear.
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: |
+          `current` reruns the release for the tag picked by `--ref`.
+          `stable/beta/rc/lts` kicks off `cargo xtask release --channel …`
+          which opens a bump-version PR; merging that PR auto-tags and
+          re-enters this workflow via the tag push. Mirrors `just release`.
+        required: true
+        type: choice
+        default: current
+        options:
+          - current
+          - stable
+          - beta
+          - rc
+          - lts
+
+permissions:
+  contents: write
+  packages: write
+
+# Single group for the whole release — a re-push of the same tag cancels
+# the entire in-flight workflow. Cross-job independence is preserved by
+# GitHub Actions default behaviour (jobs only block each other through
+# explicit `needs`, which we only use where the old files already did).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ═════════════════════════════════════════════════════════════════════════
+  # PR close → auto-tag (from release-create.yml)
+  # ═════════════════════════════════════════════════════════════════════════
+
+  tag_on_merge:
+    name: Tag Release
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'chore/bump-version-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Extract tag from PR body and create
+        run: |
+          TAG=$(echo "${{ github.event.pull_request.body }}" | grep -oP '(?<=<!-- release-tag:)(v[^ ]+)(?= -->)' || true)
+          if [ -z "$TAG" ]; then
+            echo "No release-tag marker found, skipping"
+            exit 0
+          fi
+          echo "Creating tag $TAG on main"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # workflow_dispatch channel=stable/beta/rc/lts → run the same flow as
+  # `just release`: compute the next tag for the chosen channel and open a
+  # bump-version PR. Merging that PR auto-tags (see `tag_on_merge`) and the
+  # tag push re-enters this workflow via `create_release` and the rest of
+  # the graph.
+  #
+  # channel=current takes a different path: it does not run this job at all,
+  # and instead the `workflow_dispatch && inputs.channel == 'current'` arm
+  # of every tag-driven job reuses `github.ref` (the tag you picked with
+  # `gh workflow run Release --ref <tag>`) to re-publish without retagging.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  bump_version:
+    name: Bump Version (${{ inputs.channel }})
+    if: github.event_name == 'workflow_dispatch' && inputs.channel != 'current'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # PAT (not GITHUB_TOKEN) is required so the PR is opened by a
+          # user account and `release: published` events on the
+          # subsequent tag can trigger downstream workflows. Same reason
+          # `create_release` uses HOMEBREW_TAP_TOKEN.
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Run xtask release
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          # --no-article: skip Dev.to article generation (CI runner has no
+          # Claude CLI and we don't want to gate releases on it).
+          # --no-confirm + --channel: non-interactive version pick.
+          cargo xtask release --no-confirm --no-article --channel ${{ inputs.channel }}
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Tag push → create GitHub Release entry (from release-create.yml)
+  # All other tag-driven jobs `needs: [create_release]`.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  create_release:
+    name: Create Release
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          # Strip pre-release suffix (-betaN / -rcN) for CHANGELOG lookup
+          VERSION=$(echo "$VERSION" | sed 's/-.*//')
+
+          # Extract this version's changelog section
+          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
+
+          if [ -z "$CHANGES" ]; then
+            CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
+          fi
+
+          # Write to file for multiline output
+          echo "$CHANGES" > /tmp/changelog.md
+
+      # Use HOMEBREW_TAP_TOKEN (PAT) instead of GITHUB_TOKEN so that the
+      # `release: published` event fires downstream workflows. Releases
+      # created by GITHUB_TOKEN do NOT trigger any subsequent workflow runs,
+      # which is why dashboard-build.yml's `release: published` trigger
+      # never fired for past releases — leaving beta14 without its
+      # `dashboard-dist.tar.gz` asset for ~9 hours after publish (#2091).
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          {
+            echo "## What's New"
+            echo ""
+            cat /tmp/changelog.md
+            echo ""
+            echo "## Installation"
+            echo ""
+            echo '**Homebrew (macOS):**'
+            echo '```bash'
+            echo 'brew tap librefang/tap'
+            echo 'brew install librefang              # CLI (stable)'
+            echo 'brew install librefang-beta         # CLI (beta channel)'
+            echo 'brew install librefang-rc           # CLI (rc channel)'
+            echo 'brew install --cask librefang       # Desktop (stable)'
+            echo 'brew install --cask librefang-beta  # Desktop (beta channel)'
+            echo 'brew install --cask librefang-rc    # Desktop (rc channel)'
+            echo '```'
+            echo ""
+            echo '**CLI (Linux/macOS):**'
+            echo '```bash'
+            echo 'curl -fsSL https://librefang.ai/install.sh | sh'
+            echo '```'
+            echo ""
+            echo '**npm:**'
+            echo '```bash'
+            echo 'npm install -g @librefang/cli'
+            echo '```'
+            echo ""
+            echo '**pip:**'
+            echo '```bash'
+            echo 'pip install librefang'
+            echo '```'
+            echo ""
+            echo '**Cargo:**'
+            echo '```bash'
+            echo 'cargo install librefang'
+            echo '```'
+            echo ""
+            echo '**Docker:**'
+            echo '```bash'
+            echo 'docker pull ghcr.io/librefang/librefang:latest'
+            echo '```'
+            echo ""
+            echo "## Migration"
+            echo ""
+            echo '**Coming from OpenClaw or OpenFang?**'
+            echo '```bash'
+            echo 'librefang migrate --from openclaw'
+            echo 'librefang migrate --from openfang'
+            echo '```'
+            echo ""
+            echo "## Links"
+            echo ""
+            echo "- [Documentation](https://librefang.ai)"
+            echo "- [Discord](https://discord.gg/DzTYqAZZmc)"
+            echo "- [Contributing Guide](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md)"
+            echo ""
+            PREV=$(git tag --sort=-creatordate | grep -E '^v[0-9]' | grep -v "$TAG" | head -1)
+            if [ -n "$PREV" ]; then
+              echo "---"
+              echo "**Full diff:** https://github.com/librefang/librefang/compare/${PREV}...${TAG}"
+            fi
+          } > /tmp/release-body.md
+
+          # LTS releases get a special label
+          if echo "$TAG" | grep -qE -- '\-lts$'; then
+            # v2026.3.0-lts -> release/2026.3
+            LTS_BASE="${TAG#v}"
+            LTS_BASE="${LTS_BASE%-lts}"
+            LTS_BRANCH="$(echo "$LTS_BASE" | cut -d. -f1,2)"
+            echo "" >> /tmp/release-body.md
+            echo "> **LTS Release** — this version receives long-term security and bug fixes on the \`release/${LTS_BRANCH}\` branch." >> /tmp/release-body.md
+          fi
+
+          if gh release view "$TAG" &>/dev/null; then
+            echo "Release $TAG already exists, updating..."
+            gh release edit "$TAG" \
+              --title "$TAG" \
+              --notes-file /tmp/release-body.md
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file /tmp/release-body.md
+          fi
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # LTS branch (from release-lts.yml)
+  # Only fires on v*-lts tags.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  create_lts_branch:
+    name: Create LTS Branch
+    if: >
+      ((github.event_name == 'push') ||
+       (github.event_name == 'workflow_dispatch' && inputs.channel == 'current'))
+      && startsWith(github.ref, 'refs/tags/v')
+      && endsWith(github.ref, '-lts')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Create release branch (only for .0-lts)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Extract: v2026.3.0-lts -> 2026.3.0
+          BASE="${TAG#v}"
+          BASE="${BASE%-lts}"
+          # YYYY.M from YYYY.M.PATCH
+          YEAR_MONTH="$(echo "$BASE" | cut -d. -f1,2)"
+          PATCH="$(echo "$BASE" | cut -d. -f3)"
+          BRANCH="release/$YEAR_MONTH"
+
+          # Only create branch for patch 0 (initial LTS)
+          if [ "$PATCH" != "0" ]; then
+            echo "Patch tag ($TAG), branch $BRANCH should already exist"
+            exit 0
+          fi
+
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            echo "Branch $BRANCH already exists, skipping"
+          else
+            echo "Creating LTS branch: $BRANCH from $TAG"
+            git checkout -b "$BRANCH" "$TAG"
+            git push origin "$BRANCH"
+            echo "✓ Created $BRANCH"
+          fi
+
+          # Protect the branch
+          gh api repos/${{ github.repository }}/branches/$BRANCH/protection \
+            -X PUT \
+            -f "required_pull_request_reviews[dismiss_stale_reviews]=true" \
+            -f "required_pull_request_reviews[required_approving_review_count]=1" \
+            -f "enforce_admins=false" \
+            -f "restrictions=null" \
+            -f "required_status_checks=null" \
+            2>/dev/null || echo "::warning::Could not set branch protection (may need admin token)"
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Shared build: React dashboard (from release-shell.yml)
+  # Uploaded as `dashboard-dist` artifact and pulled in by every CLI job.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  build_dashboard:
+    name: Build Dashboard
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+      - name: Install dependencies
+        working-directory: crates/librefang-api/dashboard
+        run: pnpm install --frozen-lockfile --config.strict-dep-builds=false
+      - name: Build dashboard
+        working-directory: crates/librefang-api/dashboard
+        run: pnpm run build
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+          retention-days: 1
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # CLI binaries (from release-shell.yml)
+  # ═════════════════════════════════════════════════════════════════════════
+
+  cli_mac:
+    name: CLI / ${{ matrix.target }}
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release, build_dashboard]
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+          - target: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build CLI
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang
+      - name: Ad-hoc codesign
+        run: |
+          xattr -cr target/${{ matrix.target }}/release/librefang || true
+          codesign --force --sign - target/${{ matrix.target }}/release/librefang
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          cd ../../..
+          shasum -a 256 librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for attempt in $(seq 1 5); do
+            if gh release upload "$TAG" librefang-${{ matrix.target }}.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_linux:
+    name: CLI / ${{ matrix.target }}
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release, build_dashboard]
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            use_cross: true
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build CLI
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --bin librefang
+          else
+            cargo build --release --target ${{ matrix.target }} --bin librefang
+          fi
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for attempt in $(seq 1 5); do
+            if gh release upload "$TAG" librefang-${{ matrix.target }}.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_android:
+    name: CLI / aarch64-linux-android
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release, build_dashboard]
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cross
+        run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-aarch64-linux-android-${{ github.ref_name }}
+      - name: Build CLI (Android aarch64)
+        run: cross build --release --target aarch64-linux-android --bin librefang
+      - name: Package
+        run: |
+          cd target/aarch64-linux-android/release
+          tar czf ../../../librefang-aarch64-linux-android.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-aarch64-linux-android.tar.gz > librefang-aarch64-linux-android.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for attempt in $(seq 1 5); do
+            if gh release upload "$TAG" librefang-aarch64-linux-android.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_linux_mini:
+    name: CLI / ${{ matrix.target }} (mini)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release, build_dashboard]
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build CLI (mini)
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}-mini.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for attempt in $(seq 1 5); do
+            if gh release upload "$TAG" librefang-${{ matrix.target }}-mini.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_musl:
+    name: CLI / ${{ matrix.target }} (static)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release, build_dashboard]
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build static CLI
+        run: cross build --release --target ${{ matrix.target }} --bin librefang
+      - name: Verify static linking
+        run: |
+          FILE_OUT=$(file target/${{ matrix.target }}/release/librefang)
+          echo "$FILE_OUT"
+          if ! echo "$FILE_OUT" | grep -qE "statically linked|static-pie linked"; then
+            echo "::error::Binary is not statically linked!"
+            exit 1
+          fi
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for attempt in $(seq 1 5); do
+            if gh release upload "$TAG" librefang-${{ matrix.target }}.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_windows:
+    name: CLI / ${{ matrix.target }}
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release, build_dashboard]
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+          - target: aarch64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build CLI
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/librefang.exe" -DestinationPath "librefang-${{ matrix.target }}.zip"
+          $hash = (Get-FileHash "librefang-${{ matrix.target }}.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  librefang-${{ matrix.target }}.zip" | Out-File -Encoding ASCII "librefang-${{ matrix.target }}.zip.sha256"
+      - name: Upload to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for attempt in $(seq 1 5); do
+            if gh release upload "$TAG" librefang-${{ matrix.target }}.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_mac_mini:
+    name: CLI / ${{ matrix.target }} (mini)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release, build_dashboard]
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build CLI (mini)
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
+      - name: Ad-hoc codesign
+        run: |
+          xattr -cr target/${{ matrix.target }}/release/librefang || true
+          codesign --force --sign - target/${{ matrix.target }}/release/librefang
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}-mini.tar.gz librefang
+          cd ../../..
+          shasum -a 256 librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for attempt in $(seq 1 5); do
+            if gh release upload "$TAG" librefang-${{ matrix.target }}-mini.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_windows_mini:
+    name: CLI / ${{ matrix.target }} (mini)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release, build_dashboard]
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build CLI (mini)
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/librefang.exe" -DestinationPath "librefang-${{ matrix.target }}-mini.zip"
+          $hash = (Get-FileHash "librefang-${{ matrix.target }}-mini.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  librefang-${{ matrix.target }}-mini.zip" | Out-File -Encoding ASCII "librefang-${{ matrix.target }}-mini.zip.sha256"
+      - name: Upload to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for attempt in $(seq 1 5); do
+            if gh release upload "$TAG" librefang-${{ matrix.target }}-mini.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_npm:
+    name: CLI / npm
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish CLI binaries to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          cargo xtask publish-npm-binaries \
+            --version "$VERSION" \
+            --repo "${{ github.repository }}" \
+            --tag "${{ github.ref_name }}"
+
+  cli_pypi:
+    name: CLI / PyPI
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Publish CLI binaries to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          cargo xtask publish-pypi-binaries \
+            --version "$VERSION" \
+            --repo "${{ github.repository }}" \
+            --tag "${{ github.ref_name }}"
+
+  sync_homebrew:
+    name: Sync to Homebrew Tap
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    needs: [cli_mac, cli_linux]
+    steps:
+      - name: Check out tap repo
+        uses: actions/checkout@v6
+        with:
+          repository: librefang/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Fetch release metadata (with retry for asset availability)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # Retry up to 10 times (100s total) to allow asset uploads to complete
+          for attempt in $(seq 1 10); do
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+              > release.json
+
+            jq -e '.tag_name and (.assets | type == "array")' release.json >/dev/null
+
+            # Check that all 4 CLI assets exist (macOS + Linux, arm64 + x86_64)
+            MAC_ARM_OK=$(jq -r '.assets[] | select(.name == "librefang-aarch64-apple-darwin.tar.gz") | .name' release.json)
+            MAC_X86_OK=$(jq -r '.assets[] | select(.name == "librefang-x86_64-apple-darwin.tar.gz") | .name' release.json)
+            LNX_ARM_OK=$(jq -r '.assets[] | select(.name == "librefang-aarch64-unknown-linux-gnu.tar.gz") | .name' release.json)
+            LNX_X86_OK=$(jq -r '.assets[] | select(.name == "librefang-x86_64-unknown-linux-gnu.tar.gz") | .name' release.json)
+
+            if [ -n "$MAC_ARM_OK" ] && [ -n "$MAC_X86_OK" ] && [ -n "$LNX_ARM_OK" ] && [ -n "$LNX_X86_OK" ]; then
+              echo "✓ All 4 CLI assets found on attempt $attempt"
+              break
+            fi
+
+            if [ "$attempt" -eq 10 ]; then
+              echo "::error::CLI assets not found in release after 10 attempts"
+              echo "  macOS ARM: ${MAC_ARM_OK:-MISSING}"
+              echo "  macOS x86: ${MAC_X86_OK:-MISSING}"
+              echo "  Linux ARM: ${LNX_ARM_OK:-MISSING}"
+              echo "  Linux x86: ${LNX_X86_OK:-MISSING}"
+              exit 1
+            fi
+
+            echo "Waiting for CLI assets to be uploaded... ($attempt/10)"
+            sleep 10
+          done
+
+      - name: Generate formulas (channel-based)
+        run: |
+          set -euo pipefail
+
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          SEMVER="${VERSION}"
+
+          asset_url() {
+            jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json
+          }
+
+          asset_sha() {
+            local sha_url
+            sha_url="$(jq -r --arg name "${1}.sha256" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
+            if [ -z "$sha_url" ] || [ "$sha_url" = "null" ]; then
+              local asset_url
+              asset_url="$(jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
+              curl -fsSL "$asset_url" | sha256sum | awk '{print $1}'
+            else
+              curl -fsSL "$sha_url" | awk '{print $1}'
+            fi
+          }
+
+          asset_size() {
+            jq -r --arg name "$1" '.assets[] | select(.name == $name) | .size' release.json
+          }
+
+          # macOS assets
+          ARM64_DARWIN_NAME="librefang-aarch64-apple-darwin.tar.gz"
+          X86_DARWIN_NAME="librefang-x86_64-apple-darwin.tar.gz"
+          # Linux assets
+          ARM64_LINUX_NAME="librefang-aarch64-unknown-linux-gnu.tar.gz"
+          X86_LINUX_NAME="librefang-x86_64-unknown-linux-gnu.tar.gz"
+
+          ARM64_DARWIN_URL="$(asset_url "$ARM64_DARWIN_NAME")"
+          X86_DARWIN_URL="$(asset_url "$X86_DARWIN_NAME")"
+          ARM64_LINUX_URL="$(asset_url "$ARM64_LINUX_NAME")"
+          X86_LINUX_URL="$(asset_url "$X86_LINUX_NAME")"
+
+          ARM64_DARWIN_SHA="$(asset_sha "$ARM64_DARWIN_NAME")"
+          X86_DARWIN_SHA="$(asset_sha "$X86_DARWIN_NAME")"
+          ARM64_LINUX_SHA="$(asset_sha "$ARM64_LINUX_NAME")"
+          X86_LINUX_SHA="$(asset_sha "$X86_LINUX_NAME")"
+
+          ARM64_DARWIN_SIZE="$(asset_size "$ARM64_DARWIN_NAME")"
+          X86_DARWIN_SIZE="$(asset_size "$X86_DARWIN_NAME")"
+          ARM64_LINUX_SIZE="$(asset_size "$ARM64_LINUX_NAME")"
+          X86_LINUX_SIZE="$(asset_size "$X86_LINUX_NAME")"
+
+          for required in \
+            ARM64_DARWIN_URL X86_DARWIN_URL ARM64_LINUX_URL X86_LINUX_URL \
+            ARM64_DARWIN_SHA X86_DARWIN_SHA ARM64_LINUX_SHA X86_LINUX_SHA \
+            ARM64_DARWIN_SIZE X86_DARWIN_SIZE ARM64_LINUX_SIZE X86_LINUX_SIZE
+          do
+            if [ -z "${!required}" ] || [ "${!required}" = "null" ]; then
+              echo "Missing release metadata: $required" >&2
+              exit 1
+            fi
+          done
+
+          for size_var in ARM64_DARWIN_SIZE X86_DARWIN_SIZE ARM64_LINUX_SIZE X86_LINUX_SIZE
+          do
+            if [ "${!size_var}" -le 0 ]; then
+              echo "Release asset is empty: $size_var" >&2
+              exit 1
+            fi
+          done
+
+          # Channel strategy (like Apple software updates):
+          #   -rc tag    → update rc channel only
+          #   -beta tag  → update beta + rc channels
+          #   stable tag → update stable + beta + rc channels
+          if echo "$VERSION" | grep -qE '\-rc'; then
+            CHANNELS=(rc)
+          elif echo "$VERSION" | grep -qE '\-beta'; then
+            CHANNELS=(beta rc)
+          else
+            CHANNELS=(stable beta rc)
+          fi
+
+          echo "Release $VERSION → updating formula channels: ${CHANNELS[*]}"
+
+          ALL_CHANNELS=(stable beta rc)
+
+          generate_formula() {
+            local channel="$1"
+            local formula_name="librefang"
+            local class_name="Librefang"
+            local desc_suffix=""
+
+            if [ "$channel" != "stable" ]; then
+              formula_name="librefang-${channel}"
+              # librefang-beta → LibrefangBeta, librefang-rc → LibrefangRc
+              local suffix
+              suffix="$(echo "${channel}" | sed 's/.*/\u&/')"
+              class_name="Librefang${suffix}"
+              desc_suffix=" (${channel} channel)"
+            fi
+
+            # Build conflicts_with lines
+            local conflicts=""
+            for other in "${ALL_CHANNELS[@]}"; do
+              [ "$other" = "$channel" ] && continue
+              local other_name="librefang"
+              [ "$other" != "stable" ] && other_name="librefang-${other}"
+              conflicts="${conflicts}
+            conflicts_with \"${other_name}\", because: \"both install a \\\`librefang\\\` binary\""
+            done
+
+            # Livecheck only for stable channel
+            local livecheck=""
+            if [ "$channel" = "stable" ]; then
+              livecheck='
+
+            livecheck do
+              url "https://github.com/librefang/librefang/releases/latest"
+              strategy :header_match
+            end'
+            fi
+
+            mkdir -p tap/Formula
+            cat > "tap/Formula/${formula_name}.rb" <<FORMULA
+          class ${class_name} < Formula
+            desc "Community-Maintained Agent Operating System written in Rust${desc_suffix}"
+            homepage "https://librefang.ai"
+            license "MIT"
+            version "$SEMVER"
+          ${conflicts}${livecheck}
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "$ARM64_DARWIN_URL"
+                sha256 "$ARM64_DARWIN_SHA"
+              else
+                url "$X86_DARWIN_URL"
+                sha256 "$X86_DARWIN_SHA"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "$ARM64_LINUX_URL"
+                sha256 "$ARM64_LINUX_SHA"
+              else
+                url "$X86_LINUX_URL"
+                sha256 "$X86_LINUX_SHA"
+              end
+            end
+
+            def install
+              bin.install "librefang"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/librefang --version")
+            end
+          end
+          FORMULA
+
+            echo "=== Formula: ${formula_name} ==="
+            cat "tap/Formula/${formula_name}.rb"
+          }
+
+          for channel in "${CHANNELS[@]}"; do
+            generate_formula "$channel"
+          done
+
+          # --- Versioned formula (e.g. librefang@2026.3.2114) ---
+          # Always generated for every release, regardless of channel
+          CLASS_SUFFIX=$(echo "$SEMVER" | tr -d '.')
+          CLASS_NAME="LibrefangAT${CLASS_SUFFIX}"
+
+          cat > "tap/Formula/librefang@${SEMVER}.rb" <<FORMULA
+          class ${CLASS_NAME} < Formula
+            desc "Community-Maintained Agent Operating System written in Rust"
+            homepage "https://librefang.ai"
+            license "MIT"
+            version "$SEMVER"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "$ARM64_DARWIN_URL"
+                sha256 "$ARM64_DARWIN_SHA"
+              else
+                url "$X86_DARWIN_URL"
+                sha256 "$X86_DARWIN_SHA"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "$ARM64_LINUX_URL"
+                sha256 "$ARM64_LINUX_SHA"
+              else
+                url "$X86_LINUX_URL"
+                sha256 "$X86_LINUX_SHA"
+              end
+            end
+
+            keg_only :versioned_formula
+
+            def install
+              bin.install "librefang"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/librefang --version")
+            end
+          end
+          FORMULA
+
+          echo ""
+          echo "=== Versioned formula: librefang@${SEMVER}.rb ==="
+          cat "tap/Formula/librefang@${SEMVER}.rb"
+
+      - name: Commit and push
+        working-directory: tap
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "chore: update formula channels to ${{ github.ref_name }}" || echo "No changes"
+          git push
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Desktop (Tauri) — from release-desktop.yml
+  # ═════════════════════════════════════════════════════════════════════════
+
+  desktop:
+    name: Desktop / ${{ matrix.platform.name }}
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release]
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: Linux x86_64
+            os: ubuntu-22.04
+            args: "--target x86_64-unknown-linux-gnu"
+            rust_target: x86_64-unknown-linux-gnu
+
+          - name: macOS x86_64
+            os: macos-latest
+            args: "--target x86_64-apple-darwin"
+            rust_target: x86_64-apple-darwin
+
+          - name: macOS ARM64
+            os: macos-latest
+            args: "--target aarch64-apple-darwin"
+            rust_target: aarch64-apple-darwin
+
+          - name: Windows x86_64
+            os: windows-latest
+            args: "--target x86_64-pc-windows-msvc"
+            rust_target: x86_64-pc-windows-msvc
+
+          - name: Windows ARM64
+            os: windows-latest
+            args: "--target aarch64-pc-windows-msvc"
+            rust_target: aarch64-pc-windows-msvc
+
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust_target }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.platform.rust_target }}-${{ github.ref_name }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Build embedded dashboard assets
+        working-directory: crates/librefang-api/dashboard
+        run: |
+          pnpm install --frozen-lockfile --config.strict-dep-builds=false
+          pnpm run build
+
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS'
+        env:
+          MAC_CERT_BASE64: ${{ secrets.MAC_CERT_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          if [ -z "$MAC_CERT_BASE64" ]; then
+            echo "No certificate configured, skipping..."
+            exit 0
+          fi
+          echo "$MAC_CERT_BASE64" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import $RUNNER_TEMP/certificate.p12 -P "$MAC_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          echo "Using signing identity: $IDENTITY"
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+          rm -f $RUNNER_TEMP/certificate.p12
+
+      - name: Check notarization readiness
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
+        env:
+          TEAM_ID: ${{ secrets.MAC_NOTARIZE_TEAM_ID }}
+        run: |
+          if [ -z "$TEAM_ID" ] || [ ${#TEAM_ID} -lt 3 ]; then
+            echo "::warning::MAC_NOTARIZE_TEAM_ID is missing or invalid, falling back to unsigned build"
+            echo "APPLE_SIGNING_IDENTITY=" >> $GITHUB_ENV
+          fi
+
+      - name: Verify Tauri version (CalVer, Major ≤ 255 for WiX MSI)
+        shell: bash
+        run: |
+          cd crates/librefang-desktop
+          TAURI_VER=$(grep '"version"' tauri.conf.json | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          echo "Tauri version: $TAURI_VER"
+          MAJOR=$(echo "$TAURI_VER" | cut -d. -f1)
+          MINOR=$(echo "$TAURI_VER" | cut -d. -f2)
+          PATCH=$(echo "$TAURI_VER" | cut -d. -f3)
+          if [ "$MAJOR" -gt 255 ] || [ "$MINOR" -gt 255 ] || [ "$PATCH" -gt 65535 ]; then
+            echo "::error::Tauri version $TAURI_VER exceeds MSI limits (Major/Minor ≤ 255, Patch ≤ 65535)"
+            exit 1
+          fi
+          echo "✓ Version $TAURI_VER is MSI-compatible"
+
+      - name: Delete existing assets for this target (allows re-release)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Fetch asset list with retry (GitHub API can be transiently unavailable)
+          ASSETS=""
+          for attempt in $(seq 1 5); do
+            if ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null); then
+              break
+            fi
+            echo "Failed to fetch release assets (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          # Delete any matching this target
+          echo "$ASSETS" | while read -r name; do
+            [ -z "$name" ] && continue
+            case "$name" in
+              *${{ matrix.platform.rust_target }}*|*latest.json)
+                echo "Deleting existing asset: $name"
+                gh release delete-asset "$TAG" "$name" --yes 2>/dev/null || true
+                ;;
+            esac
+          done
+
+      - name: Build and bundle Tauri desktop app
+        if: runner.os != 'macOS' || env.APPLE_SIGNING_IDENTITY == ''
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "${{ github.ref_name }}"
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          projectPath: crates/librefang-desktop
+          args: ${{ matrix.platform.args }}
+
+      - name: Build and bundle Tauri desktop app (signed macOS)
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.MAC_NOTARIZE_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.MAC_NOTARIZE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.MAC_NOTARIZE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "${{ github.ref_name }}"
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          projectPath: crates/librefang-desktop
+          args: ${{ matrix.platform.args }}
+
+  sync_homebrew_cask:
+    name: Sync Homebrew Cask
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    needs: [desktop]
+    steps:
+      - name: Check out tap repo
+        uses: actions/checkout@v6
+        with:
+          repository: librefang/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Fetch release metadata (with retry for DMG availability)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          for attempt in $(seq 1 10); do
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+              > release.json
+
+            # Match DMG assets by suffix (Tauri version differs from tag version)
+            ARM_DMG=$(jq -r '[.assets[].name | select(endswith("_aarch64.dmg"))][0] // empty' release.json)
+            X86_DMG=$(jq -r '[.assets[].name | select(endswith("_x64.dmg"))][0] // empty' release.json)
+
+            if [ -n "$ARM_DMG" ] && [ -n "$X86_DMG" ]; then
+              echo "✓ Both DMG assets found on attempt $attempt"
+              echo "  ARM: $ARM_DMG"
+              echo "  x86: $X86_DMG"
+              break
+            fi
+
+            if [ "$attempt" -eq 10 ]; then
+              echo "::error::DMG assets not found in release after 10 attempts"
+              echo "  ARM DMG: ${ARM_DMG:-MISSING}"
+              echo "  x86 DMG: ${X86_DMG:-MISSING}"
+              exit 1
+            fi
+
+            echo "Waiting for DMG assets... ($attempt/10)"
+            sleep 10
+          done
+
+      - name: Generate Casks (channel-based)
+        run: |
+          set -euo pipefail
+
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+
+          # Resolve actual DMG names (Tauri version differs from tag version)
+          ARM_DMG=$(jq -r '[.assets[].name | select(endswith("_aarch64.dmg"))][0] // empty' release.json)
+          X86_DMG=$(jq -r '[.assets[].name | select(endswith("_x64.dmg"))][0] // empty' release.json)
+          # Extract Tauri version from DMG filename for cask version field
+          TAURI_VERSION=$(echo "$ARM_DMG" | sed 's/^LibreFang_//; s/_aarch64\.dmg$//')
+
+          if [ -z "$ARM_DMG" ] || [ -z "$X86_DMG" ]; then
+            echo "::error::DMG assets not found in release.json"
+            exit 1
+          fi
+          echo "DMG version (Tauri): $TAURI_VERSION"
+
+          asset_sha() {
+            local sha_url
+            sha_url="$(jq -r --arg name "${1}.sha256" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
+            if [ -z "$sha_url" ] || [ "$sha_url" = "null" ]; then
+              local asset_url
+              asset_url="$(jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
+              curl -fsSL "$asset_url" | sha256sum | awk '{print $1}'
+            else
+              curl -fsSL "$sha_url" | awk '{print $1}'
+            fi
+          }
+
+          ARM_SHA="$(asset_sha "$ARM_DMG")"
+          X86_SHA="$(asset_sha "$X86_DMG")"
+
+          for required in ARM_SHA X86_SHA; do
+            if [ -z "${!required}" ] || [ "${!required}" = "null" ]; then
+              echo "Missing SHA256 for $required" >&2
+              exit 1
+            fi
+          done
+
+          # Channel strategy (like Apple software updates):
+          #   -rc tag    → update rc channel only
+          #   -beta tag  → update beta + rc channels
+          #   stable tag → update stable + beta + rc channels
+          if echo "$VERSION" | grep -qE '\-rc'; then
+            CHANNELS=(rc)
+          elif echo "$VERSION" | grep -qE '\-beta'; then
+            CHANNELS=(beta rc)
+          else
+            CHANNELS=(stable beta rc)
+          fi
+
+          echo "Release $VERSION → updating cask channels: ${CHANNELS[*]}"
+
+          ALL_CHANNELS=(stable beta rc)
+
+          generate_cask() {
+            local channel="$1"
+            local cask_name="librefang"
+            local display_name="LibreFang"
+            local desc_suffix=""
+
+            if [ "$channel" != "stable" ]; then
+              cask_name="librefang-${channel}"
+              display_name="LibreFang (${channel})"
+              desc_suffix=" (${channel} channel)"
+            fi
+
+            # Build conflicts_with lines
+            local conflicts=""
+            for other in "${ALL_CHANNELS[@]}"; do
+              [ "$other" = "$channel" ] && continue
+              local other_name="librefang"
+              [ "$other" != "stable" ] && other_name="librefang-${other}"
+              conflicts="${conflicts}
+            conflicts_with cask: \"${other_name}\""
+            done
+
+            # Livecheck only for stable channel
+            local livecheck=""
+            if [ "$channel" = "stable" ]; then
+              livecheck='
+
+            livecheck do
+              url "https://github.com/librefang/librefang/releases/latest"
+              strategy :header_match
+            end'
+            fi
+
+            mkdir -p tap/Casks
+            cat > "tap/Casks/${cask_name}.rb" <<CASK
+          cask "${cask_name}" do
+            arch arm: "aarch64", intel: "x64"
+
+            version "${TAURI_VERSION}"
+
+            on_arm do
+              sha256 "${ARM_SHA}"
+            end
+            on_intel do
+              sha256 "${X86_SHA}"
+            end
+
+            url "https://github.com/librefang/librefang/releases/download/${TAG}/LibreFang_#{version}_#{arch}.dmg",
+                verified: "github.com/librefang/librefang/"
+            name "${display_name}"
+            desc "Community-Maintained Agent Operating System written in Rust${desc_suffix}"
+            homepage "https://librefang.ai"
+          ${conflicts}${livecheck}
+
+            depends_on macos: ">= :ventura"
+
+            app "LibreFang.app"
+
+            zap trash: [
+              "~/Library/Application Support/ai.librefang.desktop",
+              "~/Library/Caches/ai.librefang.desktop",
+              "~/Library/Preferences/ai.librefang.desktop.plist",
+            ]
+          end
+          CASK
+
+            echo "=== Cask: ${cask_name} ==="
+            cat "tap/Casks/${cask_name}.rb"
+          }
+
+          for channel in "${CHANNELS[@]}"; do
+            generate_cask "$channel"
+          done
+
+          # ── Versioned cask (pinned to this exact release) ──────────────
+          # Allows: brew install --cask librefang@2026.4.2-beta7
+          # These accumulate in the tap and are never overwritten.
+          VERSIONED_NAME="librefang@${VERSION}"
+          mkdir -p tap/Casks
+          cat > "tap/Casks/${VERSIONED_NAME}.rb" <<CASK
+          cask "${VERSIONED_NAME}" do
+            arch arm: "aarch64", intel: "x64"
+
+            version "${TAURI_VERSION}"
+
+            on_arm do
+              sha256 "${ARM_SHA}"
+            end
+            on_intel do
+              sha256 "${X86_SHA}"
+            end
+
+            url "https://github.com/librefang/librefang/releases/download/${TAG}/LibreFang_#{version}_#{arch}.dmg",
+                verified: "github.com/librefang/librefang/"
+            name "LibreFang ${VERSION}"
+            desc "Community-Maintained Agent Operating System written in Rust (pinned to ${VERSION})"
+            homepage "https://librefang.ai"
+
+            depends_on macos: ">= :ventura"
+
+            app "LibreFang.app"
+
+            zap trash: [
+              "~/Library/Application Support/ai.librefang.desktop",
+              "~/Library/Caches/ai.librefang.desktop",
+              "~/Library/Preferences/ai.librefang.desktop.plist",
+            ]
+          end
+          CASK
+
+          echo "=== Versioned cask: ${VERSIONED_NAME} ==="
+          cat "tap/Casks/${VERSIONED_NAME}.rb"
+
+      - name: Commit and push
+        working-directory: tap
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          mkdir -p Casks
+          git add .
+          git commit -m "chore: update cask channels to ${{ github.ref_name }}" || echo "No changes"
+          git push
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Docker — from release-docker.yml
+  # ═════════════════════════════════════════════════════════════════════════
+
+  docker:
+    name: Docker / ${{ matrix.platform }}
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            os: ubuntu-24.04
+          - platform: linux/arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Extract version & platform slug
+        id: meta
+        run: |
+          echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          platform=${{ matrix.platform }}
+          echo "slug=${platform//\//-}" >> "$GITHUB_OUTPUT"
+      - name: Build and push (single-arch digest)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          platforms: ${{ matrix.platform }}
+          tags: ghcr.io/librefang/librefang
+          cache-from: type=gha,scope=${{ steps.meta.outputs.slug }}
+          cache-to: type=gha,mode=max,scope=${{ steps.meta.outputs.slug }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-digest-${{ steps.meta.outputs.slug }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-manifest:
+    name: Docker Manifest
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    needs: [docker]
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Extract version
+        id: version
+        run: |
+          echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: docker-digest-*
+          merge-multiple: true
+      - name: Create and push multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          IMAGE=ghcr.io/librefang/librefang
+          VERSION=${{ steps.version.outputs.version }}
+          TAGS="-t $IMAGE:$VERSION -t $IMAGE:latest"
+          # LTS releases also get :lts tag
+          if echo "$VERSION" | grep -qE -- '\-lts'; then
+            TAGS="$TAGS -t $IMAGE:lts"
+          fi
+          docker buildx imagetools create \
+            $TAGS \
+            $(printf "$IMAGE@sha256:%s " *)
+
+  deploy_fly:
+    name: Deploy to Fly.io
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    needs: [docker-manifest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: superfly/flyctl-actions/setup-flyctl@v1
+      - name: Deploy
+        run: flyctl deploy --remote-only --config deploy/fly/fly.toml
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  deploy_render:
+    name: Deploy to Render
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    needs: [docker-manifest]
+    steps:
+      - name: Trigger Render deploy
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "No Render deploy hook configured, skipping"
+            exit 0
+          fi
+          curl -sf "$RENDER_DEPLOY_HOOK_URL"
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Language SDKs — from release-sdk.yml
+  # ═════════════════════════════════════════════════════════════════════════
+
+  sdk_javascript:
+    name: SDK / JavaScript (npm)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/javascript
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Sync version from tag
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          echo "Publishing @librefang/sdk@$VERSION"
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; then
+            echo "✓ ${PKG_NAME}@${PKG_VERSION} already published to npm, skipping"
+          else
+            NPM_TAG=""
+            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+              NPM_TAG="--tag next"
+            elif echo "$PKG_VERSION" | grep -qE -- '\-lts'; then
+              NPM_TAG="--tag lts"
+            fi
+            npm publish --access public $NPM_TAG
+          fi
+          echo "- **npm**: https://www.npmjs.com/package/${PKG_NAME}/v/${PKG_VERSION}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Publish to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm config set registry https://npm.pkg.github.com
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          GPR_TAG=""
+          if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+            GPR_TAG="--tag next"
+          elif echo "$PKG_VERSION" | grep -qE -- '-lts'; then
+            GPR_TAG="--tag lts"
+          fi
+          npm publish --access public $GPR_TAG 2>/dev/null || echo "✓ Already published to GitHub Packages, skipping"
+
+  sdk_cli_npm:
+    name: SDK / CLI npm (@librefang/cli)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/cli-npm
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Sync version from tag
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          echo "Publishing @librefang/cli@$VERSION"
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; then
+            echo "✓ ${PKG_NAME}@${PKG_VERSION} already published, skipping"
+          else
+            NPM_TAG=""
+            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+              NPM_TAG="--tag next"
+            fi
+            npm publish --access public $NPM_TAG
+          fi
+          echo "- **npm**: https://www.npmjs.com/package/${PKG_NAME}/v/${PKG_VERSION}" >> $GITHUB_STEP_SUMMARY
+
+  sdk_python:
+    name: SDK / Python (PyPI)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Sync version from tag
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          # PEP 440: convert -beta1 → b1, -rc1 → rc1, strip -lts (no PEP 440 equivalent)
+          PYPI_VERSION=$(echo "$VERSION" | sed 's/-beta/b/; s/-rc/rc/; s/-lts//')
+          sed -i "s/^version = .*/version = \"$PYPI_VERSION\"/" pyproject.toml
+          echo "Publishing librefang-sdk==$PYPI_VERSION"
+          grep '^version' pyproject.toml
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist/
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+
+      - name: Output publish link
+        run: |
+          PYPI_VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "- **PyPI**: https://pypi.org/project/librefang-sdk/${PYPI_VERSION}/" >> $GITHUB_STEP_SUMMARY
+
+  sdk_rust:
+    name: SDK / Rust (crates.io)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/rust
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Sync version from tag
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+          sed -i '/^\[dependencies\]/,/^```/ s/librefang = "[^"]*"/librefang = "'"$MAJOR_MINOR"'"/' README.md
+          echo "Publishing librefang@$VERSION"
+          grep '^version' Cargo.toml
+
+      - name: Test
+        run: cargo test
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if cargo search librefang --limit 1 2>/dev/null | grep -q "librefang = \"$VERSION\""; then
+            echo "✓ librefang@$VERSION already published to crates.io, skipping"
+          else
+            cargo publish --allow-dirty
+          fi
+          echo "- **crates.io**: https://crates.io/crates/librefang/${VERSION}" >> $GITHUB_STEP_SUMMARY
+
+  sdk_go:
+    name: SDK / Go (tag)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create Go module tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          REPO="${{ github.repository }}"
+
+          # Map CalVer to Go-compatible v0.YYYYMMDD.0 (keeps major=0, no /v2026 import path)
+          # e.g. 2026.3.21 → v0.20260321.0, 2026.3.21-rc1 → v0.20260321.0-rc1
+          YEAR=$(echo "$VERSION" | cut -d. -f1)
+          MONTH=$(printf '%02d' "$(echo "$VERSION" | cut -d. -f2)")
+          DD=$(echo "$VERSION" | cut -d. -f3 | sed 's/-.*//')
+          PRERELEASE=$(echo "$VERSION" | grep -oE '\-.*' || true)
+          GO_VERSION="0.${YEAR}${MONTH}${DD}.0${PRERELEASE}"
+          GO_TAG="sdk/go/v${GO_VERSION}"
+
+          # Check if tag already exists
+          if gh api "repos/$REPO/git/refs/tags/$GO_TAG" &>/dev/null; then
+            echo "Tag $GO_TAG already exists, skipping"
+            exit 0
+          fi
+
+          # Get the commit SHA for this tag
+          SHA=$(gh api "repos/$REPO/git/ref/tags/${GITHUB_REF#refs/tags/}" --jq '.object.sha')
+
+          # Create tag via API (avoids git push workflow permission issue)
+          gh api "repos/$REPO/git/refs" \
+            -f ref="refs/tags/$GO_TAG" \
+            -f sha="$SHA"
+          echo "✓ Published Go module tag: $GO_TAG (from $VERSION)"
+          echo "- **Go**: https://pkg.go.dev/github.com/librefang/librefang/sdk/go@v${GO_VERSION}" >> $GITHUB_STEP_SUMMARY

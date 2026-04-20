@@ -6,7 +6,7 @@ import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
 import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
-import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, getDashboardUsername, getStatus, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
+import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getDashboardUsername, getStatus, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 import { NotificationCenter } from "./components/NotificationCenter";
 
 function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
@@ -756,7 +756,7 @@ export function App() {
                     </button>
                     {authMode !== "none" && (
                       <button
-                        onClick={() => { clearApiKey(); window.location.reload(); }}
+                        onClick={async () => { await dashboardLogout(); window.location.reload(); }}
                         className="flex w-full items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-red-500 hover:bg-surface-hover transition-colors"
                       >
                         <LogOut className="h-3.5 w-3.5" />

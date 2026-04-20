@@ -2,9 +2,11 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   spawnAgent,
   cloneAgent,
+  stopAgent,
   suspendAgent,
   resumeAgent,
   deleteAgent,
+  patchAgent,
   patchAgentConfig,
   createAgentSession,
   switchAgentSession,
@@ -42,6 +44,16 @@ export function useCloneAgent() {
   });
 }
 
+// Abort an in-flight agent run. The backend aborts the kernel task; the UI
+// side separately reconciles streaming state (see ChatPage.stopMessage), so
+// this hook intentionally doesn't invalidate queries — agent list state is
+// unchanged by a stop.
+export function useStopAgent() {
+  return useMutation({
+    mutationFn: (agentId: string) => stopAgent(agentId),
+  });
+}
+
 export function useSuspendAgent() {
   const qc = useQueryClient();
   return useMutation({
@@ -71,6 +83,35 @@ export function useResumeAgent() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: agentKeys.all });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+/**
+ * Manifest-level partial update: name, description, system_prompt,
+ * mcp_servers, model. Distinct from `usePatchAgentConfig` which targets
+ * `/agents/{id}/config` (model-tuning only).
+ */
+export function usePatchAgent() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      body,
+    }: {
+      agentId: string;
+      body: {
+        name?: string;
+        description?: string;
+        system_prompt?: string;
+        model?: string;
+        provider?: string;
+        mcp_servers?: string[];
+      };
+    }) => patchAgent(agentId, body),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
     },
   });
 }

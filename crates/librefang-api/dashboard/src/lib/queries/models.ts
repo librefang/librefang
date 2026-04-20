@@ -27,9 +27,9 @@ export const modelQueries = {
 
 export function useModels(
   filters: { provider?: string; tier?: string; available?: boolean } = {},
-  options: { enabled?: boolean } = {},
+  options: { enabled?: boolean; staleTime?: number; refetchInterval?: number | false } = {},
 ) {
-  return useQuery({ ...modelQueries.list(filters), enabled: options.enabled });
+  return useQuery({ ...modelQueries.list(filters), ...options });
 }
 
 export function useModelOverrides(modelKey: string) {

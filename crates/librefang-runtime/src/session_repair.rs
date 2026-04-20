@@ -607,43 +607,21 @@ fn should_replace_kept_tool_result(
         && candidate_status != ToolExecutionStatus::WaitingApproval
 }
 
-/// Phase 2e: Remove aborted assistant messages.
+/// Phase 2e: Remove empty assistant messages.
 ///
-/// An assistant message with no content blocks (or only empty text blocks)
-/// that is followed by a user message with ToolResults is considered aborted.
-/// This handles cases where the LLM was interrupted mid-tool-use.
+/// An assistant message with no content blocks (or only empty text / unknown
+/// blocks) is always invalid. Providers like Moonshot/Kimi reject the whole
+/// session with HTTP 400 ("assistant message must not be empty") when such a
+/// message survives — including when it sits at the tail of the transcript.
+/// This pass strips them unconditionally regardless of position (fixes #2809).
 fn remove_aborted_assistant_messages(messages: Vec<Message>) -> Vec<Message> {
-    if messages.len() < 2 {
-        return messages;
-    }
-
     let mut result = Vec::with_capacity(messages.len());
-    let mut skip_next = false;
-    let msg_len = messages.len();
 
     for (i, msg) in messages.into_iter().enumerate() {
-        if skip_next {
-            skip_next = false;
+        if msg.role == Role::Assistant && is_empty_or_blank_content(&msg.content) {
+            debug!(index = i, "Removing empty assistant message");
             continue;
         }
-
-        if msg.role == Role::Assistant && is_empty_or_blank_content(&msg.content) {
-            // Check if next message is a user message with ToolResults
-            // We cannot peek ahead in an owned iterator, so we use index tracking.
-            // Since we consumed the message, we check if we should skip.
-            if i + 1 < msg_len {
-                // We'll handle this by not pushing the message and letting the
-                // next iteration handle the ToolResult user message normally.
-                // The ToolResult will become orphaned and get cleaned in a
-                // subsequent repair pass, but for now we just remove the empty assistant.
-                debug!(
-                    index = i,
-                    "Removing aborted assistant message with empty content"
-                );
-                continue;
-            }
-        }
-
         result.push(msg);
     }
 
@@ -788,16 +766,15 @@ pub fn prune_heartbeat_turns(messages: &mut Vec<Message>, keep_recent: usize) {
 
     for (i, msg) in messages.iter().enumerate().take(prune_end) {
         if msg.role == Role::Assistant {
+            // Delegate to the canonical silent-response detector so the
+            // heartbeat prune logic stays in lock-step with the rest of the
+            // runtime (single source of truth — see silent_response.rs).
             let is_no_reply = match &msg.content {
-                MessageContent::Text(text) => {
-                    let t = text.trim();
-                    t == "NO_REPLY" || t == "[no reply needed]"
-                }
+                MessageContent::Text(text) => crate::silent_response::is_silent_response(text),
                 MessageContent::Blocks(blocks) => {
                     blocks.len() == 1
                         && matches!(&blocks[0], ContentBlock::Text { text, .. } if {
-                            let t = text.trim();
-                            t == "NO_REPLY" || t == "[no reply needed]"
+                            crate::silent_response::is_silent_response(text)
                         })
                 }
             };
@@ -1313,6 +1290,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_trailing_empty_assistant_removed() {
+        // Regression for #2809: a trailing empty assistant (from an aborted
+        // stream) must be stripped, otherwise providers like Moonshot/Kimi
+        // return HTTP 400 on the next turn.
+        let messages = vec![
+            Message::user("Hi"),
+            Message::assistant("Hello"),
+            Message::user("What's up?"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![]),
+                pinned: false,
+            },
+        ];
+
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+        assert!(
+            stats.empty_messages_removed > 0,
+            "trailing empty assistant must be stripped"
+        );
+        for msg in &repaired {
+            if msg.role == Role::Assistant {
+                assert!(
+                    !is_empty_or_blank_content(&msg.content),
+                    "no empty assistant messages may survive repair"
+                );
+            }
+        }
+        assert!(
+            matches!(repaired.last().map(|m| &m.role), Some(Role::User)),
+            "trailing message should now be the user turn"
+        );
+    }
+
+    #[test]
+    fn test_lone_empty_assistant_removed() {
+        // Edge case exposed by #2809: even a single-message transcript with
+        // only an empty assistant message should be stripped rather than
+        // passed through as-is.
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![]),
+            pinned: false,
+        }];
+
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+        assert_eq!(repaired.len(), 0);
+        assert!(stats.empty_messages_removed > 0);
     }
 
     #[test]

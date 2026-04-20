@@ -1,4 +1,4 @@
-import { lazy, Suspense, type ComponentType } from "react";
+import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
 import { Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { App } from "./App";
 
@@ -9,27 +9,40 @@ import { App } from "./App";
 // Webpack: "Loading chunk ... failed"
 const CHUNK_ERROR_RE = /dynamically imported module|importing a module script|Loading chunk .* failed/i;
 
+// Matches the transient React 19 + Vite HMR failure mode where the dispatcher
+// is null at hook-read time. A full reload reliably clears the stale module
+// graph; we auto-reload once per session so users don't have to click Reload.
+const REACT_DISPATCHER_RE = /reading ['"]useContext['"]|reading ['"]useState['"]|reading ['"]useRef['"]|reading ['"]useMemo['"]|reading ['"]useEffect['"]|reading ['"]useReducer['"]|reading ['"]useCallback['"]|reading ['"]useLayoutEffect['"]|reading ['"]useSyncExternalStore['"]/;
+
+function shouldAutoReload(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return CHUNK_ERROR_RE.test(msg) || REACT_DISPATCHER_RE.test(msg);
+}
+
 // Auto-reload on stale chunk — when the dashboard is rebuilt (dev HMR, sync,
 // or version upgrade) the old chunk hashes no longer exist on the server.
 // Detect the chunk error and reload once so the browser picks up the new
 // index.html with correct chunk hashes. A sessionStorage guard prevents
 // infinite reload loops.
+function tryAutoReload(err: unknown): boolean {
+  if (!shouldAutoReload(err)) return false;
+  const key = "__chunk_reload";
+  const last = Number(sessionStorage.getItem(key) || "0");
+  if (Date.now() - last <= 10_000) return false;
+  sessionStorage.setItem(key, String(Date.now()));
+  window.location.reload();
+  return true;
+}
+
 function lazyWithReload<T extends ComponentType<any>>(
   factory: () => Promise<{ default: T }>,
 ): React.LazyExoticComponent<T> {
   return lazy(() =>
     factory().catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (CHUNK_ERROR_RE.test(msg)) {
-        const key = "__chunk_reload";
-        const last = Number(sessionStorage.getItem(key) || "0");
-        if (Date.now() - last > 10_000) {
-          sessionStorage.setItem(key, String(Date.now()));
-          window.location.reload();
-          // Return a never-resolving promise so React doesn't render the
-          // error boundary before the reload takes effect.
-          return new Promise<never>(() => {});
-        }
+      if (tryAutoReload(err)) {
+        // Return a never-resolving promise so React doesn't render the
+        // error boundary before the reload takes effect.
+        return new Promise<never>(() => {});
       }
       throw err;
     }),
@@ -339,23 +352,63 @@ const routeTree = rootRoute.addChildren([
 
 function ChunkErrorBoundary({ error }: { error: Error }) {
   const isChunkError = CHUNK_ERROR_RE.test(error.message);
+  const isDispatcherError = REACT_DISPATCHER_RE.test(error.message);
+  const [showStack, setShowStack] = useState(false);
+
+  // Auto-reload once per session for known-transient failures (chunk misses,
+  // React dispatcher-null after HMR). If the reload fires we never render
+  // past this effect; otherwise we show the diagnostic UI below.
+  useEffect(() => {
+    if (isChunkError || isDispatcherError) {
+      tryAutoReload(error);
+    }
+  }, [error, isChunkError, isDispatcherError]);
+
+  const title = isChunkError
+    ? "Page assets have been updated"
+    : isDispatcherError
+    ? "React state reset — reloading"
+    : "Something went wrong";
+  const detail = isChunkError
+    ? "A new version is available. Reload to get the latest."
+    : error.message;
+
   return (
     <div className="flex h-[60vh] items-center justify-center">
-      <div className="max-w-md text-center space-y-4">
-        <p className="text-lg font-semibold">
-          {isChunkError ? "Page assets have been updated" : "Something went wrong"}
-        </p>
-        <p className="text-sm text-gray-500">
-          {isChunkError
-            ? "A new version is available. Reload to get the latest."
-            : error.message}
-        </p>
-        <button
-          onClick={() => window.location.reload()}
-          className="rounded-xl bg-sky-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-sky-600 transition-colors"
-        >
-          Reload
-        </button>
+      <div className="max-w-xl text-center space-y-4 px-4">
+        <p className="text-lg font-semibold">{title}</p>
+        <p className="text-sm text-gray-500 break-words">{detail}</p>
+        <div className="flex gap-2 justify-center flex-wrap">
+          <button
+            onClick={() => window.location.reload()}
+            className="rounded-xl bg-sky-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-sky-600 transition-colors"
+          >
+            Reload
+          </button>
+          <button
+            onClick={() => {
+              sessionStorage.removeItem("__chunk_reload");
+              window.location.reload();
+            }}
+            className="rounded-xl bg-red-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-red-600 transition-colors"
+            title="Clears the auto-reload cooldown and forces a fresh load"
+          >
+            Force reload
+          </button>
+          {error.stack && (
+            <button
+              onClick={() => setShowStack(v => !v)}
+              className="rounded-xl border border-gray-300 px-6 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+            >
+              {showStack ? "Hide" : "Show"} stack
+            </button>
+          )}
+        </div>
+        {showStack && error.stack && (
+          <pre className="mt-4 max-h-64 overflow-auto rounded-lg bg-gray-900 p-3 text-left text-xs text-gray-100 whitespace-pre-wrap break-all">
+            {error.stack}
+          </pre>
+        )}
       </div>
     </div>
   );
