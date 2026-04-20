@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
   getMcpAuthStatus, startMcpAuth, revokeMcpAuth,
@@ -31,10 +31,39 @@ import {
 import { DynamicIcon } from "lucide-react/dynamic";
 import type { IconName } from "lucide-react/dynamic";
 
+// Wraps `DynamicIcon` so a catalog entry with a stale or mistyped
+// `lucide:xxx` name (backend-controlled, but still human-edited) falls back
+// to a neutral icon instead of throwing and blowing up the surrounding card.
+// `DynamicIcon` lazy-imports the icon module — if the name isn't a real
+// lucide icon the import rejects and the `Suspense` fallback doesn't catch
+// that; it bubbles up as a render error, which this boundary converts into
+// `fallback`.
+class DynamicIconBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error) {
+    // eslint-disable-next-line no-console
+    console.warn("CatalogIcon: DynamicIcon failed to load, using fallback.", error);
+  }
+  render() {
+    return this.state.hasError ? this.props.fallback : this.props.children;
+  }
+}
+
 function CatalogIcon({ icon, className }: { icon: string; className?: string }) {
   if (icon.startsWith("lucide:")) {
     const name = icon.slice("lucide:".length) as IconName;
-    return <DynamicIcon name={name} className={className} />;
+    const fallback = <Plug className={className} />;
+    return (
+      <DynamicIconBoundary fallback={fallback}>
+        <DynamicIcon name={name} className={className} fallback={() => fallback} />
+      </DynamicIconBoundary>
+    );
   }
   return <span className="text-xl">{icon}</span>;
 }
