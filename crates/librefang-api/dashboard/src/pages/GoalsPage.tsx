@@ -40,8 +40,16 @@ export function GoalsPage() {
   const templates = templatesQuery.data ?? [];
 
   const runBatch = async <T,>(items: readonly T[], action: (item: T) => Promise<unknown>) => {
-    const results = await Promise.allSettled(items.map((item) => action(item)));
-    const succeeded = results.filter((result) => result.status === "fulfilled").length;
+    let succeeded = 0;
+    for (const item of items) {
+      try {
+        await action(item);
+        succeeded += 1;
+      } catch {
+        // Continue so batch actions report aggregate success/failure totals.
+      }
+    }
+
     return {
       total: items.length,
       succeeded,
@@ -68,7 +76,14 @@ export function GoalsPage() {
       if (result.failed === 0) {
         addToast(`${t("common.success")} (${result.succeeded}/${result.total})`, "success");
       } else {
-        addToast(`Created ${result.succeeded}/${result.total} goals, failed ${result.failed}.`, result.succeeded > 0 ? "info" : "error");
+        addToast(
+          t("goals.apply_template_partial", {
+            succeeded: result.succeeded,
+            total: result.total,
+            failed: result.failed,
+          }),
+          result.succeeded > 0 ? "info" : "error",
+        );
       }
     } finally {
       setApplyingTemplate(null);
@@ -128,7 +143,14 @@ export function GoalsPage() {
         addToast(`${t("common.success")} (${result.succeeded}/${result.total})`, "success");
         setShowClearConfirm(false);
       } else {
-        addToast(`Deleted ${result.succeeded}/${result.total} goals, failed ${result.failed}.`, result.succeeded > 0 ? "info" : "error");
+        addToast(
+          t("goals.clear_all_partial", {
+            succeeded: result.succeeded,
+            total: result.total,
+            failed: result.failed,
+          }),
+          result.succeeded > 0 ? "info" : "error",
+        );
       }
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");

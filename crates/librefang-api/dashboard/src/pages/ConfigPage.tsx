@@ -399,24 +399,27 @@ export function ConfigPage({ category }: { category: string }) {
   });
 
   const [batchSaving, setBatchSaving] = useState(false);
-  const batchStatusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const batchStatusTimeoutRefs = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const clearBatchStatuses = useCallback((paths: string[], statuses: Record<string, { ok: boolean; msg: string }>, delay: number) => {
-    if (batchStatusTimeoutRef.current) clearTimeout(batchStatusTimeoutRef.current);
-    batchStatusTimeoutRef.current = setTimeout(() => {
-      setSaveStatus((current) => {
-        const next = { ...current };
-        for (const path of paths) {
-          if (next[path]?.msg === statuses[path]?.msg) {
-            delete next[path];
-          }
-        }
-        return next;
-      });
-    }, delay);
+    for (const path of paths) {
+      const existingTimeout = batchStatusTimeoutRefs.current[path];
+      if (existingTimeout) clearTimeout(existingTimeout);
+      batchStatusTimeoutRefs.current[path] = setTimeout(() => {
+        setSaveStatus((current) => {
+          if (current[path]?.msg !== statuses[path]?.msg) return current;
+          const next = { ...current };
+          delete next[path];
+          return next;
+        });
+        delete batchStatusTimeoutRefs.current[path];
+      }, delay);
+    }
   }, []);
 
   useEffect(() => () => {
-    if (batchStatusTimeoutRef.current) clearTimeout(batchStatusTimeoutRef.current);
+    for (const timeoutId of Object.values(batchStatusTimeoutRefs.current)) {
+      clearTimeout(timeoutId);
+    }
   }, []);
 
   const batchSaveMutation = useBatchSetConfigValues({
@@ -475,9 +478,12 @@ export function ConfigPage({ category }: { category: string }) {
     if (entries.length === 0) return;
     setBatchSaving(true);
     try {
+      // Per-entry failures are folded into the successful batch result.
+      // Mutation-level failures are handled in the hook's onError; await here
+      // so batchSaving tracks the full request and no rejection is left unhandled.
       await batchSaveMutation.mutateAsync(entries.map(([path, value]) => ({ path, value })));
     } catch {
-      // onError handles UI state for unexpected batch-level failures.
+      // onError already mapped the batch-level failure into UI state.
     }
   }, [batchSaveMutation, pendingChanges]);
 

@@ -26,9 +26,7 @@ export function useSetConfigValue(
     ...options,
     mutationFn: ({ path, value }) => setConfigValue(path, value),
     onSuccess: (data, variables, context, meta) => {
-      qc.invalidateQueries({ queryKey: configKeys.full() });
-      qc.invalidateQueries({ queryKey: configKeys.schema() });
-      qc.invalidateQueries({ queryKey: configKeys.rawToml() });
+      qc.invalidateQueries({ queryKey: configKeys.all });
       options?.onSuccess?.(data, variables, context, meta);
     },
   });
@@ -55,9 +53,7 @@ export function useBatchSetConfigValues(
       }
     })),
     onSuccess: (data, variables, context, meta) => {
-      qc.invalidateQueries({ queryKey: configKeys.full() });
-      qc.invalidateQueries({ queryKey: configKeys.schema() });
-      qc.invalidateQueries({ queryKey: configKeys.rawToml() });
+      qc.invalidateQueries({ queryKey: configKeys.all });
       options?.onSuccess?.(data, variables, context, meta);
     },
   });

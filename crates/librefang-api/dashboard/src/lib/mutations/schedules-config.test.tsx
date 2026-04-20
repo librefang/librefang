@@ -34,7 +34,7 @@ describe("useRunSchedule", () => {
 });
 
 describe("useSetConfigValue", () => {
-  it("invalidates config queries touched by config writes", async () => {
+  it("invalidates configKeys.all after a config write", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -45,9 +45,8 @@ describe("useSetConfigValue", () => {
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.full() });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.schema() });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.rawToml() });
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.all });
   });
 
   it("calls options.onSuccess after invalidation", async () => {
@@ -68,7 +67,7 @@ describe("useSetConfigValue", () => {
 });
 
 describe("useBatchSetConfigValues", () => {
-  it("invalidates config queries once each after batch save", async () => {
+  it("invalidates configKeys.all once after batch save", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -82,10 +81,8 @@ describe("useBatchSetConfigValues", () => {
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
-    expect(invalidateSpy).toHaveBeenCalledTimes(3);
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.full() });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.schema() });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.rawToml() });
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: configKeys.all });
   });
 
   it("calls options.onSuccess after invalidation", async () => {
