@@ -1401,8 +1401,12 @@ mod tests {
     #[test]
     fn test_create_embedding_driver_cohere_remaps_openai_model_name() {
         // When auto-detect sends us an OpenAI-flavored model name, the Cohere
-        // branch should fall back to `embed-english-v3.0` rather than passing
-        // the unknown name through (which would 404 at request time).
+        // branch should fall back to `embed-multilingual-v3.0` rather than
+        // passing the unknown name through (which would 404 at request
+        // time). The assertion below checks dims == 1024, which holds for
+        // both `embed-multilingual-v3.0` and `embed-english-v3.0`; the
+        // actual fallback choice is pinned in code and documented in the
+        // warn!() call inside `create_embedding_driver`.
         let had = std::env::var("COHERE_API_KEY").ok();
         std::env::set_var("COHERE_API_KEY", "test-cohere-key");
 
