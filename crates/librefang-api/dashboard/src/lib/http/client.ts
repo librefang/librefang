@@ -53,6 +53,7 @@ export {
   getHandSession,
   getHandInstanceStatus,
   getHandManifestToml,
+  getMetricsText,
   // mcp
   listMcpServers,
   getMcpServer,
@@ -92,6 +93,8 @@ export {
   skillhubSearch,
   skillhubGetSkill,
   fanghubListSkills,
+  listMediaProviders,
+  pollVideo,
   // workflows
   listWorkflows,
   listWorkflowRuns,
@@ -139,6 +142,11 @@ export {
   reloadChannels,
   sendCommsMessage,
   postCommsTask,
+  // media
+  generateImage,
+  synthesizeSpeech,
+  submitVideo,
+  generateMusic,
   // config
   setConfigValue,
   reloadConfig,
@@ -241,6 +249,11 @@ export type {
   McpAuthStatusResponse,
   MemoryItem,
   ModelOverrides,
+  MediaImageResult,
+  MediaMusicResult,
+  MediaProvider,
+  MediaVideoStatus,
+  SpeechResult,
   TerminalHealth,
   TerminalWindow,
 } from "../../api";

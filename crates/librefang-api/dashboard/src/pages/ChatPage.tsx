@@ -1592,7 +1592,9 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
 // ---------------------------------------------------------------------------
 function useApprovalPoller(agentId: string | null) {
   const queryClient = useQueryClient();
-  const approvalsQuery = usePendingApprovals(agentId ?? undefined);
+  const approvalsQuery = usePendingApprovals(agentId ?? undefined, {
+    enabled: Boolean(agentId), // Poll approvals only when chat has concrete agent selected.
+  });
 
   const remove = useCallback((id: string) => {
     queryClient.setQueryData<ApprovalItem[]>(

@@ -136,10 +136,20 @@ export function RuntimePage() {
   const tasks = taskListQuery.data?.tasks ?? [];
 
   const refreshAll = () => {
-    snapshotQuery.refetch(); versionQuery.refetch(); queueQuery.refetch();
-    healthDetailQuery.refetch(); securityQuery.refetch();
-    auditQuery.refetch(); auditVerifyQuery.refetch(); backupsQuery.refetch();
-    taskStatusQuery.refetch(); taskListQuery.refetch();
+    for (const q of [
+      snapshotQuery,
+      versionQuery,
+      queueQuery,
+      healthDetailQuery,
+      securityQuery,
+      auditQuery,
+      auditVerifyQuery,
+      backupsQuery,
+      taskStatusQuery,
+      taskListQuery,
+    ]) {
+      q.refetch();
+    }
   };
 
   return (

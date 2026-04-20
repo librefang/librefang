@@ -29,10 +29,21 @@ export function useRunWorkflow() {
   return useMutation({
     mutationFn: ({ workflowId, input }: { workflowId: string; input: string }) =>
       runWorkflow(workflowId, input),
-    onSuccess: (_data, variables) => Promise.all([
-      invalidateWorkflowLists(qc),
-      invalidateWorkflowRecord(qc, variables.workflowId),
-    ]),
+    onSuccess: (data, variables) => {
+      const invalidations: Array<Promise<unknown>> = [
+        invalidateWorkflowLists(qc),
+        qc.invalidateQueries({ queryKey: workflowKeys.runs(variables.workflowId) }),
+      ];
+      const runId = typeof data.run_id === "string" ? data.run_id : undefined;
+
+      if (runId) {
+        invalidations.push(
+          qc.invalidateQueries({ queryKey: workflowKeys.runDetail(runId) }),
+        );
+      }
+
+      return Promise.all(invalidations);
+    },
   });
 }
 
@@ -47,7 +58,10 @@ export function useDeleteWorkflow() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteWorkflow,
-    onSuccess: () => invalidateWorkflowLists(qc),
+    onSuccess: (_data, workflowId) => Promise.all([
+      invalidateWorkflowLists(qc),
+      invalidateWorkflowRecord(qc, workflowId),
+    ]),
   });
 }
 
@@ -86,7 +100,9 @@ export function useInstantiateTemplate() {
 }
 
 export function useSaveWorkflowAsTemplate() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: saveWorkflowAsTemplate,
+    onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.templates() }),
   });
 }

@@ -257,6 +257,15 @@ export const auditKeys = {
 export const mediaKeys = {
   all: ["media"] as const,
   providers: () => [...mediaKeys.all, "providers"] as const,
+  videoTasks: () => [...mediaKeys.all, "videoTasks"] as const,
+  videoTask: (taskId: string, provider: string) =>
+    [...mediaKeys.videoTasks(), taskId, provider] as const,
+  // Stable key for the disabled state of useVideoTask — paired with skipToken
+  // so every not-yet-submitted render shares the same (unused) cache slot.
+  // Shape mirrors `videoTask(taskId, provider)` (4 segments) so both branches
+  // of the query are type-compatible under useQuery's generic inference.
+  videoTaskDisabled: () =>
+    [...mediaKeys.videoTasks(), "__disabled__", "__disabled__"] as const,
 };
 
 export const mcpKeys = {
@@ -288,9 +297,9 @@ export const registryKeys = {
     [...registryKeys.all, "schema", contentType] as const,
 };
 
-export const metricsKeys = {
-  all: ["metrics"] as const,
-  text: () => [...metricsKeys.all, "text"] as const,
+export const telemetryKeys = {
+  all: ["telemetry"] as const,
+  metrics: () => [...telemetryKeys.all, "metrics"] as const,
 };
 
 export const terminalKeys = {

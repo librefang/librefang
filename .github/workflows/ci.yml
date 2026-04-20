@@ -64,26 +64,23 @@ jobs:
           echo "Changed files ($EVENT_NAME):"
           printf '  %s\n' $CHANGED
 
-          # Boolean flags — `grep -q` and echo "true"/"false".
+          # Boolean flags — `grep -q` against the diff filenames.
           has() { printf '%s\n' "$CHANGED" | grep -qE "$1"; }
 
-          if has '^(crates/|Cargo\.toml$|Cargo\.lock$|xtask/)'; then
-            echo "rust=true" >> "$GITHUB_OUTPUT"
-            RUST=true
-          else
-            echo "rust=false" >> "$GITHUB_OUTPUT"
-            RUST=false
-          fi
-          if has '^(docs/|.*\.md$)'; then echo "docs=true"  >> "$GITHUB_OUTPUT"; else echo "docs=false"  >> "$GITHUB_OUTPUT"; fi
-          if has '^\.github/workflows/';  then echo "ci=true"    >> "$GITHUB_OUTPUT"; CI=true; else echo "ci=false" >> "$GITHUB_OUTPUT"; CI=false; fi
-          if has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$'; then echo "install=true" >> "$GITHUB_OUTPUT"; else echo "install=false" >> "$GITHUB_OUTPUT"; fi
-          if has '^Cargo\.toml$|^xtask/';  then ROOT_CARGO=true;  else ROOT_CARGO=false;  fi
+          RUST=false;    has '^(crates/|Cargo\.toml$|Cargo\.lock$|xtask/)'            && RUST=true
+          DOCS=false;    has '^(docs/|.*\.md$)'                                       && DOCS=true
+          CI=false;      has '^\.github/workflows/'                                   && CI=true
+          INSTALL=false; has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$' && INSTALL=true
+          ROOT_CARGO=false; has '^Cargo\.toml$|^xtask/'                               && ROOT_CARGO=true
 
           # Full run policy — stated plainly so it's auditable from the log:
           # 1. Push to main (merge) → catch cross-crate breakage before it rots
           # 2. CI file itself changed → test the new pipeline on every platform
           # 3. Root Cargo.toml / xtask → graph-level change, per-crate logic
           #    can't safely predict the blast radius
+          #
+          # Platform regressions don't need a special full_run bucket — PR lane
+          # test jobs on Windows/macOS cover their affected crates directly.
           if [ "$EVENT_NAME" = "push" ]; then
             FULL=true; REASON="push to main"
           elif [ "$CI" = "true" ]; then
@@ -93,7 +90,14 @@ jobs:
           else
             FULL=false; REASON="selective"
           fi
-          echo "full_run=$FULL" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "rust=$RUST"
+            echo "docs=$DOCS"
+            echo "ci=$CI"
+            echo "install=$INSTALL"
+            echo "full_run=$FULL"
+          } >> "$GITHUB_OUTPUT"
           echo "Route: full_run=$FULL ($REASON)"
 
           # Directly-touched crates (no downstream fan-out — on purpose).
@@ -304,11 +308,11 @@ jobs:
             cargo nextest run $PFLAGS --no-fail-fast
           fi
 
-  # ── Windows tests: full workspace, push-to-main only ───────────────────────────
+  # ── Windows tests: selective on PR, full on main ───────────────────────────────
   test-windows:
     name: Test / Windows
     needs: changes
-    if: needs.changes.outputs.full_run == 'true' && needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -322,13 +326,28 @@ jobs:
         run: mkdir -p crates/librefang-api/static/react
         shell: bash
       - name: Run tests
-        run: cargo nextest run --workspace --no-fail-fast
+        shell: bash
+        run: |
+          if [ "${{ needs.changes.outputs.full_run }}" = "true" ]; then
+            echo "Running workspace tests (full run)…"
+            cargo nextest run --workspace --no-fail-fast
+          else
+            CRATES="${{ needs.changes.outputs.crates }}"
+            if [ -z "$CRATES" ]; then
+              echo "No crates affected — nothing to run."
+              exit 0
+            fi
+            echo "Running tests for: $CRATES"
+            PFLAGS=""
+            for c in $CRATES; do PFLAGS="$PFLAGS -p $c"; done
+            cargo nextest run $PFLAGS --no-fail-fast
+          fi
 
-  # ── macOS tests: full workspace, push-to-main only ─────────────────────────────
+  # ── macOS tests: selective on PR, full on main ─────────────────────────────────
   test-macos:
     name: Test / macOS
     needs: changes
-    if: needs.changes.outputs.full_run == 'true' && needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -341,4 +360,18 @@ jobs:
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Run tests
-        run: cargo nextest run --workspace --no-fail-fast
+        run: |
+          if [ "${{ needs.changes.outputs.full_run }}" = "true" ]; then
+            echo "Running workspace tests (full run)…"
+            cargo nextest run --workspace --no-fail-fast
+          else
+            CRATES="${{ needs.changes.outputs.crates }}"
+            if [ -z "$CRATES" ]; then
+              echo "No crates affected — nothing to run."
+              exit 0
+            fi
+            echo "Running tests for: $CRATES"
+            PFLAGS=""
+            for c in $CRATES; do PFLAGS="$PFLAGS -p $c"; done
+            cargo nextest run $PFLAGS --no-fail-fast
+          fi

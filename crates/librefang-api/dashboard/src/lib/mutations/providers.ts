@@ -9,8 +9,12 @@ import {
 import { modelKeys, providerKeys, runtimeKeys } from "../queries/keys";
 
 export function useTestProvider() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: testProvider,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: providerKeys.all });
+    },
   });
 }
 

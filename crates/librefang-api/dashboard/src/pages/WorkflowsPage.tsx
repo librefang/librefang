@@ -67,16 +67,30 @@ export function WorkflowsPage() {
       .filter(wf => !searchQuery || wf.name?.toLowerCase().includes(searchQuery.toLowerCase()) || wf.description?.toLowerCase().includes(searchQuery.toLowerCase())),
     [workflowsQuery.data, searchQuery]
   );
+  const allWorkflows = workflowsQuery.data ?? [];
 
   useEffect(() => {
-    if (!selectedWorkflowId) return;
-    const all = workflowsQuery.data ?? [];
-    if (all.some(wf => wf.id === selectedWorkflowId)) return;
-    setSelectedWorkflowId("");
-    setSelectedRunId(null);
-    setRunInput("");
-    setDryRunResult(null);
-  }, [workflowsQuery.data, selectedWorkflowId]);
+    if (!workflowsQuery.isSuccess) return;
+    if (workflows.length === 0) {
+      if (selectedWorkflowId) {
+        setSelectedWorkflowId("");
+        setSelectedRunId(null);
+        setRunInput("");
+        setDryRunResult(null);
+      }
+      return;
+    }
+    if (!selectedWorkflowId) {
+      setSelectedWorkflowId(workflows[0]?.id ?? "");
+      return;
+    }
+    if (!allWorkflows.some((workflow) => workflow.id === selectedWorkflowId)) {
+      setSelectedRunId(null);
+      setRunInput("");
+      setDryRunResult(null);
+      setSelectedWorkflowId(workflows[0]?.id ?? "");
+    }
+  }, [allWorkflows, workflows, selectedWorkflowId, workflowsQuery.isSuccess]);
 
   const handleRun = async () => {
     if (!selectedWorkflowId) return;
@@ -299,7 +313,9 @@ export function WorkflowsPage() {
             </h2>
             {workflows.map(wf => (
               <div key={wf.id}
-                onClick={() => setSelectedWorkflowId(wf.id)}
+                onClick={() => {
+                  setSelectedWorkflowId(wf.id);
+                }}
                 onDoubleClick={() => openWorkflow(wf.id)}
                 className={`group flex items-center gap-4 p-4 rounded-2xl border cursor-pointer transition-colors ${
                   selectedWorkflowId === wf.id

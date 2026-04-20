@@ -12,6 +12,7 @@ import {
   listCronJobs,
 } from "../../api";
 import { runtimeKeys, auditKeys, cronKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 export { useDashboardSnapshot, useVersionInfo } from "./overview";
 
@@ -71,8 +72,8 @@ export const auditRecentQueryOptions = (limit: number) =>
     refetchInterval: 30_000,
   });
 
-export function useAuditRecent(limit: number) {
-  return useQuery(auditRecentQueryOptions(limit));
+export function useAuditRecent(limit: number, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(auditRecentQueryOptions(limit), options));
 }
 
 export const auditVerifyQueryOptions = () =>

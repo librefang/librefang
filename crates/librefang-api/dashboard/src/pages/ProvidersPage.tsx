@@ -158,7 +158,6 @@ interface ProviderConfigState {
 }
 
 function useProviderConfig(
-  refetchProviders: () => void,
   testMutation: ReturnType<typeof useMutation<any, any, string>>,
   setKeyMutation: ReturnType<typeof useMutation<any, any, { id: string; key: string }>>,
   deleteKeyMutation: ReturnType<typeof useMutation<any, any, string>>,
@@ -206,7 +205,6 @@ function useProviderConfig(
           key: state.keyInput.trim(),
         });
       }
-      refetchProviders();
       setState(s => ({ ...s, provider: null }));
       if (activeTab === "unconfigured") setActiveTab("configured");
       addToast(t("providers.key_saved"), "success");
@@ -215,14 +213,13 @@ function useProviderConfig(
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, setKeyMutation, setUrlMutation, refetchProviders, addToast, t, activeTab, setActiveTab]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, setKeyMutation, setUrlMutation, addToast, t, activeTab, setActiveTab]);
 
   const removeKey = useCallback(async () => {
     if (!state.provider) return;
     setState(s => ({ ...s, saving: true }));
     try {
       await deleteKeyMutation.mutateAsync(state.provider.id);
-      refetchProviders();
       setState(s => ({ ...s, provider: null, hasStoredKey: false }));
       addToast(t("providers.key_removed"), "success");
     } catch (e: any) {
@@ -230,7 +227,7 @@ function useProviderConfig(
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
-  }, [state.provider, deleteKeyMutation, refetchProviders, addToast, t]);
+  }, [state.provider, deleteKeyMutation, addToast, t]);
 
   const testKey = useCallback(async () => {
     if (!state.provider) return;
@@ -258,13 +255,12 @@ function useProviderConfig(
       } else {
         setState(s => ({ ...s, testResult: { ok: true, message: t("providers.reachable") } }));
       }
-      refetchProviders();
     } catch (e: any) {
       setState(s => ({ ...s, testResult: { ok: false, message: e?.message || t("common.error") } }));
     } finally {
       setState(s => ({ ...s, testing: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, testMutation, setKeyMutation, setUrlMutation, refetchProviders, t]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, testMutation, setKeyMutation, setUrlMutation, t]);
 
   return { ...state, open, close, setKeyInput, setUrlInput, setProxyInput, saveKey, removeKey, testKey };
 }
@@ -1053,7 +1049,6 @@ export function ProvidersPage() {
   const defaultProviderMutation = useSetDefaultProvider();
 
   const config = useProviderConfig(
-    () => void providersQuery.refetch(),
     testMutation,
     setKeyMutation,
     deleteKeyMutation,
@@ -1123,7 +1118,6 @@ export function ProvidersPage() {
       }
     }));
     addToast(t("common.success"), "success");
-    void providersQuery.refetch();
   };
 
   const handleTest = async (id: string) => {
@@ -1132,10 +1126,8 @@ export function ProvidersPage() {
       const result = await testMutation.mutateAsync(id);
       if (result.status === "error") addToast(String(result.error_message || result.error || t("common.error")), "error");
       else addToast(t("common.success"), "success");
-      await providersQuery.refetch();
     } catch (e: any) {
       addToast(e.message || t("common.error"), "error");
-      await providersQuery.refetch();
     } finally {
       setPendingId(null);
     }
@@ -1154,7 +1146,6 @@ export function ProvidersPage() {
     if (!deleteConfirmProvider) return;
     try {
       await deleteKeyMutation.mutateAsync(deleteConfirmProvider.id);
-      await providersQuery.refetch();
       setDeleteConfirmProvider(null);
       addToast(t("providers.key_removed"), "success");
     } catch (e: any) {

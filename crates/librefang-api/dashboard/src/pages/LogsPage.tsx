@@ -1,8 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
 import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listAuditRecent } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
@@ -10,6 +8,7 @@ import { Input } from "../components/ui/Input";
 import { InlineEmpty } from "../components/ui/InlineEmpty";
 import { FileText, Search, Download, Loader2 } from "lucide-react";
 import { truncateId } from "../lib/string";
+import { useAuditRecent } from "../lib/queries/runtime";
 
 const REFRESH_MS = 5000;
 
@@ -23,7 +22,9 @@ const LOG_LEVELS = {
 export function LogsPage() {
   const { t } = useTranslation();
   const [limit] = useState(100);
-  const auditQuery = useQuery({ queryKey: ["audit", "recent", limit], queryFn: () => listAuditRecent(limit), refetchInterval: REFRESH_MS });
+  const auditQuery = useAuditRecent(limit, {
+    refetchInterval: REFRESH_MS, // Logs page polls faster so the live tail stays responsive.
+  });
 
   const logs = auditQuery.data?.entries ?? [];
   const modules = useMemo(
