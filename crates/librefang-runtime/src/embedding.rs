@@ -1272,10 +1272,14 @@ mod tests {
             base_url: "https://api.cohere.com/v2".to_string(),
             dimensions_override: None,
         };
-        let err = CohereEmbeddingDriver::new(cfg).unwrap_err();
+        // `.unwrap_err()` would require `CohereEmbeddingDriver: Debug`, which
+        // it deliberately doesn't derive (would leak the api_key). Match on
+        // the Result directly instead so we only need `EmbeddingError: Debug`.
+        let result = CohereEmbeddingDriver::new(cfg);
         assert!(
-            matches!(err, EmbeddingError::MissingApiKey(_)),
-            "expected MissingApiKey, got {err:?}"
+            matches!(&result, Err(EmbeddingError::MissingApiKey(_))),
+            "expected MissingApiKey, got {:?}",
+            result.as_ref().err()
         );
     }
 
@@ -1407,11 +1411,14 @@ mod tests {
         let had = std::env::var("COHERE_API_KEY").ok();
         std::env::set_var("COHERE_API_KEY", "test-cohere-key");
 
-        let err =
-            create_embedding_driver("cohere", "embed-english-v3.0", "", None, None).unwrap_err();
+        // `.unwrap_err()` would require `Box<dyn EmbeddingDriver + Send + Sync>: Debug`,
+        // which the trait object doesn't provide (the trait has no Debug
+        // supertrait). Match on the Result directly.
+        let result = create_embedding_driver("cohere", "embed-english-v3.0", "", None, None);
         assert!(
-            matches!(err, EmbeddingError::InvalidInput(_)),
-            "expected InvalidInput when no base_url is available, got {err:?}"
+            matches!(&result, Err(EmbeddingError::InvalidInput(_))),
+            "expected InvalidInput when no base_url is available, got {:?}",
+            result.as_ref().err()
         );
 
         match had {
