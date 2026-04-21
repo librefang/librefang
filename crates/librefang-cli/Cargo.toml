@@ -41,6 +41,7 @@ uuid = { workspace = true }
 ratatui = { workspace = true }
 colored = { workspace = true }
 libc = "0.2"
+tikv-jemallocator = { version = "0.6", features = ["disable_initial_exec_tls"] }
 fluent = "0.17"
 unic-langid = "0.9"
 open = "5.3.3"

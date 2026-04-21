@@ -109,8 +109,14 @@ impl PromptStore {
     pub fn new_with_path<P: AsRef<std::path::Path>>(db_path: P) -> LibreFangResult<Self> {
         let conn =
             Connection::open(db_path).map_err(|e| LibreFangError::Internal(e.to_string()))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA busy_timeout=5000; \
+             PRAGMA cache_size=-8192; \
+             PRAGMA temp_store=MEMORY; \
+             PRAGMA mmap_size=0;",
+        )
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
