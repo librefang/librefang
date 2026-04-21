@@ -339,7 +339,7 @@ fn test_deactivate_nonexistent_instance_fails() {
 #[test]
 fn test_hand_state_persistence() {
     let config = test_config("persistence");
-    let state_path = config.home_dir.join("hand_state.json");
+    let state_path = config.home_dir.join("data").join("hand_state.json");
 
     let kernel = LibreFangKernel::boot_with_config(config).unwrap();
     install_hand(&kernel, HAND_A);
@@ -390,7 +390,7 @@ fn test_hand_state_persistence() {
 #[test]
 fn test_multi_agent_hand_state_persists_coordinator_role() {
     let config = test_config("multi-persistence");
-    let state_path = config.home_dir.join("hand_state.json");
+    let state_path = config.home_dir.join("data").join("hand_state.json");
 
     let kernel = LibreFangKernel::boot_with_config(config).unwrap();
     install_hand(&kernel, HAND_C);

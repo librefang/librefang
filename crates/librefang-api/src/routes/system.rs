@@ -2773,30 +2773,30 @@ pub async fn create_backup(
         }
     }
 
-    // 2. cron_jobs.json
-    let cron_path = home_dir.join("cron_jobs.json");
+    // 2. data/cron_jobs.json
+    let cron_path = home_dir.join("data").join("cron_jobs.json");
     if cron_path.exists() {
-        if let Err(e) = add_file(&mut zip, &cron_path, "cron_jobs.json") {
+        if let Err(e) = add_file(&mut zip, &cron_path, "data/cron_jobs.json") {
             tracing::warn!("Backup: skipping cron_jobs.json: {e}");
         } else {
             components.push("cron_jobs".to_string());
         }
     }
 
-    // 3. hand_state.json
-    let hand_state_path = home_dir.join("hand_state.json");
+    // 3. data/hand_state.json
+    let hand_state_path = home_dir.join("data").join("hand_state.json");
     if hand_state_path.exists() {
-        if let Err(e) = add_file(&mut zip, &hand_state_path, "hand_state.json") {
+        if let Err(e) = add_file(&mut zip, &hand_state_path, "data/hand_state.json") {
             tracing::warn!("Backup: skipping hand_state.json: {e}");
         } else {
             components.push("hand_state".to_string());
         }
     }
 
-    // 4. custom_models.json
-    let custom_models_path = home_dir.join("custom_models.json");
+    // 4. data/custom_models.json
+    let custom_models_path = home_dir.join("data").join("custom_models.json");
     if custom_models_path.exists() {
-        if let Err(e) = add_file(&mut zip, &custom_models_path, "custom_models.json") {
+        if let Err(e) = add_file(&mut zip, &custom_models_path, "data/custom_models.json") {
             tracing::warn!("Backup: skipping custom_models.json: {e}");
         } else {
             components.push("custom_models".to_string());

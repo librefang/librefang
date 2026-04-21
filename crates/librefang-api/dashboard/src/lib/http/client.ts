@@ -79,6 +79,7 @@ export {
   // schedules & triggers
   listSchedules,
   listTriggers,
+  getTrigger,
   // sessions
   listSessions,
   getSessionDetails,
@@ -195,6 +196,7 @@ export {
   updateSchedule,
   deleteSchedule,
   runSchedule,
+  createTrigger,
   updateTrigger,
   deleteTrigger,
   // skills

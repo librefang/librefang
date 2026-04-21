@@ -706,7 +706,7 @@ async fn change_password(
 
 /// Path to the file where active sessions are persisted across restarts.
 fn sessions_path(home_dir: &std::path::Path) -> std::path::PathBuf {
-    home_dir.join("sessions.json")
+    home_dir.join("data").join("sessions.json")
 }
 
 /// Load persisted sessions from disk, dropping any that have already expired.
@@ -805,7 +805,7 @@ pub async fn build_router(
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
         provider_test_cache: dashmap::DashMap::new(),
         webhook_store: crate::webhook_store::WebhookStore::load(
-            kernel.home_dir().join("webhooks.json"),
+            kernel.home_dir().join("data").join("webhooks.json"),
         ),
         active_sessions: active_sessions.clone(),
         api_key_lock: api_key_lock.clone(),

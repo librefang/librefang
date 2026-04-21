@@ -516,10 +516,21 @@
     "enabled": true,
     "fire_count": 5,
     "max_fires": 0,
-    "created_at": "2025-01-15T10:30:00Z"
+    "created_at": "2025-01-15T10:30:00Z",
+    "cooldown_secs": 60,
+    "session_mode": "persistent",
+    "target_agent_id": null
   }
 ]
 ```
+
+### GET /api/triggers/&lbrace;id&rbrace;
+
+获取单个触发器详情。
+
+**响应** `200 OK`：与列表中的单条记录格式相同。
+
+**响应** `404 Not Found`：触发器不存在时返回。
 
 ### POST /api/triggers
 
@@ -536,9 +547,24 @@
     }
   },
   "prompt_template": "A new agent was spawned: {&lbrace;event&rbrace;}. Review its capabilities.",
-  "max_fires": 0
+  "max_fires": 0,
+  "cooldown_secs": 60,
+  "session_mode": "persistent",
+  "target_agent_id": "b2c3d4e5-..."
 }
 ```
+
+除 `agent_id`、`pattern` 和 `prompt_template` 外，其余字段均为可选。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `agent_id` | UUID | — | 触发器归属的 Agent。 |
+| `pattern` | object | — | 激活触发器的事件模式（见下方模式类型）。 |
+| `prompt_template` | string | — | 事件触发时发送给 Agent 的提示，支持 `{&lbrace;event&rbrace;}` 占位符。 |
+| `max_fires` | integer | `0` | 最多触发次数，`0` 表示无限制。 |
+| `cooldown_secs` | integer | 引擎默认值 | 两次触发之间的最短间隔（秒）。省略则使用引擎默认值。 |
+| `session_mode` | `"persistent"` \| `"new"` | Agent 默认值 | 每次触发的会话连续性。省略则继承 Agent 配置。 |
+| `target_agent_id` | UUID | `null` | 将触发消息路由到指定 Agent，而非触发器所有者。 |
 
 **支持的模式类型：**
 
@@ -558,28 +584,28 @@
 }
 ```
 
-### PUT /api/triggers/&lbrace;id&rbrace;
+### PATCH /api/triggers/&lbrace;id&rbrace;
 
-更新已有触发器的配置。
+部分更新触发器配置。所有字段均为可选，仅更新提供的字段。
+
+将 `cooldown_secs`、`session_mode` 或 `target_agent_id` 设为 `null` 可清除覆盖值并恢复默认。省略字段则保持不变。
 
 **请求体**：
 
 ```json
 {
-  "prompt_template": "Updated template: {&lbrace;event&rbrace;}",
-  "enabled": false,
-  "max_fires": 10
+  "prompt_template": "Updated: {&lbrace;event&rbrace;}",
+  "enabled": true,
+  "max_fires": 10,
+  "cooldown_secs": 120,
+  "session_mode": "new",
+  "target_agent_id": "b2c3d4e5-..."
 }
 ```
 
-**响应** `200 OK`：
+**响应** `200 OK`：返回完整的更新后触发器对象（与 `GET /api/triggers/&lbrace;id&rbrace;` 格式相同）。
 
-```json
-{
-  "status": "updated",
-  "trigger_id": "t1b2c3d4-..."
-}
-```
+**响应** `404 Not Found`：触发器不存在时返回。
 
 ### DELETE /api/triggers/&lbrace;id&rbrace;
 

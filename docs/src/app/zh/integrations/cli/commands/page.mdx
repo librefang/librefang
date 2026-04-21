@@ -470,7 +470,7 @@ librefang trigger list [--agent-id <ID>]
 为 Agent 创建事件触发器。
 
 ```
-librefang trigger create <AGENT_ID> <PATTERN_JSON> [--prompt <TEMPLATE>] [--max-fires <N>]
+librefang trigger create <AGENT_ID> <PATTERN_JSON> [选项]
 ```
 
 **参数：**
@@ -478,29 +478,98 @@ librefang trigger create <AGENT_ID> <PATTERN_JSON> [--prompt <TEMPLATE>] [--max-
 | 参数 | 说明 |
 |---|---|
 | `<AGENT_ID>` | 拥有该触发器的 Agent 的 UUID。 |
-| `<PATTERN_JSON>` | 触发器模式，以 JSON 字符串形式提供。 |
+| `<PATTERN_JSON>` | 触发器模式，以 JSON 字符串形式提供（如 `'"lifecycle"'`）。 |
 
 **选项：**
 
 | 选项 | 默认值 | 说明 |
 |---|---|---|
-| `--prompt <TEMPLATE>` | `"Event: {{event}}"` | 提示模板。使用 `{{event}}` 作为事件数据的占位符。 |
+| `--prompt <TEMPLATE>` | `"Event: {{event}}"` | 提示模板，使用 `{{event}}` 作为事件数据占位符。 |
 | `--max-fires <N>` | `0`（无限制） | 触发器最大触发次数。 |
+| `--target-agent <ID>` | （拥有者自身） | 将触发消息路由到另一个 Agent 而非拥有者。 |
+| `--cooldown <SECS>` | 无 | 连续两次触发之间的最短间隔（秒）。 |
+| `--session-mode <MODE>` | Agent 默认值 | 覆盖触发调用的会话模式（`persistent` 或 `new`）。 |
 
 **模式示例：**
 
 ```bash
 # 在任何生命周期事件时触发
-librefang trigger create <AGENT_ID> '{"lifecycle":{}}'
+librefang trigger create <AGENT_ID> '"lifecycle"'
 
-# 在指定 Agent 生成时触发
-librefang trigger create <AGENT_ID> '{"agent_spawned":{"name_pattern":"*"}}'
+# 在任意 Agent 生成时触发
+librefang trigger create <AGENT_ID> '"agent_spawned"'
 
-# 在 Agent 终止时触发
-librefang trigger create <AGENT_ID> '{"agent_terminated":{}}'
+# 在 Agent 终止时触发，最多 5 次，冷却 60 秒
+librefang trigger create <AGENT_ID> '"agent_terminated"' --max-fires 5 --cooldown 60
 
-# 在所有事件时触发（限制触发 10 次）
-librefang trigger create <AGENT_ID> '{"all":{}}' --max-fires 10
+# 在所有事件时触发，消息路由给另一个 Agent
+librefang trigger create <AGENT_ID> '"all"' --target-agent <OTHER_AGENT_ID>
+
+# 自定义模式 JSON
+librefang trigger create <AGENT_ID> '{"agent_spawned":{"name_pattern":"worker-*"}}'
+```
+
+---
+
+### librefang trigger get
+
+查看单个触发器的完整详情。
+
+```
+librefang trigger get <TRIGGER_ID>
+```
+
+---
+
+### librefang trigger update
+
+部分更新触发器，只修改指定的字段。
+
+```
+librefang trigger update <TRIGGER_ID> [选项]
+```
+
+**选项：**
+
+| 选项 | 说明 |
+|---|---|
+| `--pattern <JSON>` | 新的事件模式（JSON 字符串）。 |
+| `--prompt <TEMPLATE>` | 新的提示模板。 |
+| `--enabled <true\|false>` | 启用或禁用触发器。 |
+| `--max-fires <N>` | 新的最大触发次数。 |
+| `--cooldown <SECS>` | 新的冷却时间（秒）。 |
+| `--clear-cooldown` | 完全移除冷却限制。 |
+| `--session-mode <MODE>` | 新的会话模式覆盖（`persistent` 或 `new`）。 |
+| `--clear-session-mode` | 移除会话模式覆盖，恢复 Agent 默认值。 |
+| `--target-agent <ID>` | 将触发消息路由到另一个 Agent（UUID）。 |
+| `--clear-target-agent` | 移除目标 Agent 覆盖，恢复拥有者路由。 |
+
+```bash
+# 修改提示并设置 30 秒冷却
+librefang trigger update <TRIGGER_ID> --prompt "告警：{{event}}" --cooldown 30
+
+# 移除冷却
+librefang trigger update <TRIGGER_ID> --clear-cooldown
+
+# 切换到 new 会话模式
+librefang trigger update <TRIGGER_ID> --session-mode new
+
+# 将触发重定向到另一个 Agent
+librefang trigger update <TRIGGER_ID> --target-agent <OTHER_AGENT_ID>
+
+# 清除目标 Agent 重定向
+librefang trigger update <TRIGGER_ID> --clear-target-agent
+```
+
+---
+
+### librefang trigger enable / disable
+
+启用或禁用触发器，不会删除它。
+
+```
+librefang trigger enable <TRIGGER_ID>
+librefang trigger disable <TRIGGER_ID>
 ```
 
 ---

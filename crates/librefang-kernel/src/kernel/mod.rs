@@ -1363,6 +1363,8 @@ impl LibreFangKernel {
         ensure_workspaces_layout(&config.home_dir)?;
         migrate_legacy_agent_dirs(&config.home_dir, &config.effective_agent_workspaces_dir());
         migrate_root_backups(&config.home_dir);
+        migrate_root_state_files(&config.home_dir);
+        cleanup_legacy_root_logs(&config.home_dir);
 
         // Initialize memory substrate
         let db_path = config
@@ -1758,8 +1760,13 @@ impl LibreFangKernel {
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
-        model_catalog.load_suppressed(&config.home_dir.join("suppressed_providers.json"));
-        model_catalog.load_overrides(&config.home_dir.join("model_overrides.json"));
+        model_catalog.load_suppressed(
+            &config
+                .home_dir
+                .join("data")
+                .join("suppressed_providers.json"),
+        );
+        model_catalog.load_overrides(&config.home_dir.join("data").join("model_overrides.json"));
         model_catalog.detect_auth();
         // Apply region selections first (lower priority than explicit provider_urls)
         if !config.provider_regions.is_empty() {
@@ -1794,8 +1801,8 @@ impl LibreFangKernel {
                 config.provider_proxy_urls.len()
             );
         }
-        // Load user's custom models from ~/.librefang/custom_models.json (highest priority)
-        let custom_models_path = config.home_dir.join("custom_models.json");
+        // Load user's custom models from ~/.librefang/data/custom_models.json (highest priority)
+        let custom_models_path = config.home_dir.join("data").join("custom_models.json");
         model_catalog.load_custom_models(&custom_models_path);
         let available_count = model_catalog.available_models().len();
         let total_count = model_catalog.list_models().len();
@@ -2145,6 +2152,19 @@ impl LibreFangKernel {
             }
         }
 
+        // Initialize trigger engine and reload persisted triggers
+        let trigger_engine = TriggerEngine::with_config(&config.triggers, &config.home_dir);
+        match trigger_engine.load() {
+            Ok(count) => {
+                if count > 0 {
+                    info!("Loaded {count} trigger job(s) from disk");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to load trigger jobs: {e}");
+            }
+        }
+
         // Initialize execution approval manager
         let approval_manager = crate::approval::ApprovalManager::new_with_db(
             config.approval.clone(),
@@ -2220,7 +2240,6 @@ impl LibreFangKernel {
 
         let workflow_home_dir = config.home_dir.clone();
         let oauth_home_dir = config.home_dir.clone();
-        let trigger_config = config.triggers.clone();
         // Resolve the audit anchor path from `[audit].anchor_path`. When
         // unset, the default is `data_dir/audit.anchor` — good enough to
         // catch most casual tampering since it sits next to the SQLite
@@ -2251,7 +2270,7 @@ impl LibreFangKernel {
             supervisor,
             workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
             template_registry: WorkflowTemplateRegistry::new(),
-            triggers: TriggerEngine::with_config(&trigger_config),
+            triggers: trigger_engine,
             background,
             audit_log: Arc::new(AuditLog::with_db_anchored(
                 memory.usage_conn(),
@@ -2956,15 +2975,26 @@ system_prompt = "You are a helpful assistant."
             "ok",
         );
 
-        // For proactive agents spawned at runtime, auto-register triggers
+        // For proactive agents spawned at runtime, auto-register triggers.
+        // Skip any pattern already present (e.g. reloaded from trigger_jobs.json on restart).
         if let ScheduleMode::Proactive { conditions } = &entry.manifest.schedule {
+            let mut registered = false;
             for condition in conditions {
                 if let Some(pattern) = background::parse_condition(condition) {
+                    if self.triggers.agent_has_pattern(agent_id, &pattern) {
+                        continue;
+                    }
                     let prompt = format!(
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
                     self.triggers.register(agent_id, pattern, prompt, 0);
+                    registered = true;
+                }
+            }
+            if registered {
+                if let Err(e) = self.triggers.persist() {
+                    warn!(agent = %name, "Failed to persist proactive triggers: {e}");
                 }
             }
         }
@@ -2979,7 +3009,12 @@ system_prompt = "You are a helpful assistant."
             }),
         );
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
-        let _triggered = self.triggers.evaluate(&event);
+        let (triggered, trigger_state_mutated) = self.triggers.evaluate(&event);
+        if !triggered.is_empty() || trigger_state_mutated {
+            if let Err(e) = self.triggers.persist() {
+                warn!("Failed to persist trigger jobs after spawn event: {e}");
+            }
+        }
 
         Ok(agent_id)
     }
@@ -3622,7 +3657,18 @@ system_prompt = "You are a helpful assistant."
                 // Cooldown: per-agent, at most one review every SKILL_REVIEW_COOLDOWN_SECS.
                 let now_epoch = chrono::Utc::now().timestamp();
                 let agent_id_str = agent_id.to_string();
-                // Pre-claim gate 0: Stable mode / frozen registry. Skip
+                // Pre-claim gate 0a: per-agent opt-out. A2A worker agents
+                // and any agent where trigger responsiveness matters more
+                // than automatic skill distillation can set
+                // `auto_evolve = false` in agent.toml to skip the review
+                // entirely — no LLM call, no semaphore, no cooldown slot.
+                if !entry.manifest.auto_evolve {
+                    tracing::debug!(
+                        agent_id = %agent_id,
+                        "Skipping background skill review — auto_evolve disabled for this agent"
+                    );
+                }
+                // Pre-claim gate 0b: Stable mode / frozen registry. Skip
                 // spawning a review task entirely when the operator
                 // chose a no-skill-mutations posture — the review would
                 // write to disk and the reload_skills() call afterwards
@@ -3636,9 +3682,11 @@ system_prompt = "You are a helpful assistant."
                 // Pre-claim gate 1: eligibility. Only consider claiming
                 // the cooldown slot if this loop actually suggested a
                 // review AND the agent didn't already evolve a skill
-                // AND the registry isn't frozen.
-                let eligible =
-                    result.skill_evolution_suggested && !used_evolution_tool && !registry_frozen;
+                // AND the registry isn't frozen AND auto_evolve is on.
+                let eligible = result.skill_evolution_suggested
+                    && !used_evolution_tool
+                    && !registry_frozen
+                    && entry.manifest.auto_evolve;
                 // Pre-claim gate 2: budget. Background reviews are
                 // optional work — if the global budget is exhausted we
                 // want to skip WITHOUT burning the 5-minute cooldown
@@ -4909,7 +4957,7 @@ system_prompt = "You are a helpful assistant."
             for (channel, platform_id) in &bindings {
                 if kernel.channel_adapters.contains_key(channel.as_str()) {
                     if let Err(e) = kernel
-                        .send_channel_message(channel, platform_id, &message, None)
+                        .send_channel_message(channel, platform_id, &message, None, None)
                         .await
                     {
                         warn!(channel = %channel, error = %e, "Failed to send owner notification");
@@ -7128,6 +7176,9 @@ system_prompt = "You are a helpful assistant."
         self.capabilities.revoke_all(agent_id);
         self.event_bus.unsubscribe_agent(agent_id);
         self.triggers.remove_agent_triggers(agent_id);
+        if let Err(e) = self.triggers.persist() {
+            warn!("Failed to persist trigger jobs after agent deletion: {e}");
+        }
 
         // Remove cron jobs so they don't linger as orphans (#504)
         let cron_removed = self.cron_scheduler.remove_agent_jobs(agent_id);
@@ -7546,6 +7597,9 @@ system_prompt = "You are a helpful assistant."
                     );
                 }
             }
+            if let Err(e) = self.triggers.persist() {
+                warn!("Failed to persist trigger jobs after hand reactivation: {e}");
+            }
         }
 
         // Link all agents to instance
@@ -7621,7 +7675,7 @@ system_prompt = "You are a helpful assistant."
 
     /// Persist active hand state to disk.
     pub fn persist_hand_state(&self) {
-        let state_path = self.home_dir_boot.join("hand_state.json");
+        let state_path = self.home_dir_boot.join("data").join("hand_state.json");
         if let Err(e) = self.hand_registry.persist_state(&state_path) {
             warn!(error = %e, "Failed to persist hand state");
         }
@@ -8068,7 +8122,12 @@ system_prompt = "You are a helpful assistant."
         let _guard = DepthGuard;
 
         // Evaluate triggers before publishing (so describe_event works on the event)
-        let triggered = self.triggers.evaluate(&event);
+        let (triggered, trigger_state_mutated) = self.triggers.evaluate(&event);
+        if !triggered.is_empty() || trigger_state_mutated {
+            if let Err(e) = self.triggers.persist() {
+                warn!("Failed to persist trigger jobs after fire: {e}");
+            }
+        }
 
         // Publish to the event bus
         self.event_bus.publish(event).await;
@@ -8103,7 +8162,15 @@ system_prompt = "You are a helpful assistant."
         prompt_template: String,
         max_fires: u64,
     ) -> KernelResult<TriggerId> {
-        self.register_trigger_with_target(agent_id, pattern, prompt_template, max_fires, None)
+        self.register_trigger_with_target(
+            agent_id,
+            pattern,
+            prompt_template,
+            max_fires,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Register a trigger with an optional cross-session target agent.
@@ -8117,6 +8184,8 @@ system_prompt = "You are a helpful assistant."
         prompt_template: String,
         max_fires: u64,
         target_agent: Option<AgentId>,
+        cooldown_secs: Option<u64>,
+        session_mode: Option<librefang_types::agent::SessionMode>,
     ) -> KernelResult<TriggerId> {
         // Verify owner agent exists
         if self.registry.get(agent_id).is_none() {
@@ -8132,23 +8201,41 @@ system_prompt = "You are a helpful assistant."
                 )));
             }
         }
-        Ok(self.triggers.register_with_target(
+        let id = self.triggers.register_with_target(
             agent_id,
             pattern,
             prompt_template,
             max_fires,
             target_agent,
-        ))
+            cooldown_secs,
+            session_mode,
+        );
+        if let Err(e) = self.triggers.persist() {
+            warn!(trigger_id = %id, "Failed to persist trigger jobs after register: {e}");
+        }
+        Ok(id)
     }
 
     /// Remove a trigger by ID.
     pub fn remove_trigger(&self, trigger_id: TriggerId) -> bool {
-        self.triggers.remove(trigger_id)
+        let removed = self.triggers.remove(trigger_id);
+        if removed {
+            if let Err(e) = self.triggers.persist() {
+                warn!(%trigger_id, "Failed to persist trigger jobs after remove: {e}");
+            }
+        }
+        removed
     }
 
     /// Enable or disable a trigger. Returns true if found.
     pub fn set_trigger_enabled(&self, trigger_id: TriggerId, enabled: bool) -> bool {
-        self.triggers.set_enabled(trigger_id, enabled)
+        let found = self.triggers.set_enabled(trigger_id, enabled);
+        if found {
+            if let Err(e) = self.triggers.persist() {
+                warn!(%trigger_id, "Failed to persist trigger jobs after set_enabled: {e}");
+            }
+        }
+        found
     }
 
     /// List all triggers (optionally filtered by agent).
@@ -8157,6 +8244,26 @@ system_prompt = "You are a helpful assistant."
             Some(id) => self.triggers.list_agent_triggers(id),
             None => self.triggers.list_all(),
         }
+    }
+
+    /// Get a single trigger by ID.
+    pub fn get_trigger(&self, trigger_id: TriggerId) -> Option<crate::triggers::Trigger> {
+        self.triggers.get_trigger(trigger_id)
+    }
+
+    /// Update mutable fields of an existing trigger.
+    pub fn update_trigger(
+        &self,
+        trigger_id: TriggerId,
+        patch: crate::triggers::TriggerPatch,
+    ) -> Option<crate::triggers::Trigger> {
+        let result = self.triggers.update(trigger_id, patch);
+        if result.is_some() {
+            if let Err(e) = self.triggers.persist() {
+                warn!(%trigger_id, "Failed to persist trigger jobs after update: {e}");
+            }
+        }
+        result
     }
 
     /// Register a workflow definition.
@@ -8276,7 +8383,7 @@ system_prompt = "You are a helpful assistant."
     pub async fn start_background_agents(self: &Arc<Self>) {
         let cfg = self.config.load_full();
         // Restore previously active hands from persisted state
-        let state_path = self.home_dir_boot.join("hand_state.json");
+        let state_path = self.home_dir_boot.join("data").join("hand_state.json");
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
@@ -8359,6 +8466,11 @@ system_prompt = "You are a helpful assistant."
                                             migrated = t_migrated,
                                             "Reassigned triggers after restart"
                                         );
+                                        if let Err(e) = self.triggers.persist() {
+                                            warn!(
+                                                "Failed to persist trigger jobs after hand restore: {e}"
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -9254,18 +9366,29 @@ system_prompt = "You are a helpful assistant."
         name: &str,
         schedule: &ScheduleMode,
     ) {
-        // For proactive agents, auto-register triggers from conditions
+        // For proactive agents, auto-register triggers from conditions.
+        // Skip patterns already present (loaded from trigger_jobs.json on restart).
         if let ScheduleMode::Proactive { conditions } = schedule {
+            let mut registered = false;
             for condition in conditions {
                 if let Some(pattern) = background::parse_condition(condition) {
+                    if self.triggers.agent_has_pattern(agent_id, &pattern) {
+                        continue;
+                    }
                     let prompt = format!(
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
                     self.triggers.register(agent_id, pattern, prompt, 0);
+                    registered = true;
                 }
             }
-            info!(agent = %name, id = %agent_id, "Registered proactive triggers");
+            if registered {
+                if let Err(e) = self.triggers.persist() {
+                    warn!(agent = %name, id = %agent_id, "Failed to persist proactive triggers: {e}");
+                }
+                info!(agent = %name, id = %agent_id, "Registered proactive triggers");
+            }
         }
 
         // Start continuous/periodic loops
@@ -11583,7 +11706,7 @@ async fn cron_deliver_response(
                 .memory
                 .structured_set(agent_id, "delivery.last_channel", kv_val);
             if let Err(e) = kernel
-                .send_channel_message(channel, to, response, None)
+                .send_channel_message(channel, to, response, None, None)
                 .await
             {
                 tracing::warn!(channel = %channel, to = %to, error = %e, "Cron channel delivery failed");
@@ -11604,7 +11727,7 @@ async fn cron_deliver_response(
                             "Cron: delivering to last channel"
                         );
                         if let Err(e) = kernel
-                            .send_channel_message(channel, recipient, response, None)
+                            .send_channel_message(channel, recipient, response, None, None)
                             .await
                         {
                             tracing::warn!(channel = %channel, recipient = %recipient, error = %e, "Cron last_channel delivery failed");
@@ -11737,6 +11860,7 @@ impl LibreFangKernel {
                 &target.recipient,
                 message,
                 target.thread_id.as_deref(),
+                None,
             )
             .await
         {
@@ -12125,14 +12249,18 @@ impl KernelHandle for LibreFangKernel {
     }
 
     async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String> {
-        // Resolve `agent_id` as either a UUID (used directly) or an agent
-        // name (looked up via the registry → its UUID). Tasks are stored
-        // under the canonical UUID, so name-based callers used to silently
-        // get zero matches. Issue #2330.
-        let resolved = match librefang_types::agent::AgentId::from_str(agent_id) {
-            Ok(_) => agent_id.to_string(),
+        // Resolve `agent_id` to a canonical UUID and also capture the name.
+        // Both are forwarded to `memory.task_claim` so that tasks whose
+        // `assigned_to` field was stored as either a UUID *or* a name string
+        // are correctly matched (issue #2841).
+        let (resolved, resolved_name) = match librefang_types::agent::AgentId::from_str(agent_id) {
+            Ok(parsed_id) => {
+                // Caller passed a UUID — look up the name from the registry.
+                let name = self.registry.get(parsed_id).map(|e| e.name.clone());
+                (agent_id.to_string(), name)
+            }
             Err(_) => match self.registry.find_by_name(agent_id) {
-                Some(entry) => entry.id.to_string(),
+                Some(entry) => (entry.id.to_string(), Some(agent_id.to_string())),
                 None => {
                     return Err(format!(
                         "Task claim failed: agent {agent_id:?} not found by UUID or name"
@@ -12142,7 +12270,7 @@ impl KernelHandle for LibreFangKernel {
         };
         let result = self
             .memory
-            .task_claim(&resolved)
+            .task_claim(&resolved, resolved_name.as_deref())
             .await
             .map_err(|e| format!("Task claim failed: {e}"))?;
 
@@ -12841,21 +12969,32 @@ impl KernelHandle for LibreFangKernel {
         recipient: &str,
         message: &str,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
         let cfg = self.config.load_full();
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
+            .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -12905,20 +13044,31 @@ impl KernelHandle for LibreFangKernel {
         caption: Option<&str>,
         filename: Option<&str>,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
+            .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -12963,6 +13113,7 @@ impl KernelHandle for LibreFangKernel {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_channel_file_data(
         &self,
         channel: &str,
@@ -12971,20 +13122,31 @@ impl KernelHandle for LibreFangKernel {
         filename: &str,
         mime_type: &str,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
+            .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -13027,11 +13189,21 @@ impl KernelHandle for LibreFangKernel {
         is_quiz: bool,
         correct_option_id: Option<u8>,
         explanation: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<(), String> {
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
-            .ok_or_else(|| format!("Channel adapter '{channel}' not found"))?
+            .get(&lookup_key)
+            .ok_or_else(|| match account_id.filter(|s| !s.is_empty()) {
+                Some(aid) => {
+                    format!("Channel adapter '{channel}' with account_id '{aid}' not found")
+                }
+                None => format!("Channel adapter '{channel}' not found"),
+            })?
             .clone();
 
         let user = librefang_channels::types::ChannelUser {
