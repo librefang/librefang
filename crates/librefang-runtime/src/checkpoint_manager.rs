@@ -570,34 +570,46 @@ fn run_git(
         }
     };
 
-    // Poll until exit or deadline, then kill if it hasn't finished.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break, // process finished; collect output below
-            Ok(None) if std::time::Instant::now() >= deadline => {
-                // Timed out — kill the process so it doesn't linger.
-                let _ = child.kill();
-                let _ = child.wait(); // reap the zombie
-                warn!(?args, timeout_secs, "git command timed out");
-                return (
-                    false,
-                    String::new(),
-                    format!("timed out after {timeout_secs}s"),
-                );
-            }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-            Err(e) => {
-                warn!(error = %e, "git try_wait failed");
-                return (false, String::new(), e.to_string());
-            }
+    // Spawn a killer thread that enforces the wall-clock deadline.
+    // Using wait_with_output() (instead of the try_wait poll loop) ensures
+    // stdout/stderr pipes are drained continuously, so git can never block
+    // on a full pipe buffer and cause a spurious timeout.
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    let pid = child.id();
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timed_out_c = Arc::clone(&timed_out);
+    let timeout_dur = std::time::Duration::from_secs(timeout_secs);
+
+    std::thread::spawn(move || {
+        std::thread::sleep(timeout_dur);
+        timed_out_c.store(true, Ordering::SeqCst);
+        // Best-effort SIGKILL; harmless if the process already exited.
+        #[cfg(unix)]
+        {
+            let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
         }
-    }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+        }
+    });
 
     match child.wait_with_output() {
         Err(e) => {
             warn!(error = %e, "git wait_with_output failed");
             (false, String::new(), e.to_string())
+        }
+        Ok(_) if timed_out.load(Ordering::SeqCst) => {
+            warn!(?args, timeout_secs, "git command timed out");
+            (
+                false,
+                String::new(),
+                format!("timed out after {timeout_secs}s"),
+            )
         }
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
