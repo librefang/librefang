@@ -136,7 +136,10 @@ impl TmuxController {
 
     /// Ensure the named session exists, creating it detached if it does not.
     ///
-    /// Idempotent — safe to call every time the API starts.
+    /// Idempotent — safe to call concurrently. The `has-session` → `new-session`
+    /// sequence is inherently racy when multiple requests arrive simultaneously;
+    /// a "duplicate session" error from `new-session` means another concurrent
+    /// caller already created the session, which is a success condition.
     pub async fn ensure_session(&self) -> anyhow::Result<()> {
         // Check whether the session already exists.
         let mut check = self.base_cmd();
@@ -163,15 +166,39 @@ impl TmuxController {
             return Ok(());
         }
 
-        // Create a new detached session.
+        // Create a new detached session. If this races with another caller and
+        // tmux reports "duplicate session", the session exists — treat as success.
         let mut create = self.base_cmd();
         create
             .arg("new-session")
             .arg("-d")
             .arg("-s")
-            .arg(&self.session_name);
+            .arg(&self.session_name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
 
-        self.run(create).await?;
+        let child = create
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to spawn tmux new-session: {e}"))?;
+
+        let out = tokio::time::timeout(TMUX_TIMEOUT, child.wait_with_output())
+            .await
+            .map_err(|_| anyhow::anyhow!("tmux new-session timed out"))?
+            .map_err(|e| anyhow::anyhow!("tmux I/O error: {e}"))?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // A concurrent ensure_session already created the session — not an error.
+            if stderr.contains("duplicate session") {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!(
+                "tmux exited with {}: {}",
+                out.status,
+                stderr.trim()
+            ));
+        }
+
         Ok(())
     }
 
