@@ -93,7 +93,7 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
         return;
     }
     let ok = std::process::Command::new("git")
-        .args(["init", "-q"])
+        .args(["init", "-q", "-b", "main"])
         .current_dir(home_dir)
         .status()
         .is_ok_and(|s| s.success());

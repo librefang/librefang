@@ -2523,7 +2523,7 @@ fn init_git_if_missing(librefang_dir: &std::path::Path) {
     }
 
     let Ok(status) = std::process::Command::new("git")
-        .args(["init", "-q"])
+        .args(["init", "-q", "-b", "main"])
         .current_dir(librefang_dir)
         .status()
     else {
