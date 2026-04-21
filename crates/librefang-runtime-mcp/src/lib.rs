@@ -1067,7 +1067,11 @@ impl McpConnection {
             Some(i) => &url[i + 3..],
             None => return false,
         };
-        let host_port = after_scheme.split('/').next().unwrap_or("");
+        // Strip path, query string, and fragment to isolate host[:port].
+        let host_port = after_scheme
+            .split(|c| c == '/' || c == '?' || c == '#')
+            .next()
+            .unwrap_or("");
         // Handle bracketed IPv6 addresses: [::1]:3000 → ::1
         let host = if host_port.starts_with('[') {
             host_port
@@ -1075,7 +1079,14 @@ impl McpConnection {
                 .split(']')
                 .next()
                 .unwrap_or("")
+        } else if host_port.matches(':').count() > 1 {
+            // Bare (unbracketed) IPv6 literal, e.g. "::1" — technically
+            // invalid per RFC 3986 but handle defensively.  split(':') would
+            // give an empty first token because the address starts with ':',
+            // so use the whole host_port.
+            host_port
         } else {
+            // IPv4 or hostname with optional port: "127.0.0.1:8080" → "127.0.0.1"
             host_port.split(':').next().unwrap_or(host_port)
         };
         let host_lower = host.to_lowercase();

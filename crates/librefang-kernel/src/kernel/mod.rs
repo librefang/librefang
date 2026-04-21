@@ -668,7 +668,12 @@ impl LibreFangKernel {
         }
         let workspaces = self.config.load().effective_workspaces_dir();
         if let Some(ws) = workspaces.to_str() {
-            if !roots.iter().any(|r| r == ws) {
+            // Use Path::starts_with so ~/.librefang/workspaces is not added
+            // when ~/.librefang is already in roots (it is covered by it).
+            let already_covered = roots
+                .iter()
+                .any(|r| workspaces.starts_with(std::path::Path::new(r)));
+            if !already_covered {
                 roots.push(ws.to_owned());
             }
         }
@@ -723,7 +728,12 @@ impl LibreFangKernel {
                 if already_covered {
                     return None;
                 }
-                let ws_str = ws.to_string_lossy().into_owned();
+                // Use to_str() for consistency with default_mcp_roots(); non-UTF-8
+                // workspace paths fall back to the global pool.
+                let ws_str = match ws.to_str() {
+                    Some(s) => s.to_owned(),
+                    None => return None,
+                };
                 if !roots.contains(&ws_str) {
                     roots.push(ws_str);
                 }
@@ -732,7 +742,14 @@ impl LibreFangKernel {
 
         let mut connections = Vec::new();
         for server_config in &servers {
-            let transport = match &server_config.transport {
+            let transport_entry = match &server_config.transport {
+                Some(t) => t,
+                None => {
+                    tracing::warn!(name = %server_config.name, "MCP server has no transport configured, skipping");
+                    continue;
+                }
+            };
+            let transport = match transport_entry {
                 McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                     command: command.clone(),
                     args: args.clone(),
