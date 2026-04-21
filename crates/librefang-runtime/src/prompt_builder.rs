@@ -489,16 +489,29 @@ pub fn build_skill_section(
         // Extract only skill names from the full summary string.
         // Lines that describe a skill look like:
         //   `  - skill-name: description …`
-        // We collect the name tokens (part before the first `:`) and join
+        // We collect the name tokens (part before the first `: `) and join
         // them as a comma-separated list.
+        //
+        // Use `split_once(": ")` (colon + space) rather than `split(':')` so
+        // that skill names containing a bare colon (e.g. `http:client`) are
+        // preserved intact.  The format emitted by `build_skill_summary_from_skills`
+        // always separates name from description with `: `, so this delimiter
+        // is unambiguous for names that don't themselves contain ": ".
         let names: Vec<&str> = skill_summary
             .lines()
             .filter_map(|line| {
                 let trimmed = line.trim();
                 if let Some(after_dash) = trimmed.strip_prefix("- ") {
                     let name_part = after_dash.trim();
-                    // Take everything before the first `: ` as the name
-                    Some(name_part.split(':').next().unwrap_or(name_part).trim())
+                    // Split on ": " (colon + space) so names containing a bare
+                    // colon are kept whole; fall back to the full token if the
+                    // separator is absent.
+                    let name = name_part
+                        .split_once(": ")
+                        .map(|(n, _)| n)
+                        .unwrap_or(name_part)
+                        .trim();
+                    Some(name)
                 } else {
                     None
                 }
@@ -1282,6 +1295,32 @@ mod tests {
         let result = build_skill_section(&summary, count, SKILL_INLINE_THRESHOLD);
         assert!(!result.contains("<available_skills>"));
         assert!(result.contains("skill_read_file"));
+    }
+
+    #[test]
+    fn test_skill_section_summary_mode_preserves_colon_in_name() {
+        // Skill names that contain a bare colon (e.g. "http:client") must not
+        // be truncated when summary mode strips descriptions.
+        // The separator between name and description is ": " (colon + space),
+        // so "http:client: fetches URLs" should yield the name "http:client".
+        let count = SKILL_INLINE_THRESHOLD + 1;
+        let mut summary = String::new();
+        // One skill whose name contains a colon
+        summary.push_str("  - http:client: fetches URLs\n");
+        for i in 2..=count {
+            summary.push_str(&format!("  - skill-{i}: Desc {i}\n"));
+        }
+        let result = build_skill_section(&summary, count, SKILL_INLINE_THRESHOLD);
+        // Full name must appear, not just the prefix before the colon
+        assert!(
+            result.contains("http:client"),
+            "Expected 'http:client' in summary output, got: {result}"
+        );
+        // The description must not leak into the name list
+        assert!(
+            !result.contains("fetches URLs"),
+            "Description should be omitted in summary mode, got: {result}"
+        );
     }
 
     #[test]
